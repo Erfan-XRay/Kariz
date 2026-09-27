@@ -4,7 +4,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use kariz::config::{mode_name, role_name, Config};
+use kariz::config::{mode_name, role_name, Config, Encryption, TransportKind};
+use kariz::crypto::Cipher;
 
 #[derive(Parser)]
 #[command(name = "kariz", version, about = "High-performance tunnel core")]
@@ -27,6 +28,12 @@ enum Command {
     },
     /// Generate a random token for `tunnel.token`.
     Token,
+    /// Print the `tunnel.tls.pin_sha256` value of a certificate (PEM file), for dialing
+    /// a `wss` server with a self-signed certificate.
+    Pin {
+        /// The certificate file (`tunnel.tls.cert` of the listening side).
+        cert: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -46,6 +53,10 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Command::Pin { cert } => {
+            println!("{}", kariz::transport::tls::pin_of_file(&cert)?);
+            Ok(())
+        }
     }
 }
 
@@ -53,6 +64,9 @@ fn run(config: Config) -> Result<()> {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log.level));
     tracing_subscriber::fmt().with_env_filter(filter).init();
+    for warning in config.warnings() {
+        tracing::warn!("{warning}");
+    }
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     if let Some(threads) = config.tuning().threads {
@@ -96,12 +110,59 @@ fn print_summary(config: &Config) {
     println!("  role      : {}", role_name(config.role));
     println!("  mode      : {}", mode_name(config.mode));
     println!("  profile   : {:?}", config.profile);
-    println!("  transport : {:?}", config.tunnel.transport);
+    println!("  transport : {}", config.tunnel.transport.name());
     if let Some(listen) = &config.tunnel.listen {
         println!("  listen    : {listen}");
     }
     if let Some(remote) = &config.tunnel.remote {
         println!("  remote    : {remote}");
+    }
+    let cipher = Cipher::for_config(config.tunnel.encryption);
+    match config.tunnel.encryption {
+        Encryption::Auto if config.is_acceptor() => {
+            println!("  encryption: auto (accepts chacha20-poly1305 and aes-256-gcm)")
+        }
+        Encryption::Auto => println!("  encryption: auto ({} on this CPU)", cipher.name()),
+        e => println!("  encryption: {}", e.name()),
+    }
+    let mux = config.mux();
+    if mux.enabled {
+        println!(
+            "  mux       : connections={} max_streams={} window={}B",
+            mux.connections, mux.max_streams, mux.stream_window
+        );
+    } else {
+        println!("  mux       : off");
+    }
+    if matches!(
+        config.tunnel.transport,
+        TransportKind::Ws | TransportKind::Wss
+    ) {
+        let ws = config.tunnel.ws.as_ref();
+        let path = ws.map_or("/", |w| w.path.as_str());
+        let host = ws.and_then(|w| w.host.as_deref()).unwrap_or("-");
+        println!("  ws        : path={path} host={host}");
+    }
+    if config.tunnel.transport == TransportKind::Wss {
+        let tls = config.tunnel.tls.clone().unwrap_or_default();
+        if let Some(cert) = &tls.cert {
+            println!(
+                "  tls cert  : {} (reloaded when it changes)",
+                cert.display()
+            );
+        } else {
+            let verify = if tls.pin_sha256.is_some() {
+                "pinned certificate (pin_sha256)"
+            } else if tls.insecure {
+                "none (insecure)"
+            } else {
+                "Mozilla root certificates"
+            };
+            println!("  tls verify: {verify}");
+            if let Some(sni) = &tls.sni {
+                println!("  tls sni   : {sni}");
+            }
+        }
     }
     println!(
         "  tuning    : nodelay={} buffer={}B keepalive={}s",
@@ -114,5 +175,8 @@ fn print_summary(config: &Config) {
             "  forward   : {} -> {} ({:?})",
             f.listen, f.target, f.protocol
         );
+    }
+    for warning in config.warnings() {
+        println!("warning: {warning}");
     }
 }

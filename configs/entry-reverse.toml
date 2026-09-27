@@ -5,9 +5,12 @@ mode = "reverse"
 profile = "balanced"   # balanced | throughput | gaming
 
 [tunnel]
-transport = "tcp"
+transport = "tcp"      # tcp | tcpmux | ws | wss; see the other samples
 listen = "0.0.0.0:3080"
 token = "CHANGE-ME-run-kariz-token"
+# encryption = "auto"   # auto | chacha20-poly1305 | aes-256-gcm | none
+#                        # "auto" picks AES-GCM on CPUs with AES instructions, else ChaCha20;
+#                        # on the listening side it accepts both. Use "none" on both sides or neither.
 
 [[forward]]
 listen = "0.0.0.0:443"
