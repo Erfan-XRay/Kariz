@@ -13,7 +13,8 @@ linking servers together. It is written in Rust and built around three goals:
 > (WebSocket, plain or over TLS) transports are available, with an encrypted,
 > forward-secret record layer (`tunnel.encryption`, default `auto`).
 > The wire format changed after v0.1.0: upgrade both servers together.
-> See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
+> See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan, and [docs/CDN.md](docs/CDN.md) for
+> running behind a CDN such as Cloudflare.
 
 ## Concepts
 

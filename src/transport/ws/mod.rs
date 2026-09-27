@@ -32,7 +32,7 @@ use frame::{
     OP_CONTINUATION, OP_PING, OP_PONG, OP_TEXT,
 };
 
-pub use upgrade::{ClientConfig, ServerConfig};
+pub use upgrade::{Accepted, ClientConfig, ServerConfig};
 
 /// Incoming data frames larger than this are a protocol error. Payloads are streamed,
 /// so this is a sanity limit, not a buffer size.
@@ -93,6 +93,24 @@ impl<R, W> WsStream<R, W> {
         })
     }
 
+    /// Listening side: wraps a connection whose upgrade request was accepted. The `101`
+    /// goes out with the first write or flush, unless [`Self::reject_upgrade`] comes
+    /// first; early data from the request is read before any frame.
+    pub fn accepted(reader: R, writer: W, accepted: Accepted) -> io::Result<Self> {
+        let mut this = Self::new(reader, writer, Role::Server, &accepted.read_ahead)?;
+        this.reader.early = accepted.early;
+        this.writer.buf = accepted.response;
+        this.writer.upgrade_pending = true;
+        Ok(this)
+    }
+
+    /// Replaces a `101` that has not gone out yet with a `404`, and makes this stream
+    /// write nothing else. Returns whether it did; shut the stream down afterwards to
+    /// send it.
+    pub fn reject_upgrade(&mut self) -> bool {
+        self.writer.reject_upgrade()
+    }
+
     pub fn reader(&self) -> &WsReader<R> {
         &self.reader
     }
@@ -119,6 +137,9 @@ enum ReadState {
 /// Receiving half: yields the payloads of binary frames as one byte stream.
 pub struct WsReader<R> {
     inner: R,
+    /// Payload bytes that came as early data in the upgrade request; read first.
+    early: Vec<u8>,
+    early_pos: usize,
     /// Read-ahead bytes in `buf[start..end]`.
     buf: Box<[u8]>,
     start: usize,
@@ -137,6 +158,8 @@ impl<R> WsReader<R> {
         buf[..read_ahead.len()].copy_from_slice(read_ahead);
         Self {
             inner,
+            early: Vec::new(),
+            early_pos: 0,
             buf,
             start: 0,
             end: read_ahead.len(),
@@ -149,6 +172,11 @@ impl<R> WsReader<R> {
 
     pub fn get_ref(&self) -> &R {
         &self.inner
+    }
+
+    /// Whether early data from the upgrade request is still unread.
+    pub fn has_early(&self) -> bool {
+        self.early_pos < self.early.len()
     }
 
     /// Whether bytes from the peer are waiting in the read-ahead buffer.
@@ -231,6 +259,16 @@ impl<R: AsyncRead + Unpin> AsyncRead for WsReader<R> {
         out: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        if this.early_pos < this.early.len() {
+            let n = out.remaining().min(this.early.len() - this.early_pos);
+            out.put_slice(&this.early[this.early_pos..this.early_pos + n]);
+            this.early_pos += n;
+            if this.early_pos == this.early.len() {
+                this.early = Vec::new();
+                this.early_pos = 0;
+            }
+            return Poll::Ready(Ok(()));
+        }
         loop {
             match this.state {
                 ReadState::Closed => return Poll::Ready(Ok(())),
@@ -321,6 +359,8 @@ pub struct WsWriter<W> {
     /// Encoded frames not yet written to `inner`, from `pos`.
     buf: Vec<u8>,
     pos: usize,
+    /// `buf` holds only a `101` response that may still be swapped for a `404`.
+    upgrade_pending: bool,
     close_sent: bool,
     shared: Arc<Shared>,
 }
@@ -335,6 +375,7 @@ impl<W> WsWriter<W> {
             },
             buf: Vec::new(),
             pos: 0,
+            upgrade_pending: false,
             close_sent: false,
             shared,
         })
@@ -358,6 +399,17 @@ impl<W> WsWriter<W> {
         if let Some(key) = mask {
             apply_mask(&mut self.buf[payload_start..], key, 0);
         }
+    }
+
+    fn reject_upgrade(&mut self) -> bool {
+        if !self.upgrade_pending {
+            return false;
+        }
+        self.upgrade_pending = false;
+        self.buf = upgrade::not_found();
+        // No close frame after an HTTP error page.
+        self.close_sent = true;
+        true
     }
 
     /// Queues the pong the reader asked for, if any. Control frames go between whole
@@ -387,7 +439,10 @@ impl<W: AsyncWrite + Unpin> WsWriter<W> {
     /// Frames `parts` (already cut to [`MAX_FRAME_OUT`]) and starts sending right away;
     /// whatever does not fit goes out on the next write or flush.
     fn poll_send(&mut self, cx: &mut Context<'_>, parts: &[&[u8]]) -> Poll<io::Result<usize>> {
-        ready!(self.poll_buffered(cx))?;
+        // A held-back 101 goes out in the same write as the first frame.
+        if !std::mem::take(&mut self.upgrade_pending) {
+            ready!(self.poll_buffered(cx))?;
+        }
         if self.close_sent {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -442,6 +497,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for WsWriter<W> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        this.upgrade_pending = false;
         if !this.close_sent {
             this.queue_control();
         }
@@ -452,6 +508,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for WsWriter<W> {
     /// Sends a close frame, then shuts the connection's sending side down.
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        this.upgrade_pending = false;
         ready!(this.poll_buffered(cx))?;
         if !this.close_sent {
             this.encode(OP_CLOSE, &[&CLOSE_NORMAL]);

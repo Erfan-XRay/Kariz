@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -130,6 +130,9 @@ pub enum Incoming {
 impl Incoming {
     /// Finishes the transport handshake. A rejected WebSocket upgrade has already been
     /// answered (`404`) and closed when this returns an error. Callers bound the time.
+    ///
+    /// With WebSocket early data the `101` is held back until the first write, so the
+    /// caller can still [`TunnelStream::reject_upgrade`] after checking what it read.
     pub async fn establish(self) -> io::Result<TunnelStream> {
         match self {
             Self::Tcp(s) => Ok(TunnelStream::Tcp(s)),
@@ -139,10 +142,11 @@ impl Incoming {
                 tls: None,
                 peer,
             } => {
-                let read_ahead = ws::upgrade::accept(&mut stream, &config, peer).await?;
+                let accepted = ws::upgrade::accept(&mut stream, &config, peer).await?;
                 let (r, w) = stream.into_split();
-                let ws = ws::WsStream::new(r, w, ws::Role::Server, &read_ahead)?;
-                Ok(TunnelStream::Ws(ws))
+                let mut stream = TunnelStream::Ws(ws::WsStream::accepted(r, w, accepted)?);
+                stream.answer_upgrade().await?;
+                Ok(stream)
             }
             Self::Ws {
                 stream,
@@ -151,10 +155,12 @@ impl Incoming {
                 peer,
             } => {
                 let mut stream = TlsTcp::Server(acceptor.accept(stream).await?);
-                let read_ahead = ws::upgrade::accept(&mut stream, &config, peer).await?;
+                let accepted = ws::upgrade::accept(&mut stream, &config, peer).await?;
                 let (r, w) = tokio::io::split(stream);
-                let ws = ws::WsStream::new(r, w, ws::Role::Server, &read_ahead)?;
-                Ok(TunnelStream::Wss(Box::new(ws)))
+                let ws = ws::WsStream::accepted(r, w, accepted)?;
+                let mut stream = TunnelStream::Wss(Box::new(ws));
+                stream.answer_upgrade().await?;
+                Ok(stream)
             }
         }
     }
@@ -199,11 +205,25 @@ impl Dialer {
     }
 
     pub async fn dial(&self) -> io::Result<TunnelStream> {
+        self.dial_with(&[]).await
+    }
+
+    /// Dials and sends `first` (possibly empty) as the first bytes of the connection:
+    /// in the upgrade request itself when WebSocket early data is on and it fits,
+    /// otherwise as the first write.
+    pub async fn dial_with(&self, first: &[u8]) -> io::Result<TunnelStream> {
         match self {
-            Self::Tcp(d) => Ok(TunnelStream::Tcp(d.dial().await?)),
+            Self::Tcp(d) => {
+                let mut stream = d.dial().await?;
+                if !first.is_empty() {
+                    stream.write_all(first).await?;
+                    stream.flush().await?;
+                }
+                Ok(TunnelStream::Tcp(stream))
+            }
             Self::Ws(d, ws) => {
                 let stream = d.dial().await?;
-                timeout(ws.timeout, ws.establish(stream))
+                timeout(ws.timeout, ws.establish(stream, first))
                     .await
                     .map_err(|_| {
                         io::Error::new(
@@ -217,18 +237,32 @@ impl Dialer {
 }
 
 impl WsDialer {
-    async fn establish(&self, mut stream: TcpStream) -> io::Result<TunnelStream> {
-        let Some(tls) = &self.tls else {
-            let read_ahead = ws::upgrade::connect(&mut stream, &self.config).await?;
-            let (r, w) = stream.into_split();
-            let ws = ws::WsStream::new(r, w, ws::Role::Client, &read_ahead)?;
-            return Ok(TunnelStream::Ws(ws));
+    async fn establish(&self, mut stream: TcpStream, first: &[u8]) -> io::Result<TunnelStream> {
+        let early = self.config.early_data() && first.len() <= ws::upgrade::MAX_EARLY_DATA;
+        let (early, late) = if early {
+            (first, &[][..])
+        } else {
+            (&[][..], first)
         };
-        let mut stream = TlsTcp::Client(tls.connect(stream).await?);
-        let read_ahead = ws::upgrade::connect(&mut stream, &self.config).await?;
-        let (r, w) = tokio::io::split(stream);
-        let ws = ws::WsStream::new(r, w, ws::Role::Client, &read_ahead)?;
-        Ok(TunnelStream::Wss(Box::new(ws)))
+        let mut stream = match &self.tls {
+            None => {
+                let read_ahead = ws::upgrade::connect(&mut stream, &self.config, early).await?;
+                let (r, w) = stream.into_split();
+                TunnelStream::Ws(ws::WsStream::new(r, w, ws::Role::Client, &read_ahead)?)
+            }
+            Some(tls) => {
+                let mut stream = TlsTcp::Client(tls.connect(stream).await?);
+                let read_ahead = ws::upgrade::connect(&mut stream, &self.config, early).await?;
+                let (r, w) = tokio::io::split(stream);
+                let ws = ws::WsStream::new(r, w, ws::Role::Client, &read_ahead)?;
+                TunnelStream::Wss(Box::new(ws))
+            }
+        };
+        if !late.is_empty() {
+            stream.write_all(late).await?;
+            stream.flush().await?;
+        }
+        Ok(stream)
     }
 }
 
@@ -242,6 +276,31 @@ pub enum TunnelStream {
 }
 
 impl TunnelStream {
+    /// Sends a held-back `101` now unless early data came with the request, in which
+    /// case the caller checks that first (see [`Self::reject_upgrade`]).
+    async fn answer_upgrade(&mut self) -> io::Result<()> {
+        let early = match self {
+            Self::Tcp(_) => return Ok(()),
+            Self::Ws(s) => s.reader().has_early(),
+            Self::Wss(s) => s.reader().has_early(),
+        };
+        if !early {
+            self.flush().await?;
+        }
+        Ok(())
+    }
+
+    /// Listening side of a WebSocket with early data: if the `101` has not gone out
+    /// yet, replace it with a `404` (sent on shutdown) and return true. For anything
+    /// else, false: the connection has to be dealt with some other way.
+    pub fn reject_upgrade(&mut self) -> bool {
+        match self {
+            Self::Tcp(_) => false,
+            Self::Ws(s) => s.reject_upgrade(),
+            Self::Wss(s) => s.reject_upgrade(),
+        }
+    }
+
     /// Cheap, non-blocking check that an idle connection has not been closed by the peer.
     /// Only meaningful while the peer is not expected to send anything: whatever
     /// arrives counts as "not idle", and may be consumed by the check.

@@ -20,3 +20,17 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # nginx in front of the tunnel as a stand-in for a CDN: WebSocket proxying, TLS
+  # termination and an idle timeout (tests/tunnel.rs, module `nginx`).
+  cdn:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y nginx-light
+      - run: cargo test --test tunnel nginx -- --nocapture
+        env:
+          KARIZ_REQUIRE_NGINX: "1"
+          KARIZ_NGINX: /usr/sbin/nginx

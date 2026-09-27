@@ -60,12 +60,11 @@ pub async fn run(config: Config) -> Result<()> {
             let pool = Arc::new(SessionPool::default());
             for _ in 0..mux.connections {
                 let (dialer, crypto, pool) = (dialer.clone(), crypto.clone(), pool.clone());
-                let handshake_timeout = tuning.handshake_timeout;
+                let wait = tuning.dial_timeout + tuning.handshake_timeout;
                 let connect = move || {
                     let (dialer, crypto) = (dialer.clone(), crypto.clone());
                     async move {
-                        let stream = dialer.dial().await?;
-                        timeout(handshake_timeout, channel::connect(stream, &crypto, &[]))
+                        timeout(wait, channel::connect(&dialer, &crypto, &[]))
                             .await
                             .map_err(|_| {
                                 io::Error::new(io::ErrorKind::TimedOut, "handshake timed out")
@@ -241,10 +240,9 @@ impl Entry {
 
     /// Dials the exit side and sends the open request along with the hello.
     async fn open_direct(&self, dialer: &Dialer, open: &[u8]) -> io::Result<Channel> {
-        let stream = dialer.dial().await?;
         let wait = self.tuning.handshake_timeout + self.tuning.dial_timeout;
         timeout(wait, async {
-            let mut channel = Channel::from(channel::connect(stream, &self.crypto, open).await?);
+            let mut channel = Channel::from(channel::connect(dialer, &self.crypto, open).await?);
             proto::read_status(&mut channel).await?;
             Ok(channel)
         })

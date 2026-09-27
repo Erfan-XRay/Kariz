@@ -43,6 +43,10 @@ struct Setup {
     ws_path: &'static str,
     /// `wss` dialer: pin a certificate the listener does not have.
     wrong_pin: bool,
+    /// `ws` / `wss` dialer: `tunnel.ws.early_data`.
+    early_data: bool,
+    /// `tuning.keepalive_secs` (mux ping interval); 0 keeps the profile default.
+    keepalive_secs: u64,
 }
 
 impl Setup {
@@ -54,6 +58,22 @@ impl Setup {
             encryption: "auto",
             ws_path: "/kariz-e2e",
             wrong_pin: false,
+            early_data: false,
+            keepalive_secs: 0,
+        }
+    }
+
+    const fn keepalive(self, keepalive_secs: u64) -> Self {
+        Self {
+            keepalive_secs,
+            ..self
+        }
+    }
+
+    const fn early_data(self) -> Self {
+        Self {
+            early_data: true,
+            ..self
         }
     }
 
@@ -107,6 +127,9 @@ impl Setup {
         );
         if self.transport.starts_with("ws") {
             options += &format!("[tunnel.ws]\npath = \"{}\"\n", self.ws_path);
+            if self.early_data && !listening {
+                options += "early_data = true\n";
+            }
         }
         if self.transport == "wss" {
             let cert = test_cert();
@@ -123,6 +146,9 @@ impl Setup {
                 };
                 format!("[tunnel.tls]\nsni = \"tunnel.example\"\npin_sha256 = \"{pin}\"\n")
             };
+        }
+        if self.keepalive_secs > 0 {
+            options += &format!("[tuning]\nkeepalive_secs = {}\n", self.keepalive_secs);
         }
         options
     }
@@ -200,6 +226,8 @@ impl Drop for Side {
 
 struct Tunnel {
     user_port: u16,
+    /// Held only to keep a proxy between the two sides running.
+    _proxy: Option<Nginx>,
     /// Held only to keep the entry side running.
     _entry: Side,
     exit: Option<Side>,
@@ -228,16 +256,39 @@ async fn start_pair(
     exit_token: &str,
     target_port: u16,
 ) -> Tunnel {
+    let direct = |port| (port, None);
+    start_via(
+        setup,
+        exit_setup,
+        entry_token,
+        exit_token,
+        target_port,
+        direct,
+    )
+    .await
+}
+
+/// Like [`start_pair`], with a proxy between the sides: `proxy` gets the port the
+/// listening side uses and returns the port the dialing side should connect to.
+async fn start_via(
+    setup: Setup,
+    exit_setup: Setup,
+    entry_token: &str,
+    exit_token: &str,
+    target_port: u16,
+    proxy: impl FnOnce(u16) -> (u16, Option<Nginx>),
+) -> Tunnel {
     let tunnel_port = free_port();
+    let (dial_port, proxy) = proxy(tunnel_port);
     let user_port = free_port();
     let mode = setup.mode;
     let (entry_tunnel, exit_tunnel) = match mode {
         "reverse" => (
             format!("listen = \"127.0.0.1:{tunnel_port}\""),
-            format!("remote = \"127.0.0.1:{tunnel_port}\"\npool = 2"),
+            format!("remote = \"127.0.0.1:{dial_port}\"\npool = 2"),
         ),
         _ => (
-            format!("remote = \"127.0.0.1:{tunnel_port}\""),
+            format!("remote = \"127.0.0.1:{dial_port}\""),
             format!("listen = \"127.0.0.1:{tunnel_port}\""),
         ),
     };
@@ -280,6 +331,7 @@ async fn start_pair(
     tokio::time::sleep(Duration::from_millis(300)).await;
     Tunnel {
         user_port,
+        _proxy: proxy,
         _entry: entry_side,
         exit: Some(exit_side),
         exit_config: exit,
@@ -465,6 +517,9 @@ tunnel_tests! {
     wss_direct: Setup::wss("direct");
     wss_reverse_no_mux: Setup::wss("reverse").no_mux();
     wss_direct_no_mux_chacha: Setup::wss("direct").no_mux().encryption("chacha20-poly1305");
+    ws_direct_no_mux_early: Setup::ws("direct").no_mux().early_data();
+    ws_reverse_early: Setup::ws("reverse").early_data();
+    wss_direct_early: Setup::wss("direct").early_data();
 }
 
 /// A `wss` dialer that pins another certificate refuses the listener, so nothing passes.
@@ -541,5 +596,218 @@ async fn throughput() {
         assert_eq!(got.len(), payload.len());
         let mbps = (payload.len() as f64 * 8.0) / secs / 1e6;
         println!("{name}: 256 MiB echoed in {secs:.2}s = {mbps:.0} Mbit/s each way");
+    }
+}
+
+/// nginx as a stand-in for a CDN: it proxies the WebSocket (optionally terminating TLS)
+/// and closes connections idle for `idle_secs`. Killed on drop.
+struct Nginx {
+    child: std::process::Child,
+    port: u16,
+    dir: std::path::PathBuf,
+}
+
+impl Nginx {
+    /// The nginx binary, or `None` to skip nginx tests. `KARIZ_REQUIRE_NGINX=1` (set in
+    /// CI) turns a missing nginx into a failure instead.
+    fn binary() -> Option<String> {
+        let bin = std::env::var("KARIZ_NGINX").unwrap_or_else(|_| "nginx".into());
+        let found = std::process::Command::new(&bin)
+            .arg("-v")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if found {
+            return Some(bin);
+        }
+        assert!(
+            std::env::var_os("KARIZ_REQUIRE_NGINX").is_none(),
+            "nginx not found ({bin}) but KARIZ_REQUIRE_NGINX is set"
+        );
+        eprintln!("nginx not found, skipping (set KARIZ_NGINX to its path)");
+        None
+    }
+
+    fn start(bin: &str, upstream: u16, path: &str, tls: bool, idle_secs: u64) -> Self {
+        let port = free_port();
+        let dir = std::env::temp_dir().join(format!("kariz-nginx-{}-{port}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (listen, certs) = if tls {
+            let cert = test_cert();
+            (
+                format!("{port} ssl"),
+                format!(
+                    "ssl_certificate {};\nssl_certificate_key {};",
+                    cert.cert.display(),
+                    cert.key.display()
+                ),
+            )
+        } else {
+            (port.to_string(), String::new())
+        };
+        let d = dir.display();
+        let conf = format!(
+            r#"
+            daemon off;
+            master_process off;
+            worker_processes 1;
+            pid {d}/nginx.pid;
+            error_log {d}/error.log info;
+            events {{ worker_connections 256; }}
+            http {{
+                access_log off;
+                client_body_temp_path {d}/body;
+                proxy_temp_path {d}/proxy;
+                fastcgi_temp_path {d}/fastcgi;
+                uwsgi_temp_path {d}/uwsgi;
+                scgi_temp_path {d}/scgi;
+                map $http_upgrade $connection_upgrade {{ default upgrade; '' close; }}
+                server {{
+                    listen 127.0.0.1:{listen};
+                    {certs}
+                    location {path} {{
+                        proxy_pass http://127.0.0.1:{upstream};
+                        proxy_http_version 1.1;
+                        proxy_set_header Upgrade $http_upgrade;
+                        proxy_set_header Connection $connection_upgrade;
+                        proxy_set_header Host $host;
+                        proxy_set_header X-Forwarded-For $remote_addr;
+                        proxy_buffering off;
+                        proxy_read_timeout {idle_secs}s;
+                        proxy_send_timeout {idle_secs}s;
+                    }}
+                }}
+            }}
+            "#
+        );
+        let conf_path = dir.join("nginx.conf");
+        std::fs::write(&conf_path, conf).unwrap();
+        let child = std::process::Command::new(bin)
+            .arg("-p")
+            .arg(&dir)
+            .arg("-e")
+            .arg(dir.join("error.log"))
+            .arg("-c")
+            .arg(&conf_path)
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let ready = (0..100).any(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+        });
+        let log = || std::fs::read_to_string(dir.join("error.log")).unwrap_or_default();
+        assert!(ready, "nginx did not start:\n{}", log());
+        Self { child, port, dir }
+    }
+}
+
+impl Drop for Nginx {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Idle time nginx allows before it closes a proxied WebSocket.
+const NGINX_IDLE_SECS: u64 = 3;
+
+/// Runs `entry` / `exit` through nginx and keeps one user connection idle for longer
+/// than nginx allows. With `survives`, the same connection must still work afterwards
+/// (mux pings kept the WebSocket busy); without, it must be broken (the control case,
+/// proving the idle timeout is real). New connections must work in both cases.
+async fn check_through_nginx(entry: Setup, exit: Setup, survives: bool) {
+    let Some(bin) = Nginx::binary() else {
+        return;
+    };
+    let dialer = if entry.mode == "direct" { entry } else { exit };
+    let tls = dialer.transport == "wss";
+    let path = dialer.ws_path;
+    let target = echo_server().await;
+    let tunnel = start_via(entry, exit, TOKEN, TOKEN, target, |upstream| {
+        let nginx = Nginx::start(&bin, upstream, path, tls, NGINX_IDLE_SECS);
+        (nginx.port, Some(nginx))
+    })
+    .await;
+
+    // Bulk data through the proxy.
+    let payload = pattern(4 * 1024 * 1024);
+    let got = echo_roundtrip(tunnel.user_port, &payload).await.unwrap();
+    assert!(got == payload, "payload corrupted through nginx");
+
+    let mut user = TcpStream::connect(("127.0.0.1", tunnel.user_port))
+        .await
+        .unwrap();
+    let mut buf = [0u8; 6];
+    user.write_all(b"before").await.unwrap();
+    user.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"before");
+
+    tokio::time::sleep(Duration::from_secs(NGINX_IDLE_SECS + 3)).await;
+    let after = tokio::time::timeout(Duration::from_secs(5), async {
+        user.write_all(b"after!").await?;
+        user.read_exact(&mut buf).await?;
+        std::io::Result::Ok(buf)
+    })
+    .await;
+    match after {
+        Ok(Ok(buf)) => assert!(
+            survives,
+            "idle connection survived: control case is broken ({buf:?})"
+        ),
+        _ => assert!(
+            !survives,
+            "idle connection did not survive nginx's idle timeout"
+        ),
+    }
+
+    let recovered = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let attempt = tokio::time::timeout(
+                Duration::from_secs(5),
+                echo_roundtrip(tunnel.user_port, b"again"),
+            );
+            if let Ok(Ok(data)) = attempt.await {
+                if data == b"again" {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await;
+    assert!(recovered.is_ok(), "no new connections through nginx");
+}
+
+/// The tunnel behind nginx as a CDN stand-in (`cargo test nginx`; CI job `cdn`).
+mod nginx {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ws_direct_survives_idle() {
+        let setup = Setup::ws("direct").keepalive(1).early_data();
+        check_through_nginx(setup, setup, true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ws_reverse_survives_idle() {
+        let setup = Setup::ws("reverse").keepalive(1).early_data();
+        check_through_nginx(setup, setup, true).await;
+    }
+
+    /// Like a CDN: TLS from the dialer to nginx, plain WebSocket from nginx to the origin.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wss_to_proxy_ws_to_origin() {
+        let exit = Setup::ws("direct").keepalive(1);
+        let entry = Setup::wss("direct").keepalive(1).early_data();
+        check_through_nginx(entry, exit, true).await;
+    }
+
+    /// Control: with the default 30 s keepalive nginx does cut the idle connection, so
+    /// the cases above prove something.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn control_idle_connections_are_cut_without_frequent_pings() {
+        let setup = Setup::ws("direct");
+        check_through_nginx(setup, setup, false).await;
     }
 }
