@@ -28,7 +28,7 @@ supported for every transport.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Project skeleton, CLI, TOML config, profiles, mutual auth, plain `tcp` transport, reverse + direct modes, tests, CI | **done (v0.1.0)** |
-| 2 | Encryption layer, `tcpmux`, `ws` / `wss` (CDN friendly); plan in [PHASE2.md](PHASE2.md) | in progress (2.0-2.6 done) |
+| 2 | Encryption layer, `tcpmux`, `ws` / `wss` (CDN friendly); plan in [PHASE2.md](PHASE2.md) | **done (v0.2.0)** |
 | 3 | UDP forwarding and UDP-over-stream framing | planned |
 | 4 | `kcp` (full settings + Reed-Solomon FEC) and `quic` (quinn; BBR/Cubic, 0-RTT, datagrams, GSO/GRO) | planned |
 | 5 | `icmp` transport (raw sockets, needs `CAP_NET_RAW`) | planned |
@@ -37,19 +37,27 @@ supported for every transport.
 
 ## Protocol (v2)
 
+0. **Transport**: a TCP connection (`tcp`, `tcpmux`), or a WebSocket over TCP (`ws`) or
+   TLS (`wss`) that looks like a browser's (see `src/transport/`). Everything below
+   travels inside it.
 1. **Handshake** (see `src/crypto/handshake.rs`): mutual authentication with the shared
    token plus an X25519 exchange for forward secrecy. The hello is masked and padded to a
    random length, so it has no fixed bytes and no fixed size; replays are rejected.
 2. **Records** (see `src/crypto/record.rs`): everything after the handshake is sent as
    AEAD records (ChaCha20-Poly1305 or AES-256-GCM, lengths encrypted too), with one key
    per direction. `encryption = "none"` keeps the handshake but skips the records.
-3. **Open** (see `src/proto.rs`): entry sends `kind | len | target`, exit dials the
-   target and answers with a one-byte status.
-4. **Relay**: bidirectional copy through the record layer.
+3. **Mux** (optional, see `src/mux/`): many streams over one connection, with per-stream
+   flow control, pings and graceful rotation. On by default for `tcpmux`, `ws`, `wss`.
+4. **Open** (see `src/proto.rs`): entry sends `kind | len | target`, exit dials the
+   target. Without mux the exit answers with a one-byte status; with mux the entry
+   sends data right away and a failed dial resets the stream.
+5. **Relay**: bidirectional copy through the record layer.
 
-In reverse mode the handshake happens when the exit fills the pool, so opening a user
-connection costs one round trip plus the target dial. In direct mode the open request is
-sent as 0-RTT early data right behind the hello.
+Without mux, in reverse mode the handshake happens when the exit fills the pool, so
+opening a user connection costs one round trip plus the target dial; in direct mode
+the open request is sent as 0-RTT early data right behind the hello (and with
+`ws.early_data`, inside the WebSocket upgrade request). With mux, the handshake happens
+once per session and opening a stream adds no round trip.
 
 A connection that fails the handshake is not closed at once but drained for a random
 5-30 s. Wire format v2 is not compatible with v0.1: upgrade both sides together.

@@ -1,0 +1,27 @@
+# Entry side, direct mode, wss straight to our own exit server (no CDN), which uses a
+# self-signed certificate. We accept exactly that certificate by its fingerprint.
+# Pair: exit-wss-direct.toml.
+role = "entry"
+mode = "direct"
+profile = "balanced"
+
+[tunnel]
+transport = "wss"
+remote = "EXIT_SERVER_IP:443"
+token = "CHANGE-ME-run-kariz-token"
+
+[tunnel.ws]
+path = "/ws"
+host = "www.example.com"           # Host header and TLS server name to present
+early_data = true
+
+[tunnel.tls]
+# On the exit server: kariz pin /etc/kariz/cert.pem
+pin_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"
+
+[log]
+level = "info"

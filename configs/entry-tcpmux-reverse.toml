@@ -1,0 +1,23 @@
+# Entry side (Iran), reverse mode with mux: the exit side keeps a few long-lived
+# connections open to us and every user connection becomes a stream on one of them.
+# Fewer connections between the servers than plain reverse mode, and no handshake per
+# user connection. Pair: exit-tcpmux-reverse.toml.
+role = "entry"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "tcpmux"               # tcp with mux on; must match the exit side
+listen = "0.0.0.0:3080"
+token = "CHANGE-ME-run-kariz-token"
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"
+
+[[forward]]
+listen = "0.0.0.0:8080"
+target = "127.0.0.1:80"
+
+[log]
+level = "info"
