@@ -235,6 +235,33 @@ implementation:
 - Localhost throughput (`tests/tunnel.rs` throughput, release): `ws` without mux is on par
   with `tcp`; with mux 85-90 % of `tcp` + mux.
 
+*Status after 2.5:* `wss` is implemented (`src/transport/tls.rs`); it is `ws` with a
+TLS layer in between, so everything above applies. Notes:
+
+- rustls 0.23 with the `ring` provider only (no `aws-lc`), TLS 1.2 and 1.3, ALPN
+  `http/1.1` on both sides.
+- Dialer: SNI is `tls.sni`, else the `ws.host` host, else the host of `remote`; an IP
+  address sends no SNI, like a browser. Verification is the bundled Mozilla roots by
+  default, one certificate with `pin_sha256` (hex SHA-256 of the DER certificate, case
+  insensitive; `kariz pin <cert.pem>` prints it), or none with `insecure`. Pinned and
+  insecure modes skip the chain and name checks but still verify the handshake
+  signatures, so the server must hold the private key.
+- Listener: `tls.cert` / `tls.key` are loaded before the port is bound, so a broken pair
+  fails at startup. Each handshake compares the two files' modification times with the
+  last load (two `stat` calls) and reloads on change; a pair that does not load (for
+  example halfway through a renewal) is logged and the previous certificate stays in use
+  until the files change again.
+- TLS state is shared by both directions, so a `wss` connection is split with
+  `tokio::io::split` (a lock between the halves), unlike `tcp` / `ws`.
+- The idle check for pooled `wss` connections reads through TLS instead of peeking at the
+  socket, so post-handshake TLS records (tickets, key updates) do not count as data.
+- Known gaps, left for phase 6: a plain HTTP request to the `wss` port gets a TLS error
+  instead of nginx's "plain HTTP request was sent to HTTPS port" page, and the rustls
+  ClientHello does not look like a browser's.
+- Localhost throughput (release, both sides and TLS on one machine): `wss` with mux
+  2.3-2.4 Gbit/s, about 78 % of `ws` with mux; the data is encrypted twice (TLS and the
+  tunnel's own records).
+
 **Optional (step 2.6):** WebSocket early data. The first bytes the upper layer writes
 (the hello) go base64url-encoded in `Sec-WebSocket-Protocol`, as Xray does. Saves one
 round trip through the CDN, and lets the server answer `404` instead of `101` to any
@@ -320,7 +347,7 @@ Each step is one PR, keeps CI green, and keeps both modes working.
 | **2.2** Mux core (done) | Frames, session, streams, flow control, ping, `GOAWAY`. Tested in isolation over `tokio::io::duplex`. | Tests: 1000 parallel streams, half close, `RST`, slow reader does not block a fast stream, window accounting, dead peer detected by ping. |
 | **2.3** Mux integration (done) | Session manager in both modes, optimistic open, `tcpmux` alias, rotation. | E2E matrix `{reverse, direct} x {mux on, off}` green; unreachable-target test still closes the user connection; killing the exit mid-transfer resets streams and the entry reconnects. |
 | **2.4** `ws` (done) | Upgrade client/server, frame codec, 404 on mismatch. | Codec tests with RFC 6455 vectors (masking, 16/64-bit lengths, fragmentation, control frames); E2E over `ws`; probe test: plain HTTP GET and wrong-path upgrade get a 404. |
-| **2.5** `wss` | rustls, cert/key, SNI vs connect address, pin / insecure, cert reload. | E2E over `wss` with an `rcgen` certificate (pinned); wrong pin fails; cert reload test. |
+| **2.5** `wss` (done) | rustls, cert/key, SNI vs connect address, pin / insecure, cert reload. | E2E over `wss` with an `rcgen` certificate (pinned); wrong pin fails; cert reload test. |
 | **2.6** CDN hardening | WS early data (optional flag), CI job with nginx as a stand-in CDN (`proxy_pass` with upgrade, idle timeout), manual Cloudflare checklist. | Tunnel survives nginx in the middle and idle periods longer than the proxy timeout. |
 | **2.7** Release | Sample configs (`entry-wss-cdn.toml`, `exit-wss-cdn.toml`, ...), README / README_FA, ROADMAP update, benchmark table, version `0.2.0`. | Docs reviewed, tagged. |
 

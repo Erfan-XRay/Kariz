@@ -392,6 +392,10 @@ impl<S> SecureStream<S> {
         &self.inner
     }
 
+    pub fn get_mut(&mut self) -> &mut S {
+        &mut self.inner
+    }
+
     /// Splits into independent receiving and sending halves, using `split` for the
     /// inner stream, so both directions can be processed in parallel.
     pub fn split<R, W>(

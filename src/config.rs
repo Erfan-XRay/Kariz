@@ -464,8 +464,7 @@ impl Config {
 
         self.validate_mux()?;
         self.validate_ws()?;
-        self.validate_tls()?;
-        self.check_implemented()
+        self.validate_tls()
     }
 
     fn validate_mux(&self) -> Result<()> {
@@ -589,18 +588,6 @@ impl Config {
                     "tunnel.tls.pin_sha256 must be 64 hex characters (SHA-256 of the certificate)"
                 );
             }
-        }
-        Ok(())
-    }
-
-    /// Rejects settings that parse and validate but are not implemented yet.
-    /// Each phase 2 step removes the part it implements.
-    fn check_implemented(&self) -> Result<()> {
-        let not_yet = |what: &str| -> Result<()> {
-            bail!("{what} is not implemented yet (planned for v0.2, see docs/PHASE2.md)")
-        };
-        if self.tunnel.transport == TransportKind::Wss {
-            return not_yet("transport = \"wss\"");
         }
         Ok(())
     }
@@ -739,8 +726,7 @@ mod tests {
         format!("{:#}", Config::parse(text).unwrap_err())
     }
 
-    /// Parses without validation, for checking effective values of settings that are
-    /// not implemented yet.
+    /// Parses without validation, for checking effective values on their own.
     fn parse_unchecked(text: &str) -> Config {
         toml::from_str(text).unwrap()
     }
@@ -777,12 +763,6 @@ mod tests {
         ));
         assert!(!off.mux().enabled);
         assert_eq!(off.mux().connections, 3);
-    }
-
-    #[test]
-    fn unimplemented_features_are_rejected_after_validation() {
-        let err = parse_err(&with_transport("entry", "wss", ""));
-        assert!(err.contains("not implemented yet"), "{err}");
     }
 
     #[test]
@@ -907,7 +887,7 @@ mod tests {
         ));
         assert!(err.contains("dialing side"), "{err}");
         let ok = "[tunnel.tls]\ncert = \"c.pem\"\nkey = \"k.pem\"";
-        assert!(parse_err(&with_transport("exit", "wss", ok)).contains("not implemented yet"));
+        assert!(Config::parse(&with_transport("exit", "wss", ok)).is_ok());
 
         // Dialing side of wss.
         let pin = "ab".repeat(32);
@@ -928,7 +908,9 @@ mod tests {
             assert!(err.contains(expect), "{extra}: {err}");
         }
         let ok = format!("[tunnel.tls]\nsni = \"a.example\"\npin_sha256 = \"{pin}\"");
-        assert!(parse_err(&with_transport("entry", "wss", &ok)).contains("not implemented yet"));
+        assert!(Config::parse(&with_transport("entry", "wss", &ok)).is_ok());
+        // Without [tunnel.tls] the dialer verifies against the bundled Mozilla roots.
+        assert!(Config::parse(&with_transport("entry", "wss", "")).is_ok());
 
         let insecure = parse_unchecked(&with_transport(
             "entry",

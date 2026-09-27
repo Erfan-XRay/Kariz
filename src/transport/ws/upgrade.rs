@@ -292,7 +292,7 @@ fn has_token(headers: &[httparse::Header<'_>], name: &str, token: &str) -> bool 
 }
 
 /// Splits `host:port` (also `[v6]:port`); the port is `None` when there is none.
-fn split_port(authority: &str) -> (&str, Option<&str>) {
+pub fn split_port(authority: &str) -> (&str, Option<&str>) {
     let (host, port) = if authority.starts_with('[') {
         match authority.find("]:") {
             Some(i) => (&authority[..=i], Some(&authority[i + 2..])),

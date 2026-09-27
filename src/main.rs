@@ -28,6 +28,12 @@ enum Command {
     },
     /// Generate a random token for `tunnel.token`.
     Token,
+    /// Print the `tunnel.tls.pin_sha256` value of a certificate (PEM file), for dialing
+    /// a `wss` server with a self-signed certificate.
+    Pin {
+        /// The certificate file (`tunnel.tls.cert` of the listening side).
+        cert: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -45,6 +51,10 @@ fn main() -> Result<()> {
                 "{}",
                 bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
             );
+            Ok(())
+        }
+        Command::Pin { cert } => {
+            println!("{}", kariz::transport::tls::pin_of_file(&cert)?);
             Ok(())
         }
     }
@@ -133,12 +143,25 @@ fn print_summary(config: &Config) {
         let host = ws.and_then(|w| w.host.as_deref()).unwrap_or("-");
         println!("  ws        : path={path} host={host}");
     }
-    if let Some(tls) = &config.tunnel.tls {
-        if let Some(sni) = &tls.sni {
-            println!("  tls sni   : {sni}");
-        }
+    if config.tunnel.transport == TransportKind::Wss {
+        let tls = config.tunnel.tls.clone().unwrap_or_default();
         if let Some(cert) = &tls.cert {
-            println!("  tls cert  : {}", cert.display());
+            println!(
+                "  tls cert  : {} (reloaded when it changes)",
+                cert.display()
+            );
+        } else {
+            let verify = if tls.pin_sha256.is_some() {
+                "pinned certificate (pin_sha256)"
+            } else if tls.insecure {
+                "none (insecure)"
+            } else {
+                "Mozilla root certificates"
+            };
+            println!("  tls verify: {verify}");
+            if let Some(sni) = &tls.sni {
+                println!("  tls sni   : {sni}");
+            }
         }
     }
     println!(

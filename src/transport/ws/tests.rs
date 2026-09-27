@@ -410,6 +410,7 @@ async fn ws_listener() -> (std::net::SocketAddr, Settings) {
     let settings = Settings {
         kind: TransportKind::Ws,
         ws: Some(ws),
+        ..Default::default()
     };
     let tuning = Tuning::for_profile(Default::default());
     let listener = Listener::bind(&settings, "127.0.0.1:0", &tuning)
