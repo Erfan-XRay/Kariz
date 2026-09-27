@@ -11,7 +11,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::time::{timeout, timeout_at, Instant};
+use tokio::time::{timeout_at, Instant};
 
 use crate::crypto::handshake::{self, SessionKeys};
 use crate::crypto::record::{
@@ -19,7 +19,7 @@ use crate::crypto::record::{
 };
 use crate::crypto::{random_below, Cipher, Crypto, ReplayFilter};
 use crate::mux::{MuxStream, Transport};
-use crate::transport::{TunnelReader, TunnelStream, TunnelWriter};
+use crate::transport::{Incoming, TunnelReader, TunnelStream, TunnelWriter};
 
 /// A failed handshake is drained for a random time in this range (seconds).
 const DRAIN_SECS: (u64, u64) = (5, 30);
@@ -152,19 +152,26 @@ pub async fn connect(mut stream: TunnelStream, crypto: &Crypto, early: &[u8]) ->
     Ok(link)
 }
 
-/// Listening side: runs the handshake on a tunnel connection the other side opened.
+/// Listening side: finishes the transport handshake (the WebSocket upgrade) and runs
+/// the tunnel handshake on a connection the other side opened, both within
+/// `handshake_timeout`.
 ///
-/// A connection that fails the handshake (or does not finish it within
-/// `handshake_timeout`) is not closed right away: it is read and discarded for a random
-/// time first, so probing does not reveal a Kariz server by how fast it hangs up.
+/// A connection that fails the tunnel handshake (or does not finish it in time) is not
+/// closed right away: it is read and discarded for a random time first, so probing does
+/// not reveal a Kariz server by how fast it hangs up. A failed WebSocket upgrade has
+/// been answered like a web server would and is closed.
 pub async fn accept(
-    mut stream: TunnelStream,
+    incoming: Incoming,
     crypto: &Crypto,
     replay: &ReplayFilter,
     handshake_timeout: Duration,
 ) -> io::Result<Link> {
-    let result = timeout(
-        handshake_timeout,
+    let deadline = Instant::now() + handshake_timeout;
+    let mut stream = timeout_at(deadline, incoming.establish())
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "transport handshake timed out"))??;
+    let result = timeout_at(
+        deadline,
         handshake::accept(
             &mut stream,
             crypto.psk(),
@@ -386,16 +393,17 @@ impl AsyncWrite for LinkWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Encryption, TransportKind, Tuning};
-    use crate::transport::{Dialer, Listener};
+    use crate::config::{Encryption, Tuning};
+    use crate::transport::{Dialer, Listener, Settings};
 
     async fn listener() -> (Listener, Dialer) {
         let tuning = Tuning::for_profile(Default::default());
-        let l = Listener::bind(TransportKind::Tcp, "127.0.0.1:0", &tuning)
+        let settings = Settings::default();
+        let l = Listener::bind(&settings, "127.0.0.1:0", &tuning)
             .await
             .unwrap();
         let addr = l.local_addr().unwrap().to_string();
-        (l, Dialer::new(TransportKind::Tcp, &addr, &tuning).unwrap())
+        (l, Dialer::new(&settings, &addr, &tuning).unwrap())
     }
 
     const TOKEN: &str = "channel-test-token-0123";
@@ -509,7 +517,7 @@ mod tests {
             let (port, captured) = spy(l.local_addr().unwrap()).await;
             let tuning = Tuning::for_profile(Default::default());
             let dialer =
-                Dialer::new(TransportKind::Tcp, &format!("127.0.0.1:{port}"), &tuning).unwrap();
+                Dialer::new(&Settings::default(), &format!("127.0.0.1:{port}"), &tuning).unwrap();
             let crypto = Crypto::new(TOKEN, enc);
             let c2 = crypto.clone();
             let server = tokio::spawn(async move {

@@ -16,7 +16,7 @@ use crate::crypto::{Crypto, ReplayFilter};
 use crate::mux::{maintain, MuxSession, MuxStream, ResetReason, SessionConfig, Side};
 use crate::proto::{self, Open, STATUS_DIAL_FAILED, STATUS_OK};
 use crate::relay::{relay, relay_mux};
-use crate::transport::{tcp, Dialer, Listener};
+use crate::transport::{tcp, Dialer, Listener, Settings};
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
@@ -29,6 +29,7 @@ struct Exit {
 pub async fn run(config: Config) -> Result<()> {
     let tuning = config.tuning();
     let mux = config.mux();
+    let transport = Settings::new(&config.tunnel);
     let exit = Arc::new(Exit {
         crypto: Crypto::new(&config.tunnel.token, config.tunnel.encryption).with_mux(mux.enabled),
         tuning: tuning.clone(),
@@ -44,7 +45,7 @@ pub async fn run(config: Config) -> Result<()> {
                 connections = mux.connections,
                 "exit: reverse mode with mux, keeping sessions to the entry side"
             );
-            let dialer = Arc::new(Dialer::new(config.tunnel.transport, remote, &tuning)?);
+            let dialer = Arc::new(Dialer::new(&transport, remote, &tuning)?);
             for _ in 0..mux.connections {
                 let (exit, dialer) = (exit.clone(), dialer.clone());
                 let connect = {
@@ -78,14 +79,14 @@ pub async fn run(config: Config) -> Result<()> {
                 pool = config.tunnel.pool,
                 "exit: reverse mode, connecting to the entry side"
             );
-            let dialer = Arc::new(Dialer::new(config.tunnel.transport, remote, &tuning)?);
+            let dialer = Arc::new(Dialer::new(&transport, remote, &tuning)?);
             for _ in 0..config.tunnel.pool {
                 tasks.spawn(pool_worker(exit.clone(), dialer.clone()));
             }
         }
         Mode::Direct => {
             let addr = config.tunnel.listen.as_deref().expect("validated");
-            let listener = Listener::bind(config.tunnel.transport, addr, &tuning)
+            let listener = Listener::bind(&transport, addr, &tuning)
                 .await
                 .with_context(|| format!("failed to listen for tunnel connections on {addr}"))?;
             info!(

@@ -39,6 +39,8 @@ struct Setup {
     transport: &'static str,
     mux: bool,
     encryption: &'static str,
+    /// `tunnel.ws.path`, for `ws`.
+    ws_path: &'static str,
 }
 
 impl Setup {
@@ -48,7 +50,24 @@ impl Setup {
             transport: "tcp",
             mux: false,
             encryption: "auto",
+            ws_path: "/kariz-e2e",
         }
+    }
+
+    const fn ws(mode: &'static str) -> Self {
+        Self {
+            transport: "ws",
+            mux: true,
+            ..Self::tcp(mode)
+        }
+    }
+
+    const fn no_mux(self) -> Self {
+        Self { mux: false, ..self }
+    }
+
+    const fn ws_path(self, ws_path: &'static str) -> Self {
+        Self { ws_path, ..self }
     }
 
     const fn encryption(self, encryption: &'static str) -> Self {
@@ -65,10 +84,14 @@ impl Setup {
 
     /// `[tunnel]` lines shared by both sides.
     fn tunnel_options(&self) -> String {
-        format!(
+        let mut options = format!(
             "transport = \"{}\"\nencryption = \"{}\"\n[tunnel.mux]\nenabled = {}\n",
             self.transport, self.encryption, self.mux
-        )
+        );
+        if self.transport == "ws" {
+            options += &format!("[tunnel.ws]\npath = \"{}\"\n", self.ws_path);
+        }
+        options
     }
 }
 
@@ -370,6 +393,28 @@ tunnel_tests! {
     mux_direct: Setup::tcp("direct").mux();
     tcpmux_reverse_plain: Setup::tcp("reverse").transport("tcpmux").mux().encryption("none");
     tcpmux_direct_chacha: Setup::tcp("direct").transport("tcpmux").mux().encryption("chacha20-poly1305");
+    ws_reverse: Setup::ws("reverse");
+    ws_direct: Setup::ws("direct");
+    ws_reverse_no_mux: Setup::ws("reverse").no_mux();
+    ws_direct_no_mux_plain: Setup::ws("direct").no_mux().encryption("none");
+}
+
+/// Both sides must agree on the WebSocket path; the listener answers any other path
+/// with a 404, so nothing passes.
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_path_mismatch_is_rejected() {
+    let target = echo_server().await;
+    let runs = ["reverse", "direct"].map(|mode| {
+        tokio::spawn(async move {
+            let entry = Setup::ws(mode);
+            let exit = entry.ws_path("/somewhere-else");
+            let tunnel = start_pair(entry, exit, TOKEN, TOKEN, target).await;
+            expect_closed_without_data(&tunnel).await;
+        })
+    });
+    for run in runs {
+        run.await.unwrap();
+    }
 }
 
 /// Mux must be on or off on both sides; a mismatch fails the handshake, it does not

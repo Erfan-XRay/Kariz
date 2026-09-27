@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use kariz::config::{mode_name, role_name, Config, Encryption};
+use kariz::config::{mode_name, role_name, Config, Encryption, TransportKind};
 use kariz::crypto::Cipher;
 
 #[derive(Parser)]
@@ -124,9 +124,14 @@ fn print_summary(config: &Config) {
     } else {
         println!("  mux       : off");
     }
-    if let Some(ws) = &config.tunnel.ws {
-        let host = ws.host.as_deref().unwrap_or("-");
-        println!("  ws        : path={} host={host}", ws.path);
+    if matches!(
+        config.tunnel.transport,
+        TransportKind::Ws | TransportKind::Wss
+    ) {
+        let ws = config.tunnel.ws.as_ref();
+        let path = ws.map_or("/", |w| w.path.as_str());
+        let host = ws.and_then(|w| w.host.as_deref()).unwrap_or("-");
+        println!("  ws        : path={path} host={host}");
     }
     if let Some(tls) = &config.tunnel.tls {
         if let Some(sni) = &tls.sni {
