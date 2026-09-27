@@ -19,7 +19,7 @@ use crate::crypto::record::{
 };
 use crate::crypto::{random_below, Cipher, Crypto, ReplayFilter};
 use crate::mux::{MuxStream, Transport};
-use crate::transport::{Incoming, TunnelReader, TunnelStream, TunnelWriter};
+use crate::transport::{Dialer, Incoming, TunnelReader, TunnelStream, TunnelWriter};
 
 /// A failed handshake is drained for a random time in this range (seconds).
 const DRAIN_SECS: (u64, u64) = (5, 30);
@@ -126,10 +126,13 @@ impl Channel {
     }
 }
 
-/// Dialing side: runs the handshake on a fresh tunnel connection. `early` (possibly
-/// empty) goes out in the same write as the hello (0-RTT), so the other side can act on
-/// it before the handshake round trip completes.
-pub async fn connect(mut stream: TunnelStream, crypto: &Crypto, early: &[u8]) -> io::Result<Link> {
+/// Dialing side: opens a tunnel connection with `dialer` and runs the handshake on it.
+/// `early` (possibly empty) goes out in the same write as the hello (0-RTT), so the
+/// other side can act on it before the handshake round trip completes. With WebSocket
+/// early data, both even ride in the upgrade request.
+///
+/// Callers bound the time: dial plus handshake.
+pub async fn connect(dialer: &Dialer, crypto: &Crypto, early: &[u8]) -> io::Result<Link> {
     let cipher = crypto.cipher();
     let sealed_early = cipher != Cipher::None && !early.is_empty() && early.len() <= MAX_PAYLOAD;
     let (mut msg, state) =
@@ -142,7 +145,7 @@ pub async fn connect(mut stream: TunnelStream, crypto: &Crypto, early: &[u8]) ->
         // Too long for one record: send it after the handshake instead.
         None => late = early,
     }
-    stream.write_all(&msg).await?;
+    let mut stream = dialer.dial_with(&msg).await?;
     let keys = state.read_reply(&mut stream).await?;
     let mut link = Link::new(stream, keys, true, None)?;
     if !late.is_empty() {
@@ -159,7 +162,8 @@ pub async fn connect(mut stream: TunnelStream, crypto: &Crypto, early: &[u8]) ->
 /// A connection that fails the tunnel handshake (or does not finish it in time) is not
 /// closed right away: it is read and discarded for a random time first, so probing does
 /// not reveal a Kariz server by how fast it hangs up. A failed WebSocket upgrade has
-/// been answered like a web server would and is closed.
+/// been answered like a web server would and is closed; so is an upgrade whose early
+/// data does not hold a valid hello (`404` instead of `101`).
 pub async fn accept(
     incoming: Incoming,
     crypto: &Crypto,
@@ -190,9 +194,16 @@ pub async fn accept(
     match result {
         Ok(accepted) => Link::new(stream, accepted.keys, false, accepted.early_key.as_ref()),
         // The peer proved it knows the token; it is misconfigured, not probing.
-        Err(e) if e.kind() == io::ErrorKind::Unsupported => Err(e),
+        Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+            let _ = timeout_at(deadline, stream.shutdown()).await;
+            Err(e)
+        }
         Err(e) => {
-            drain(stream).await;
+            if stream.reject_upgrade() {
+                let _ = timeout_at(deadline + Duration::from_secs(1), stream.shutdown()).await;
+            } else {
+                drain(stream).await;
+            }
             Err(e)
         }
     }
@@ -432,9 +443,7 @@ mod tests {
                 ch.flush().await.unwrap();
                 got
             });
-            let mut ch = connect(d.dial().await.unwrap(), &crypto, &early)
-                .await
-                .unwrap();
+            let mut ch = connect(&d, &crypto, &early).await.unwrap();
             assert_eq!(matches!(ch, Link::Plain(_)), enc == Encryption::None);
             ch.write_all(b"hello").await.unwrap();
             ch.flush().await.unwrap();
@@ -473,9 +482,7 @@ mod tests {
         });
         let crypto = Crypto::new(TOKEN, Encryption::Aes256Gcm);
         let started = std::time::Instant::now();
-        assert!(connect(d.dial().await.unwrap(), &crypto, &[])
-            .await
-            .is_err());
+        assert!(connect(&d, &crypto, &[]).await.is_err());
         assert!(started.elapsed() < Duration::from_secs(3));
         assert_eq!(server.await.unwrap().kind(), io::ErrorKind::Unsupported);
     }
@@ -530,9 +537,7 @@ mod tests {
                 ch.write_all(MARKER).await.unwrap();
                 ch.shutdown().await.unwrap();
             });
-            let mut ch = connect(dialer.dial().await.unwrap(), &crypto, MARKER)
-                .await
-                .unwrap();
+            let mut ch = connect(&dialer, &crypto, MARKER).await.unwrap();
             ch.write_all(MARKER).await.unwrap();
             ch.flush().await.unwrap();
             let mut back = Vec::new();
@@ -547,5 +552,122 @@ mod tests {
                 _ => assert_eq!(visible, 0, "marker visible on the wire with {enc:?}"),
             }
         }
+    }
+
+    /// A `ws` listener, and a dialer with early data on or off.
+    async fn ws_pair(early_data: bool) -> (Listener, Dialer) {
+        let tuning = Tuning::for_profile(Default::default());
+        let server = Settings {
+            kind: crate::config::TransportKind::Ws,
+            ..Default::default()
+        };
+        let l = Listener::bind(&server, "127.0.0.1:0", &tuning)
+            .await
+            .unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let client = Settings {
+            ws: Some(toml::from_str(&format!("early_data = {early_data}")).unwrap()),
+            ..server
+        };
+        (l, Dialer::new(&client, &addr, &tuning).unwrap())
+    }
+
+    #[tokio::test]
+    async fn ws_early_data_carries_hello_and_open() {
+        for (early_data, enc) in [
+            (true, Encryption::Auto),
+            (true, Encryption::None),
+            (false, Encryption::Auto),
+        ] {
+            let (l, d) = ws_pair(early_data).await;
+            let crypto = Crypto::new(TOKEN, enc);
+            let c2 = crypto.clone();
+            let server = tokio::spawn(async move {
+                let (s, _) = l.accept().await.unwrap();
+                let mut ch = accept(s, &c2, &ReplayFilter::default(), Duration::from_secs(5))
+                    .await
+                    .unwrap();
+                let mut got = [0u8; 9];
+                ch.read_exact(&mut got).await.unwrap();
+                ch.write_all(b"pong").await.unwrap();
+                ch.flush().await.unwrap();
+                got
+            });
+            let mut ch = connect(&d, &crypto, b"open").await.unwrap();
+            ch.write_all(b"-more").await.unwrap();
+            ch.flush().await.unwrap();
+            let mut pong = [0u8; 4];
+            ch.read_exact(&mut pong).await.unwrap();
+            assert_eq!(&pong, b"pong");
+            assert_eq!(&server.await.unwrap(), b"open-more");
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_early_data_with_a_bad_hello_gets_a_404() {
+        // Wrong token: the listener never sends 101.
+        let (l, d) = ws_pair(true).await;
+        tokio::spawn(async move {
+            let crypto = Crypto::new("another-token-0123456789", Encryption::Auto);
+            let (s, _) = l.accept().await.unwrap();
+            let _ = accept(s, &crypto, &ReplayFilter::default(), Duration::from_secs(5)).await;
+        });
+        let started = std::time::Instant::now();
+        let err = connect(&d, &Crypto::new(TOKEN, Encryption::Auto), &[])
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("404"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn ws_early_data_replay_gets_a_404() {
+        let (l, d) = ws_pair(true).await;
+        let (port, captured) = spy(l.local_addr().unwrap()).await;
+        let addr = format!("127.0.0.1:{port}");
+        let tuning = Tuning::for_profile(Default::default());
+        let client = Settings {
+            kind: crate::config::TransportKind::Ws,
+            ws: Some(toml::from_str("early_data = true").unwrap()),
+            ..Default::default()
+        };
+        let spied = Dialer::new(&client, &addr, &tuning).unwrap();
+        drop(d);
+        let crypto = Crypto::new(TOKEN, Encryption::Auto);
+        let c2 = crypto.clone();
+        let real = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            // One filter for both connections, as in a running server.
+            let replay = std::sync::Arc::new(ReplayFilter::default());
+            loop {
+                let (s, _) = l.accept().await.unwrap();
+                let (c2, replay) = (c2.clone(), replay.clone());
+                tokio::spawn(async move {
+                    if let Ok(mut ch) = accept(s, &c2, &replay, Duration::from_secs(5)).await {
+                        let _ = ch.shutdown().await;
+                    }
+                });
+            }
+        });
+        let mut ch = connect(&spied, &crypto, &[]).await.unwrap();
+        let mut rest = Vec::new();
+        let _ = ch.read_to_end(&mut rest).await;
+        drop(ch);
+        let wire = captured.await.unwrap();
+        let end = wire.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let request = &wire[..end];
+        assert!(String::from_utf8_lossy(request).contains("Sec-WebSocket-Protocol: "));
+
+        // The same upgrade request again: the hello inside is a replay.
+        let mut probe = tokio::net::TcpStream::connect(real).await.unwrap();
+        probe.write_all(request).await.unwrap();
+        let mut answer = Vec::new();
+        tokio::time::timeout(Duration::from_secs(3), probe.read_to_end(&mut answer))
+            .await
+            .expect("a replay must be answered at once")
+            .unwrap();
+        let answer = String::from_utf8(answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 404 Not Found\r\n"), "{answer}");
     }
 }

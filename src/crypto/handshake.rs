@@ -302,6 +302,7 @@ where
     let tag_s = psk.tag(b's', &[&transcript_c, &reply]);
     reply.extend_from_slice(tag_s.as_bytes());
     stream.write_all(&reply).await?;
+    stream.flush().await?;
 
     let shared = agree(secret, &hdr[8..40])?;
     let th = transcript_hash(&transcript_c, &[&reply]);

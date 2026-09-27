@@ -173,6 +173,11 @@ pub struct WsConfig {
     /// Dialing side only: extra request headers.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    /// Dialing side only: send the tunnel hello inside the upgrade request (in
+    /// `Sec-WebSocket-Protocol`), saving a round trip. The listening side always
+    /// accepts it.
+    #[serde(default)]
+    pub early_data: bool,
 }
 
 fn default_ws_path() -> String {
@@ -347,6 +352,8 @@ const MUX_CONNECTIONS: std::ops::RangeInclusive<usize> = 1..=64;
 const MUX_MAX_STREAMS: std::ops::RangeInclusive<usize> = 1..=4096;
 const MUX_STREAM_WINDOW: std::ops::RangeInclusive<usize> = 16 * 1024..=16 * 1024 * 1024;
 const MUX_MIN_LIFETIME_SECS: u64 = 60;
+/// Keepalives (mux pings) at most this far apart keep a WebSocket through a CDN.
+const CDN_IDLE_SAFE: Duration = Duration::from_secs(90);
 
 /// Request headers the WebSocket dialer sets itself.
 const RESERVED_WS_HEADERS: &[&str] = &[
@@ -397,6 +404,12 @@ impl Config {
         if self.tunnel.encryption == Encryption::None {
             warnings
                 .push("tunnel.encryption = \"none\": traffic between the servers is not encrypted");
+        }
+        if self.tunnel.transport.is_websocket() && self.tuning().keepalive > CDN_IDLE_SAFE {
+            warnings.push(
+                "tuning.keepalive_secs is above 90: CDNs close WebSocket connections that \
+                 are idle for about 100 s (Cloudflare)",
+            );
         }
         if self.tunnel.tls.as_ref().is_some_and(|t| t.insecure) {
             warnings.push(
@@ -521,9 +534,10 @@ impl Config {
             bail!("tunnel.ws.host must be a host name, optionally with a port");
         }
         if self.is_acceptor() {
-            if ws.user_agent.is_some() || !ws.headers.is_empty() {
+            if ws.user_agent.is_some() || !ws.headers.is_empty() || ws.early_data {
                 bail!(
-                    "tunnel.ws.user_agent and tunnel.ws.headers are only used by the dialing side"
+                    "tunnel.ws.user_agent, headers and early_data are only used by the \
+                     dialing side"
                 );
             }
             return Ok(());
@@ -766,6 +780,15 @@ mod tests {
     }
 
     #[test]
+    fn long_keepalive_over_websocket_is_warned() {
+        let slow = "[tuning]\nkeepalive_secs = 120";
+        let c = Config::parse(&format!("{}{slow}", with_transport("entry", "ws", ""))).unwrap();
+        assert_eq!(c.warnings().len(), 1);
+        let c = Config::parse(&format!("{}{slow}", with_transport("entry", "tcp", ""))).unwrap();
+        assert!(c.warnings().is_empty());
+    }
+
+    #[test]
     fn encryption_none_is_allowed_with_a_warning() {
         let c = Config::parse(&with_transport("entry", "tcp", "encryption = \"none\"")).unwrap();
         assert_eq!(c.tunnel.encryption, Encryption::None);
@@ -867,12 +890,21 @@ mod tests {
         let c = Config::parse(&with_transport("exit", "ws", "")).unwrap();
         assert!(c.mux().enabled);
 
-        let err = parse_err(&with_transport(
-            "exit",
+        for extra in ["user_agent = \"x\"", "early_data = true"] {
+            let err = parse_err(&with_transport(
+                "exit",
+                "ws",
+                &format!("[tunnel.ws]\n{extra}"),
+            ));
+            assert!(err.contains("dialing side"), "{extra}: {err}");
+        }
+        let c = Config::parse(&with_transport(
+            "entry",
             "ws",
-            "[tunnel.ws]\nuser_agent = \"x\"",
-        ));
-        assert!(err.contains("dialing side"), "{err}");
+            "[tunnel.ws]\nearly_data = true",
+        ))
+        .unwrap();
+        assert!(c.tunnel.ws.unwrap().early_data);
     }
 
     #[test]

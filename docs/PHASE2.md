@@ -267,6 +267,31 @@ TLS layer in between, so everything above applies. Notes:
 round trip through the CDN, and lets the server answer `404` instead of `101` to any
 upgrade whose hello does not verify.
 
+*Status after 2.6:* done, see [CDN.md](CDN.md) for the setup and the manual Cloudflare
+checklist. Notes:
+
+- `tunnel.ws.early_data = true` (dialing side; the listener always accepts it). The
+  first write goes in `Sec-WebSocket-Protocol` if it is at most 2048 bytes, otherwise in
+  frames after the `101`. In practice that is the hello, plus the open request in
+  direct mode without mux, so a mux session costs TCP + TLS + one round trip, and a
+  non-mux direct connection gets its first target bytes after that same round trip.
+- The listener echoes the protocol value in the `101` (browsers require an accepted
+  subprotocol to be named), but it holds the `101` back until the tunnel handshake has
+  read the hello from the early data. A hello that does not verify (wrong token,
+  replay, too old, or a truncated early payload that runs into the timeout) gets the
+  same nginx `404` as a wrong path, not the random drain. An authenticated peer with a
+  cipher or mux mismatch gets the `101` and a close, as before.
+- `channel::connect` now takes the dialer (`Dialer::dial_with` sends the first bytes),
+  and callers bound dial plus handshake together.
+- `kariz check` warns when `tuning.keepalive_secs` is above 90 on `ws` / `wss`.
+- CI job `cdn`: nginx (`proxy_pass` with the upgrade headers, `proxy_read_timeout` /
+  `proxy_send_timeout` 3 s) between the two sides, in `ws` direct and reverse mode and as
+  a TLS-terminating front (`wss` to nginx, `ws` to the origin), with early data. Each
+  test moves 4 MiB, keeps a user connection idle for 6 s with a 1 s keepalive and uses
+  it again, then checks new connections. A control case with the default 30 s keepalive
+  has to see the idle connection cut, so the idle timeout is known to be real. The
+  tests skip when nginx is missing, unless `KARIZ_REQUIRE_NGINX` is set (as in CI).
+
 ## 7. Configuration
 
 All new fields are optional; v0.1 configs still parse. Example (entry in Iran dialing the
@@ -348,7 +373,7 @@ Each step is one PR, keeps CI green, and keeps both modes working.
 | **2.3** Mux integration (done) | Session manager in both modes, optimistic open, `tcpmux` alias, rotation. | E2E matrix `{reverse, direct} x {mux on, off}` green; unreachable-target test still closes the user connection; killing the exit mid-transfer resets streams and the entry reconnects. |
 | **2.4** `ws` (done) | Upgrade client/server, frame codec, 404 on mismatch. | Codec tests with RFC 6455 vectors (masking, 16/64-bit lengths, fragmentation, control frames); E2E over `ws`; probe test: plain HTTP GET and wrong-path upgrade get a 404. |
 | **2.5** `wss` (done) | rustls, cert/key, SNI vs connect address, pin / insecure, cert reload. | E2E over `wss` with an `rcgen` certificate (pinned); wrong pin fails; cert reload test. |
-| **2.6** CDN hardening | WS early data (optional flag), CI job with nginx as a stand-in CDN (`proxy_pass` with upgrade, idle timeout), manual Cloudflare checklist. | Tunnel survives nginx in the middle and idle periods longer than the proxy timeout. |
+| **2.6** CDN hardening (done) | WS early data (optional flag), CI job with nginx as a stand-in CDN (`proxy_pass` with upgrade, idle timeout), manual Cloudflare checklist. | Tunnel survives nginx in the middle and idle periods longer than the proxy timeout. |
 | **2.7** Release | Sample configs (`entry-wss-cdn.toml`, `exit-wss-cdn.toml`, ...), README / README_FA, ROADMAP update, benchmark table, version `0.2.0`. | Docs reviewed, tagged. |
 
 2.4 depends only on 2.0, so it can be developed in parallel with 2.1-2.3.

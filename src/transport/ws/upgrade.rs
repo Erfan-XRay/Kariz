@@ -3,12 +3,19 @@
 //! The dialer sends a browser-like upgrade request. The listener answers `101` only to
 //! a well-formed upgrade for the configured path (and host, when set); everything else,
 //! including plain HTTP requests from probes, gets the `404` page of a stock nginx.
+//!
+//! **Early data** (`tunnel.ws.early_data`, as in Xray): the dialer may put the first
+//! bytes it sends (the tunnel hello) base64url-encoded in `Sec-WebSocket-Protocol`.
+//! That saves the round trip of waiting for `101` before sending the hello, which is
+//! expensive through a CDN. The listener then holds the `101` back until the upper
+//! layer has checked those bytes, so an upgrade with a hello that does not verify gets a
+//! `404` too, like any other request (see [`Accepted`]).
 
 use std::io;
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::prelude::{Engine, BASE64_STANDARD};
+use base64::prelude::{Engine, BASE64_STANDARD, BASE64_URL_SAFE_NO_PAD};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::debug;
 
@@ -18,6 +25,8 @@ use crate::config::WsConfig;
 pub const MAX_HEAD: usize = 8 * 1024;
 const MAX_HEADERS: usize = 64;
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+/// Longest first write sent as early data; longer ones go in frames after the `101`.
+pub const MAX_EARLY_DATA: usize = 2048;
 
 /// `User-Agent` sent when `tunnel.ws.user_agent` is not set: a current desktop Chrome.
 pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
@@ -29,6 +38,7 @@ pub struct ClientConfig {
     /// The request up to (not including) the `Sec-WebSocket-Key` line, which is random
     /// per connection and goes last.
     head: String,
+    early_data: bool,
 }
 
 impl ClientConfig {
@@ -82,18 +92,34 @@ impl ClientConfig {
         for (name, value) in extra.iter().filter(|(k, _)| !is_default(k)) {
             head.push_str(&format!("{name}: {value}\r\n"));
         }
-        Self { head }
+        Self {
+            head,
+            early_data: ws.is_some_and(|w| w.early_data),
+        }
+    }
+
+    /// Whether the first write may go in the upgrade request (`tunnel.ws.early_data`).
+    pub fn early_data(&self) -> bool {
+        self.early_data
     }
 }
 
-/// Dialing side: sends the upgrade request on `stream` and checks the answer. Returns
-/// the bytes that arrived after the response head (the start of the first frames).
-pub async fn connect<S>(stream: &mut S, config: &ClientConfig) -> io::Result<Vec<u8>>
+/// Dialing side: sends the upgrade request on `stream` and checks the answer. `early`
+/// (possibly empty, at most [`MAX_EARLY_DATA`] bytes) goes in the request as early
+/// data. Returns the bytes that arrived after the response head (the start of the
+/// first frames).
+pub async fn connect<S>(stream: &mut S, config: &ClientConfig, early: &[u8]) -> io::Result<Vec<u8>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    debug_assert!(early.len() <= MAX_EARLY_DATA);
     let key = BASE64_STANDARD.encode(crate::crypto::random_bytes::<16>()?);
-    let request = format!("{}Sec-WebSocket-Key: {key}\r\n\r\n", config.head);
+    let mut request = format!("{}Sec-WebSocket-Key: {key}\r\n", config.head);
+    if !early.is_empty() {
+        let encoded = BASE64_URL_SAFE_NO_PAD.encode(early);
+        request.push_str(&format!("Sec-WebSocket-Protocol: {encoded}\r\n"));
+    }
+    request.push_str("\r\n");
     stream.write_all(request.as_bytes()).await?;
     stream.flush().await?;
 
@@ -146,22 +172,44 @@ impl ServerConfig {
     }
 }
 
+/// A request the listener agreed to upgrade.
+pub struct Accepted {
+    /// The `101` response. Not sent yet: the caller sends it (with or before its first
+    /// frames), or answers [`not_found`] instead if `early` does not check out.
+    pub response: Vec<u8>,
+    /// Early data from the request, empty when there was none.
+    pub early: Vec<u8>,
+    /// Bytes that arrived after the request head: the start of the first frames.
+    pub read_ahead: Vec<u8>,
+}
+
+/// A valid upgrade request, as far as HTTP goes.
+struct Request {
+    key: String,
+    /// `Sec-WebSocket-Protocol` as sent, echoed in the `101`.
+    protocol: Option<String>,
+    early: Vec<u8>,
+    /// Real client address reported by a CDN or proxy, for logs.
+    client: Option<String>,
+}
+
 /// Why a request was not upgraded; only logged, the client just sees an nginx page.
 enum Reject {
     BadRequest(&'static str),
     NotFound(&'static str),
 }
 
-/// Listening side: reads the upgrade request from `stream` and answers it. Returns the
-/// bytes that arrived after the request head. Anything but a valid upgrade for our path
-/// is answered with an nginx-style error page and fails with `PermissionDenied`.
+/// Listening side: reads the upgrade request from `stream`. Anything but a valid upgrade
+/// for our path is answered with an nginx-style error page and fails with
+/// `PermissionDenied`; for a valid one, the `101` is left to the caller (see
+/// [`Accepted`]).
 ///
 /// Callers bound the time this takes (the handshake timeout).
 pub async fn accept<S>(
     stream: &mut S,
     config: &ServerConfig,
     peer: SocketAddr,
-) -> io::Result<Vec<u8>>
+) -> io::Result<Accepted>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -173,7 +221,7 @@ where
         }
         Err(e) => return Err(e),
     };
-    let ((key, client), head_len) = match verdict {
+    let (request, head_len) = match verdict {
         Ok(v) => v,
         Err(reject) => {
             let (response, reason) = match reject {
@@ -190,21 +238,38 @@ where
             ));
         }
     };
-    let response = format!(
+    let mut response = format!(
         "HTTP/1.1 101 Switching Protocols\r\nServer: nginx\r\nDate: {}\r\n\
-         Connection: upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+         Connection: upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {}\r\n",
         http_date(SystemTime::now()),
-        accept_key(&key)
+        accept_key(&request.key)
     );
-    stream.write_all(response.as_bytes()).await?;
-    stream.flush().await?;
-    debug!(%peer, client = client.as_deref().unwrap_or("-"), "websocket upgrade accepted");
-    Ok(buf.split_off(head_len))
+    // A server that accepts a subprotocol names it in the answer; browsers insist.
+    if let Some(protocol) = &request.protocol {
+        response.push_str(&format!("Sec-WebSocket-Protocol: {protocol}\r\n"));
+    }
+    response.push_str("\r\n");
+    debug!(
+        %peer,
+        client = request.client.as_deref().unwrap_or("-"),
+        early = request.early.len(),
+        "websocket upgrade request accepted"
+    );
+    Ok(Accepted {
+        response: response.into_bytes(),
+        early: request.early,
+        read_ahead: buf.split_off(head_len),
+    })
 }
 
-/// Checks an upgrade request head. Returns the `Sec-WebSocket-Key` and the real client
-/// address a CDN or proxy reports, if any (for logs).
-fn check_request(head: &[u8], config: &ServerConfig) -> Result<(String, Option<String>), Reject> {
+/// The answer to an upgrade whose early data did not check out: the same `404` as for
+/// a wrong path.
+pub fn not_found() -> Vec<u8> {
+    error_page(404, "Not Found").into_bytes()
+}
+
+/// Checks an upgrade request head.
+fn check_request(head: &[u8], config: &ServerConfig) -> Result<Request, Reject> {
     let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut request = httparse::Request::new(&mut headers);
     match request.parse(head) {
@@ -240,7 +305,27 @@ fn check_request(head: &[u8], config: &ServerConfig) -> Result<(String, Option<S
         .or_else(|| header(headers, "x-real-ip"))
         .and_then(|v| std::str::from_utf8(v).ok())
         .map(|v| v.split(',').next().unwrap_or("").trim().to_owned());
-    Ok((key.to_owned(), client))
+    let protocol = match header(headers, "sec-websocket-protocol") {
+        None => None,
+        Some(v) => Some(
+            std::str::from_utf8(v)
+                .map_err(|_| Reject::NotFound("bad Sec-WebSocket-Protocol"))?
+                .to_owned(),
+        ),
+    };
+    // Early data: the whole protocol value, base64url without padding.
+    let early = match &protocol {
+        None => Vec::new(),
+        Some(p) => BASE64_URL_SAFE_NO_PAD
+            .decode(p.trim().trim_end_matches('='))
+            .map_err(|_| Reject::NotFound("Sec-WebSocket-Protocol is not early data"))?,
+    };
+    Ok(Request {
+        key: key.to_owned(),
+        protocol,
+        early,
+        client,
+    })
 }
 
 /// Reads until the end of an HTTP head (`\r\n\r\n`). Returns the head length; `buf`
@@ -461,19 +546,20 @@ mod tests {
         let ws: WsConfig = toml::from_str("path = \"/p\"\nhost = \"a.example\"").unwrap();
         let server = ServerConfig::new(Some(&ws));
         let ok = request_head(&ClientConfig::new(Some(&ws), "1.2.3.4:80", "http", 80));
-        let (key, client) = check_request(ok.as_bytes(), &server).ok().unwrap();
-        assert_eq!(key, "dGhlIHNhbXBsZSBub25jZQ==");
-        assert_eq!(client, None);
+        let r = check_request(ok.as_bytes(), &server).ok().unwrap();
+        assert_eq!(r.key, "dGhlIHNhbXBsZSBub25jZQ==");
+        assert_eq!((r.client, r.protocol), (None, None));
+        assert!(r.early.is_empty());
 
         let with_cf = ok.replace("\r\n\r\n", "\r\nCF-Connecting-IP: 198.51.100.7\r\n\r\n");
-        let (_, client) = check_request(with_cf.as_bytes(), &server).ok().unwrap();
-        assert_eq!(client.as_deref(), Some("198.51.100.7"));
+        let r = check_request(with_cf.as_bytes(), &server).ok().unwrap();
+        assert_eq!(r.client.as_deref(), Some("198.51.100.7"));
         let with_xff = ok.replace(
             "\r\n\r\n",
             "\r\nX-Forwarded-For: 198.51.100.8, 10.0.0.1\r\n\r\n",
         );
-        let (_, client) = check_request(with_xff.as_bytes(), &server).ok().unwrap();
-        assert_eq!(client.as_deref(), Some("198.51.100.8"));
+        let r = check_request(with_xff.as_bytes(), &server).ok().unwrap();
+        assert_eq!(r.client.as_deref(), Some("198.51.100.8"));
 
         // Query strings are ignored, as with most servers.
         assert!(check_request(ok.replace("/p ", "/p?x=1 ").as_bytes(), &server).is_ok());
@@ -516,5 +602,56 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn early_data_rides_in_the_protocol_header() {
+        let early: Vec<u8> = (0..=255u8).collect();
+        let encoded = BASE64_URL_SAFE_NO_PAD.encode(&early);
+        let c = ClientConfig::new(None, "1.2.3.4:80", "http", 80);
+        let head = request_head(&c).replace(
+            "\r\n\r\n",
+            &format!("\r\nSec-WebSocket-Protocol: {encoded}\r\n\r\n"),
+        );
+        let server = ServerConfig::new(None);
+        let r = check_request(head.as_bytes(), &server).ok().unwrap();
+        assert_eq!(r.early, early);
+        assert_eq!(r.protocol.as_deref(), Some(encoded.as_str()));
+
+        // A subprotocol list from some other client is not early data: 404.
+        let other = request_head(&c).replace(
+            "\r\n\r\n",
+            "\r\nSec-WebSocket-Protocol: chat, superchat\r\n\r\n",
+        );
+        assert!(matches!(
+            check_request(other.as_bytes(), &server),
+            Err(Reject::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn early_data_roundtrip_and_echo() {
+        let ws: WsConfig = toml::from_str("early_data = true").unwrap();
+        let client = ClientConfig::new(Some(&ws), "1.2.3.4:80", "http", 80);
+        assert!(client.early_data());
+        let (mut c, mut s) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            let peer = "127.0.0.1:1".parse().unwrap();
+            let accepted = accept(&mut s, &ServerConfig::new(None), peer)
+                .await
+                .unwrap();
+            // The caller decides when the 101 goes out.
+            s.write_all(&accepted.response).await.unwrap();
+            (accepted, s)
+        });
+        let hello = vec![0xab; MAX_EARLY_DATA];
+        connect(&mut c, &client, &hello).await.unwrap();
+        let (accepted, _s) = server.await.unwrap();
+        assert_eq!(accepted.early, hello);
+        let response = String::from_utf8(accepted.response).unwrap();
+        assert!(
+            response.contains("\r\nSec-WebSocket-Protocol: "),
+            "{response}"
+        );
     }
 }

@@ -370,7 +370,9 @@ async fn upgrade_keeps_bytes_that_follow_the_head() {
         server_io.write_all(&answer).await.unwrap();
         server_io
     });
-    let read_ahead = upgrade::connect(&mut client_io, &config).await.unwrap();
+    let read_ahead = upgrade::connect(&mut client_io, &config, &[])
+        .await
+        .unwrap();
     let _server_io = server.await.unwrap();
     let (r, w) = split(client_io);
     let mut ws = WsStream::new(r, w, Role::Client, &read_ahead).unwrap();
@@ -396,7 +398,9 @@ async fn client_rejects_a_bad_accept_key_and_non_101() {
         });
         let config = ClientConfig::new(None, "127.0.0.1:80", "http", 80);
         assert!(
-            upgrade::connect(&mut client_io, &config).await.is_err(),
+            upgrade::connect(&mut client_io, &config, &[])
+                .await
+                .is_err(),
             "{answer}"
         );
         drop(server.await);

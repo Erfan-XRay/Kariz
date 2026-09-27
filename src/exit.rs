@@ -143,10 +143,9 @@ async fn pool_worker(exit: Arc<Exit>, dialer: Arc<Dialer>) -> Result<()> {
 }
 
 async fn connect_once(exit: &Exit, dialer: &Dialer) -> io::Result<Link> {
-    let stream = dialer.dial().await?;
     timeout(
-        exit.tuning.handshake_timeout,
-        channel::connect(stream, &exit.crypto, &[]),
+        exit.tuning.dial_timeout + exit.tuning.handshake_timeout,
+        channel::connect(dialer, &exit.crypto, &[]),
     )
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))?

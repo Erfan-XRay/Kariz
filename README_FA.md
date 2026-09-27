@@ -13,7 +13,7 @@
 > وضعیت: **مراحل اولیه‌ی توسعه (نسخه‌ی 0.2 در حال ساخت).** فعلاً transportهای `tcp`، `tcpmux`، `ws` و `wss` (WebSocket ساده یا روی TLS) پیاده شده‌اند و
 > ترافیک با یک لایه‌ی رمزنگاری با forward secrecy رمز می‌شود (`tunnel.encryption`، پیش‌فرض `auto`).
 > فرمت داده‌ها روی شبکه بعد از 0.1.0 عوض شده؛ هر دو سرور را با هم آپدیت کنید.
-> نقشه‌ی راه در [docs/ROADMAP.md](docs/ROADMAP.md).
+> نقشه‌ی راه در [docs/ROADMAP.md](docs/ROADMAP.md) و راهنمای استفاده پشت CDN (مثل Cloudflare) در [docs/CDN.md](docs/CDN.md).
 
 ## مفاهیم
 
