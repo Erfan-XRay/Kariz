@@ -143,3 +143,77 @@ impl AsyncWrite for TunnelStream {
         }
     }
 }
+
+impl TunnelStream {
+    /// Splits into independently usable halves (no lock between them).
+    pub fn into_split(self) -> (TunnelReader, TunnelWriter) {
+        match self {
+            Self::Tcp(s) => {
+                let (r, w) = s.into_split();
+                (TunnelReader::Tcp(r), TunnelWriter::Tcp(w))
+            }
+        }
+    }
+}
+
+/// Receiving half of a [`TunnelStream`].
+pub enum TunnelReader {
+    Tcp(tokio::net::tcp::OwnedReadHalf),
+}
+
+/// Sending half of a [`TunnelStream`].
+pub enum TunnelWriter {
+    Tcp(tokio::net::tcp::OwnedWriteHalf),
+}
+
+impl AsyncRead for TunnelReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for TunnelWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Tcp(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Tcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Tcp(s) => s.is_write_vectored(),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}

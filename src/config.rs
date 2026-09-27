@@ -602,9 +602,6 @@ impl Config {
         if self.tunnel.transport.is_websocket() {
             return not_yet(&format!("transport = \"{}\"", self.tunnel.transport.name()));
         }
-        if self.mux().enabled {
-            return not_yet("mux");
-        }
         Ok(())
     }
 }
@@ -784,12 +781,7 @@ mod tests {
 
     #[test]
     fn unimplemented_features_are_rejected_after_validation() {
-        for (transport, extra) in [
-            ("ws", ""),
-            ("wss", ""),
-            ("tcpmux", ""),
-            ("tcp", "[tunnel.mux]\nenabled = true"),
-        ] {
+        for (transport, extra) in [("ws", ""), ("wss", "")] {
             let err = parse_err(&with_transport("entry", transport, extra));
             assert!(
                 err.contains("not implemented yet"),
@@ -810,6 +802,19 @@ mod tests {
             assert_eq!(c.tunnel.encryption.name(), cipher);
             assert!(c.warnings().is_empty());
         }
+    }
+
+    #[test]
+    fn mux_configs_parse() {
+        let c = Config::parse(&with_transport("entry", "tcpmux", "")).unwrap();
+        assert!(c.mux().enabled);
+        let text = with_transport(
+            "exit",
+            "tcp",
+            "[tunnel.mux]\nenabled = true\nmax_lifetime_secs = 600",
+        );
+        let c = Config::parse(&text).unwrap();
+        assert_eq!(c.mux().max_lifetime, Some(Duration::from_secs(600)));
     }
 
     #[test]

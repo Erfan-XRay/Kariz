@@ -91,6 +91,7 @@ pub struct Crypto {
     psk: Psk,
     encryption: Encryption,
     cipher: Cipher,
+    mux: bool,
 }
 
 impl Crypto {
@@ -99,7 +100,18 @@ impl Crypto {
             psk: Psk::new(token),
             encryption,
             cipher: Cipher::for_config(encryption),
+            mux: false,
         }
+    }
+
+    /// Whether connections carry a mux session; announced and checked in the handshake.
+    pub fn with_mux(mut self, mux: bool) -> Self {
+        self.mux = mux;
+        self
+    }
+
+    pub fn mux(&self) -> bool {
+        self.mux
     }
 
     pub fn psk(&self) -> &Psk {

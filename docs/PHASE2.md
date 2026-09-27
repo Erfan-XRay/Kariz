@@ -292,7 +292,7 @@ Each step is one PR, keeps CI green, and keeps both modes working.
 | **2.0** Prep (done) | `Channel` abstraction, config sections (`mux`, `ws`, `tls`, `encryption`) parsed and validated but not yet used, test helper parameterised over transport / mux / mode. | No behaviour change, all v0.1 tests pass through the new helper. |
 | **2.1** Crypto (done) | Handshake v2, `SecureStream`, early data, drain-on-failure, cipher `auto`. | Unit tests: roundtrip, tamper, wrong token both ways, replay, stale ts, downgrade attempt, record split across reads, counter per direction. E2E tests pass with encryption on (default) and `none`. Hello bytes pass a simple byte-distribution check (no fixed offsets). |
 | **2.2** Mux core (done) | Frames, session, streams, flow control, ping, `GOAWAY`. Tested in isolation over `tokio::io::duplex`. | Tests: 1000 parallel streams, half close, `RST`, slow reader does not block a fast stream, window accounting, dead peer detected by ping. |
-| **2.3** Mux integration | Session manager in both modes, optimistic open, `tcpmux` alias, rotation. | E2E matrix `{reverse, direct} x {mux on, off}` green; unreachable-target test still closes the user connection; killing the exit mid-transfer resets streams and the entry reconnects. |
+| **2.3** Mux integration (done) | Session manager in both modes, optimistic open, `tcpmux` alias, rotation. | E2E matrix `{reverse, direct} x {mux on, off}` green; unreachable-target test still closes the user connection; killing the exit mid-transfer resets streams and the entry reconnects. |
 | **2.4** `ws` | Upgrade client/server, frame codec, 404 on mismatch. | Codec tests with RFC 6455 vectors (masking, 16/64-bit lengths, fragmentation, control frames); E2E over `ws`; probe test: plain HTTP GET and wrong-path upgrade get a 404. |
 | **2.5** `wss` | rustls, cert/key, SNI vs connect address, pin / insecure, cert reload. | E2E over `wss` with an `rcgen` certificate (pinned); wrong pin fails; cert reload test. |
 | **2.6** CDN hardening | WS early data (optional flag), CI job with nginx as a stand-in CDN (`proxy_pass` with upgrade, idle timeout), manual Cloudflare checklist. | Tunnel survives nginx in the middle and idle periods longer than the proxy timeout. |
@@ -313,6 +313,12 @@ and on a 1 vCPU VPS:
   is the copy into and out of each stream (unavoidable with `AsyncRead`/`AsyncWrite`)
   plus extra task hops; to be revisited in 2.3 with end-to-end numbers (lock-free
   connection split, fewer hops).
+  *Status after 2.3:* reading and writing now run in separate tasks over independent
+  connection halves (no lock between encryption and decryption), and the mux relay
+  hands `Bytes` through without user-space copies. Isolated: 67-71 %. End to end
+  (`tests/tunnel.rs` throughput, both sides on one 4-core machine): about 70 % with the
+  default 256 KiB window, about 80 % with a 4 MiB window. Mux stays off by default for
+  `tcp`; window auto-tuning is a candidate follow-up.
 - 100 idle mux streams: under 2 MiB extra RSS.
 - Idle process RSS stays under 10 MiB.
 - Stream open latency in reverse + mux: no extra round trip over the target dial

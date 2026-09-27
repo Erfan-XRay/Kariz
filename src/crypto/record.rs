@@ -148,19 +148,13 @@ fn bad_record() -> io::Error {
     )
 }
 
-/// An encrypted stream on top of `S`.
-pub struct SecureStream<S> {
-    inner: S,
-    sealer: Sealer,
+/// Receiving state: opens records read from the inner stream.
+struct ReadState {
     opener: Opener,
     /// Opener for an early-data record that precedes everything else, if one was announced.
     early: Option<Opener>,
-
-    /// Sealed records not yet written to `inner`, from `wpos`.
-    wbuf: Vec<u8>,
-    wpos: usize,
-
-    /// Ciphertext read from `inner`, valid in `rstart..rend`. Allocated on first read.
+    /// Ciphertext read from the inner stream, valid in `rstart..rend`. Allocated on
+    /// first read.
     rbuf: Vec<u8>,
     rstart: usize,
     rend: usize,
@@ -172,15 +166,11 @@ pub struct SecureStream<S> {
     read_eof: bool,
 }
 
-impl<S> SecureStream<S> {
-    pub fn new(inner: S, sealer: Sealer, opener: Opener, early: Option<Opener>) -> Self {
+impl ReadState {
+    fn new(opener: Opener, early: Option<Opener>) -> Self {
         Self {
-            inner,
-            sealer,
             opener,
             early,
-            wbuf: Vec::new(),
-            wpos: 0,
             rbuf: Vec::new(),
             rstart: 0,
             rend: 0,
@@ -191,16 +181,95 @@ impl<S> SecureStream<S> {
         }
     }
 
-    pub fn get_ref(&self) -> &S {
-        &self.inner
+    fn poll_read<R: AsyncRead + Unpin>(
+        &mut self,
+        inner: &mut R,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        loop {
+            if self.plain_start < self.plain_end {
+                let n = (self.plain_end - self.plain_start).min(buf.remaining());
+                buf.put_slice(&self.rbuf[self.plain_start..self.plain_start + n]);
+                self.plain_start += n;
+                return Poll::Ready(Ok(()));
+            }
+
+            let need = match self.pending_len {
+                None => HEADER_LEN,
+                Some(len) => len + AEAD_TAG_LEN,
+            };
+            if self.rend - self.rstart < need {
+                if self.read_eof {
+                    return if self.rstart == self.rend && self.pending_len.is_none() {
+                        Poll::Ready(Ok(()))
+                    } else {
+                        Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "tunnel closed in the middle of a record",
+                        )))
+                    };
+                }
+                if self.rbuf.is_empty() {
+                    self.rbuf = vec![0u8; READ_BUFFER];
+                }
+                if self.rstart + need > self.rbuf.len() {
+                    self.rbuf.copy_within(self.rstart..self.rend, 0);
+                    self.rend -= self.rstart;
+                    self.rstart = 0;
+                }
+                let mut rb = ReadBuf::new(&mut self.rbuf[self.rend..]);
+                ready!(Pin::new(&mut *inner).poll_read(cx, &mut rb))?;
+                let n = rb.filled().len();
+                if n == 0 {
+                    self.read_eof = true;
+                }
+                self.rend += n;
+                continue;
+            }
+
+            let opener = self.early.as_mut().unwrap_or(&mut self.opener);
+            let record = &mut self.rbuf[self.rstart..self.rstart + need];
+            match self.pending_len {
+                None => self.pending_len = Some(opener.open_header(record)?),
+                Some(len) => {
+                    opener.open_payload(record)?;
+                    self.early = None;
+                    self.pending_len = None;
+                    self.plain_start = self.rstart;
+                    self.plain_end = self.rstart + len;
+                }
+            }
+            self.rstart += need;
+        }
     }
 }
 
-impl<S: AsyncWrite + Unpin> SecureStream<S> {
+/// Sending state: seals records and writes them to the inner stream.
+struct WriteState {
+    sealer: Sealer,
+    /// Sealed records not yet written to the inner stream, from `wpos`.
+    wbuf: Vec<u8>,
+    wpos: usize,
+}
+
+impl WriteState {
+    fn new(sealer: Sealer) -> Self {
+        Self {
+            sealer,
+            wbuf: Vec::new(),
+            wpos: 0,
+        }
+    }
+
     /// Writes out sealed records that are still buffered.
-    fn poll_write_buffered(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_buffered<W: AsyncWrite + Unpin>(
+        &mut self,
+        inner: &mut W,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
         while self.wpos < self.wbuf.len() {
-            let n = ready!(Pin::new(&mut self.inner).poll_write(cx, &self.wbuf[self.wpos..]))?;
+            let n = ready!(Pin::new(&mut *inner).poll_write(cx, &self.wbuf[self.wpos..]))?;
             if n == 0 {
                 return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
             }
@@ -210,105 +279,47 @@ impl<S: AsyncWrite + Unpin> SecureStream<S> {
         self.wpos = 0;
         Poll::Ready(Ok(()))
     }
-}
 
-impl<S: AsyncRead + Unpin> AsyncRead for SecureStream<S> {
-    fn poll_read(
-        self: Pin<&mut Self>,
+    /// Starts sending freshly sealed records right away; whatever does not fit goes out
+    /// on the next write or flush. The caller's data is ours now either way.
+    fn finish_write<W: AsyncWrite + Unpin>(
+        &mut self,
+        inner: &mut W,
         cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        loop {
-            if this.plain_start < this.plain_end {
-                let n = (this.plain_end - this.plain_start).min(buf.remaining());
-                buf.put_slice(&this.rbuf[this.plain_start..this.plain_start + n]);
-                this.plain_start += n;
-                return Poll::Ready(Ok(()));
-            }
-
-            let need = match this.pending_len {
-                None => HEADER_LEN,
-                Some(len) => len + AEAD_TAG_LEN,
-            };
-            if this.rend - this.rstart < need {
-                if this.read_eof {
-                    return if this.rstart == this.rend && this.pending_len.is_none() {
-                        Poll::Ready(Ok(()))
-                    } else {
-                        Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "tunnel closed in the middle of a record",
-                        )))
-                    };
-                }
-                if this.rbuf.is_empty() {
-                    this.rbuf = vec![0u8; READ_BUFFER];
-                }
-                if this.rstart + need > this.rbuf.len() {
-                    this.rbuf.copy_within(this.rstart..this.rend, 0);
-                    this.rend -= this.rstart;
-                    this.rstart = 0;
-                }
-                let mut rb = ReadBuf::new(&mut this.rbuf[this.rend..]);
-                ready!(Pin::new(&mut this.inner).poll_read(cx, &mut rb))?;
-                let n = rb.filled().len();
-                if n == 0 {
-                    this.read_eof = true;
-                }
-                this.rend += n;
-                continue;
-            }
-
-            let opener = this.early.as_mut().unwrap_or(&mut this.opener);
-            let record = &mut this.rbuf[this.rstart..this.rstart + need];
-            match this.pending_len {
-                None => this.pending_len = Some(opener.open_header(record)?),
-                Some(len) => {
-                    opener.open_payload(record)?;
-                    this.early = None;
-                    this.pending_len = None;
-                    this.plain_start = this.rstart;
-                    this.plain_end = this.rstart + len;
-                }
-            }
-            this.rstart += need;
+        taken: usize,
+    ) -> Poll<io::Result<usize>> {
+        if let Poll::Ready(Err(e)) = self.poll_buffered(inner, cx) {
+            return Poll::Ready(Err(e));
         }
+        Poll::Ready(Ok(taken))
     }
-}
 
-impl<S: AsyncWrite + Unpin> AsyncWrite for SecureStream<S> {
-    fn poll_write(
-        self: Pin<&mut Self>,
+    fn poll_write<W: AsyncWrite + Unpin>(
+        &mut self,
+        inner: &mut W,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        ready!(this.poll_write_buffered(cx))?;
+        ready!(self.poll_buffered(inner, cx))?;
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
         let take = buf.len().min(WRITE_BATCH);
         for chunk in buf[..take].chunks(MAX_PAYLOAD) {
-            this.sealer.seal(chunk, &mut this.wbuf)?;
+            self.sealer.seal(chunk, &mut self.wbuf)?;
         }
-        // Start sending right away; whatever does not fit goes out on the next write or
-        // flush. The data is ours now either way.
-        if let Poll::Ready(Err(e)) = this.poll_write_buffered(cx) {
-            return Poll::Ready(Err(e));
-        }
-        Poll::Ready(Ok(take))
+        self.finish_write(inner, cx, take)
     }
 
     /// Seals the pieces straight into records (no gathering copy), so a caller writing
     /// many small pieces still gets full-size records.
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
+    fn poll_write_vectored<W: AsyncWrite + Unpin>(
+        &mut self,
+        inner: &mut W,
         cx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        ready!(this.poll_write_buffered(cx))?;
+        ready!(self.poll_buffered(inner, cx))?;
         let mut parts: Vec<&[u8]> = Vec::new();
         let mut in_record = 0;
         let mut taken = 0;
@@ -327,22 +338,108 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for SecureStream<S> {
                 in_record += n;
                 taken += n;
                 if in_record == MAX_PAYLOAD {
-                    this.sealer.seal_parts(&parts, &mut this.wbuf)?;
+                    self.sealer.seal_parts(&parts, &mut self.wbuf)?;
                     parts.clear();
                     in_record = 0;
                 }
             }
         }
         if in_record > 0 {
-            this.sealer.seal_parts(&parts, &mut this.wbuf)?;
+            self.sealer.seal_parts(&parts, &mut self.wbuf)?;
         }
         if taken == 0 {
             return Poll::Ready(Ok(0));
         }
-        if let Poll::Ready(Err(e)) = this.poll_write_buffered(cx) {
-            return Poll::Ready(Err(e));
+        self.finish_write(inner, cx, taken)
+    }
+
+    fn poll_flush<W: AsyncWrite + Unpin>(
+        &mut self,
+        inner: &mut W,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        ready!(self.poll_buffered(inner, cx))?;
+        Pin::new(inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown<W: AsyncWrite + Unpin>(
+        &mut self,
+        inner: &mut W,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        ready!(self.poll_buffered(inner, cx))?;
+        Pin::new(inner).poll_shutdown(cx)
+    }
+}
+
+/// An encrypted stream on top of `S`.
+pub struct SecureStream<S> {
+    inner: S,
+    read: ReadState,
+    write: WriteState,
+}
+
+impl<S> SecureStream<S> {
+    pub fn new(inner: S, sealer: Sealer, opener: Opener, early: Option<Opener>) -> Self {
+        Self {
+            inner,
+            read: ReadState::new(opener, early),
+            write: WriteState::new(sealer),
         }
-        Poll::Ready(Ok(taken))
+    }
+
+    pub fn get_ref(&self) -> &S {
+        &self.inner
+    }
+
+    /// Splits into independent receiving and sending halves, using `split` for the
+    /// inner stream, so both directions can be processed in parallel.
+    pub fn split<R, W>(
+        self,
+        split: impl FnOnce(S) -> (R, W),
+    ) -> (SecureReader<R>, SecureWriter<W>) {
+        let (r, w) = split(self.inner);
+        (
+            SecureReader {
+                inner: r,
+                state: self.read,
+            },
+            SecureWriter {
+                inner: w,
+                state: self.write,
+            },
+        )
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for SecureStream<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.read.poll_read(&mut this.inner, cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for SecureStream<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        this.write.poll_write(&mut this.inner, cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        this.write.poll_write_vectored(&mut this.inner, cx, bufs)
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -351,14 +448,69 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for SecureStream<S> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        ready!(this.poll_write_buffered(cx))?;
-        Pin::new(&mut this.inner).poll_flush(cx)
+        this.write.poll_flush(&mut this.inner, cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        ready!(this.poll_write_buffered(cx))?;
-        Pin::new(&mut this.inner).poll_shutdown(cx)
+        this.write.poll_shutdown(&mut this.inner, cx)
+    }
+}
+
+/// Receiving half of a split [`SecureStream`].
+pub struct SecureReader<R> {
+    inner: R,
+    state: ReadState,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for SecureReader<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.state.poll_read(&mut this.inner, cx, buf)
+    }
+}
+
+/// Sending half of a split [`SecureStream`].
+pub struct SecureWriter<W> {
+    inner: W,
+    state: WriteState,
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for SecureWriter<W> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        this.state.poll_write(&mut this.inner, cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        this.state.poll_write_vectored(&mut this.inner, cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.state.poll_flush(&mut this.inner, cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.state.poll_shutdown(&mut this.inner, cx)
     }
 }
 
@@ -477,6 +629,30 @@ mod tests {
             expected.len() + records * (MAX_RECORD - MAX_PAYLOAD)
         );
         assert_eq!(read_wire(&wire, None).await.unwrap(), expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn split_halves_carry_both_directions() {
+        let (a, b) = pair(Cipher::Chacha20Poly1305, 4096);
+        let (mut ar, mut aw) = a.split(tokio::io::split);
+        let (mut br, mut bw) = b.split(tokio::io::split);
+        let data = pattern(500_000);
+        let (d1, d2) = (data.clone(), data.clone());
+        let w1 = tokio::spawn(async move {
+            aw.write_all(&d1).await.unwrap();
+            aw.shutdown().await.unwrap();
+        });
+        let w2 = tokio::spawn(async move {
+            bw.write_all(&d2).await.unwrap();
+            bw.shutdown().await.unwrap();
+        });
+        let (mut got_a, mut got_b) = (Vec::new(), Vec::new());
+        let (x, y) = tokio::join!(ar.read_to_end(&mut got_a), br.read_to_end(&mut got_b));
+        x.unwrap();
+        y.unwrap();
+        w1.await.unwrap();
+        w2.await.unwrap();
+        assert!(got_a == data && got_b == data);
     }
 
     #[tokio::test]

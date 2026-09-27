@@ -5,15 +5,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
-use crate::channel::{self, Channel};
+use crate::channel::{self, Channel, Link};
 use crate::config::{Config, Mode, Tuning};
 use crate::crypto::{Crypto, ReplayFilter};
+use crate::mux::{maintain, MuxSession, MuxStream, ResetReason, SessionConfig, Side};
 use crate::proto::{self, Open, STATUS_DIAL_FAILED, STATUS_OK};
-use crate::relay::relay;
+use crate::relay::{relay, relay_mux};
 use crate::transport::{tcp, Dialer, Listener};
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
@@ -26,13 +28,49 @@ struct Exit {
 
 pub async fn run(config: Config) -> Result<()> {
     let tuning = config.tuning();
+    let mux = config.mux();
     let exit = Arc::new(Exit {
-        crypto: Crypto::new(&config.tunnel.token, config.tunnel.encryption),
+        crypto: Crypto::new(&config.tunnel.token, config.tunnel.encryption).with_mux(mux.enabled),
         tuning: tuning.clone(),
     });
+    let sessions = SessionConfig::new(&mux, &tuning);
     let mut tasks = JoinSet::new();
 
     match config.mode {
+        Mode::Reverse if mux.enabled => {
+            let remote = config.tunnel.remote.as_deref().expect("validated");
+            info!(
+                remote,
+                connections = mux.connections,
+                "exit: reverse mode with mux, keeping sessions to the entry side"
+            );
+            let dialer = Arc::new(Dialer::new(config.tunnel.transport, remote, &tuning)?);
+            for _ in 0..mux.connections {
+                let (exit, dialer) = (exit.clone(), dialer.clone());
+                let connect = {
+                    let exit = exit.clone();
+                    move || {
+                        let (exit, dialer) = (exit.clone(), dialer.clone());
+                        async move { connect_once(&exit, &dialer).await }
+                    }
+                };
+                let (sessions, lifetime) = (sessions.clone(), mux.max_lifetime);
+                tasks.spawn(async move {
+                    maintain(
+                        "the entry side",
+                        connect,
+                        Side::Server,
+                        sessions,
+                        lifetime,
+                        move |s| {
+                            tokio::spawn(run_session(exit.clone(), s));
+                        },
+                    )
+                    .await;
+                    Ok(())
+                });
+            }
+        }
         Mode::Reverse => {
             let remote = config.tunnel.remote.as_deref().expect("validated");
             info!(
@@ -50,8 +88,13 @@ pub async fn run(config: Config) -> Result<()> {
             let listener = Listener::bind(config.tunnel.transport, addr, &tuning)
                 .await
                 .with_context(|| format!("failed to listen for tunnel connections on {addr}"))?;
-            info!(addr = %listener.local_addr()?, "exit: direct mode, waiting for the entry side");
-            tasks.spawn(accept_direct(exit.clone(), listener));
+            info!(
+                addr = %listener.local_addr()?,
+                mux = mux.enabled,
+                "exit: direct mode, waiting for the entry side"
+            );
+            let sessions = mux.enabled.then_some(sessions);
+            tasks.spawn(accept_direct(exit.clone(), listener, sessions));
         }
     }
 
@@ -68,12 +111,15 @@ async fn pool_worker(exit: Arc<Exit>, dialer: Arc<Dialer>) -> Result<()> {
     let mut backoff = BACKOFF_MIN;
     loop {
         let mut channel = match connect_once(&exit, &dialer).await {
-            Ok(s) => {
+            Ok(link) => {
                 backoff = BACKOFF_MIN;
-                s
+                Channel::from(link)
             }
             Err(e) => {
-                if e.kind() == io::ErrorKind::PermissionDenied {
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+                ) {
                     error!(error = %e, "entry side rejected us or failed authentication");
                 } else {
                     warn!(error = %e, "could not connect to the entry side");
@@ -95,7 +141,7 @@ async fn pool_worker(exit: Arc<Exit>, dialer: Arc<Dialer>) -> Result<()> {
     }
 }
 
-async fn connect_once(exit: &Exit, dialer: &Dialer) -> io::Result<Channel> {
+async fn connect_once(exit: &Exit, dialer: &Dialer) -> io::Result<Link> {
     let stream = dialer.dial().await?;
     timeout(
         exit.tuning.handshake_timeout,
@@ -105,8 +151,13 @@ async fn connect_once(exit: &Exit, dialer: &Dialer) -> io::Result<Channel> {
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))?
 }
 
-/// Direct mode: authenticates connections from the entry side and serves them.
-async fn accept_direct(exit: Arc<Exit>, listener: Listener) -> Result<()> {
+/// Direct mode: authenticates connections from the entry side and serves them, each as
+/// one channel or, with `sessions`, as a mux session.
+async fn accept_direct(
+    exit: Arc<Exit>,
+    listener: Listener,
+    sessions: Option<SessionConfig>,
+) -> Result<()> {
     let replay = Arc::new(ReplayFilter::default());
     loop {
         let (stream, peer) = match listener.accept().await {
@@ -117,14 +168,19 @@ async fn accept_direct(exit: Arc<Exit>, listener: Listener) -> Result<()> {
                 continue;
             }
         };
-        let (exit, replay) = (exit.clone(), replay.clone());
+        let (exit, replay, sessions) = (exit.clone(), replay.clone(), sessions.clone());
         tokio::spawn(async move {
             let hs_timeout = exit.tuning.handshake_timeout;
-            let mut channel = match channel::accept(stream, &exit.crypto, &replay, hs_timeout).await
-            {
-                Ok(c) => c,
+            let link = match channel::accept(stream, &exit.crypto, &replay, hs_timeout).await {
+                Ok(link) => link,
                 Err(e) => return warn!(%peer, error = %e, "tunnel handshake failed"),
             };
+            if let Some(config) = sessions {
+                info!(%peer, "mux session from the entry side established");
+                let session = Arc::new(MuxSession::over(link, Side::Server, config));
+                return run_session(exit, session).await;
+            }
+            let mut channel = Channel::from(link);
             match timeout(hs_timeout, Open::read(&mut channel)).await {
                 Ok(Ok(open)) => serve(&exit, channel, open).await,
                 Ok(Err(e)) => warn!(%peer, error = %e, "bad open request"),
@@ -147,6 +203,40 @@ async fn serve(exit: &Exit, mut tunnel: Channel, open: Open) {
         return;
     }
     if let Err(e) = relay(&mut tunnel, &mut target, exit.tuning.buffer_size).await {
+        debug!(target = %open.target, error = %e, "connection ended with error");
+    }
+}
+
+/// Serves every stream the entry side opens on `session`, then lets the session drain.
+async fn run_session(exit: Arc<Exit>, session: Arc<MuxSession>) {
+    while let Some((stream, syn)) = session.accept().await {
+        let exit = exit.clone();
+        tokio::spawn(async move { serve_stream(&exit, stream, syn).await });
+    }
+    session.drain().await;
+    debug!(
+        reason = session.close_reason().unwrap_or_default(),
+        "mux session ended"
+    );
+}
+
+/// Mux counterpart of [`serve`]: no status byte, a failed dial resets the stream.
+async fn serve_stream(exit: &Exit, stream: MuxStream, syn: Bytes) {
+    let open = match Open::decode(&syn) {
+        Ok(open) => open,
+        Err(e) => {
+            warn!(error = %e, "bad open request");
+            return stream.reset(ResetReason::Protocol);
+        }
+    };
+    let mut target = match tcp::connect(&open.target, &exit.tuning).await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(target = %open.target, error = %e, "could not connect to target");
+            return stream.reset(ResetReason::DialFailed);
+        }
+    };
+    if let Err(e) = relay_mux(&mut target, &stream, exit.tuning.buffer_size).await {
         debug!(target = %open.target, error = %e, "connection ended with error");
     }
 }

@@ -63,6 +63,8 @@ pub const HELLO_HEAD_LEN: usize = NONCE_LEN + CLIENT_HDR_LEN;
 
 /// `flags` bit: one early-data record follows the hello.
 const FLAG_EARLY: u8 = 1;
+/// `flags` bit: the connection carries a mux session. Both sides must agree.
+const FLAG_MUX: u8 = 2;
 
 pub type Key = [u8; 32];
 
@@ -133,15 +135,22 @@ pub struct ClientState {
 }
 
 /// Builds the dialer's hello. With `early`, the hello announces one early-data record,
-/// to be sealed with [`ClientState::early_key`] and sent right after it.
-pub fn client_hello(psk: &Psk, cipher: Cipher, early: bool) -> io::Result<(Vec<u8>, ClientState)> {
-    client_hello_at(psk, cipher, early, unix_now())
+/// to be sealed with [`ClientState::early_key`] and sent right after it. `mux` announces
+/// a mux session on this connection.
+pub fn client_hello(
+    psk: &Psk,
+    cipher: Cipher,
+    early: bool,
+    mux: bool,
+) -> io::Result<(Vec<u8>, ClientState)> {
+    client_hello_at(psk, cipher, early, mux, unix_now())
 }
 
 fn client_hello_at(
     psk: &Psk,
     cipher: Cipher,
     early: bool,
+    mux: bool,
     ts: u64,
 ) -> io::Result<(Vec<u8>, ClientState)> {
     let (secret, public) = ephemeral()?;
@@ -153,7 +162,7 @@ fn client_hello_at(
     hdr[8..40].copy_from_slice(&public);
     hdr[40] = cipher.id();
     hdr[41..43].copy_from_slice(&(pad.len() as u16).to_be_bytes());
-    hdr[43] = if early { FLAG_EARLY } else { 0 };
+    hdr[43] = if early { FLAG_EARLY } else { 0 } | if mux { FLAG_MUX } else { 0 };
     psk.apply_mask(b'c', &nonce, &mut hdr);
 
     let mut msg = Vec::with_capacity(HELLO_HEAD_LEN + pad.len() + TAG_LEN);
@@ -212,15 +221,17 @@ pub struct Accepted {
 }
 
 /// Acceptor side: reads and verifies the hello, answers, and derives the session keys.
-/// `allows` decides which ciphers this side accepts.
+/// `allows` decides which ciphers this side accepts; `mux` is whether this side expects a
+/// mux session.
 ///
 /// Authentication failures are `PermissionDenied`; an authenticated peer asking for a
-/// cipher this side does not allow is `Unsupported`.
+/// cipher this side does not allow, or disagreeing on mux, is `Unsupported`.
 pub async fn accept<S>(
     stream: &mut S,
     psk: &Psk,
     replay: &ReplayFilter,
     allows: impl Fn(Cipher) -> bool,
+    mux: bool,
 ) -> io::Result<Accepted>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -271,6 +282,14 @@ where
             ))
         }
     };
+
+    if (hdr[43] & FLAG_MUX != 0) != mux {
+        let (peer, us) = if mux { ("off", "on") } else { ("on", "off") };
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("peer has mux {peer} but this side has it {us}; set tunnel.mux the same on both sides"),
+        ));
+    }
 
     let (secret, public) = ephemeral()?;
     let pad_s = padding()?;
@@ -390,7 +409,7 @@ mod tests {
         // Close our write side so a hello that claims more bytes than it has fails
         // instead of waiting forever.
         client.shutdown().await.unwrap();
-        let accepted = accept(&mut server, acceptor, replay, allows).await;
+        let accepted = accept(&mut server, acceptor, replay, allows, false).await;
         if accepted.is_err() {
             return (accepted, None);
         }
@@ -403,7 +422,7 @@ mod tests {
         let psk = Psk::new(TOKEN);
         for cipher in [Cipher::Chacha20Poly1305, Cipher::Aes256Gcm, Cipher::None] {
             for early in [false, true] {
-                let (hello, state) = client_hello(&psk, cipher, early).unwrap();
+                let (hello, state) = client_hello(&psk, cipher, early, false).unwrap();
                 let early_c = state.early_key().copied();
                 let (acc, keys) =
                     run(&hello, state, &psk, &ReplayFilter::default(), |_| true).await;
@@ -426,7 +445,7 @@ mod tests {
         let replay = ReplayFilter::default();
         let mut seen = Vec::new();
         for _ in 0..2 {
-            let (hello, state) = client_hello(&psk, Cipher::Aes256Gcm, false).unwrap();
+            let (hello, state) = client_hello(&psk, Cipher::Aes256Gcm, false, false).unwrap();
             let (_, keys) = run(&hello, state, &psk, &replay, any_cipher).await;
             seen.push(keys.unwrap().unwrap().c2s);
         }
@@ -437,16 +456,16 @@ mod tests {
     async fn wrong_token_is_rejected_both_ways() {
         let a = Psk::new("token-a-token-a-token-a");
         let b = Psk::new("token-b-token-b-token-b");
-        let (hello, state) = client_hello(&a, Cipher::Aes256Gcm, false).unwrap();
+        let (hello, state) = client_hello(&a, Cipher::Aes256Gcm, false, false).unwrap();
         let (acc, _) = run(&hello, state, &b, &ReplayFilter::default(), any_cipher).await;
         assert_eq!(acc.err().unwrap().kind(), io::ErrorKind::PermissionDenied);
 
         // A fake acceptor that does not know the token cannot produce a valid reply.
-        let (_, state) = client_hello(&a, Cipher::Aes256Gcm, false).unwrap();
-        let (fake_hello, _) = client_hello(&b, Cipher::Aes256Gcm, false).unwrap();
+        let (_, state) = client_hello(&a, Cipher::Aes256Gcm, false, false).unwrap();
+        let (fake_hello, _) = client_hello(&b, Cipher::Aes256Gcm, false, false).unwrap();
         let (mut client, mut server) = tokio::io::duplex(4096);
         client.write_all(&fake_hello).await.unwrap();
-        accept(&mut server, &b, &ReplayFilter::default(), any_cipher)
+        accept(&mut server, &b, &ReplayFilter::default(), any_cipher, false)
             .await
             .unwrap();
         let err = state.read_reply(&mut client).await.err().unwrap();
@@ -457,10 +476,10 @@ mod tests {
     async fn replay_is_rejected() {
         let psk = Psk::new(TOKEN);
         let replay = ReplayFilter::default();
-        let (hello, state) = client_hello(&psk, Cipher::Aes256Gcm, true).unwrap();
+        let (hello, state) = client_hello(&psk, Cipher::Aes256Gcm, true, false).unwrap();
         let (acc, _) = run(&hello, state, &psk, &replay, any_cipher).await;
         acc.unwrap();
-        let (_, state) = client_hello(&psk, Cipher::Aes256Gcm, true).unwrap();
+        let (_, state) = client_hello(&psk, Cipher::Aes256Gcm, true, false).unwrap();
         let (acc, _) = run(&hello, state, &psk, &replay, any_cipher).await;
         assert!(acc.is_err());
     }
@@ -472,7 +491,8 @@ mod tests {
             unix_now() - MAX_CLOCK_SKEW - 5,
             unix_now() + MAX_CLOCK_SKEW + 5,
         ] {
-            let (hello, state) = client_hello_at(&psk, Cipher::Aes256Gcm, false, ts).unwrap();
+            let (hello, state) =
+                client_hello_at(&psk, Cipher::Aes256Gcm, false, false, ts).unwrap();
             let (acc, _) = run(&hello, state, &psk, &ReplayFilter::default(), any_cipher).await;
             assert!(acc.is_err());
         }
@@ -481,13 +501,13 @@ mod tests {
     #[tokio::test]
     async fn any_tampered_byte_is_rejected() {
         let psk = Psk::new(TOKEN);
-        let (hello, _) = client_hello(&psk, Cipher::Aes256Gcm, false).unwrap();
+        let (hello, _) = client_hello(&psk, Cipher::Aes256Gcm, false, false).unwrap();
         // Every header byte (including the cipher byte) and the tag.
         let positions = (0..HELLO_HEAD_LEN).chain(hello.len() - TAG_LEN..hello.len());
         for i in positions {
             let mut bad = hello.clone();
             bad[i] ^= 0x01;
-            let (_, state) = client_hello(&psk, Cipher::Aes256Gcm, false).unwrap();
+            let (_, state) = client_hello(&psk, Cipher::Aes256Gcm, false, false).unwrap();
             let (acc, _) = run(&bad, state, &psk, &ReplayFilter::default(), any_cipher).await;
             assert!(acc.is_err(), "byte {i} tampered but accepted");
         }
@@ -501,13 +521,49 @@ mod tests {
             (Cipher::None, Cipher::Aes256Gcm),
             (Cipher::Chacha20Poly1305, Cipher::None),
         ] {
-            let (hello, state) = client_hello(&psk, cipher, false).unwrap();
+            let (hello, state) = client_hello(&psk, cipher, false, false).unwrap();
             let (acc, _) = run(&hello, state, &psk, &ReplayFilter::default(), |c| {
                 c == allowed
             })
             .await;
             assert_eq!(acc.err().unwrap().kind(), io::ErrorKind::Unsupported);
         }
+    }
+
+    #[tokio::test]
+    async fn mux_mismatch_is_rejected_both_ways() {
+        let psk = Psk::new(TOKEN);
+        for (dialer, acceptor) in [(true, false), (false, true)] {
+            let (hello, _) = client_hello(&psk, Cipher::Aes256Gcm, false, dialer).unwrap();
+            let (mut client, mut server) = tokio::io::duplex(4096);
+            client.write_all(&hello).await.unwrap();
+            let err = accept(
+                &mut server,
+                &psk,
+                &ReplayFilter::default(),
+                any_cipher,
+                acceptor,
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+            assert!(err.to_string().contains("mux"), "{err}");
+        }
+        // Agreeing on mux works.
+        let (hello, state) = client_hello(&psk, Cipher::Aes256Gcm, false, true).unwrap();
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        client.write_all(&hello).await.unwrap();
+        accept(
+            &mut server,
+            &psk,
+            &ReplayFilter::default(),
+            any_cipher,
+            true,
+        )
+        .await
+        .unwrap();
+        state.read_reply(&mut client).await.unwrap();
     }
 
     #[tokio::test]
@@ -518,10 +574,16 @@ mod tests {
             let (mut client, mut server) = tokio::io::duplex(4096);
             client.write_all(&junk).await.unwrap();
             drop(client);
-            let err = accept(&mut server, &psk, &ReplayFilter::default(), any_cipher)
-                .await
-                .err()
-                .unwrap();
+            let err = accept(
+                &mut server,
+                &psk,
+                &ReplayFilter::default(),
+                any_cipher,
+                false,
+            )
+            .await
+            .err()
+            .unwrap();
             assert!(matches!(
                 err.kind(),
                 io::ErrorKind::PermissionDenied | io::ErrorKind::UnexpectedEof
@@ -534,7 +596,11 @@ mod tests {
     fn hello_bytes_look_random_at_every_offset() {
         let psk = Psk::new(TOKEN);
         let hellos: Vec<Vec<u8>> = (0..256)
-            .map(|_| client_hello(&psk, Cipher::Aes256Gcm, false).unwrap().0)
+            .map(|_| {
+                client_hello(&psk, Cipher::Aes256Gcm, false, false)
+                    .unwrap()
+                    .0
+            })
             .collect();
         let lengths: std::collections::HashSet<usize> = hellos.iter().map(Vec::len).collect();
         assert!(lengths.len() > 50, "hello length should vary");

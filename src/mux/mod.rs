@@ -3,14 +3,26 @@
 //! See `docs/PHASE2.md`, section 5, for the design and the frame format.
 
 pub mod frame;
+mod manager;
 mod session;
 
 use std::io;
 use std::time::Duration;
 
+pub use manager::{maintain, SessionPool};
 pub use session::{MuxSession, MuxStream, INITIAL_WINDOW, MAX_DATA_FRAME};
 
 use crate::config::{MuxSettings, Tuning};
+
+/// A connection a session can run over. It is split into halves that work
+/// independently, so reading (and decrypting) and writing (and encrypting) run in
+/// parallel.
+pub trait Transport: Send + 'static {
+    type Reader: tokio::io::AsyncRead + Unpin + Send + 'static;
+    type Writer: tokio::io::AsyncWrite + Unpin + Send + 'static;
+
+    fn into_halves(self) -> (Self::Reader, Self::Writer);
+}
 
 /// Which end of the tunnel connection a session runs on. It only decides the stream id
 /// space (client: odd, server: even), so both ends can open streams without clashing.
