@@ -1,0 +1,14 @@
+# Exit side (server abroad), reverse mode: we connect out to the entry side
+# and keep `pool` idle connections ready.
+role = "exit"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "tcp"
+remote = "ENTRY_SERVER_IP:3080"
+token = "CHANGE-ME-run-kariz-token"
+pool = 8
+
+[log]
+level = "info"

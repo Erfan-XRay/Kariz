@@ -1,0 +1,21 @@
+# Entry side (public server users connect to, e.g. in Iran), reverse mode:
+# the exit side connects to us on tunnel.listen.
+role = "entry"
+mode = "reverse"
+profile = "balanced"   # balanced | throughput | gaming
+
+[tunnel]
+transport = "tcp"
+listen = "0.0.0.0:3080"
+token = "CHANGE-ME-run-kariz-token"
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"   # resolved and dialed on the exit side
+
+[[forward]]
+listen = "0.0.0.0:8080"
+target = "127.0.0.1:80"
+
+[log]
+level = "info"

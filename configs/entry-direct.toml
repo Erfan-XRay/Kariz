@@ -1,0 +1,25 @@
+# Entry side, direct mode: we dial the exit side for every user connection.
+role = "entry"
+mode = "direct"
+profile = "balanced"
+
+[tunnel]
+transport = "tcp"
+remote = "EXIT_SERVER_IP:3080"
+token = "CHANGE-ME-run-kariz-token"
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"
+
+# Every field is optional and overrides the profile default.
+[tuning]
+nodelay = true
+buffer_size = 65536
+keepalive_secs = 30
+dial_timeout_secs = 10
+handshake_timeout_secs = 10
+# threads = 2   # default: one per CPU core
+
+[log]
+level = "info"
