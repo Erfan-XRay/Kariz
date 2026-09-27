@@ -4,7 +4,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use kariz::config::{mode_name, role_name, Config};
+use kariz::config::{mode_name, role_name, Config, Encryption};
+use kariz::crypto::Cipher;
 
 #[derive(Parser)]
 #[command(name = "kariz", version, about = "High-performance tunnel core")]
@@ -106,11 +107,14 @@ fn print_summary(config: &Config) {
     if let Some(remote) = &config.tunnel.remote {
         println!("  remote    : {remote}");
     }
-    // TODO(phase 2.1): drop the note once the record layer exists.
-    println!(
-        "  encryption: {} (not active yet, traffic is sent in the clear)",
-        config.tunnel.encryption.name()
-    );
+    let cipher = Cipher::for_config(config.tunnel.encryption);
+    match config.tunnel.encryption {
+        Encryption::Auto if config.is_acceptor() => {
+            println!("  encryption: auto (accepts chacha20-poly1305 and aes-256-gcm)")
+        }
+        Encryption::Auto => println!("  encryption: auto ({} on this CPU)", cipher.name()),
+        e => println!("  encryption: {}", e.name()),
+    }
     let mux = config.mux();
     if mux.enabled {
         println!(

@@ -85,7 +85,8 @@ k_early   = BLAKE3-derive-key("kariz v2 early", psk | nonce_c | hdr_c)
 - Hello length is `92 + pad_len`, random per connection. Phase 6 reuses `pad_len` and
   `flags` for real traffic shaping; phase 2 only picks a small random padding.
 - **Failed handshake:** never close immediately. Keep reading and discarding until a
-  random deadline (5-30 s) or a byte cap, then close. Phase 6 replaces this with a real
+  random deadline (5-30 s), then close; after 1 MiB stop reading but keep the connection
+  open until the deadline, so no byte count triggers the close. Phase 6 replaces this with a real
   fallback; phase 2 only removes the obvious signature.
 - `X25519` costs ~50 µs. In reverse mode it is paid when the pool / session is filled, and
   with mux once per session, so it is off the user-visible path in almost all setups.
@@ -285,7 +286,7 @@ Each step is one PR, keeps CI green, and keeps both modes working.
 | Step | Content | Done when |
 |---|---|---|
 | **2.0** Prep (done) | `Channel` abstraction, config sections (`mux`, `ws`, `tls`, `encryption`) parsed and validated but not yet used, test helper parameterised over transport / mux / mode. | No behaviour change, all v0.1 tests pass through the new helper. |
-| **2.1** Crypto | Handshake v2, `SecureStream`, early data, drain-on-failure, cipher `auto`. | Unit tests: roundtrip, tamper, wrong token both ways, replay, stale ts, downgrade attempt, record split across reads, counter per direction. E2E tests pass with encryption on (default) and `none`. Hello bytes pass a simple byte-distribution check (no fixed offsets). |
+| **2.1** Crypto (done) | Handshake v2, `SecureStream`, early data, drain-on-failure, cipher `auto`. | Unit tests: roundtrip, tamper, wrong token both ways, replay, stale ts, downgrade attempt, record split across reads, counter per direction. E2E tests pass with encryption on (default) and `none`. Hello bytes pass a simple byte-distribution check (no fixed offsets). |
 | **2.2** Mux core | Frames, session, streams, flow control, ping, `GOAWAY`. Tested in isolation over `tokio::io::duplex`. | Tests: 1000 parallel streams, half close, `RST`, slow reader does not block a fast stream, window accounting, dead peer detected by ping. |
 | **2.3** Mux integration | Session manager in both modes, optimistic open, `tcpmux` alias, rotation. | E2E matrix `{reverse, direct} x {mux on, off}` green; unreachable-target test still closes the user connection; killing the exit mid-transfer resets streams and the entry reconnects. |
 | **2.4** `ws` | Upgrade client/server, frame codec, 404 on mismatch. | Codec tests with RFC 6455 vectors (masking, 16/64-bit lengths, fragmentation, control frames); E2E over `ws`; probe test: plain HTTP GET and wrong-path upgrade get a 404. |

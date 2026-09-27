@@ -9,9 +9,9 @@ use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
-use crate::auth::{AuthKey, ReplayFilter};
 use crate::channel::{self, Channel};
 use crate::config::{Config, Mode, Tuning};
+use crate::crypto::{Crypto, ReplayFilter};
 use crate::proto::{self, Open, STATUS_DIAL_FAILED, STATUS_OK};
 use crate::relay::relay;
 use crate::transport::{tcp, Dialer, Listener};
@@ -20,14 +20,14 @@ const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
 
 struct Exit {
-    key: AuthKey,
+    crypto: Crypto,
     tuning: Tuning,
 }
 
 pub async fn run(config: Config) -> Result<()> {
     let tuning = config.tuning();
     let exit = Arc::new(Exit {
-        key: AuthKey::new(&config.tunnel.token),
+        crypto: Crypto::new(&config.tunnel.token, config.tunnel.encryption),
         tuning: tuning.clone(),
     });
     let mut tasks = JoinSet::new();
@@ -99,7 +99,7 @@ async fn connect_once(exit: &Exit, dialer: &Dialer) -> io::Result<Channel> {
     let stream = dialer.dial().await?;
     timeout(
         exit.tuning.handshake_timeout,
-        channel::connect(stream, &exit.key, &[]),
+        channel::connect(stream, &exit.crypto, &[]),
     )
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))?
@@ -119,15 +119,16 @@ async fn accept_direct(exit: Arc<Exit>, listener: Listener) -> Result<()> {
         };
         let (exit, replay) = (exit.clone(), replay.clone());
         tokio::spawn(async move {
-            let handshake = async {
-                let mut channel = channel::accept(stream, &exit.key, &replay).await?;
-                let open = Open::read(&mut channel).await?;
-                Ok::<_, io::Error>((channel, open))
+            let hs_timeout = exit.tuning.handshake_timeout;
+            let mut channel = match channel::accept(stream, &exit.crypto, &replay, hs_timeout).await
+            {
+                Ok(c) => c,
+                Err(e) => return warn!(%peer, error = %e, "tunnel handshake failed"),
             };
-            match timeout(exit.tuning.handshake_timeout, handshake).await {
-                Ok(Ok((channel, open))) => serve(&exit, channel, open).await,
-                Ok(Err(e)) => warn!(%peer, error = %e, "tunnel handshake failed"),
-                Err(_) => warn!(%peer, "tunnel handshake timed out"),
+            match timeout(hs_timeout, Open::read(&mut channel)).await {
+                Ok(Ok(open)) => serve(&exit, channel, open).await,
+                Ok(Err(e)) => warn!(%peer, error = %e, "bad open request"),
+                Err(_) => warn!(%peer, "open request timed out"),
             }
         });
     }

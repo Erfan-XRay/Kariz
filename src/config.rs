@@ -605,15 +605,6 @@ impl Config {
         if self.mux().enabled {
             return not_yet("mux");
         }
-        if matches!(
-            self.tunnel.encryption,
-            Encryption::Chacha20Poly1305 | Encryption::Aes256Gcm
-        ) {
-            return not_yet(&format!(
-                "tunnel.encryption = \"{}\"",
-                self.tunnel.encryption.name()
-            ));
-        }
         Ok(())
     }
 }
@@ -798,8 +789,6 @@ mod tests {
             ("wss", ""),
             ("tcpmux", ""),
             ("tcp", "[tunnel.mux]\nenabled = true"),
-            ("tcp", "encryption = \"chacha20-poly1305\""),
-            ("tcp", "encryption = \"aes-256-gcm\""),
         ] {
             let err = parse_err(&with_transport("entry", transport, extra));
             assert!(
@@ -815,6 +804,12 @@ mod tests {
         assert_eq!(c.tunnel.encryption, Encryption::None);
         assert_eq!(c.warnings().len(), 1);
         assert!(Config::parse(&with_transport("entry", "tcp", "encryption = \"rot13\"")).is_err());
+        for cipher in ["chacha20-poly1305", "aes-256-gcm", "auto"] {
+            let text = with_transport("entry", "tcp", &format!("encryption = \"{cipher}\""));
+            let c = Config::parse(&text).unwrap();
+            assert_eq!(c.tunnel.encryption.name(), cipher);
+            assert!(c.warnings().is_empty());
+        }
     }
 
     #[test]
