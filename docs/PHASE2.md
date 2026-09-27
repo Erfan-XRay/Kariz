@@ -1,6 +1,6 @@
 # Phase 2 plan: encryption, mux, WebSocket
 
-Target release: **v0.2.0**. Scope from [ROADMAP.md](ROADMAP.md): encryption layer,
+Target release: **v0.2.0** (all steps done; see the status notes in each section). Scope from [ROADMAP.md](ROADMAP.md): encryption layer,
 `tcpmux`, `ws` / `wss` (CDN friendly).
 
 This document fixes the design, the wire formats and the order of work, so each step
@@ -374,7 +374,7 @@ Each step is one PR, keeps CI green, and keeps both modes working.
 | **2.4** `ws` (done) | Upgrade client/server, frame codec, 404 on mismatch. | Codec tests with RFC 6455 vectors (masking, 16/64-bit lengths, fragmentation, control frames); E2E over `ws`; probe test: plain HTTP GET and wrong-path upgrade get a 404. |
 | **2.5** `wss` (done) | rustls, cert/key, SNI vs connect address, pin / insecure, cert reload. | E2E over `wss` with an `rcgen` certificate (pinned); wrong pin fails; cert reload test. |
 | **2.6** CDN hardening (done) | WS early data (optional flag), CI job with nginx as a stand-in CDN (`proxy_pass` with upgrade, idle timeout), manual Cloudflare checklist. | Tunnel survives nginx in the middle and idle periods longer than the proxy timeout. |
-| **2.7** Release | Sample configs (`entry-wss-cdn.toml`, `exit-wss-cdn.toml`, ...), README / README_FA, ROADMAP update, benchmark table, version `0.2.0`. | Docs reviewed, tagged. |
+| **2.7** Release (done) | Sample configs (`entry-wss-cdn.toml`, `exit-wss-cdn.toml`, ...), README / README_FA, ROADMAP update, benchmark table, version `0.2.0`. | Docs reviewed, tagged. |
 
 2.4 depends only on 2.0, so it can be developed in parallel with 2.1-2.3.
 
@@ -401,6 +401,22 @@ and on a 1 vCPU VPS:
 - Idle process RSS stays under 10 MiB.
 - Stream open latency in reverse + mux: no extra round trip over the target dial
   (optimistic open).
+
+*Status at release (2.7):* measured on one 4-core Xeon 2.1 GHz VM with both sides and
+the echo server on it (so the tunnel competes with itself for CPU); not yet measured on
+a 1 vCPU VPS. Full table in the README.
+
+| Target | Result | |
+|---|---|---|
+| Encryption, single stream, vs plain | AES-256-GCM about 66 % (3.8-4.0 vs 5.2-6.6 Gbit/s); ChaCha20-Poly1305 35-45 % on this AES-capable CPU (`auto` picks AES here) | slightly below 70 % |
+| Mux vs no mux, same encryption | about 83 % (`tcpmux` 3.2-3.3 vs `tcp` 3.8-4.0 Gbit/s, AES) | slightly below 85 % |
+| 100 idle mux streams | +0.6 to +1.0 MiB (`scripts/rss.sh tcpmux 100`) | met |
+| Idle RSS | 4.8-5.8 MiB per side | met |
+| Stream open, reverse + mux | optimistic open, no status round trip | met (by design) |
+
+The two throughput targets are close and CPU-bound on the shared machine; follow-ups
+(not in v0.2.0): mux window auto-tuning (larger windows measured faster in 2.3), and a
+measurement on separate small VPSes over a real link.
 
 ## 11. Compatibility
 

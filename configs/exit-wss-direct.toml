@@ -1,0 +1,24 @@
+# Exit side, direct mode, wss with a self-signed certificate. Pair: entry-wss-direct.toml.
+# Make a certificate, for example:
+#   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+#     -subj "/CN=www.example.com" -addext "subjectAltName=DNS:www.example.com" \
+#     -keyout /etc/kariz/key.pem -out /etc/kariz/cert.pem
+# then put the output of `kariz pin /etc/kariz/cert.pem` into the entry's pin_sha256.
+role = "exit"
+mode = "direct"
+profile = "balanced"
+
+[tunnel]
+transport = "wss"
+listen = "0.0.0.0:443"
+token = "CHANGE-ME-run-kariz-token"
+
+[tunnel.ws]
+path = "/ws"
+
+[tunnel.tls]
+cert = "/etc/kariz/cert.pem"
+key = "/etc/kariz/key.pem"
+
+[log]
+level = "info"
