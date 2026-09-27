@@ -58,6 +58,9 @@ The side that dials needs `tunnel.remote`, the other side `tunnel.listen`.
 
 ## Quick start
 
+Download the static Linux binary (x86_64) from
+[Releases](https://github.com/Erfan-XRay/Kariz/releases), or build it:
+
 ```bash
 cargo build --release
 sudo cp target/release/kariz /usr/local/bin/

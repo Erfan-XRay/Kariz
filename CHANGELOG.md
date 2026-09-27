@@ -45,6 +45,8 @@ automatically.
     TLS termination).
   - A test that the sample configs are valid and paired.
   - `scripts/rss.sh` for memory measurements.
+  - A release workflow: a tag push publishes a static x86_64 Linux binary (musl) with
+    the samples and docs.
 
 ### Changed
 

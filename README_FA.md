@@ -59,6 +59,8 @@
 
 ## شروع سریع
 
+فایل اجرایی لینوکس (x86_64، بدون وابستگی) را از بخش [Releases](https://github.com/Erfan-XRay/Kariz/releases) دانلود کنید، یا خودتان build کنید:
+
 <div dir="ltr">
 
 ```bash
