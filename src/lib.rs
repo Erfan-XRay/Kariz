@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod crypto;
+pub mod mux;
 pub mod proto;
 pub mod transport;
 

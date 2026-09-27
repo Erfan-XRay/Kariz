@@ -144,7 +144,11 @@ type (1) | stream_id (4, BE) | length (2, BE) | payload
   failure it answers `RST(dial_failed)` and the entry closes the user connection. This
   removes the round trip that v1 pays per connection for the status byte.
 - **Flow control:** per-stream credit window (profile defaults below), `WINDOW` sent when
-  half of the window has been consumed. No connection-level window: a slow reader only
+  half of the window has been consumed. Every stream starts with a fixed 64 KiB of credit
+  in each direction, so the two sides never need to agree on settings: each side raises
+  its receive window to its own configured size with a `WINDOW` frame (the opener right
+  after its `SYN`, the acceptor as soon as it sees the `SYN`). Sending beyond the credit
+  is a protocol error that closes the session. No connection-level window: a slow reader only
   stalls its own stream, never the others. Receive buffers are allocated lazily, so idle
   streams cost only their bookkeeping.
 - **Session task layout:** one reader task dispatches frames to per-stream queues; one
@@ -287,7 +291,7 @@ Each step is one PR, keeps CI green, and keeps both modes working.
 |---|---|---|
 | **2.0** Prep (done) | `Channel` abstraction, config sections (`mux`, `ws`, `tls`, `encryption`) parsed and validated but not yet used, test helper parameterised over transport / mux / mode. | No behaviour change, all v0.1 tests pass through the new helper. |
 | **2.1** Crypto (done) | Handshake v2, `SecureStream`, early data, drain-on-failure, cipher `auto`. | Unit tests: roundtrip, tamper, wrong token both ways, replay, stale ts, downgrade attempt, record split across reads, counter per direction. E2E tests pass with encryption on (default) and `none`. Hello bytes pass a simple byte-distribution check (no fixed offsets). |
-| **2.2** Mux core | Frames, session, streams, flow control, ping, `GOAWAY`. Tested in isolation over `tokio::io::duplex`. | Tests: 1000 parallel streams, half close, `RST`, slow reader does not block a fast stream, window accounting, dead peer detected by ping. |
+| **2.2** Mux core (done) | Frames, session, streams, flow control, ping, `GOAWAY`. Tested in isolation over `tokio::io::duplex`. | Tests: 1000 parallel streams, half close, `RST`, slow reader does not block a fast stream, window accounting, dead peer detected by ping. |
 | **2.3** Mux integration | Session manager in both modes, optimistic open, `tcpmux` alias, rotation. | E2E matrix `{reverse, direct} x {mux on, off}` green; unreachable-target test still closes the user connection; killing the exit mid-transfer resets streams and the entry reconnects. |
 | **2.4** `ws` | Upgrade client/server, frame codec, 404 on mismatch. | Codec tests with RFC 6455 vectors (masking, 16/64-bit lengths, fragmentation, control frames); E2E over `ws`; probe test: plain HTTP GET and wrong-path upgrade get a 404. |
 | **2.5** `wss` | rustls, cert/key, SNI vs connect address, pin / insecure, cert reload. | E2E over `wss` with an `rcgen` certificate (pinned); wrong pin fails; cert reload test. |
@@ -303,6 +307,12 @@ and on a 1 vCPU VPS:
 
 - Encryption on, single stream: at least 70 % of v0.1 plain `tcp` throughput.
 - Mux on, single stream: at least 85 % of the same setup without mux.
+  *Status after 2.2:* 60-64 % plain and 53-56 % encrypted, measured with
+  `cargo test --release --lib mux_throughput -- --ignored --nocapture` (both ends and the
+  echo on one 4-core machine, so it is CPU-bound). Profiling shows the mux-specific cost
+  is the copy into and out of each stream (unavoidable with `AsyncRead`/`AsyncWrite`)
+  plus extra task hops; to be revisited in 2.3 with end-to-end numbers (lock-free
+  connection split, fewer hops).
 - 100 idle mux streams: under 2 MiB extra RSS.
 - Idle process RSS stays under 10 MiB.
 - Stream open latency in reverse + mux: no extra round trip over the target dial

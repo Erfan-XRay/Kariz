@@ -76,10 +76,16 @@ impl Sealer {
 
     /// Appends one record carrying `payload` (at most [`MAX_PAYLOAD`] bytes) to `out`.
     pub fn seal(&mut self, payload: &[u8], out: &mut Vec<u8>) -> io::Result<()> {
-        debug_assert!(payload.len() <= MAX_PAYLOAD);
+        self.seal_parts(&[payload], out)
+    }
+
+    /// Like [`Sealer::seal`], with the payload given as consecutive pieces.
+    pub fn seal_parts(&mut self, parts: &[&[u8]], out: &mut Vec<u8>) -> io::Result<()> {
+        let len: usize = parts.iter().map(|p| p.len()).sum();
+        debug_assert!(len <= MAX_PAYLOAD);
         let d = &mut self.0;
         let start = out.len();
-        out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        out.extend_from_slice(&(len as u16).to_be_bytes());
         let nonce = d.next_nonce()?;
         let tag = d
             .key
@@ -88,7 +94,9 @@ impl Sealer {
         out.extend_from_slice(tag.as_ref());
 
         let start = out.len();
-        out.extend_from_slice(payload);
+        for p in parts {
+            out.extend_from_slice(p);
+        }
         let nonce = d.next_nonce()?;
         let tag = d
             .key
@@ -292,6 +300,55 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for SecureStream<S> {
         Poll::Ready(Ok(take))
     }
 
+    /// Seals the pieces straight into records (no gathering copy), so a caller writing
+    /// many small pieces still gets full-size records.
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        ready!(this.poll_write_buffered(cx))?;
+        let mut parts: Vec<&[u8]> = Vec::new();
+        let mut in_record = 0;
+        let mut taken = 0;
+        'outer: for buf in bufs {
+            let mut buf: &[u8] = buf;
+            while !buf.is_empty() {
+                if taken == WRITE_BATCH {
+                    break 'outer;
+                }
+                let n = buf
+                    .len()
+                    .min(MAX_PAYLOAD - in_record)
+                    .min(WRITE_BATCH - taken);
+                parts.push(&buf[..n]);
+                buf = &buf[n..];
+                in_record += n;
+                taken += n;
+                if in_record == MAX_PAYLOAD {
+                    this.sealer.seal_parts(&parts, &mut this.wbuf)?;
+                    parts.clear();
+                    in_record = 0;
+                }
+            }
+        }
+        if in_record > 0 {
+            this.sealer.seal_parts(&parts, &mut this.wbuf)?;
+        }
+        if taken == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        if let Poll::Ready(Err(e)) = this.poll_write_buffered(cx) {
+            return Poll::Ready(Err(e));
+        }
+        Poll::Ready(Ok(taken))
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         ready!(this.poll_write_buffered(cx))?;
@@ -377,6 +434,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn vectored_writes_fill_whole_records() {
+        let (raw_a, mut raw_b) = tokio::io::duplex(1 << 20);
+        let mut a = SecureStream::new(
+            raw_a,
+            Sealer::new(Cipher::Aes256Gcm, &K1).unwrap(),
+            Opener::new(Cipher::Aes256Gcm, &K2).unwrap(),
+            None,
+        );
+        let pieces: Vec<Vec<u8>> = (0..500).map(|i| pattern(7 + i % 300)).collect();
+        let expected = pieces.concat();
+        let mut written = 0;
+        while written < expected.len() {
+            // Re-slice what is left, as a caller does after a partial write.
+            let mut skip = written;
+            let rest: Vec<io::IoSlice> = pieces
+                .iter()
+                .filter_map(|p| {
+                    if skip >= p.len() {
+                        skip -= p.len();
+                        None
+                    } else {
+                        let out = io::IoSlice::new(&p[skip..]);
+                        skip = 0;
+                        Some(out)
+                    }
+                })
+                .collect();
+            written += a.write_vectored(&rest).await.unwrap();
+        }
+        a.shutdown().await.unwrap();
+        let mut wire = Vec::new();
+        raw_b.read_to_end(&mut wire).await.unwrap();
+
+        // 500 small pieces become full records, not 500 tiny ones.
+        let records = expected.len().div_ceil(MAX_PAYLOAD);
+        assert_eq!(
+            wire.len(),
+            expected.len() + records * (MAX_RECORD - MAX_PAYLOAD)
+        );
+        assert_eq!(read_wire(&wire, None).await.unwrap(), expected);
     }
 
     #[tokio::test]
