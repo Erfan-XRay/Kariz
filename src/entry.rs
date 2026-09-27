@@ -20,7 +20,7 @@ use crate::crypto::{Crypto, ReplayFilter};
 use crate::mux::{maintain, MuxSession, SessionConfig, SessionPool, Side};
 use crate::proto::{self, Open};
 use crate::relay::{relay, relay_mux};
-use crate::transport::{Dialer, Listener};
+use crate::transport::{Dialer, Listener, Settings};
 
 /// How many idle reverse connections the entry may queue before it starts dropping them.
 const POOL_CAPACITY: usize = 1024;
@@ -43,6 +43,7 @@ enum Source {
 pub async fn run(config: Config) -> Result<()> {
     let tuning = config.tuning();
     let mux = config.mux();
+    let transport = Settings::new(&config.tunnel);
     let crypto = Crypto::new(&config.tunnel.token, config.tunnel.encryption).with_mux(mux.enabled);
     let sessions = SessionConfig::new(&mux, &tuning);
     let mut tasks = JoinSet::new();
@@ -55,7 +56,7 @@ pub async fn run(config: Config) -> Result<()> {
                 connections = mux.connections,
                 "entry: direct mode with mux, keeping sessions to the exit side"
             );
-            let dialer = Arc::new(Dialer::new(config.tunnel.transport, remote, &tuning)?);
+            let dialer = Arc::new(Dialer::new(&transport, remote, &tuning)?);
             let pool = Arc::new(SessionPool::default());
             for _ in 0..mux.connections {
                 let (dialer, crypto, pool) = (dialer.clone(), crypto.clone(), pool.clone());
@@ -93,11 +94,11 @@ pub async fn run(config: Config) -> Result<()> {
                 remote,
                 "entry: direct mode, dialing the exit side per connection"
             );
-            Source::Direct(Dialer::new(config.tunnel.transport, remote, &tuning)?)
+            Source::Direct(Dialer::new(&transport, remote, &tuning)?)
         }
         Mode::Reverse => {
             let addr = config.tunnel.listen.as_deref().expect("validated");
-            let listener = Listener::bind(config.tunnel.transport, addr, &tuning)
+            let listener = Listener::bind(&transport, addr, &tuning)
                 .await
                 .with_context(|| format!("failed to listen for tunnel connections on {addr}"))?;
             info!(

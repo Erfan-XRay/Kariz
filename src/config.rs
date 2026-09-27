@@ -599,8 +599,8 @@ impl Config {
         let not_yet = |what: &str| -> Result<()> {
             bail!("{what} is not implemented yet (planned for v0.2, see docs/PHASE2.md)")
         };
-        if self.tunnel.transport.is_websocket() {
-            return not_yet(&format!("transport = \"{}\"", self.tunnel.transport.name()));
+        if self.tunnel.transport == TransportKind::Wss {
+            return not_yet("transport = \"wss\"");
         }
         Ok(())
     }
@@ -781,13 +781,8 @@ mod tests {
 
     #[test]
     fn unimplemented_features_are_rejected_after_validation() {
-        for (transport, extra) in [("ws", ""), ("wss", "")] {
-            let err = parse_err(&with_transport("entry", transport, extra));
-            assert!(
-                err.contains("not implemented yet"),
-                "{transport} {extra}: {err}"
-            );
-        }
+        let err = parse_err(&with_transport("entry", "wss", ""));
+        assert!(err.contains("not implemented yet"), "{err}");
     }
 
     #[test]
@@ -884,10 +879,13 @@ mod tests {
             assert!(err.contains(expect), "{extra}: {err}");
         }
 
-        // A valid dialer section only fails on the "not implemented" check.
         let ok = "[tunnel.ws]\npath = \"/api/v1\"\nhost = \"a.example\"\n\
                   headers = { \"Accept-Language\" = \"en-US\" }";
-        assert!(parse_err(&with_transport("entry", "ws", ok)).contains("not implemented yet"));
+        let c = Config::parse(&with_transport("entry", "ws", ok)).unwrap();
+        assert_eq!(c.tunnel.ws.unwrap().path, "/api/v1");
+        // `[tunnel.ws]` is optional: path "/", any host.
+        let c = Config::parse(&with_transport("exit", "ws", "")).unwrap();
+        assert!(c.mux().enabled);
 
         let err = parse_err(&with_transport(
             "exit",

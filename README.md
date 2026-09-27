@@ -9,8 +9,8 @@ linking servers together. It is written in Rust and built around three goals:
 2. **DPI resistance**: pluggable transports and camouflage, so a blocked method can be swapped without touching the core.
 3. **Maximum speed**: statically dispatched hot path, tuned sockets, per-use-case profiles.
 
-> Status: **early development (v0.2 in progress).** The `tcp` transport is available, with
-> an encrypted, forward-secret record layer (`tunnel.encryption`, default `auto`).
+> Status: **early development (v0.2 in progress).** The `tcp`, `tcpmux` and `ws`
+> (WebSocket) transports are available, with an encrypted, forward-secret record layer (`tunnel.encryption`, default `auto`).
 > The wire format changed after v0.1.0: upgrade both servers together.
 > See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
 
