@@ -53,6 +53,9 @@ fn run(config: Config) -> Result<()> {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log.level));
     tracing_subscriber::fmt().with_env_filter(filter).init();
+    for warning in config.warnings() {
+        tracing::warn!("{warning}");
+    }
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     if let Some(threads) = config.tuning().threads {
@@ -96,12 +99,38 @@ fn print_summary(config: &Config) {
     println!("  role      : {}", role_name(config.role));
     println!("  mode      : {}", mode_name(config.mode));
     println!("  profile   : {:?}", config.profile);
-    println!("  transport : {:?}", config.tunnel.transport);
+    println!("  transport : {}", config.tunnel.transport.name());
     if let Some(listen) = &config.tunnel.listen {
         println!("  listen    : {listen}");
     }
     if let Some(remote) = &config.tunnel.remote {
         println!("  remote    : {remote}");
+    }
+    // TODO(phase 2.1): drop the note once the record layer exists.
+    println!(
+        "  encryption: {} (not active yet, traffic is sent in the clear)",
+        config.tunnel.encryption.name()
+    );
+    let mux = config.mux();
+    if mux.enabled {
+        println!(
+            "  mux       : connections={} max_streams={} window={}B",
+            mux.connections, mux.max_streams, mux.stream_window
+        );
+    } else {
+        println!("  mux       : off");
+    }
+    if let Some(ws) = &config.tunnel.ws {
+        let host = ws.host.as_deref().unwrap_or("-");
+        println!("  ws        : path={} host={host}", ws.path);
+    }
+    if let Some(tls) = &config.tunnel.tls {
+        if let Some(sni) = &tls.sni {
+            println!("  tls sni   : {sni}");
+        }
+        if let Some(cert) = &tls.cert {
+            println!("  tls cert  : {}", cert.display());
+        }
     }
     println!(
         "  tuning    : nodelay={} buffer={}B keepalive={}s",
@@ -114,5 +143,8 @@ fn print_summary(config: &Config) {
             "  forward   : {} -> {} ({:?})",
             f.listen, f.target, f.protocol
         );
+    }
+    for warning in config.warnings() {
+        println!("warning: {warning}");
     }
 }

@@ -32,6 +32,35 @@ async fn echo_server() -> u16 {
     port
 }
 
+/// One way to set up the tunnel. The scenarios below run for every setup listed in
+/// `tunnel_tests!`, so a new transport or layer only needs a new row there.
+#[derive(Clone, Copy, Debug)]
+struct Setup {
+    mode: &'static str,
+    transport: &'static str,
+    mux: bool,
+    encryption: &'static str,
+}
+
+impl Setup {
+    const fn tcp(mode: &'static str) -> Self {
+        Self {
+            mode,
+            transport: "tcp",
+            mux: false,
+            encryption: "auto",
+        }
+    }
+
+    /// `[tunnel]` lines shared by both sides.
+    fn tunnel_options(&self) -> String {
+        format!(
+            "transport = \"{}\"\nencryption = \"{}\"\n[tunnel.mux]\nenabled = {}\n",
+            self.transport, self.encryption, self.mux
+        )
+    }
+}
+
 struct Tunnel {
     user_port: u16,
     tasks: Vec<JoinHandle<anyhow::Result<()>>>,
@@ -46,13 +75,14 @@ impl Drop for Tunnel {
 }
 
 fn spawn_side(text: String) -> JoinHandle<anyhow::Result<()>> {
-    let config = Config::parse(&text).unwrap();
+    let config = Config::parse(&text).unwrap_or_else(|e| panic!("{e:#}\n{text}"));
     tokio::spawn(kariz::run(config))
 }
 
-async fn start(mode: &str, entry_token: &str, exit_token: &str, target_port: u16) -> Tunnel {
+async fn start(setup: Setup, entry_token: &str, exit_token: &str, target_port: u16) -> Tunnel {
     let tunnel_port = free_port();
     let user_port = free_port();
+    let mode = setup.mode;
     let (entry_tunnel, exit_tunnel) = match mode {
         "reverse" => (
             format!("listen = \"127.0.0.1:{tunnel_port}\""),
@@ -63,16 +93,18 @@ async fn start(mode: &str, entry_token: &str, exit_token: &str, target_port: u16
             format!("listen = \"127.0.0.1:{tunnel_port}\""),
         ),
     };
+    let options = setup.tunnel_options();
     let entry = format!(
         r#"
         role = "entry"
         mode = "{mode}"
-        [tunnel]
-        {entry_tunnel}
-        token = "{entry_token}"
         [[forward]]
         listen = "127.0.0.1:{user_port}"
         target = "127.0.0.1:{target_port}"
+        [tunnel]
+        {entry_tunnel}
+        token = "{entry_token}"
+        {options}
         "#
     );
     let exit = format!(
@@ -82,6 +114,7 @@ async fn start(mode: &str, entry_token: &str, exit_token: &str, target_port: u16
         [tunnel]
         {exit_tunnel}
         token = "{exit_token}"
+        {options}
         "#
     );
     // Start the listening side first so the dialing side connects right away.
@@ -117,9 +150,9 @@ fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i * 31 % 251) as u8).collect()
 }
 
-async fn check_echo(mode: &str) {
+async fn check_echo(setup: Setup) {
     let target = echo_server().await;
-    let tunnel = start(mode, TOKEN, TOKEN, target).await;
+    let tunnel = start(setup, TOKEN, TOKEN, target).await;
 
     // Several concurrent connections, including more than the reverse pool size.
     let mut handles = Vec::new();
@@ -141,68 +174,77 @@ async fn check_echo(mode: &str) {
     assert!(got == payload, "large payload corrupted");
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn reverse_mode_echo() {
-    check_echo("reverse").await;
+/// The user connection must be closed without passing data, not left hanging.
+async fn expect_closed_without_data(tunnel: &Tunnel) {
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        echo_roundtrip(tunnel.user_port, b"hello"),
+    )
+    .await
+    .expect("user connection should be closed, not hang");
+    if let Ok(data) = result {
+        assert!(data.is_empty(), "no data may pass");
+    }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn direct_mode_echo() {
-    check_echo("direct").await;
-}
-
-async fn check_token_mismatch(mode: &str) {
+async fn check_token_mismatch(setup: Setup) {
     let target = echo_server().await;
-    let tunnel = start(mode, TOKEN, "another-token-0123456789", target).await;
-    let result = tokio::time::timeout(
-        Duration::from_secs(30),
-        echo_roundtrip(tunnel.user_port, b"hello"),
-    )
-    .await
-    .expect("user connection should be closed, not hang");
-    if let Ok(data) = result {
-        assert!(data.is_empty(), "data must not pass with a wrong token");
-    }
+    let tunnel = start(setup, TOKEN, "another-token-0123456789", target).await;
+    expect_closed_without_data(&tunnel).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn reverse_mode_rejects_wrong_token() {
-    check_token_mismatch("reverse").await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn direct_mode_rejects_wrong_token() {
-    check_token_mismatch("direct").await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn unreachable_target_closes_user_connection() {
+async fn check_unreachable_target(setup: Setup) {
     let dead_port = free_port();
-    let tunnel = start("reverse", TOKEN, TOKEN, dead_port).await;
-    let result = tokio::time::timeout(
-        Duration::from_secs(30),
-        echo_roundtrip(tunnel.user_port, b"hello"),
-    )
-    .await
-    .expect("user connection should be closed, not hang");
-    if let Ok(data) = result {
-        assert!(data.is_empty());
-    }
+    let tunnel = start(setup, TOKEN, TOKEN, dead_port).await;
+    expect_closed_without_data(&tunnel).await;
+}
+
+macro_rules! tunnel_tests {
+    ($($name:ident: $setup:expr;)*) => {
+        $(
+            mod $name {
+                use super::*;
+
+                #[tokio::test(flavor = "multi_thread")]
+                async fn echo() {
+                    check_echo($setup).await;
+                }
+
+                #[tokio::test(flavor = "multi_thread")]
+                async fn rejects_wrong_token() {
+                    check_token_mismatch($setup).await;
+                }
+
+                #[tokio::test(flavor = "multi_thread")]
+                async fn unreachable_target_closes_user_connection() {
+                    check_unreachable_target($setup).await;
+                }
+            }
+        )*
+
+        /// Every setup above, for the throughput run.
+        const ALL_SETUPS: &[(&str, Setup)] = &[$((stringify!($name), $setup)),*];
+    };
+}
+
+tunnel_tests! {
+    tcp_reverse: Setup::tcp("reverse");
+    tcp_direct: Setup::tcp("direct");
 }
 
 /// Rough localhost throughput check: `cargo test --release -- --ignored --nocapture`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn throughput() {
-    for mode in ["reverse", "direct"] {
+    for &(name, setup) in ALL_SETUPS {
         let target = echo_server().await;
-        let tunnel = start(mode, TOKEN, TOKEN, target).await;
+        let tunnel = start(setup, TOKEN, TOKEN, target).await;
         let payload = pattern(256 * 1024 * 1024);
         let start = Instant::now();
         let got = echo_roundtrip(tunnel.user_port, &payload).await.unwrap();
         let secs = start.elapsed().as_secs_f64();
         assert_eq!(got.len(), payload.len());
         let mbps = (payload.len() as f64 * 8.0) / secs / 1e6;
-        println!("{mode}: 256 MiB echoed in {secs:.2}s = {mbps:.0} Mbit/s each way");
+        println!("{name}: 256 MiB echoed in {secs:.2}s = {mbps:.0} Mbit/s each way");
     }
 }

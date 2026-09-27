@@ -13,11 +13,12 @@ use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout, timeout_at, Instant};
 use tracing::{debug, info, warn};
 
-use crate::auth::{self, AuthKey, ReplayFilter};
+use crate::auth::{AuthKey, ReplayFilter};
+use crate::channel::{self, Channel};
 use crate::config::{Config, Forward, Mode, Tuning};
 use crate::proto::{self, Open};
 use crate::relay::relay;
-use crate::transport::{Dialer, Listener, TunnelStream};
+use crate::transport::{Dialer, Listener};
 
 /// How many idle reverse connections the entry may queue before it starts dropping them.
 const POOL_CAPACITY: usize = 1024;
@@ -31,8 +32,8 @@ struct Entry {
 enum Source {
     /// Direct mode: dial the exit side for every user connection.
     Direct(Dialer),
-    /// Reverse mode: take an idle connection the exit side opened in advance.
-    Reverse(Mutex<mpsc::Receiver<TunnelStream>>),
+    /// Reverse mode: take an idle channel the exit side opened in advance.
+    Reverse(Mutex<mpsc::Receiver<Channel>>),
 }
 
 pub async fn run(config: Config) -> Result<()> {
@@ -47,7 +48,7 @@ pub async fn run(config: Config) -> Result<()> {
                 remote,
                 "entry: direct mode, dialing the exit side per connection"
             );
-            Source::Direct(Dialer::new(config.tunnel.transport, remote, &tuning))
+            Source::Direct(Dialer::new(config.tunnel.transport, remote, &tuning)?)
         }
         Mode::Reverse => {
             let addr = config.tunnel.listen.as_deref().expect("validated");
@@ -88,11 +89,11 @@ async fn accept_reverse(
     listener: Listener,
     key: AuthKey,
     tuning: Tuning,
-    pool: mpsc::Sender<TunnelStream>,
+    pool: mpsc::Sender<Channel>,
 ) -> Result<()> {
     let replay = Arc::new(ReplayFilter::default());
     loop {
-        let (mut stream, peer) = match listener.accept().await {
+        let (stream, peer) = match listener.accept().await {
             Ok(v) => v,
             Err(e) => {
                 warn!(error = %e, "tunnel accept failed");
@@ -103,15 +104,10 @@ async fn accept_reverse(
         let (key, replay, pool) = (key.clone(), replay.clone(), pool.clone());
         let handshake_timeout = tuning.handshake_timeout;
         tokio::spawn(async move {
-            match timeout(
-                handshake_timeout,
-                auth::server_handshake(&mut stream, &key, &replay),
-            )
-            .await
-            {
-                Ok(Ok(())) => {
+            match timeout(handshake_timeout, channel::accept(stream, &key, &replay)).await {
+                Ok(Ok(channel)) => {
                     debug!(%peer, "tunnel connection added to pool");
-                    if pool.try_send(stream).is_err() {
+                    if pool.try_send(channel).is_err() {
                         warn!(%peer, "tunnel pool is full, dropping connection");
                     }
                 }
@@ -151,68 +147,69 @@ fn encode_open(forward: &Forward) -> Vec<u8> {
 
 async fn handle_user(entry: &Entry, mut user: TcpStream, open: &[u8]) -> io::Result<()> {
     user.set_nodelay(entry.tuning.nodelay)?;
-    let mut tunnel = match &entry.source {
-        Source::Direct(dialer) => open_direct(entry, dialer, open).await?,
-        Source::Reverse(pool) => open_reverse(entry, pool, open).await?,
-    };
-    relay(&mut user, &mut tunnel, entry.tuning.buffer_size).await?;
+    let mut channel = entry.open_channel(open).await?;
+    relay(&mut user, &mut channel, entry.tuning.buffer_size).await?;
     Ok(())
 }
 
-/// Dials the exit side, then sends the hello and the open request in one write
-/// to save a round trip.
-async fn open_direct(entry: &Entry, dialer: &Dialer, open: &[u8]) -> io::Result<TunnelStream> {
-    let mut stream = dialer.dial().await?;
-    let (hello, pending) = entry.key.hello()?;
-    let mut msg = Vec::with_capacity(hello.len() + open.len());
-    msg.extend_from_slice(&hello);
-    msg.extend_from_slice(open);
-    stream.write_all(&msg).await?;
-
-    let wait = entry.tuning.handshake_timeout + entry.tuning.dial_timeout;
-    timeout(wait, async {
-        auth::read_reply(&mut stream, &entry.key, &pending).await?;
-        proto::read_status(&mut stream).await
-    })
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "exit side did not answer in time"))??;
-    Ok(stream)
-}
-
-/// Takes pooled connections until one accepts the open request. Pooled connections
-/// may have died while idle, so failures other than "target unreachable" are retried.
-async fn open_reverse(
-    entry: &Entry,
-    pool: &Mutex<mpsc::Receiver<TunnelStream>>,
-    open: &[u8],
-) -> io::Result<TunnelStream> {
-    let deadline = Instant::now() + entry.tuning.handshake_timeout + entry.tuning.dial_timeout;
-    loop {
-        let mut stream = timeout_at(deadline, async { pool.lock().await.recv().await })
-            .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "no tunnel connection available (is the exit side running?)",
-                )
-            })?
-            .ok_or_else(|| io::Error::other("tunnel pool closed"))?;
-
-        if !stream.is_alive() {
-            continue;
+impl Entry {
+    /// Gets a channel to the exit side and has the exit connect it to the target
+    /// described by the encoded `open` request.
+    async fn open_channel(&self, open: &[u8]) -> io::Result<Channel> {
+        match &self.source {
+            Source::Direct(dialer) => self.open_direct(dialer, open).await,
+            Source::Reverse(pool) => self.open_reverse(pool, open).await,
         }
-        if stream.write_all(open).await.is_err() {
-            continue;
-        }
-        match timeout_at(deadline, proto::read_status(&mut stream)).await {
-            Ok(Ok(())) => return Ok(stream),
-            Ok(Err(e)) if e.kind() == io::ErrorKind::ConnectionRefused => return Err(e),
-            Ok(Err(_)) => continue,
-            Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "exit side did not answer in time",
-                ))
+    }
+
+    /// Dials the exit side and sends the open request along with the hello.
+    async fn open_direct(&self, dialer: &Dialer, open: &[u8]) -> io::Result<Channel> {
+        let stream = dialer.dial().await?;
+        let wait = self.tuning.handshake_timeout + self.tuning.dial_timeout;
+        timeout(wait, async {
+            let mut channel = channel::connect(stream, &self.key, open).await?;
+            proto::read_status(&mut channel).await?;
+            Ok(channel)
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "exit side did not answer in time"))?
+    }
+
+    /// Takes pooled channels until one accepts the open request. Pooled channels may
+    /// have died while idle, so failures other than "target unreachable" are retried.
+    async fn open_reverse(
+        &self,
+        pool: &Mutex<mpsc::Receiver<Channel>>,
+        open: &[u8],
+    ) -> io::Result<Channel> {
+        let deadline = Instant::now() + self.tuning.handshake_timeout + self.tuning.dial_timeout;
+        loop {
+            let mut channel = timeout_at(deadline, async { pool.lock().await.recv().await })
+                .await
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "no tunnel connection available (is the exit side running?)",
+                    )
+                })?
+                .ok_or_else(|| io::Error::other("tunnel pool closed"))?;
+
+            if !channel.is_alive() {
+                continue;
+            }
+            if channel.write_all(open).await.is_err() {
+                continue;
+            }
+            match timeout_at(deadline, proto::read_status(&mut channel)).await {
+                Ok(Ok(())) => return Ok(channel),
+                Ok(Err(e)) if e.kind() == io::ErrorKind::ConnectionRefused => return Err(e),
+                Ok(Err(_)) => continue,
+                Err(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "exit side did not answer in time",
+                    ))
+                }
             }
         }
     }

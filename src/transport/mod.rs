@@ -2,8 +2,8 @@
 //!
 //! Each transport provides a [`Listener`] and a [`Dialer`] that produce [`TunnelStream`]s.
 //! Dispatch is done with enums instead of trait objects so the hot path stays
-//! statically dispatched. New transports (tcpmux, ws, wss, quic, kcp, udp, icmp)
-//! are added as new variants.
+//! statically dispatched. New transports (ws, wss, quic, kcp, udp, icmp) are added as
+//! new variants. `tcpmux` is the `tcp` transport with mux on top, so it has no variant.
 
 pub mod tcp;
 
@@ -23,9 +23,10 @@ pub enum Listener {
 impl Listener {
     pub async fn bind(kind: TransportKind, addr: &str, tuning: &Tuning) -> io::Result<Self> {
         match kind {
-            TransportKind::Tcp => Ok(Self::Tcp(
+            TransportKind::Tcp | TransportKind::Tcpmux => Ok(Self::Tcp(
                 tcp::TcpTransportListener::bind(addr, tuning).await?,
             )),
+            TransportKind::Ws | TransportKind::Wss => Err(unsupported(kind)),
         }
     }
 
@@ -50,9 +51,12 @@ pub enum Dialer {
 }
 
 impl Dialer {
-    pub fn new(kind: TransportKind, addr: &str, tuning: &Tuning) -> Self {
+    pub fn new(kind: TransportKind, addr: &str, tuning: &Tuning) -> io::Result<Self> {
         match kind {
-            TransportKind::Tcp => Self::Tcp(tcp::TcpTransportDialer::new(addr, tuning)),
+            TransportKind::Tcp | TransportKind::Tcpmux => {
+                Ok(Self::Tcp(tcp::TcpTransportDialer::new(addr, tuning)))
+            }
+            TransportKind::Ws | TransportKind::Wss => Err(unsupported(kind)),
         }
     }
 
@@ -61,6 +65,13 @@ impl Dialer {
             Self::Tcp(d) => Ok(TunnelStream::Tcp(d.dial().await?)),
         }
     }
+}
+
+fn unsupported(kind: TransportKind) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("transport {} is not implemented yet", kind.name()),
+    )
 }
 
 /// A single tunnel connection, whatever transport carries it.
