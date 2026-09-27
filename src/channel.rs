@@ -61,10 +61,10 @@ impl Link {
 
     /// Cheap, non-blocking check that an idle link has not been closed by the peer.
     /// Only meaningful while the peer is not expected to send anything.
-    pub fn is_alive(&self) -> bool {
+    pub fn is_alive(&mut self) -> bool {
         match self {
             Self::Plain(s) => s.is_alive(),
-            Self::Secure(s) => s.get_ref().is_alive(),
+            Self::Secure(s) => s.get_mut().is_alive(),
         }
     }
 }
@@ -118,7 +118,7 @@ impl From<Link> for Channel {
 
 impl Channel {
     /// See [`Link::is_alive`]. Mux sessions watch their connection themselves (pings).
-    pub fn is_alive(&self) -> bool {
+    pub fn is_alive(&mut self) -> bool {
         match self {
             Self::Link(l) => l.is_alive(),
             Self::Mux(_) => true,

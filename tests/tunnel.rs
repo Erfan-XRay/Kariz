@@ -39,8 +39,10 @@ struct Setup {
     transport: &'static str,
     mux: bool,
     encryption: &'static str,
-    /// `tunnel.ws.path`, for `ws`.
+    /// `tunnel.ws.path`, for `ws` and `wss`.
     ws_path: &'static str,
+    /// `wss` dialer: pin a certificate the listener does not have.
+    wrong_pin: bool,
 }
 
 impl Setup {
@@ -51,6 +53,21 @@ impl Setup {
             mux: false,
             encryption: "auto",
             ws_path: "/kariz-e2e",
+            wrong_pin: false,
+        }
+    }
+
+    const fn wss(mode: &'static str) -> Self {
+        Self {
+            transport: "wss",
+            ..Self::ws(mode)
+        }
+    }
+
+    const fn wrong_pin(self) -> Self {
+        Self {
+            wrong_pin: true,
+            ..self
         }
     }
 
@@ -82,17 +99,62 @@ impl Setup {
         Self { transport, ..self }
     }
 
-    /// `[tunnel]` lines shared by both sides.
-    fn tunnel_options(&self) -> String {
+    /// Transport lines and sub-tables of `[tunnel]` for the listening or dialing side.
+    fn tunnel_options(&self, listening: bool) -> String {
         let mut options = format!(
             "transport = \"{}\"\nencryption = \"{}\"\n[tunnel.mux]\nenabled = {}\n",
             self.transport, self.encryption, self.mux
         );
-        if self.transport == "ws" {
+        if self.transport.starts_with("ws") {
             options += &format!("[tunnel.ws]\npath = \"{}\"\n", self.ws_path);
+        }
+        if self.transport == "wss" {
+            let cert = test_cert();
+            options += &if listening {
+                format!(
+                    "[tunnel.tls]\ncert = {:?}\nkey = {:?}\n",
+                    cert.cert, cert.key
+                )
+            } else {
+                let pin = if self.wrong_pin {
+                    &cert.other_pin
+                } else {
+                    &cert.pin
+                };
+                format!("[tunnel.tls]\nsni = \"tunnel.example\"\npin_sha256 = \"{pin}\"\n")
+            };
         }
         options
     }
+}
+
+/// A self-signed certificate for the `wss` listener, written once per test run.
+struct TestCert {
+    cert: std::path::PathBuf,
+    key: std::path::PathBuf,
+    pin: String,
+    /// Pin of a different certificate.
+    other_pin: String,
+}
+
+fn test_cert() -> &'static TestCert {
+    static CERT: std::sync::OnceLock<TestCert> = std::sync::OnceLock::new();
+    CERT.get_or_init(|| {
+        let generate =
+            || rcgen::generate_simple_self_signed(vec!["tunnel.example".into()]).unwrap();
+        let (c, other) = (generate(), generate());
+        let dir = std::env::temp_dir().join(format!("kariz-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (cert, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+        std::fs::write(&cert, c.cert.pem()).unwrap();
+        std::fs::write(&key, c.signing_key.serialize_pem()).unwrap();
+        TestCert {
+            cert,
+            key,
+            pin: kariz::transport::tls::cert_sha256(c.cert.der()),
+            other_pin: kariz::transport::tls::cert_sha256(other.cert.der()),
+        }
+    })
 }
 
 /// One side of the tunnel in its own runtime, like a separate process: dropping it
@@ -179,7 +241,9 @@ async fn start_pair(
             format!("listen = \"127.0.0.1:{tunnel_port}\""),
         ),
     };
-    let (options, exit_options) = (setup.tunnel_options(), exit_setup.tunnel_options());
+    let entry_listens = mode == "reverse";
+    let options = setup.tunnel_options(entry_listens);
+    let exit_options = exit_setup.tunnel_options(!entry_listens);
     let entry = format!(
         r#"
         role = "entry"
@@ -397,6 +461,31 @@ tunnel_tests! {
     ws_direct: Setup::ws("direct");
     ws_reverse_no_mux: Setup::ws("reverse").no_mux();
     ws_direct_no_mux_plain: Setup::ws("direct").no_mux().encryption("none");
+    wss_reverse: Setup::wss("reverse");
+    wss_direct: Setup::wss("direct");
+    wss_reverse_no_mux: Setup::wss("reverse").no_mux();
+    wss_direct_no_mux_chacha: Setup::wss("direct").no_mux().encryption("chacha20-poly1305");
+}
+
+/// A `wss` dialer that pins another certificate refuses the listener, so nothing passes.
+#[tokio::test(flavor = "multi_thread")]
+async fn wss_wrong_pin_is_rejected() {
+    let target = echo_server().await;
+    let runs = ["reverse", "direct"].map(|mode| {
+        tokio::spawn(async move {
+            let setup = Setup::wss(mode);
+            let (entry, exit) = if mode == "reverse" {
+                (setup, setup.wrong_pin())
+            } else {
+                (setup.wrong_pin(), setup)
+            };
+            let tunnel = start_pair(entry, exit, TOKEN, TOKEN, target).await;
+            expect_closed_without_data(&tunnel).await;
+        })
+    });
+    for run in runs {
+        run.await.unwrap();
+    }
 }
 
 /// Both sides must agree on the WebSocket path; the listener answers any other path
