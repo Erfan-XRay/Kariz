@@ -1,0 +1,19 @@
+# Exit side (abroad), reverse mode with mux. Pair: entry-tcpmux-reverse.toml.
+role = "exit"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "tcpmux"
+remote = "ENTRY_SERVER_IP:3080"
+token = "CHANGE-ME-run-kariz-token"
+
+# Every field is optional; defaults come from the profile.
+[tunnel.mux]
+connections = 4                    # long-lived connections to keep open to the entry side
+max_streams = 512                  # user connections per tunnel connection
+stream_window = 262144             # per-stream flow-control window, bytes
+# max_lifetime_secs = 3600         # replace each connection after about an hour
+
+[log]
+level = "info"

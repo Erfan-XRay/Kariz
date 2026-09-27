@@ -1,0 +1,36 @@
+# Entry side (Iran), direct mode through a CDN (Cloudflare): we dial a CDN edge over
+# wss, and the CDN forwards the WebSocket to the exit side. Pair: exit-wss-cdn.toml.
+# Setup and checklist: docs/CDN.md.
+role = "entry"
+mode = "direct"
+profile = "balanced"
+
+[tunnel]
+transport = "wss"
+remote = "104.16.0.1:443"          # a clean CDN IP, or "tunnel.example.com:443"
+token = "CHANGE-ME-run-kariz-token"
+
+# Mux is on by default for ws / wss: a few long-lived WebSocket connections carry all
+# user connections, and its pings keep them from being cut as idle by the CDN.
+# [tunnel.mux]
+# connections = 4
+# max_lifetime_secs = 3600         # replace each connection after about an hour
+
+[tunnel.ws]
+path = "/api/v1/stream"            # same on both sides
+host = "tunnel.example.com"        # your proxied domain; also the TLS server name (SNI)
+early_data = true                  # hello inside the upgrade request: one round trip less
+# user_agent = "Mozilla/5.0 ..."   # default: a desktop Chrome
+# headers = { "Accept-Language" = "fa-IR,fa;q=0.9,en;q=0.8" }
+
+# No [tunnel.tls] needed: the CDN's certificate is checked against the usual root
+# certificates. Do not pin it (pin_sha256): CDN certificates rotate.
+# [tunnel.tls]
+# sni = "tunnel.example.com"       # default: tunnel.ws.host
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"           # dialed on the exit side
+
+[log]
+level = "info"
