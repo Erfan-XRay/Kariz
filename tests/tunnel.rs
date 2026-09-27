@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 use kariz::config::Config;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::task::JoinHandle;
 
 const TOKEN: &str = "test-token-0123456789abcdef";
 
@@ -56,6 +55,14 @@ impl Setup {
         Self { encryption, ..self }
     }
 
+    const fn mux(self) -> Self {
+        Self { mux: true, ..self }
+    }
+
+    const fn transport(self, transport: &'static str) -> Self {
+        Self { transport, ..self }
+    }
+
     /// `[tunnel]` lines shared by both sides.
     fn tunnel_options(&self) -> String {
         format!(
@@ -65,25 +72,77 @@ impl Setup {
     }
 }
 
-struct Tunnel {
-    user_port: u16,
-    tasks: Vec<JoinHandle<anyhow::Result<()>>>,
+/// One side of the tunnel in its own runtime, like a separate process: dropping it
+/// shuts the runtime down, which drops every task and closes every socket the side had.
+struct Side {
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
-impl Drop for Tunnel {
-    fn drop(&mut self) {
-        for t in &self.tasks {
-            t.abort();
+impl Side {
+    fn start(text: &str) -> Self {
+        let config = Config::parse(text).unwrap_or_else(|e| panic!("{e:#}\n{text}"));
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.spawn(async move {
+                if let Err(e) = kariz::run(config).await {
+                    eprintln!("tunnel side stopped: {e:#}");
+                }
+            });
+            let _ = stopped.recv();
+            rt.shutdown_timeout(Duration::from_secs(2));
+        });
+        Self {
+            stop: Some(stop),
+            thread: Some(thread),
         }
     }
 }
 
-fn spawn_side(text: String) -> JoinHandle<anyhow::Result<()>> {
-    let config = Config::parse(&text).unwrap_or_else(|e| panic!("{e:#}\n{text}"));
-    tokio::spawn(kariz::run(config))
+impl Drop for Side {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+struct Tunnel {
+    user_port: u16,
+    /// Held only to keep the entry side running.
+    _entry: Side,
+    exit: Option<Side>,
+    exit_config: String,
+}
+
+impl Tunnel {
+    fn kill_exit(&mut self) {
+        drop(self.exit.take());
+    }
+
+    fn restart_exit(&mut self) {
+        self.exit = Some(Side::start(&self.exit_config));
+    }
 }
 
 async fn start(setup: Setup, entry_token: &str, exit_token: &str, target_port: u16) -> Tunnel {
+    start_pair(setup, setup, entry_token, exit_token, target_port).await
+}
+
+/// Like [`start`], with separate settings for each side (for mismatch tests).
+async fn start_pair(
+    setup: Setup,
+    exit_setup: Setup,
+    entry_token: &str,
+    exit_token: &str,
+    target_port: u16,
+) -> Tunnel {
     let tunnel_port = free_port();
     let user_port = free_port();
     let mode = setup.mode;
@@ -97,7 +156,7 @@ async fn start(setup: Setup, entry_token: &str, exit_token: &str, target_port: u
             format!("listen = \"127.0.0.1:{tunnel_port}\""),
         ),
     };
-    let options = setup.tunnel_options();
+    let (options, exit_options) = (setup.tunnel_options(), exit_setup.tunnel_options());
     let entry = format!(
         r#"
         role = "entry"
@@ -118,21 +177,26 @@ async fn start(setup: Setup, entry_token: &str, exit_token: &str, target_port: u
         [tunnel]
         {exit_tunnel}
         token = "{exit_token}"
-        {options}
+        {exit_options}
         "#
     );
     // Start the listening side first so the dialing side connects right away.
-    let tasks = if mode == "reverse" {
-        let e = spawn_side(entry);
+    let (entry_side, exit_side) = if mode == "reverse" {
+        let e = Side::start(&entry);
         tokio::time::sleep(Duration::from_millis(100)).await;
-        vec![e, spawn_side(exit)]
+        (e, Side::start(&exit))
     } else {
-        let x = spawn_side(exit);
+        let x = Side::start(&exit);
         tokio::time::sleep(Duration::from_millis(100)).await;
-        vec![x, spawn_side(entry)]
+        (Side::start(&entry), x)
     };
     tokio::time::sleep(Duration::from_millis(300)).await;
-    Tunnel { user_port, tasks }
+    Tunnel {
+        user_port,
+        _entry: entry_side,
+        exit: Some(exit_side),
+        exit_config: exit,
+    }
 }
 
 async fn echo_roundtrip(port: u16, payload: &[u8]) -> std::io::Result<Vec<u8>> {
@@ -203,6 +267,65 @@ async fn check_unreachable_target(setup: Setup) {
     expect_closed_without_data(&tunnel).await;
 }
 
+/// The exit side dies in the middle of a transfer: the user connection must end instead
+/// of hanging, and once the exit is back, new connections work again.
+async fn check_exit_restart(setup: Setup) {
+    let target = echo_server().await;
+    let mut tunnel = start(setup, TOKEN, TOKEN, target).await;
+    assert_eq!(
+        echo_roundtrip(tunnel.user_port, b"warm up").await.unwrap(),
+        b"warm up"
+    );
+
+    let user = TcpStream::connect(("127.0.0.1", tunnel.user_port))
+        .await
+        .unwrap();
+    let (mut r, mut w) = user.into_split();
+    let writer = tokio::spawn(async move {
+        let chunk = pattern(16 * 1024);
+        while w.write_all(&chunk).await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut echoed = 0;
+    while echoed < 256 * 1024 {
+        echoed += r.read(&mut buf).await.unwrap();
+    }
+
+    tunnel.kill_exit();
+    let ended = tokio::time::timeout(Duration::from_secs(20), async {
+        while matches!(r.read(&mut buf).await, Ok(n) if n > 0) {}
+    })
+    .await;
+    assert!(
+        ended.is_ok(),
+        "user connection hung after the exit side died"
+    );
+    writer.abort();
+
+    tunnel.restart_exit();
+    let recovered = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let attempt = tokio::time::timeout(
+                Duration::from_secs(5),
+                echo_roundtrip(tunnel.user_port, b"back again"),
+            );
+            if let Ok(Ok(data)) = attempt.await {
+                if data == b"back again" {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await;
+    assert!(
+        recovered.is_ok(),
+        "tunnel did not recover after the exit side came back"
+    );
+}
+
 macro_rules! tunnel_tests {
     ($($name:ident: $setup:expr;)*) => {
         $(
@@ -223,6 +346,11 @@ macro_rules! tunnel_tests {
                 async fn unreachable_target_closes_user_connection() {
                     check_unreachable_target($setup).await;
                 }
+
+                #[tokio::test(flavor = "multi_thread")]
+                async fn recovers_after_exit_restart() {
+                    check_exit_restart($setup).await;
+                }
             }
         )*
 
@@ -238,6 +366,31 @@ tunnel_tests! {
     tcp_direct_aes: Setup::tcp("direct").encryption("aes-256-gcm");
     tcp_reverse_plain: Setup::tcp("reverse").encryption("none");
     tcp_direct_plain: Setup::tcp("direct").encryption("none");
+    mux_reverse: Setup::tcp("reverse").mux();
+    mux_direct: Setup::tcp("direct").mux();
+    tcpmux_reverse_plain: Setup::tcp("reverse").transport("tcpmux").mux().encryption("none");
+    tcpmux_direct_chacha: Setup::tcp("direct").transport("tcpmux").mux().encryption("chacha20-poly1305");
+}
+
+/// Mux must be on or off on both sides; a mismatch fails the handshake, it does not
+/// turn into garbage on the wire.
+#[tokio::test(flavor = "multi_thread")]
+async fn mux_mismatch_is_rejected() {
+    let target = echo_server().await;
+    let mut cases = Vec::new();
+    for mode in ["reverse", "direct"] {
+        cases.push((Setup::tcp(mode).mux(), Setup::tcp(mode)));
+        cases.push((Setup::tcp(mode), Setup::tcp(mode).mux()));
+    }
+    let runs = cases.into_iter().map(|(entry, exit)| {
+        tokio::spawn(async move {
+            let tunnel = start_pair(entry, exit, TOKEN, TOKEN, target).await;
+            expect_closed_without_data(&tunnel).await;
+        })
+    });
+    for run in runs.collect::<Vec<_>>() {
+        run.await.unwrap();
+    }
 }
 
 /// Rough localhost throughput check: `cargo test --release -- --ignored --nocapture`.

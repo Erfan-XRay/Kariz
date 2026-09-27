@@ -1,9 +1,9 @@
 //! Channels: authenticated paths through the tunnel, one per user connection.
 //!
 //! Entry and exit only deal with [`Channel`]s and never touch the handshake or the
-//! transport directly. Today a channel is a whole tunnel connection, encrypted by the
-//! record layer; mux will add channels that share one connection, without changing the
-//! callers.
+//! transport directly. The handshake turns a transport connection into a [`Link`] (an
+//! authenticated, normally encrypted connection). A channel is then either a whole link
+//! or one stream of a mux session running over a link.
 
 use std::io;
 use std::pin::Pin;
@@ -14,16 +14,20 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::time::{timeout, timeout_at, Instant};
 
 use crate::crypto::handshake::{self, SessionKeys};
-use crate::crypto::record::{Opener, Sealer, SecureStream, MAX_PAYLOAD};
+use crate::crypto::record::{
+    Opener, Sealer, SecureReader, SecureStream, SecureWriter, MAX_PAYLOAD,
+};
 use crate::crypto::{random_below, Cipher, Crypto, ReplayFilter};
-use crate::transport::TunnelStream;
+use crate::mux::{MuxStream, Transport};
+use crate::transport::{TunnelReader, TunnelStream, TunnelWriter};
 
 /// A failed handshake is drained for a random time in this range (seconds).
 const DRAIN_SECS: (u64, u64) = (5, 30);
 /// Stop reading (but keep the connection open) after this many drained bytes.
 const DRAIN_MAX_BYTES: usize = 1 << 20;
 
-pub enum Channel {
+/// An authenticated tunnel connection, the result of a handshake.
+pub enum Link {
     /// `encryption = "none"`: authenticated, but the bytes are sent as they are.
     Plain(TunnelStream),
     /// Boxed: the cipher key schedules make it large, and it is one allocation per
@@ -31,16 +35,7 @@ pub enum Channel {
     Secure(Box<SecureStream<TunnelStream>>),
 }
 
-impl Channel {
-    /// Cheap, non-blocking check that an idle channel has not been closed by the peer.
-    /// Only meaningful while the peer is not expected to send anything.
-    pub fn is_alive(&self) -> bool {
-        match self {
-            Self::Plain(s) => s.is_alive(),
-            Self::Secure(s) => s.get_ref().is_alive(),
-        }
-    }
-
+impl Link {
     fn new(
         stream: TunnelStream,
         keys: SessionKeys,
@@ -63,19 +58,82 @@ impl Channel {
             early,
         ))))
     }
+
+    /// Cheap, non-blocking check that an idle link has not been closed by the peer.
+    /// Only meaningful while the peer is not expected to send anything.
+    pub fn is_alive(&self) -> bool {
+        match self {
+            Self::Plain(s) => s.is_alive(),
+            Self::Secure(s) => s.get_ref().is_alive(),
+        }
+    }
+}
+
+/// Receiving half of a [`Link`].
+pub enum LinkReader {
+    Plain(TunnelReader),
+    Secure(Box<SecureReader<TunnelReader>>),
+}
+
+/// Sending half of a [`Link`].
+pub enum LinkWriter {
+    Plain(TunnelWriter),
+    Secure(Box<SecureWriter<TunnelWriter>>),
+}
+
+impl Transport for Link {
+    type Reader = LinkReader;
+    type Writer = LinkWriter;
+
+    fn into_halves(self) -> (LinkReader, LinkWriter) {
+        match self {
+            Self::Plain(s) => {
+                let (r, w) = s.into_split();
+                (LinkReader::Plain(r), LinkWriter::Plain(w))
+            }
+            Self::Secure(s) => {
+                let (r, w) = s.split(TunnelStream::into_split);
+                (
+                    LinkReader::Secure(Box::new(r)),
+                    LinkWriter::Secure(Box::new(w)),
+                )
+            }
+        }
+    }
+}
+
+/// One user connection's path through the tunnel.
+pub enum Channel {
+    /// A whole link used for this connection alone.
+    Link(Link),
+    /// One stream of a mux session.
+    Mux(MuxStream),
+}
+
+impl From<Link> for Channel {
+    fn from(link: Link) -> Self {
+        Self::Link(link)
+    }
+}
+
+impl Channel {
+    /// See [`Link::is_alive`]. Mux sessions watch their connection themselves (pings).
+    pub fn is_alive(&self) -> bool {
+        match self {
+            Self::Link(l) => l.is_alive(),
+            Self::Mux(_) => true,
+        }
+    }
 }
 
 /// Dialing side: runs the handshake on a fresh tunnel connection. `early` (possibly
 /// empty) goes out in the same write as the hello (0-RTT), so the other side can act on
 /// it before the handshake round trip completes.
-pub async fn connect(
-    mut stream: TunnelStream,
-    crypto: &Crypto,
-    early: &[u8],
-) -> io::Result<Channel> {
+pub async fn connect(mut stream: TunnelStream, crypto: &Crypto, early: &[u8]) -> io::Result<Link> {
     let cipher = crypto.cipher();
     let sealed_early = cipher != Cipher::None && !early.is_empty() && early.len() <= MAX_PAYLOAD;
-    let (mut msg, state) = handshake::client_hello(crypto.psk(), cipher, sealed_early)?;
+    let (mut msg, state) =
+        handshake::client_hello(crypto.psk(), cipher, sealed_early, crypto.mux())?;
     let mut late: &[u8] = &[];
     match state.early_key() {
         Some(key) => Sealer::new(cipher, key)?.seal(early, &mut msg)?,
@@ -86,12 +144,12 @@ pub async fn connect(
     }
     stream.write_all(&msg).await?;
     let keys = state.read_reply(&mut stream).await?;
-    let mut channel = Channel::new(stream, keys, true, None)?;
+    let mut link = Link::new(stream, keys, true, None)?;
     if !late.is_empty() {
-        channel.write_all(late).await?;
-        channel.flush().await?;
+        link.write_all(late).await?;
+        link.flush().await?;
     }
-    Ok(channel)
+    Ok(link)
 }
 
 /// Listening side: runs the handshake on a tunnel connection the other side opened.
@@ -104,10 +162,16 @@ pub async fn accept(
     crypto: &Crypto,
     replay: &ReplayFilter,
     handshake_timeout: Duration,
-) -> io::Result<Channel> {
+) -> io::Result<Link> {
     let result = timeout(
         handshake_timeout,
-        handshake::accept(&mut stream, crypto.psk(), replay, |c| crypto.allows(c)),
+        handshake::accept(
+            &mut stream,
+            crypto.psk(),
+            replay,
+            |c| crypto.allows(c),
+            crypto.mux(),
+        ),
     )
     .await
     .unwrap_or_else(|_| {
@@ -117,7 +181,7 @@ pub async fn accept(
         ))
     });
     match result {
-        Ok(accepted) => Channel::new(stream, accepted.keys, false, accepted.early_key.as_ref()),
+        Ok(accepted) => Link::new(stream, accepted.keys, false, accepted.early_key.as_ref()),
         // The peer proved it knows the token; it is misconfigured, not probing.
         Err(e) if e.kind() == io::ErrorKind::Unsupported => Err(e),
         Err(e) => {
@@ -145,7 +209,7 @@ async fn drain(mut stream: TunnelStream) {
     .await;
 }
 
-impl AsyncRead for Channel {
+impl AsyncRead for Link {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -158,7 +222,123 @@ impl AsyncRead for Channel {
     }
 }
 
+impl AsyncWrite for Link {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            Self::Secure(s) => Pin::new(&mut **s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            Self::Secure(s) => Pin::new(&mut **s).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Plain(s) => s.is_write_vectored(),
+            Self::Secure(s) => s.is_write_vectored(),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_flush(cx),
+            Self::Secure(s) => Pin::new(&mut **s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            Self::Secure(s) => Pin::new(&mut **s).poll_shutdown(cx),
+        }
+    }
+}
+
+impl AsyncRead for Channel {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Link(s) => Pin::new(s).poll_read(cx, buf),
+            Self::Mux(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
 impl AsyncWrite for Channel {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Link(s) => Pin::new(s).poll_write(cx, buf),
+            Self::Mux(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Link(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            Self::Mux(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Link(s) => s.is_write_vectored(),
+            Self::Mux(s) => s.is_write_vectored(),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Link(s) => Pin::new(s).poll_flush(cx),
+            Self::Mux(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Link(s) => Pin::new(s).poll_shutdown(cx),
+            Self::Mux(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+impl AsyncRead for LinkReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            Self::Secure(s) => Pin::new(&mut **s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for LinkWriter {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -247,7 +427,7 @@ mod tests {
             let mut ch = connect(d.dial().await.unwrap(), &crypto, &early)
                 .await
                 .unwrap();
-            assert_eq!(matches!(ch, Channel::Plain(_)), enc == Encryption::None);
+            assert_eq!(matches!(ch, Link::Plain(_)), enc == Encryption::None);
             ch.write_all(b"hello").await.unwrap();
             ch.flush().await.unwrap();
             let mut pong = [0u8; 4];

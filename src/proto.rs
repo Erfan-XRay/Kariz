@@ -38,19 +38,39 @@ impl Open {
     pub async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<Self> {
         let mut head = [0u8; 3];
         stream.read_exact(&mut head).await?;
-        let kind = head[0];
-        if kind != KIND_TCP {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unsupported stream kind {kind}"),
-            ));
-        }
+        check_kind(head[0])?;
         let len = u16::from_be_bytes([head[1], head[2]]) as usize;
         let mut target = vec![0u8; len];
         stream.read_exact(&mut target).await?;
+        Self::with_target(head[0], target)
+    }
+
+    /// Decodes a complete open request, as carried in a mux `SYN`.
+    pub fn decode(bytes: &[u8]) -> io::Result<Self> {
+        let bad = || io::Error::new(io::ErrorKind::InvalidData, "malformed open request");
+        let (head, target) = bytes.split_at_checked(3).ok_or_else(bad)?;
+        check_kind(head[0])?;
+        if target.len() != u16::from_be_bytes([head[1], head[2]]) as usize {
+            return Err(bad());
+        }
+        Self::with_target(head[0], target.to_vec())
+    }
+
+    fn with_target(kind: u8, target: Vec<u8>) -> io::Result<Self> {
         let target = String::from_utf8(target)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "target is not valid UTF-8"))?;
         Ok(Self { kind, target })
+    }
+}
+
+fn check_kind(kind: u8) -> io::Result<()> {
+    if kind == KIND_TCP {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported stream kind {kind}"),
+        ))
     }
 }
 
@@ -92,5 +112,9 @@ mod tests {
         open.encode(&mut buf);
         let decoded = Open::read(&mut buf.as_slice()).await.unwrap();
         assert_eq!(decoded, open);
+        assert_eq!(Open::decode(&buf).unwrap(), open);
+        assert!(Open::decode(&buf[..buf.len() - 1]).is_err());
+        buf.push(0);
+        assert!(Open::decode(&buf).is_err());
     }
 }

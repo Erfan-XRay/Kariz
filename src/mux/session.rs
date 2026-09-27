@@ -17,6 +17,7 @@ use std::ops::Range;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -62,7 +63,9 @@ struct Stream {
     /// `WINDOW` increment to send right after our `SYN` (the peer cannot take credit for
     /// a stream it does not know yet).
     syn_window: Option<u32>,
-    send_buf: BytesMut,
+    /// Data accepted from the stream's writer, not yet framed; `send_queued` bytes.
+    send_queue: VecDeque<Bytes>,
+    send_queued: usize,
     send_credit: u64,
     fin_queued: bool,
     fin_sent: bool,
@@ -86,7 +89,8 @@ impl Stream {
             read_waker: None,
             syn: None,
             syn_window: None,
-            send_buf: BytesMut::new(),
+            send_queue: VecDeque::new(),
+            send_queued: 0,
             send_credit: INITIAL_WINDOW,
             fin_queued: false,
             fin_sent: false,
@@ -262,7 +266,8 @@ impl Shared {
                 FrameType::Rst => {
                     if let Some(s) = streams.get_mut(&h.stream) {
                         s.reset.get_or_insert(ResetReason::from_id(payload[0]));
-                        s.send_buf.clear();
+                        s.send_queue.clear();
+                        s.send_queued = 0;
                         s.wake();
                         if s.detached {
                             streams.remove(&h.stream);
@@ -336,14 +341,19 @@ impl Shared {
                     out.put_frame(FrameType::Window, id, &inc.to_be_bytes());
                 }
             }
-            if !s.send_buf.is_empty() {
-                let n = s.send_buf.len().min(MAX_DATA_FRAME);
-                out.put_data(id, s.send_buf.split_to(n).freeze());
+            if let Some(front) = s.send_queue.front_mut() {
+                let data = if front.len() <= MAX_DATA_FRAME {
+                    s.send_queue.pop_front().unwrap()
+                } else {
+                    front.split_to(MAX_DATA_FRAME)
+                };
+                s.send_queued -= data.len();
+                out.put_data(id, data);
                 if let Some(w) = s.write_waker.take() {
                     w.wake();
                 }
             }
-            if !s.send_buf.is_empty() {
+            if s.send_queued > 0 {
                 s.queued = true;
                 ready.push_back(id);
             } else if s.fin_queued && !s.fin_sent {
@@ -448,9 +458,30 @@ pub struct MuxSession {
 
 impl MuxSession {
     /// Starts a session over `io`. Both ends must use opposite `side`s.
+    ///
+    /// Reading and writing share `io` through a lock; prefer [`MuxSession::from_halves`]
+    /// when the connection can be split into independent halves.
     pub fn new<T>(io: T, side: Side, config: SessionConfig) -> Self
     where
         T: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        let (reader, writer) = tokio::io::split(io);
+        Self::from_halves(reader, writer, side, config)
+    }
+
+    /// Starts a session over `transport`, reading and writing in parallel.
+    pub fn over<T: super::Transport>(transport: T, side: Side, config: SessionConfig) -> Self {
+        let (reader, writer) = transport.into_halves();
+        Self::from_halves(reader, writer, side, config)
+    }
+
+    /// Starts a session over a connection split into a read and a write half. Reading
+    /// (and decrypting) and writing (and encrypting) then run in separate tasks, in
+    /// parallel.
+    pub fn from_halves<R, W>(reader: R, writer: W, side: Side, config: SessionConfig) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
     {
         let (tx, rx) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
@@ -475,20 +506,25 @@ impl MuxSession {
             side,
         });
 
-        let (reader, writer) = tokio::io::split(io);
+        // Whichever task ends first closes the session, which stops the other one.
         let s = shared.clone();
         tokio::spawn(async move {
             let mut closed = s.closed.subscribe();
             let result = tokio::select! {
                 r = read_loop(&s, reader) => r,
+                _ = closed.wait_for(|c| *c) => Ok(()),
+            };
+            s.close(end_reason(result));
+        });
+        let s = shared.clone();
+        tokio::spawn(async move {
+            let mut closed = s.closed.subscribe();
+            let result = tokio::select! {
                 r = write_loop(&s, writer) => r,
                 r = keepalive_loop(&s) => r,
                 _ = closed.wait_for(|c| *c) => Ok(()),
             };
-            s.close(match result {
-                Ok(()) => "closed".into(),
-                Err(e) => e.to_string(),
-            });
+            s.close(end_reason(result));
         });
 
         Self {
@@ -566,6 +602,11 @@ impl MuxSession {
         self.shared.lock().closed.is_some()
     }
 
+    /// Why the session closed, once it has.
+    pub fn close_reason(&self) -> Option<String> {
+        self.shared.lock().closed.clone()
+    }
+
     /// Going away (either side sent `GOAWAY`) or closed: no new streams.
     pub fn is_draining(&self) -> bool {
         let st = self.shared.lock();
@@ -584,6 +625,19 @@ impl MuxSession {
 
     pub fn close(&self) {
         self.shared.close("closed locally".into());
+    }
+
+    /// Stops new streams, waits for the existing ones to finish, then closes the session.
+    pub async fn drain(&self) {
+        self.goaway();
+        let mut tick = interval(Duration::from_millis(250));
+        while !self.is_closed() && self.stream_count() > 0 {
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = self.closed() => {}
+            }
+        }
+        self.close();
     }
 }
 
@@ -668,6 +722,12 @@ pub struct MuxStream {
     id: u32,
 }
 
+impl std::fmt::Debug for MuxStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MuxStream").field("id", &self.id).finish()
+    }
+}
+
 impl MuxStream {
     pub fn id(&self) -> u32 {
         self.id
@@ -727,50 +787,48 @@ impl Drop for MuxStream {
     }
 }
 
-impl AsyncRead for MuxStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
+impl MuxStream {
+    /// Hands the peer credit back after the reader consumed data, if due.
+    fn consumed(&self, st: MutexGuard<'_, State>) {
+        let mut st = st;
         let window = self.shared.config.stream_window as u64;
+        let State {
+            streams, control, ..
+        } = &mut *st;
+        let Some(s) = streams.get_mut(&self.id) else {
+            return;
+        };
+        if let Some(inc) = s.window_update(window) {
+            frame::put(control, FrameType::Window, self.id, &inc.to_be_bytes());
+            drop(st);
+            self.shared.writer.notify_one();
+        }
+    }
+
+    /// Waits for received data, then lets `take` consume some of it. `Ok(None)` at the
+    /// end of the stream.
+    fn poll_recv_with<T>(
+        &self,
+        cx: &mut Context<'_>,
+        take: impl FnOnce(&mut Stream) -> T,
+    ) -> Poll<io::Result<Option<T>>> {
         let mut st = self.shared.lock();
         let State {
-            streams,
-            control,
-            closed,
-            ..
+            streams, closed, ..
         } = &mut *st;
         let Some(s) = streams.get_mut(&self.id) else {
             return Poll::Ready(Err(stream_gone()));
         };
         if s.recv_buffered > 0 {
-            let mut n = 0;
-            while buf.remaining() > 0 {
-                let Some(front) = s.recv.front_mut() else {
-                    break;
-                };
-                let k = front.len().min(buf.remaining());
-                buf.put_slice(&front[..k]);
-                front.advance(k);
-                if front.is_empty() {
-                    s.recv.pop_front();
-                }
-                n += k;
-            }
-            s.recv_buffered -= n;
-            if let Some(inc) = s.window_update(window) {
-                frame::put(control, FrameType::Window, self.id, &inc.to_be_bytes());
-                drop(st);
-                self.shared.writer.notify_one();
-            }
-            return Poll::Ready(Ok(()));
+            let out = take(s);
+            self.consumed(st);
+            return Poll::Ready(Ok(Some(out)));
         }
         if let Some(reason) = s.reset {
             return Poll::Ready(Err(reason.to_error()));
         }
         if s.recv_fin {
-            return Poll::Ready(Ok(()));
+            return Poll::Ready(Ok(None));
         }
         if let Some(reason) = closed {
             return Poll::Ready(Err(closed_error(reason)));
@@ -778,13 +836,27 @@ impl AsyncRead for MuxStream {
         s.read_waker = Some(cx.waker().clone());
         Poll::Pending
     }
-}
 
-impl AsyncWrite for MuxStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
+    /// Receives the next chunk of data exactly as it arrived, without copying it.
+    /// `None` at the end of the stream.
+    pub async fn recv(&self) -> io::Result<Option<Bytes>> {
+        std::future::poll_fn(|cx| {
+            self.poll_recv_with(cx, |s| {
+                let chunk = s.recv.pop_front().expect("data is buffered");
+                s.recv_buffered -= chunk.len();
+                chunk
+            })
+        })
+        .await
+    }
+
+    /// Queues up to `len` bytes for sending, as far as credit and buffer room allow:
+    /// `take(n)` provides the first `n` bytes. Returns how many were queued.
+    fn poll_send_with(
+        &self,
         cx: &mut Context<'_>,
-        buf: &[u8],
+        len: usize,
+        take: impl FnOnce(usize) -> Bytes,
     ) -> Poll<io::Result<usize>> {
         let mut st = self.shared.lock();
         let State {
@@ -808,16 +880,17 @@ impl AsyncWrite for MuxStream {
                 "write after shutdown",
             )));
         }
-        if buf.is_empty() {
+        if len == 0 {
             return Poll::Ready(Ok(0));
         }
-        let room = (SEND_BUFFER - s.send_buf.len()) as u64;
-        let n = s.send_credit.min(room).min(buf.len() as u64) as usize;
+        let room = (SEND_BUFFER - s.send_queued) as u64;
+        let n = s.send_credit.min(room).min(len as u64) as usize;
         if n == 0 {
             s.write_waker = Some(cx.waker().clone());
             return Poll::Pending;
         }
-        s.send_buf.extend_from_slice(&buf[..n]);
+        s.send_queue.push_back(take(n));
+        s.send_queued += n;
         s.send_credit -= n as u64;
         if !s.queued {
             s.queued = true;
@@ -828,12 +901,20 @@ impl AsyncWrite for MuxStream {
         Poll::Ready(Ok(n))
     }
 
-    /// Queued data is sent by the session on its own; nothing to wait for.
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    /// Sends `data` without copying it, waiting for flow-control credit as needed.
+    pub async fn send(&self, mut data: Bytes) -> io::Result<()> {
+        while !data.is_empty() {
+            std::future::poll_fn(|cx| {
+                let len = data.len();
+                self.poll_send_with(cx, len, |n| data.split_to(n))
+            })
+            .await?;
+        }
+        Ok(())
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    /// Half close: no more data from this side. Queued data is still sent first.
+    pub fn finish(&self) -> io::Result<()> {
         {
             let mut st = self.shared.lock();
             let State {
@@ -843,16 +924,16 @@ impl AsyncWrite for MuxStream {
                 ..
             } = &mut *st;
             if let Some(reason) = closed {
-                return Poll::Ready(Err(closed_error(reason)));
+                return Err(closed_error(reason));
             }
             let Some(s) = streams.get_mut(&self.id) else {
-                return Poll::Ready(Err(stream_gone()));
+                return Err(stream_gone());
             };
             if let Some(reason) = s.reset {
-                return Poll::Ready(Err(reason.to_error()));
+                return Err(reason.to_error());
             }
             if s.fin_queued {
-                return Poll::Ready(Ok(()));
+                return Ok(());
             }
             s.fin_queued = true;
             if !s.queued {
@@ -861,7 +942,59 @@ impl AsyncWrite for MuxStream {
             }
         }
         self.shared.writer.notify_one();
+        Ok(())
+    }
+}
+
+impl AsyncRead for MuxStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let copied = self.poll_recv_with(cx, |s| {
+            let mut n = 0;
+            while buf.remaining() > 0 {
+                let Some(front) = s.recv.front_mut() else {
+                    break;
+                };
+                let k = front.len().min(buf.remaining());
+                buf.put_slice(&front[..k]);
+                front.advance(k);
+                if front.is_empty() {
+                    s.recv.pop_front();
+                }
+                n += k;
+            }
+            s.recv_buffered -= n;
+        });
+        copied.map_ok(|_| ())
+    }
+}
+
+impl AsyncWrite for MuxStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.poll_send_with(cx, buf.len(), |n| Bytes::copy_from_slice(&buf[..n]))
+    }
+
+    /// Queued data is sent by the session on its own; nothing to wait for.
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(self.finish())
+    }
+}
+
+fn end_reason(result: io::Result<()>) -> String {
+    match result {
+        Ok(()) => "closed".into(),
+        Err(e) => e.to_string(),
     }
 }
 

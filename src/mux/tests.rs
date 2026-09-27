@@ -10,7 +10,16 @@ use super::*;
 
 const WINDOW: u32 = 256 * 1024;
 
-fn config() -> SessionConfig {
+impl Transport for DuplexStream {
+    type Reader = tokio::io::ReadHalf<DuplexStream>;
+    type Writer = tokio::io::WriteHalf<DuplexStream>;
+
+    fn into_halves(self) -> (Self::Reader, Self::Writer) {
+        tokio::io::split(self)
+    }
+}
+
+pub(super) fn config() -> SessionConfig {
     SessionConfig {
         stream_window: WINDOW,
         max_streams: 2048,
@@ -170,6 +179,35 @@ async fn reset_reaches_the_peer() {
     let mut got = [0u8; 5];
     within(5, b.read_exact(&mut got)).await.unwrap();
     assert_eq!(&got, b"early");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bytes_api_carries_data_and_end_of_stream() {
+    let (client, server) = pair();
+    let a = client.open(Bytes::from_static(b"t")).unwrap();
+    let data = Bytes::from(pattern(3 * 1024 * 1024, 5));
+    let d = data.clone();
+    // Far more than one window: `send` must wait for credit, not fail or overrun.
+    let sender = tokio::spawn(async move {
+        a.send(d).await.unwrap();
+        a.finish().unwrap();
+        a
+    });
+    let (b, _) = within(5, server.accept()).await.unwrap();
+    let mut got = Vec::new();
+    within(30, async {
+        while let Some(chunk) = b.recv().await.unwrap() {
+            got.extend_from_slice(&chunk);
+        }
+    })
+    .await;
+    assert!(got == data);
+    let a = sender.await.unwrap();
+    // The other direction still works after the half close.
+    b.send(Bytes::from_static(b"reply")).await.unwrap();
+    b.finish().unwrap();
+    assert_eq!(&within(5, a.recv()).await.unwrap().unwrap()[..], b"reply");
+    assert!(within(5, a.recv()).await.unwrap().is_none());
 }
 
 /// Writes to `stream` until a write blocks for `patience`; returns the bytes accepted.
@@ -547,15 +585,20 @@ async fn mux_throughput() {
             };
 
             let (c, s) = tcp_pair().await;
+            // Sessions run over independent halves, as in the tunnel.
             let (client, server) = if encrypted {
+                let (cr, cw) = secure(c, true).split(TcpStream::into_split);
+                let (sr, sw) = secure(s, false).split(TcpStream::into_split);
                 (
-                    MuxSession::new(secure(c, true), Side::Client, cfg.clone()),
-                    MuxSession::new(secure(s, false), Side::Server, cfg.clone()),
+                    MuxSession::from_halves(cr, cw, Side::Client, cfg.clone()),
+                    MuxSession::from_halves(sr, sw, Side::Server, cfg.clone()),
                 )
             } else {
+                let (cr, cw) = c.into_split();
+                let (sr, sw) = s.into_split();
                 (
-                    MuxSession::new(c, Side::Client, cfg.clone()),
-                    MuxSession::new(s, Side::Server, cfg.clone()),
+                    MuxSession::from_halves(cr, cw, Side::Client, cfg.clone()),
+                    MuxSession::from_halves(sr, sw, Side::Server, cfg.clone()),
                 )
             };
             let stream = client.open(Bytes::new()).unwrap();
