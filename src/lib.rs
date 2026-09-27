@@ -5,6 +5,7 @@ pub mod config;
 pub mod proto;
 pub mod transport;
 
+mod channel;
 mod entry;
 mod exit;
 mod relay;

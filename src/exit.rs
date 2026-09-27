@@ -5,16 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
-use crate::auth::{self, AuthKey, ReplayFilter};
+use crate::auth::{AuthKey, ReplayFilter};
+use crate::channel::{self, Channel};
 use crate::config::{Config, Mode, Tuning};
 use crate::proto::{self, Open, STATUS_DIAL_FAILED, STATUS_OK};
 use crate::relay::relay;
-use crate::transport::{tcp, Dialer, Listener, TunnelStream};
+use crate::transport::{tcp, Dialer, Listener};
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
@@ -40,7 +40,7 @@ pub async fn run(config: Config) -> Result<()> {
                 pool = config.tunnel.pool,
                 "exit: reverse mode, connecting to the entry side"
             );
-            let dialer = Arc::new(Dialer::new(config.tunnel.transport, remote, &tuning));
+            let dialer = Arc::new(Dialer::new(config.tunnel.transport, remote, &tuning)?);
             for _ in 0..config.tunnel.pool {
                 tasks.spawn(pool_worker(exit.clone(), dialer.clone()));
             }
@@ -62,12 +62,12 @@ pub async fn run(config: Config) -> Result<()> {
     }
 }
 
-/// Reverse mode: keeps one idle, authenticated connection open towards the entry side.
+/// Reverse mode: keeps one idle, authenticated channel open towards the entry side.
 /// As soon as it is used, a new one is dialed.
 async fn pool_worker(exit: Arc<Exit>, dialer: Arc<Dialer>) -> Result<()> {
     let mut backoff = BACKOFF_MIN;
     loop {
-        let mut stream = match connect_once(&exit, &dialer).await {
+        let mut channel = match connect_once(&exit, &dialer).await {
             Ok(s) => {
                 backoff = BACKOFF_MIN;
                 s
@@ -85,34 +85,31 @@ async fn pool_worker(exit: Arc<Exit>, dialer: Arc<Dialer>) -> Result<()> {
         };
 
         // Waits as long as needed; TCP keepalive notices a dead entry side.
-        match Open::read(&mut stream).await {
+        match Open::read(&mut channel).await {
             Ok(open) => {
                 let exit = exit.clone();
-                tokio::spawn(async move { serve(&exit, stream, open).await });
+                tokio::spawn(async move { serve(&exit, channel, open).await });
             }
             Err(e) => debug!(error = %e, "idle tunnel connection closed"),
         }
     }
 }
 
-async fn connect_once(exit: &Exit, dialer: &Dialer) -> io::Result<TunnelStream> {
-    let mut stream = dialer.dial().await?;
-    let (hello, pending) = exit.key.hello()?;
-    stream.write_all(&hello).await?;
+async fn connect_once(exit: &Exit, dialer: &Dialer) -> io::Result<Channel> {
+    let stream = dialer.dial().await?;
     timeout(
         exit.tuning.handshake_timeout,
-        auth::read_reply(&mut stream, &exit.key, &pending),
+        channel::connect(stream, &exit.key, &[]),
     )
     .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))??;
-    Ok(stream)
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))?
 }
 
 /// Direct mode: authenticates connections from the entry side and serves them.
 async fn accept_direct(exit: Arc<Exit>, listener: Listener) -> Result<()> {
     let replay = Arc::new(ReplayFilter::default());
     loop {
-        let (mut stream, peer) = match listener.accept().await {
+        let (stream, peer) = match listener.accept().await {
             Ok(v) => v,
             Err(e) => {
                 warn!(error = %e, "tunnel accept failed");
@@ -123,11 +120,12 @@ async fn accept_direct(exit: Arc<Exit>, listener: Listener) -> Result<()> {
         let (exit, replay) = (exit.clone(), replay.clone());
         tokio::spawn(async move {
             let handshake = async {
-                auth::server_handshake(&mut stream, &exit.key, &replay).await?;
-                Open::read(&mut stream).await
+                let mut channel = channel::accept(stream, &exit.key, &replay).await?;
+                let open = Open::read(&mut channel).await?;
+                Ok::<_, io::Error>((channel, open))
             };
             match timeout(exit.tuning.handshake_timeout, handshake).await {
-                Ok(Ok(open)) => serve(&exit, stream, open).await,
+                Ok(Ok((channel, open))) => serve(&exit, channel, open).await,
                 Ok(Err(e)) => warn!(%peer, error = %e, "tunnel handshake failed"),
                 Err(_) => warn!(%peer, "tunnel handshake timed out"),
             }
@@ -135,7 +133,7 @@ async fn accept_direct(exit: Arc<Exit>, listener: Listener) -> Result<()> {
     }
 }
 
-async fn serve(exit: &Exit, mut tunnel: TunnelStream, open: Open) {
+async fn serve(exit: &Exit, mut tunnel: Channel, open: Open) {
     let mut target = match tcp::connect(&open.target, &exit.tuning).await {
         Ok(t) => t,
         Err(e) => {

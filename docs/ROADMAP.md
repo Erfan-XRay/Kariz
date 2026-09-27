@@ -28,7 +28,7 @@ supported for every transport.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Project skeleton, CLI, TOML config, profiles, mutual auth, plain `tcp` transport, reverse + direct modes, tests, CI | **done (v0.1.0)** |
-| 2 | Encryption layer, `tcpmux`, `ws` / `wss` (CDN friendly); plan in [PHASE2.md](PHASE2.md) | planned |
+| 2 | Encryption layer, `tcpmux`, `ws` / `wss` (CDN friendly); plan in [PHASE2.md](PHASE2.md) | in progress (2.0 done) |
 | 3 | UDP forwarding and UDP-over-stream framing | planned |
 | 4 | `kcp` (full settings + Reed-Solomon FEC) and `quic` (quinn; BBR/Cubic, 0-RTT, datagrams, GSO/GRO) | planned |
 | 5 | `icmp` transport (raw sockets, needs `CAP_NET_RAW`) | planned |

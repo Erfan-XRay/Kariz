@@ -284,7 +284,7 @@ Each step is one PR, keeps CI green, and keeps both modes working.
 
 | Step | Content | Done when |
 |---|---|---|
-| **2.0** Prep | `Channel` abstraction, config sections (`mux`, `ws`, `tls`, `encryption`) parsed and validated but not yet used, test helper parameterised over transport / mux / mode. | No behaviour change, all v0.1 tests pass through the new helper. |
+| **2.0** Prep (done) | `Channel` abstraction, config sections (`mux`, `ws`, `tls`, `encryption`) parsed and validated but not yet used, test helper parameterised over transport / mux / mode. | No behaviour change, all v0.1 tests pass through the new helper. |
 | **2.1** Crypto | Handshake v2, `SecureStream`, early data, drain-on-failure, cipher `auto`. | Unit tests: roundtrip, tamper, wrong token both ways, replay, stale ts, downgrade attempt, record split across reads, counter per direction. E2E tests pass with encryption on (default) and `none`. Hello bytes pass a simple byte-distribution check (no fixed offsets). |
 | **2.2** Mux core | Frames, session, streams, flow control, ping, `GOAWAY`. Tested in isolation over `tokio::io::duplex`. | Tests: 1000 parallel streams, half close, `RST`, slow reader does not block a fast stream, window accounting, dead peer detected by ping. |
 | **2.3** Mux integration | Session manager in both modes, optimistic open, `tcpmux` alias, rotation. | E2E matrix `{reverse, direct} x {mux on, off}` green; unreachable-target test still closes the user connection; killing the exit mid-transfer resets streams and the entry reconnects. |
