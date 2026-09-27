@@ -52,6 +52,10 @@ impl Setup {
         }
     }
 
+    const fn encryption(self, encryption: &'static str) -> Self {
+        Self { encryption, ..self }
+    }
+
     /// `[tunnel]` lines shared by both sides.
     fn tunnel_options(&self) -> String {
         format!(
@@ -230,6 +234,10 @@ macro_rules! tunnel_tests {
 tunnel_tests! {
     tcp_reverse: Setup::tcp("reverse");
     tcp_direct: Setup::tcp("direct");
+    tcp_reverse_chacha: Setup::tcp("reverse").encryption("chacha20-poly1305");
+    tcp_direct_aes: Setup::tcp("direct").encryption("aes-256-gcm");
+    tcp_reverse_plain: Setup::tcp("reverse").encryption("none");
+    tcp_direct_plain: Setup::tcp("direct").encryption("none");
 }
 
 /// Rough localhost throughput check: `cargo test --release -- --ignored --nocapture`.

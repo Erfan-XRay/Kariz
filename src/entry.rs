@@ -6,16 +6,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout, timeout_at, Instant};
 use tracing::{debug, info, warn};
 
-use crate::auth::{AuthKey, ReplayFilter};
 use crate::channel::{self, Channel};
 use crate::config::{Config, Forward, Mode, Tuning};
+use crate::crypto::{Crypto, ReplayFilter};
 use crate::proto::{self, Open};
 use crate::relay::relay;
 use crate::transport::{Dialer, Listener};
@@ -24,7 +23,7 @@ use crate::transport::{Dialer, Listener};
 const POOL_CAPACITY: usize = 1024;
 
 struct Entry {
-    key: AuthKey,
+    crypto: Crypto,
     tuning: Tuning,
     source: Source,
 }
@@ -38,7 +37,7 @@ enum Source {
 
 pub async fn run(config: Config) -> Result<()> {
     let tuning = config.tuning();
-    let key = AuthKey::new(&config.tunnel.token);
+    let crypto = Crypto::new(&config.tunnel.token, config.tunnel.encryption);
     let mut tasks = JoinSet::new();
 
     let source = match config.mode {
@@ -57,13 +56,13 @@ pub async fn run(config: Config) -> Result<()> {
                 .with_context(|| format!("failed to listen for tunnel connections on {addr}"))?;
             info!(addr = %listener.local_addr()?, "entry: reverse mode, waiting for the exit side");
             let (tx, rx) = mpsc::channel(POOL_CAPACITY);
-            tasks.spawn(accept_reverse(listener, key.clone(), tuning.clone(), tx));
+            tasks.spawn(accept_reverse(listener, crypto.clone(), tuning.clone(), tx));
             Source::Reverse(Mutex::new(rx))
         }
     };
 
     let entry = Arc::new(Entry {
-        key,
+        crypto,
         tuning,
         source,
     });
@@ -87,7 +86,7 @@ pub async fn run(config: Config) -> Result<()> {
 /// Reverse mode: authenticates incoming tunnel connections and puts them in the pool.
 async fn accept_reverse(
     listener: Listener,
-    key: AuthKey,
+    crypto: Crypto,
     tuning: Tuning,
     pool: mpsc::Sender<Channel>,
 ) -> Result<()> {
@@ -101,18 +100,17 @@ async fn accept_reverse(
                 continue;
             }
         };
-        let (key, replay, pool) = (key.clone(), replay.clone(), pool.clone());
+        let (crypto, replay, pool) = (crypto.clone(), replay.clone(), pool.clone());
         let handshake_timeout = tuning.handshake_timeout;
         tokio::spawn(async move {
-            match timeout(handshake_timeout, channel::accept(stream, &key, &replay)).await {
-                Ok(Ok(channel)) => {
+            match channel::accept(stream, &crypto, &replay, handshake_timeout).await {
+                Ok(channel) => {
                     debug!(%peer, "tunnel connection added to pool");
                     if pool.try_send(channel).is_err() {
                         warn!(%peer, "tunnel pool is full, dropping connection");
                     }
                 }
-                Ok(Err(e)) => warn!(%peer, error = %e, "tunnel handshake failed"),
-                Err(_) => warn!(%peer, "tunnel handshake timed out"),
+                Err(e) => warn!(%peer, error = %e, "tunnel handshake failed"),
             }
         });
     }
@@ -167,7 +165,7 @@ impl Entry {
         let stream = dialer.dial().await?;
         let wait = self.tuning.handshake_timeout + self.tuning.dial_timeout;
         timeout(wait, async {
-            let mut channel = channel::connect(stream, &self.key, open).await?;
+            let mut channel = channel::connect(stream, &self.crypto, open).await?;
             proto::read_status(&mut channel).await?;
             Ok(channel)
         })
@@ -197,7 +195,7 @@ impl Entry {
             if !channel.is_alive() {
                 continue;
             }
-            if channel.write_all(open).await.is_err() {
+            if proto::send(&mut channel, open).await.is_err() {
                 continue;
             }
             match timeout_at(deadline, proto::read_status(&mut channel)).await {

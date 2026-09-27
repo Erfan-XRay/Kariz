@@ -54,8 +54,15 @@ impl Open {
     }
 }
 
+/// Writes a whole message and flushes it: channels may buffer writes (the record layer
+/// does), and the peer waits for this message before sending anything back.
+pub async fn send<S: AsyncWrite + Unpin>(stream: &mut S, msg: &[u8]) -> io::Result<()> {
+    stream.write_all(msg).await?;
+    stream.flush().await
+}
+
 pub async fn write_status<S: AsyncWrite + Unpin>(stream: &mut S, status: u8) -> io::Result<()> {
-    stream.write_all(&[status]).await
+    send(stream, &[status]).await
 }
 
 pub async fn read_status<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<()> {
