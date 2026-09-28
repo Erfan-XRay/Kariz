@@ -87,7 +87,7 @@ fn tune_tunnel_socket(stream: &TcpStream, tuning: &Tuning) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
 mod tests {
     use super::*;
     use crate::config::Profile;

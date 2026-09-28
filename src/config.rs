@@ -54,6 +54,9 @@ pub enum TransportKind {
     Wss,
     /// QUIC: its own streams, datagrams and TLS 1.3 (see docs/PHASE4.md).
     Quic,
+    /// KCP over UDP, every packet encrypted with a key from the token (see
+    /// docs/PHASE4.md).
+    Kcp,
 }
 
 impl TransportKind {
@@ -64,6 +67,7 @@ impl TransportKind {
             Self::Ws => "ws",
             Self::Wss => "wss",
             Self::Quic => "quic",
+            Self::Kcp => "kcp",
         }
     }
 
@@ -168,6 +172,118 @@ pub struct TunnelConfig {
     pub tls: Option<TlsConfig>,
     /// Only for `quic`.
     pub quic: Option<QuicConfig>,
+    /// Only for `kcp`.
+    pub kcp: Option<KcpConfig>,
+}
+
+/// `[tunnel.kcp]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KcpConfig {
+    #[serde(default)]
+    pub mode: KcpMode,
+    /// `mode = "manual"` only; unset ones are taken from `fast2`.
+    pub nodelay: Option<bool>,
+    pub interval_ms: Option<u32>,
+    pub resend: Option<u32>,
+    pub no_congestion: Option<bool>,
+    /// In packets.
+    #[serde(default = "default_kcp_window")]
+    pub send_window: u16,
+    #[serde(default = "default_kcp_window")]
+    pub recv_window: u16,
+    /// KCP packet size (its 24-byte header included); the UDP packet adds 29 bytes of
+    /// protection.
+    #[serde(default = "default_kcp_mtu")]
+    pub mtu: usize,
+}
+
+fn default_kcp_window() -> u16 {
+    1024
+}
+
+fn default_kcp_mtu() -> usize {
+    1350
+}
+
+/// Same values as a `[tunnel.kcp]` table with nothing in it.
+impl Default for KcpConfig {
+    fn default() -> Self {
+        Self {
+            mode: KcpMode::default(),
+            nodelay: None,
+            interval_ms: None,
+            resend: None,
+            no_congestion: None,
+            send_window: default_kcp_window(),
+            recv_window: default_kcp_window(),
+            mtu: default_kcp_mtu(),
+        }
+    }
+}
+
+/// KCP presets, as in kcp-go / kcptun: from gentle to aggressive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KcpMode {
+    Normal,
+    Fast,
+    #[default]
+    Fast2,
+    Fast3,
+    /// `nodelay`, `interval_ms`, `resend` and `no_congestion` set by hand.
+    Manual,
+}
+
+impl KcpMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Fast => "fast",
+            Self::Fast2 => "fast2",
+            Self::Fast3 => "fast3",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// The KCP parameters a mode stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KcpTiming {
+    /// Minimum retransmission timeout 30 ms instead of 100 ms, and gentler backoff.
+    pub nodelay: bool,
+    /// How often KCP flushes: acks and retransmissions wait up to this long.
+    pub interval_ms: u32,
+    /// Retransmit after this many acks skip a packet (0: only on timeout).
+    pub resend: u32,
+    /// Send the whole window regardless of loss.
+    pub no_congestion: bool,
+}
+
+impl KcpConfig {
+    pub fn timing(&self) -> KcpTiming {
+        let preset = |nodelay, interval_ms, resend, no_congestion| KcpTiming {
+            nodelay,
+            interval_ms,
+            resend,
+            no_congestion,
+        };
+        match self.mode {
+            KcpMode::Normal => preset(false, 40, 2, true),
+            KcpMode::Fast => preset(false, 30, 2, true),
+            KcpMode::Fast2 => preset(true, 20, 2, true),
+            KcpMode::Fast3 => preset(true, 10, 2, true),
+            KcpMode::Manual => {
+                let fast2 = KcpConfig::default().timing();
+                preset(
+                    self.nodelay.unwrap_or(fast2.nodelay),
+                    self.interval_ms.unwrap_or(fast2.interval_ms),
+                    self.resend.unwrap_or(fast2.resend),
+                    self.no_congestion.unwrap_or(fast2.no_congestion),
+                )
+            }
+        }
+    }
 }
 
 /// `[tunnel.quic]`.
@@ -487,6 +603,14 @@ impl MuxSettings {
 const MUX_CONNECTIONS: std::ops::RangeInclusive<usize> = 1..=64;
 const MUX_MAX_STREAMS: std::ops::RangeInclusive<usize> = 1..=4096;
 const MUX_STREAM_WINDOW: std::ops::RangeInclusive<usize> = 16 * 1024..=16 * 1024 * 1024;
+const KCP_INTERVAL_MS: std::ops::RangeInclusive<u32> = 10..=1000;
+const KCP_MAX_RESEND: u32 = 10;
+const KCP_SEND_WINDOW: std::ops::RangeInclusive<u16> = 16..=32768;
+/// KCP needs 128 to receive its largest messages.
+const KCP_RECV_WINDOW: std::ops::RangeInclusive<u16> = 128..=32768;
+/// The upper bound keeps the UDP packet (with protection) under 1472 bytes, the most a
+/// 1500-byte path carries unfragmented.
+const KCP_MTU: std::ops::RangeInclusive<usize> = 576..=1450;
 const MUX_MIN_LIFETIME_SECS: u64 = 60;
 /// See [`Tuning::notsent_lowat`]. Over a throttled 20 Mbit/s link with four bulk
 /// transfers next to UDP pings (`udp_latency_under_load`), it cut the UDP round trip
@@ -654,7 +778,61 @@ impl Config {
         self.validate_mux()?;
         self.validate_ws()?;
         self.validate_tls()?;
-        self.validate_quic()
+        self.validate_quic()?;
+        self.validate_kcp()
+    }
+
+    fn validate_kcp(&self) -> Result<()> {
+        let Some(k) = &self.tunnel.kcp else {
+            return Ok(());
+        };
+        if self.tunnel.transport != TransportKind::Kcp {
+            bail!("[tunnel.kcp] is only used with transport = \"kcp\"");
+        }
+        let manual = [
+            k.nodelay.is_some(),
+            k.interval_ms.is_some(),
+            k.resend.is_some(),
+            k.no_congestion.is_some(),
+        ];
+        if k.mode != KcpMode::Manual && manual.contains(&true) {
+            bail!(
+                "tunnel.kcp.nodelay, interval_ms, resend and no_congestion need \
+                 mode = \"manual\" (mode = \"{}\" sets them)",
+                k.mode.name()
+            );
+        }
+        let timing = k.timing();
+        if !KCP_INTERVAL_MS.contains(&timing.interval_ms) {
+            bail!(
+                "tunnel.kcp.interval_ms must be between {} and {}",
+                KCP_INTERVAL_MS.start(),
+                KCP_INTERVAL_MS.end()
+            );
+        }
+        if timing.resend > KCP_MAX_RESEND {
+            bail!("tunnel.kcp.resend must be at most {KCP_MAX_RESEND}");
+        }
+        for (name, window, range) in [
+            ("send_window", k.send_window, KCP_SEND_WINDOW),
+            ("recv_window", k.recv_window, KCP_RECV_WINDOW),
+        ] {
+            if !range.contains(&window) {
+                bail!(
+                    "tunnel.kcp.{name} must be between {} and {} packets",
+                    range.start(),
+                    range.end()
+                );
+            }
+        }
+        if !KCP_MTU.contains(&k.mtu) {
+            bail!(
+                "tunnel.kcp.mtu must be between {} and {} bytes",
+                KCP_MTU.start(),
+                KCP_MTU.end()
+            );
+        }
+        Ok(())
     }
 
     fn validate_quic(&self) -> Result<()> {
@@ -1303,6 +1481,93 @@ mod tests {
                 role,
                 "quic",
                 &format!("[tunnel.quic]\n{extra}"),
+            ));
+            assert!(err.contains(expect), "{extra}: {err}");
+        }
+    }
+
+    #[test]
+    fn kcp_configs_parse() {
+        let c = Config::parse(&with_transport("entry", "kcp", "")).unwrap();
+        assert!(c.mux().enabled, "mux on by default, as for ws");
+        assert!(c.warnings().is_empty());
+        let k = KcpConfig::default();
+        assert_eq!(k.mode, KcpMode::Fast2);
+        assert_eq!((k.send_window, k.recv_window, k.mtu), (1024, 1024, 1350));
+        assert_eq!(
+            k.timing(),
+            KcpTiming {
+                nodelay: true,
+                interval_ms: 20,
+                resend: 2,
+                no_congestion: true
+            }
+        );
+
+        // Without mux, and with an explicit cipher: KCP is a stream like tcp.
+        let text = with_transport(
+            "exit",
+            "kcp",
+            "encryption = \"chacha20-poly1305\"\n[tunnel.mux]\nenabled = false",
+        );
+        assert!(!Config::parse(&text).unwrap().mux().enabled);
+
+        let text = with_transport(
+            "entry",
+            "kcp",
+            "[tunnel.kcp]\nmode = \"normal\"\nsend_window = 256\nrecv_window = 512\nmtu = 1200",
+        );
+        let k = Config::parse(&text).unwrap().tunnel.kcp.unwrap();
+        assert_eq!((k.send_window, k.recv_window, k.mtu), (256, 512, 1200));
+        assert_eq!(k.timing().interval_ms, 40);
+        assert!(!k.timing().nodelay);
+
+        // Manual: what is set, and fast2 for the rest.
+        let text = with_transport(
+            "entry",
+            "kcp",
+            "[tunnel.kcp]\nmode = \"manual\"\ninterval_ms = 15\nno_congestion = false",
+        );
+        let t = Config::parse(&text).unwrap().tunnel.kcp.unwrap().timing();
+        assert_eq!(
+            t,
+            KcpTiming {
+                nodelay: true,
+                interval_ms: 15,
+                resend: 2,
+                no_congestion: false
+            }
+        );
+    }
+
+    #[test]
+    fn kcp_validation() {
+        let err = parse_err(&with_transport("entry", "quic", "[tunnel.kcp]"));
+        assert!(err.contains("[tunnel.kcp]"), "{err}");
+        for (extra, expect) in [
+            ("nodelay = false", "mode = \"manual\""),
+            ("mode = \"fast3\"\nresend = 0", "mode = \"manual\""),
+            ("mode = \"turbo\"", "mode"),
+            (
+                "mode = \"manual\"\ninterval_ms = 5",
+                "tunnel.kcp.interval_ms",
+            ),
+            (
+                "mode = \"manual\"\ninterval_ms = 2000",
+                "tunnel.kcp.interval_ms",
+            ),
+            ("mode = \"manual\"\nresend = 11", "tunnel.kcp.resend"),
+            ("send_window = 8", "tunnel.kcp.send_window"),
+            ("recv_window = 64", "tunnel.kcp.recv_window"),
+            ("recv_window = 40000", "tunnel.kcp.recv_window"),
+            ("mtu = 500", "tunnel.kcp.mtu"),
+            ("mtu = 1451", "tunnel.kcp.mtu"),
+            ("fec = 1", "unknown field"),
+        ] {
+            let err = parse_err(&with_transport(
+                "entry",
+                "kcp",
+                &format!("[tunnel.kcp]\n{extra}"),
             ));
             assert!(err.contains(expect), "{extra}: {err}");
         }

@@ -191,6 +191,17 @@ impl Setup {
         }
     }
 
+    /// KCP: a stream transport over UDP. The same short keepalive as QUIC, since a KCP
+    /// peer that dies is also only noticed by its silence.
+    const fn kcp(mode: &'static str) -> Self {
+        Self {
+            transport: "kcp",
+            mux: true,
+            keepalive_secs: 5,
+            ..Self::tcp(mode)
+        }
+    }
+
     const fn no_mux(self) -> Self {
         Self { mux: false, ..self }
     }
@@ -697,6 +708,10 @@ tunnel_tests! {
     wss_direct_early: Setup::wss("direct").early_data();
     quic_reverse: Setup::quic("reverse");
     quic_direct: Setup::quic("direct");
+    kcp_reverse: Setup::kcp("reverse");
+    kcp_direct: Setup::kcp("direct");
+    kcp_reverse_no_mux: Setup::kcp("reverse").no_mux();
+    kcp_direct_no_mux_chacha: Setup::kcp("direct").no_mux().encryption("chacha20-poly1305");
 }
 
 /// A `wss` dialer that pins another certificate refuses the listener, so nothing passes.
@@ -1418,7 +1433,11 @@ struct LinkRun {
     link: Counts,
 }
 
-/// Runs the tunnel over an emulated link (UDP for `quic`, TCP otherwise): UDP pings on
+fn is_udp(setup: Setup) -> bool {
+    matches!(setup.transport, "quic" | "kcp")
+}
+
+/// Runs the tunnel over an emulated link (UDP for `quic` and `kcp`, TCP otherwise): UDP pings on
 /// the idle tunnel, then a download with pings next to it.
 async fn over_link(setup: Setup, imp: Impairment) -> LinkRun {
     const WARMUP: Duration = Duration::from_secs(3);
@@ -1427,7 +1446,7 @@ async fn over_link(setup: Setup, imp: Impairment) -> LinkRun {
     let target = download_server().await;
     let mut stats = None;
     let tunnel = start_via(setup, setup, TOKEN, TOKEN, target, |upstream| {
-        let (port, link_stats, proxy): (_, _, Proxy) = if setup.transport == "quic" {
+        let (port, link_stats, proxy): (_, _, Proxy) = if is_udp(setup) {
             let link = UdpLink::start(upstream, imp);
             (link.port, link.stats(), Box::new(link))
         } else {
@@ -1476,6 +1495,7 @@ async fn lossy_link() {
                 .congestion("bbr")
                 .stream_window(WINDOW),
         ),
+        ("kcp fast2", Setup::kcp("direct").stream_window(WINDOW)),
     ];
     let default_window = [
         ("tcpmux, default window", tcpmux),
@@ -1517,5 +1537,43 @@ async fn lossy_link() {
                 run.link.dropped
             );
         }
+    }
+}
+
+/// KCP over a link that loses 5 % of the packets each way: everything still arrives, in
+/// both modes, with and without mux.
+#[tokio::test(flavor = "multi_thread")]
+async fn kcp_transfer_survives_loss() {
+    let runs = [
+        Setup::kcp("direct"),
+        Setup::kcp("reverse"),
+        Setup::kcp("direct").no_mux(),
+    ]
+    .map(|setup| {
+        tokio::spawn(async move {
+            let target = echo_server().await;
+            let imp = Impairment {
+                delay: Duration::from_millis(5),
+                loss: 0.05,
+                ..Default::default()
+            };
+            let tunnel = start_via(setup, setup, TOKEN, TOKEN, target, |upstream| {
+                let link = UdpLink::start(upstream, imp);
+                (link.port, Some(Box::new(link)))
+            })
+            .await;
+            let payload = pattern(4 << 20);
+            let got = tokio::time::timeout(
+                Duration::from_secs(60),
+                echo_roundtrip(tunnel.user_port, &payload),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{setup:?}: transfer did not finish"))
+            .unwrap();
+            assert!(got == payload, "{setup:?}: payload corrupted");
+        })
+    });
+    for run in runs {
+        run.await.unwrap();
     }
 }

@@ -193,6 +193,73 @@ stateless reset after a restart, streams and reset codes, datagram sizes from 0 
   retransmission (typically one RTT or less, or zero with FEC) rather than TCP's. An
   unreliable path next to KCP is part of phase 6's gaming work.
 
+*Status after 4.4:* `transport = "kcp"` works in both modes, with and without mux, for
+TCP and UDP. The code is in `src/transport/kcp/` (`mod.rs`: `KcpStream` and its halves,
+the driver, listener and dialer; `protect.rs`: packet protection), with `TunnelStream::Kcp`
+beside the other stream transports. Handshake, records and kmux run on it unchanged.
+Where the result differs from the plan above, and why:
+
+- **A packet type inside the protection.** The plaintext is `type (1) | body`: KCP
+  segments, a ping, or a close. That makes the overhead 29 bytes, not 28. KCP has no
+  keep-alive and no way to end a conversation, and without those a conversation whose
+  peer is gone stays open forever.
+- **KCP runs in message mode, each message tagged:** data, FIN (end of the stream in that
+  direction, so half-close works as over TCP), or the dialer's opening message. The
+  opening message makes every conversation start with a data segment numbered 0, whoever
+  speaks first above.
+- **Starting and ending conversations.** The listener starts a conversation only for an
+  authenticated packet whose first segment is data segment 0, and only while its accept
+  queue has room. A packet for a conversation it does not know gets a close when it comes
+  from an earlier conversation: a ping, or segments whose `una` shows the dialer has heard
+  from us. So a restarted listener ends old conversations at once, as a restarted QUIC
+  endpoint does with a stateless reset. A dialer that has heard nothing yet only lost its
+  opening packet, which KCP resends; answering it with a close failed the first version
+  of the test with 20 connections, whose bursts overflowed the listener's socket buffer.
+  Both sides send a close when they are done: both FINs delivered and acked, or nobody
+  reading any more. A close that comes before the peer's FIN is a reset.
+- **Liveness as with QUIC:** a ping every `keepalive / 3`, and a peer silent for
+  `2 x keepalive` is dead. KCP's own dead-link check (20 retransmissions of one segment)
+  takes minutes with backoff.
+- **ICMP errors are ignored** (port unreachable, reported on the next receive). They come
+  from a peer that is restarting, or from anyone, since ICMP is easy to forge. A peer
+  that is really gone falls silent.
+- **ChaCha20-Poly1305 only**, no AES-GCM option. Nonces are random under one long-lived
+  key (from BLAKE3 in XOF mode, seeded by the OS, so there is no system call per
+  packet). If two nonces ever collided, ChaCha20-Poly1305 would give away that one
+  packet's authentication key; GCM would give away the key for every packet.
+- **Flow control:** writers queue at most 64 KiB for the driver, which holds at most two
+  send windows in KCP. The driver takes at most 256 KiB out of KCP ahead of the reader;
+  beyond that KCP's receive window fills and the peer slows down.
+
+Tests: unit tests for the protection (round trip, every changed byte rejected, another
+key rejected) and the conversation rules; over local sockets: echo with half-close, an
+8 MiB transfer, 20 connections on one listener, probes (random bytes, a KCP packet in
+the clear) get no answer and open nothing, a wrong key opens nothing, 1 MiB through a
+proxy that corrupts a fifth of the packets, a restarted listener closing old
+conversations, a dropped stream ending cleanly, a vanished peer timing out. E2E: rows
+`kcp_reverse`, `kcp_direct`, `kcp_reverse_no_mux`, `kcp_direct_no_mux_chacha`, and 4 MiB
+echoed intact over a link with 5 % loss each way (direct and reverse, with and without
+mux).
+
+Lossy-link benchmark (section 8, same machine and setup, stream window 4 MiB),
+`kcp fast2` next to the rows there:
+
+| Loss | Download | UDP idle p50 / p99, lost | UDP during download p50 / p99, lost | Queue drops |
+|---|---|---|---|---|
+| 0 % | 30.4 Mbit/s | 63 / 64 ms, 0 % | 81 / 251 ms, 0 % | 36,549 |
+| 1 % | 28.3 Mbit/s | 62 / 142 ms, 0 % | 89 / 285 ms, 0 % | 31,483 |
+| 5 % | 25.8 Mbit/s | 63 / 263 ms, 0 % | 127 / 348 ms, 0 % | 26,690 |
+
+KCP keeps most of its rate under loss: 14x `tcpmux` at 1 % and 32x at 5 %, without FEC
+(targets: 3x, and 5x with FEC). Its UDP flows lose nothing, since they ride the reliable
+stream, but a lost segment costs them a retransmission (p99 142-263 ms idle). The
+default window (1024 packets, about 1.4 MB) is well above this path's bandwidth-delay
+product plus queue (about 690 KB). With congestion control off (every preset), KCP
+keeps the queue overflowing: about 30,000 drops in 10 s. That costs it the clean-link
+rate (30 against 48 Mbit/s) and the p99 of datagrams during a download. A smaller default
+window, or `no_congestion = false`, are for 4.6 to measure; FEC (4.5) does not help
+with drops that KCP causes itself.
+
 ## 5. FEC (KCP)
 
 - Reed-Solomon over groups of `fec_data` consecutive KCP packets plus `fec_parity`
@@ -244,6 +311,7 @@ src/session.rs            Session / SessionStream enums, generic pool and mainta
 src/transport/quic.rs     endpoint setup, token-derived mutual TLS, QuicSession
 src/transport/kcp/mod.rs  KcpStream (TunnelStream variant), listener / dialer, driver
 src/transport/kcp/protect.rs   packet protection
+src/transport/kcp/tests.rs     KCP over local sockets
 src/transport/kcp/fec.rs  Reed-Solomon groups
 tests/link/mod.rs         UDP / TCP link emulators: loss, delay, jitter, reordering, rate
 ```
@@ -341,7 +409,7 @@ retransmits instead and pays in p99.) What the baseline says, for 4.4-4.6:
 | **4.1** Session layer (done) | `Session` / `SessionStream` over kmux; pool, `maintain`, entry, exit and UDP code use it. | No behaviour change; every existing test passes unchanged. |
 | **4.2** QUIC (done) | quinn endpoints in both modes, token-derived mutual TLS, streams and datagrams (stream fallback for large packets), congestion choice, keep-alive, 0-RTT, config and validation. | E2E matrix rows for `quic` (reverse / direct), TCP and UDP scenarios pass; wrong token fails the TLS handshake; a packet above the datagram limit still arrives; the TLS identity tests (wrong key rejected both ways). |
 | **4.3** Lossy link harness (done) | UDP / TCP link emulator in tests; baseline numbers for `tcpmux` vs `quic`. | Emulator unit tests (loss rate, delay within bounds); benchmark prints the matrix. |
-| **4.4** KCP | Packet protection, KCP driver, listener / dialer, settings and presets. | E2E rows for `kcp` (reverse / direct, mux on / off); probes get no answer; tampered packets are dropped; transfer integrity under 5 % loss. |
+| **4.4** KCP (done) | Packet protection, KCP driver, listener / dialer, settings and presets. | E2E rows for `kcp` (reverse / direct, mux on / off); probes get no answer; tampered packets are dropped; transfer integrity under 5 % loss. |
 | **4.5** FEC | Reed-Solomon groups, early group close, recovery. | Unit tests: any `data` of `data + parity` rebuild the group; delay bound; E2E under loss with fewer retransmissions than without FEC. |
 | **4.6** Release | Lossy-link benchmark table, defaults decided from it (QUIC congestion, KCP mode), sample configs, README / README_FA, CHANGELOG, version `0.4.0`. | Numbers in the README; release tagged. |
 

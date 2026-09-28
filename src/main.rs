@@ -158,6 +158,22 @@ fn print_summary(config: &Config) {
             quic.alpn
         );
     }
+    if config.tunnel.transport == TransportKind::Kcp {
+        let kcp = config.tunnel.kcp.clone().unwrap_or_default();
+        let t = kcp.timing();
+        println!(
+            "  kcp       : mode={} (nodelay={} interval={}ms resend={} no_congestion={}) \
+             window={}/{} mtu={}, packets sealed with the token",
+            kcp.mode.name(),
+            t.nodelay,
+            t.interval_ms,
+            t.resend,
+            t.no_congestion,
+            kcp.send_window,
+            kcp.recv_window,
+            kcp.mtu
+        );
+    }
     if config.tunnel.transport == TransportKind::Wss {
         let tls = config.tunnel.tls.clone().unwrap_or_default();
         if let Some(cert) = &tls.cert {

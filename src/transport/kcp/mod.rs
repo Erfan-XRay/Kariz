@@ -1,0 +1,886 @@
+//! `transport = "kcp"`: KCP, an ARQ protocol over UDP that trades bandwidth for latency,
+//! as a byte stream under the tunnel's handshake, records and mux (docs/PHASE4.md,
+//! section 4).
+//!
+//! ```text
+//!  handshake / records / kmux      unchanged, over a KcpStream
+//!  KcpStream                       reader and writer halves, fed by a driver task
+//!  KCP (message mode)              one driver per connection: `kcp` crate, our timers
+//!  packet protection               every UDP packet sealed with a key from the token
+//!  UDP socket                      the dialer's own, or the listener's shared one
+//! ```
+//!
+//! Each UDP packet carries one of three things (the first plaintext byte): KCP segments,
+//! a ping, or a close. KCP runs in message mode so a message can say what it is: data, the
+//! end of the stream in that direction (FIN), or the dialer's opening message, which makes
+//! sure every conversation starts with a data segment numbered 0. The listener starts a
+//! conversation only for such a packet; any other packet for a conversation it does not
+//! know (after a restart, say) is answered with a close, so the dialer finds out at once.
+//! Packets that were not sealed with the token get no answer at all.
+
+pub mod protect;
+
+use std::collections::{HashMap, VecDeque};
+use std::fmt;
+use std::io::{self, Write};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+use std::time::Duration;
+
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use kcp::Kcp;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, Notify};
+use tokio::task::JoinHandle;
+use tokio::time::{sleep_until, Instant};
+use tracing::debug;
+
+use crate::config::{KcpConfig, KcpTiming, Tuning, TunnelConfig};
+use crate::crypto::handshake::Key;
+use crate::crypto::Psk;
+use protect::{Nonces, Protection};
+
+const KEY_CONTEXT: &str = "kariz 2026-10 kcp packets v1";
+
+/// Packet types, the first byte of a packet's plaintext.
+const PACKET_DATA: u8 = 0;
+/// Keep-alive: `conv (4)`.
+const PACKET_PING: u8 = 1;
+/// The conversation is over: `conv (4)`.
+const PACKET_CLOSE: u8 = 2;
+
+/// Message tags, the first byte of every KCP message.
+const MSG_DATA: u8 = 0;
+const MSG_FIN: u8 = 1;
+const MSG_OPEN: u8 = 2;
+
+/// KCP segment header: conv (4) cmd (1) frg (1) wnd (2) ts (4) sn (4) una (4) len (4).
+const KCP_HEADER: usize = 24;
+const KCP_CMD_PUSH: u8 = 81;
+
+/// Largest KCP message: a tag and up to this much data less one byte.
+const MAX_MESSAGE: usize = 16 * 1024;
+/// Data a writer may queue for the driver before it has to wait.
+const WRITE_QUEUE: usize = 64 * 1024;
+/// Data the driver takes out of KCP ahead of the reader. Beyond it KCP's receive window
+/// fills up, which slows the peer down.
+const READ_QUEUE: usize = 256 * 1024;
+/// Packets waiting for a listener-side connection's driver; more are dropped, like
+/// packets on a congested link.
+const CONN_QUEUE: usize = 1024;
+/// New conversations waiting to be accepted; more are dropped (the dialer retries).
+const ACCEPT_QUEUE: usize = 128;
+const MAX_CONVERSATIONS: usize = 4096;
+
+/// What listeners and dialers need from `[tunnel]`: `[tunnel.kcp]` and the packet key.
+#[derive(Clone, Default)]
+pub struct KcpParams {
+    pub config: KcpConfig,
+    key: Key,
+}
+
+impl fmt::Debug for KcpParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KcpParams")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl KcpParams {
+    pub fn new(tunnel: &TunnelConfig) -> Self {
+        Self {
+            config: tunnel.kcp.clone().unwrap_or_default(),
+            key: Psk::new(&tunnel.token).subkey(KEY_CONTEXT),
+        }
+    }
+}
+
+/// Per-connection settings.
+#[derive(Clone)]
+struct ConnSettings {
+    timing: KcpTiming,
+    send_window: u16,
+    recv_window: u16,
+    mtu: usize,
+    /// A ping goes out every third of it; a peer silent for twice as long is dead.
+    keepalive: Duration,
+    socket_buffer: usize,
+    protection: Arc<Protection>,
+}
+
+impl ConnSettings {
+    fn new(params: &KcpParams, tuning: &Tuning) -> Self {
+        Self {
+            timing: params.config.timing(),
+            send_window: params.config.send_window,
+            recv_window: params.config.recv_window,
+            mtu: params.config.mtu,
+            keepalive: tuning.keepalive,
+            socket_buffer: tuning.udp.socket_buffer,
+            protection: Arc::new(Protection::new(&params.key)),
+        }
+    }
+}
+
+fn udp_socket(addr: SocketAddr, buffer: usize) -> io::Result<UdpSocket> {
+    let socket = std::net::UdpSocket::bind(addr)?;
+    let sock = socket2::SockRef::from(&socket);
+    if let Err(e) = sock
+        .set_recv_buffer_size(buffer)
+        .and_then(|_| sock.set_send_buffer_size(buffer))
+    {
+        debug!(error = %e, "could not set KCP socket buffers");
+    }
+    socket.set_nonblocking(true)?;
+    UdpSocket::from_std(socket)
+}
+
+/// Seals packets and sends them without waiting: a full socket buffer drops the packet,
+/// as a congested link would, and KCP sends it again.
+struct Output {
+    socket: Arc<UdpSocket>,
+    /// `None`: the socket is connected.
+    peer: Option<SocketAddr>,
+    protection: Arc<Protection>,
+    nonces: Nonces,
+    plain: Vec<u8>,
+    sealed: Vec<u8>,
+}
+
+impl Output {
+    fn new(
+        socket: Arc<UdpSocket>,
+        peer: Option<SocketAddr>,
+        protection: Arc<Protection>,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            socket,
+            peer,
+            protection,
+            nonces: Nonces::new()?,
+            plain: Vec::with_capacity(1500),
+            sealed: Vec::with_capacity(1500),
+        })
+    }
+
+    fn send(&mut self, kind: u8, body: &[u8]) {
+        self.plain.clear();
+        self.plain.push(kind);
+        self.plain.extend_from_slice(body);
+        self.protection
+            .seal(&mut self.nonces, &self.plain, &mut self.sealed);
+        let _ = match self.peer {
+            Some(peer) => self.socket.try_send_to(&self.sealed, peer),
+            None => self.socket.try_send(&self.sealed),
+        };
+    }
+
+    fn control(&mut self, kind: u8, conv: u32) {
+        self.send(kind, &conv.to_le_bytes());
+    }
+}
+
+/// Where KCP's packets go.
+impl Write for Output {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.send(PACKET_DATA, data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The conversation a packet's plaintext belongs to (every type starts with it).
+fn conv_of(plain: &[u8]) -> Option<u32> {
+    plain
+        .get(1..5)
+        .map(|c| u32::from_le_bytes(c.try_into().expect("4 bytes")))
+}
+
+/// Whether a packet for a conversation the listener does not know comes from one it had
+/// before (it was restarted, or ended the conversation): such a dialer gets a close. A
+/// dialer that has received nothing yet (`una` 0 in its segments) may only have lost its
+/// opening packet, which KCP will resend, so it gets no answer.
+fn from_earlier_conversation(plain: &[u8]) -> bool {
+    match plain[0] {
+        PACKET_PING => true,
+        PACKET_DATA => plain.get(1 + 16..1 + 20).is_some_and(|una| una != [0; 4]),
+        _ => false,
+    }
+}
+
+/// A packet that may start a conversation: KCP data whose first segment is the first
+/// data segment (the dialer's opening message).
+fn opens_conversation(plain: &[u8]) -> bool {
+    let Some(segment) = plain.get(1..1 + KCP_HEADER) else {
+        return false;
+    };
+    plain[0] == PACKET_DATA && segment[4] == KCP_CMD_PUSH && segment[12..16] == [0; 4]
+}
+
+/// State shared by a connection's halves and its driver.
+#[derive(Default)]
+struct State {
+    /// Messages written and not yet handed to KCP.
+    outgoing: VecDeque<Bytes>,
+    outgoing_bytes: usize,
+    write_waker: Option<Waker>,
+    /// The writer was shut down or dropped: a FIN follows the queued data.
+    shutdown: bool,
+    reader_gone: bool,
+    incoming: VecDeque<Bytes>,
+    incoming_bytes: usize,
+    read_waker: Option<Waker>,
+    /// The peer's FIN came: reads return end of stream once `incoming` is empty.
+    eof: bool,
+    /// The driver has stopped; with `error`, the connection failed.
+    ended: bool,
+    error: Option<io::ErrorKind>,
+}
+
+struct Link {
+    state: Mutex<State>,
+    wake_driver: Notify,
+}
+
+impl Link {
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A KCP connection as a byte stream.
+pub struct KcpStream {
+    reader: KcpReader,
+    writer: KcpWriter,
+}
+
+pub struct KcpReader {
+    link: Arc<Link>,
+}
+
+pub struct KcpWriter {
+    link: Arc<Link>,
+}
+
+impl KcpStream {
+    pub fn into_split(self) -> (KcpReader, KcpWriter) {
+        (self.reader, self.writer)
+    }
+
+    /// True while the connection is open and nothing has arrived (see
+    /// `TunnelStream::is_alive`).
+    pub fn is_alive(&self) -> bool {
+        let st = self.reader.link.lock();
+        !st.ended && st.incoming.is_empty() && !st.eof
+    }
+}
+
+impl AsyncRead for KcpStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().reader).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for KcpStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().writer).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().writer).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().writer).poll_shutdown(cx)
+    }
+}
+
+impl AsyncRead for KcpReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let mut st = self.link.lock();
+        if st.incoming.is_empty() {
+            if st.eof || (st.ended && st.error.is_none()) {
+                return Poll::Ready(Ok(()));
+            }
+            if let Some(kind) = st.error {
+                return Poll::Ready(Err(kind.into()));
+            }
+            st.read_waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        let was_full = st.incoming_bytes >= READ_QUEUE;
+        while buf.remaining() > 0 {
+            let Some(front) = st.incoming.front_mut() else {
+                break;
+            };
+            let n = front.len().min(buf.remaining());
+            buf.put_slice(&front[..n]);
+            front.advance(n);
+            if front.is_empty() {
+                st.incoming.pop_front();
+            }
+            st.incoming_bytes -= n;
+        }
+        let resume = was_full && st.incoming_bytes < READ_QUEUE;
+        drop(st);
+        if resume {
+            self.link.wake_driver.notify_one();
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for KcpWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let mut st = self.link.lock();
+        if let Some(kind) = st.error {
+            return Poll::Ready(Err(kind.into()));
+        }
+        if st.ended || st.shutdown {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        if st.outgoing_bytes >= WRITE_QUEUE {
+            st.write_waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        let n = buf.len().min(MAX_MESSAGE - 1);
+        let mut message = BytesMut::with_capacity(n + 1);
+        message.put_u8(MSG_DATA);
+        message.put_slice(&buf[..n]);
+        st.outgoing_bytes += message.len();
+        st.outgoing.push_back(message.freeze());
+        drop(st);
+        self.link.wake_driver.notify_one();
+        Poll::Ready(Ok(n))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.link.lock().error {
+            Some(kind) => Poll::Ready(Err(kind.into())),
+            None => Poll::Ready(Ok(())),
+        }
+    }
+
+    /// Queues the FIN behind the data written so far, like TCP.
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.link.lock().shutdown = true;
+        self.link.wake_driver.notify_one();
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Dropping the writer ends the stream in that direction, as dropping a TCP write half
+/// does.
+impl Drop for KcpWriter {
+    fn drop(&mut self) {
+        self.link.lock().shutdown = true;
+        self.link.wake_driver.notify_one();
+    }
+}
+
+impl Drop for KcpReader {
+    fn drop(&mut self) {
+        let mut st = self.link.lock();
+        st.reader_gone = true;
+        st.incoming.clear();
+        st.incoming_bytes = 0;
+        drop(st);
+        self.link.wake_driver.notify_one();
+    }
+}
+
+/// Where a driver's packets come from.
+enum Inbound {
+    /// The listener's demultiplexer, already opened.
+    Listener(mpsc::Receiver<Bytes>),
+    /// The dialer's own socket.
+    Dialer {
+        socket: Arc<UdpSocket>,
+        protection: Arc<Protection>,
+        buf: Vec<u8>,
+    },
+}
+
+impl Inbound {
+    /// The next packet's plaintext for conversation `conv`.
+    async fn next(&mut self, conv: u32) -> io::Result<Bytes> {
+        match self {
+            Self::Listener(rx) => rx
+                .recv()
+                .await
+                .ok_or_else(|| io::Error::new(io::ErrorKind::ConnectionAborted, "listener closed")),
+            Self::Dialer {
+                socket,
+                protection,
+                buf,
+            } => loop {
+                let n = match socket.recv(buf).await {
+                    Ok(n) => n,
+                    Err(e) if is_icmp_error(&e) => continue,
+                    Err(e) => return Err(e),
+                };
+                let Some(plain) = protection.open(&mut buf[..n]) else {
+                    continue;
+                };
+                if conv_of(plain) == Some(conv) {
+                    return Ok(Bytes::copy_from_slice(plain));
+                }
+            },
+        }
+    }
+}
+
+/// An ICMP error (port unreachable) for an earlier send, which the OS reports on a later
+/// receive. Ignored: it may come from a peer that is restarting, or from anyone at all
+/// (ICMP is easy to forge); a peer that is really gone falls silent.
+fn is_icmp_error(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionRefused
+    )
+}
+
+fn kcp_error(e: kcp::Error) -> io::Error {
+    io::Error::other(e)
+}
+
+/// Runs one connection: moves data between the stream halves and KCP, feeds KCP the
+/// packets and the clock, sends pings and ends the connection.
+struct Driver {
+    kcp: Kcp<Output>,
+    conv: u32,
+    link: Arc<Link>,
+    control: Output,
+    inbound: Inbound,
+    keepalive: Duration,
+    start: Instant,
+    last_heard: Instant,
+    last_ping: Instant,
+    fin_sent: bool,
+    /// Segments KCP may hold (queued and in flight) before writers wait.
+    max_queued: usize,
+    /// Listener side: tell the demultiplexer when the conversation is over.
+    on_exit: Option<(mpsc::UnboundedSender<ConnKey>, ConnKey)>,
+}
+
+type ConnKey = (SocketAddr, u32);
+
+impl Driver {
+    fn start(
+        conv: u32,
+        socket: Arc<UdpSocket>,
+        peer: Option<SocketAddr>,
+        inbound: Inbound,
+        settings: &ConnSettings,
+        on_exit: Option<(mpsc::UnboundedSender<ConnKey>, ConnKey)>,
+    ) -> io::Result<(KcpStream, Self)> {
+        let protection = settings.protection.clone();
+        let output = Output::new(socket.clone(), peer, protection.clone())?;
+        let mut kcp = Kcp::new(conv, output);
+        let t = settings.timing;
+        kcp.set_nodelay(
+            t.nodelay,
+            t.interval_ms as i32,
+            t.resend as i32,
+            t.no_congestion,
+        );
+        kcp.set_wndsize(settings.send_window, settings.recv_window);
+        kcp.set_mtu(settings.mtu).map_err(kcp_error)?;
+        let link = Arc::new(Link {
+            state: Mutex::new(State::default()),
+            wake_driver: Notify::new(),
+        });
+        let stream = KcpStream {
+            reader: KcpReader { link: link.clone() },
+            writer: KcpWriter { link: link.clone() },
+        };
+        let now = Instant::now();
+        let driver = Self {
+            kcp,
+            conv,
+            link,
+            control: Output::new(socket, peer, protection)?,
+            inbound,
+            keepalive: settings.keepalive,
+            start: now,
+            last_heard: now,
+            last_ping: now,
+            fin_sent: false,
+            max_queued: settings.send_window as usize * 2,
+            on_exit,
+        };
+        Ok((stream, driver))
+    }
+
+    fn ms(&self, at: Instant) -> u32 {
+        (at - self.start).as_millis() as u32
+    }
+
+    async fn run(mut self, dialer: bool) {
+        let result = self.drive(dialer).await;
+        if let Err(e) = &result {
+            debug!(conv = self.conv, error = %e, "kcp connection ended");
+        }
+        let mut st = self.link.lock();
+        st.ended = true;
+        if let Err(e) = result {
+            st.error = Some(e.kind());
+        }
+        let wakers = [st.read_waker.take(), st.write_waker.take()];
+        drop(st);
+        wakers.into_iter().flatten().for_each(Waker::wake);
+        if let Some((tx, key)) = self.on_exit.take() {
+            let _ = tx.send(key);
+        }
+    }
+
+    async fn drive(&mut self, dialer: bool) -> io::Result<()> {
+        let ping_every = self.keepalive / 3;
+        let silent_limit = self.keepalive * 2;
+        self.kcp
+            .update(self.ms(Instant::now()))
+            .map_err(kcp_error)?;
+        if dialer {
+            // Numbered 0, so the listener knows the conversation is new.
+            self.kcp.send(&[MSG_OPEN]).map_err(kcp_error)?;
+            self.kcp.flush().map_err(kcp_error)?;
+        }
+        loop {
+            let now = Instant::now();
+            self.kcp.update(self.ms(now)).map_err(kcp_error)?;
+            self.pump_send()?;
+            self.pump_recv(false)?;
+            if now - self.last_heard >= silent_limit {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "kcp peer went silent",
+                ));
+            }
+            if self.kcp.is_dead_link() {
+                self.control.control(PACKET_CLOSE, self.conv);
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "kcp peer stopped acking",
+                ));
+            }
+            if now - self.last_ping >= ping_every {
+                self.control.control(PACKET_PING, self.conv);
+                self.last_ping = now;
+            }
+            if self.finished() {
+                // Ack what came last, then let the peer go.
+                self.kcp.flush_ack().map_err(kcp_error)?;
+                self.control.control(PACKET_CLOSE, self.conv);
+                return Ok(());
+            }
+            let update = now + Duration::from_millis(self.kcp.check(self.ms(now)).into());
+            let wake = update
+                .min(self.last_ping + ping_every)
+                .min(self.last_heard + silent_limit);
+            tokio::select! {
+                packet = self.inbound.next(self.conv) => {
+                    if self.on_packet(&packet?)? {
+                        return Ok(());
+                    }
+                }
+                _ = self.link.wake_driver.notified() => {}
+                _ = sleep_until(wake) => {}
+            }
+        }
+    }
+
+    /// Returns true when the peer closed the conversation cleanly.
+    fn on_packet(&mut self, plain: &[u8]) -> io::Result<bool> {
+        self.last_heard = Instant::now();
+        match plain[0] {
+            PACKET_DATA => {
+                // A malformed packet from a token holder is its problem; KCP skips it.
+                let _ = self.kcp.input(&plain[1..]);
+            }
+            PACKET_CLOSE => {
+                // No more packets: deliver what KCP holds, whatever the reader's pace.
+                self.pump_recv(true)?;
+                if self.link.lock().eof {
+                    return Ok(true);
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    "kcp peer closed the connection",
+                ));
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    /// Moves written messages into KCP while it has room, then the FIN.
+    fn pump_send(&mut self) -> io::Result<()> {
+        let mut sent = false;
+        let mut st = self.link.lock();
+        while self.kcp.wait_snd() < self.max_queued {
+            let Some(message) = st.outgoing.pop_front() else {
+                break;
+            };
+            st.outgoing_bytes -= message.len();
+            self.kcp.send(&message).map_err(kcp_error)?;
+            sent = true;
+        }
+        if st.outgoing.is_empty()
+            && st.shutdown
+            && !self.fin_sent
+            && self.kcp.wait_snd() < self.max_queued
+        {
+            self.kcp.send(&[MSG_FIN]).map_err(kcp_error)?;
+            self.fin_sent = true;
+            sent = true;
+        }
+        let waker = (st.outgoing_bytes < WRITE_QUEUE)
+            .then(|| st.write_waker.take())
+            .flatten();
+        drop(st);
+        if let Some(w) = waker {
+            w.wake();
+        }
+        if sent {
+            // Send now rather than at the next interval.
+            self.kcp.flush().map_err(kcp_error)?;
+        }
+        Ok(())
+    }
+
+    /// Moves complete messages out of KCP while the reader keeps up (or all of them).
+    fn pump_recv(&mut self, all: bool) -> io::Result<()> {
+        let mut st = self.link.lock();
+        let mut wake = false;
+        loop {
+            if !all && !st.reader_gone && st.incoming_bytes >= READ_QUEUE {
+                break;
+            }
+            let Ok(size) = self.kcp.peeksize() else {
+                break;
+            };
+            let mut message = BytesMut::zeroed(size);
+            self.kcp.recv(&mut message).map_err(kcp_error)?;
+            match message.first() {
+                Some(&MSG_DATA) if size > 1 && !st.reader_gone => {
+                    let data = message.freeze().slice(1..);
+                    st.incoming_bytes += data.len();
+                    st.incoming.push_back(data);
+                    wake = true;
+                }
+                Some(&MSG_DATA | &MSG_OPEN) => {}
+                Some(&MSG_FIN) => {
+                    st.eof = true;
+                    wake = true;
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unknown kcp message",
+                    ))
+                }
+            }
+        }
+        let waker = wake.then(|| st.read_waker.take()).flatten();
+        drop(st);
+        if let Some(w) = waker {
+            w.wake();
+        }
+        Ok(())
+    }
+
+    /// Both directions are done: our FIN is acked, and the peer's came (or nobody reads).
+    fn finished(&self) -> bool {
+        if !self.fin_sent || self.kcp.wait_snd() > 0 {
+            return false;
+        }
+        let st = self.link.lock();
+        st.eof || st.reader_gone
+    }
+}
+
+/// Dials a new KCP connection each time, from a fresh socket (a random source port).
+pub struct KcpDialer {
+    remote: String,
+    settings: ConnSettings,
+}
+
+impl KcpDialer {
+    pub fn new(remote: &str, params: &KcpParams, tuning: &Tuning) -> Self {
+        Self {
+            remote: remote.to_string(),
+            settings: ConnSettings::new(params, tuning),
+        }
+    }
+
+    pub async fn dial(&self) -> io::Result<KcpStream> {
+        let peer = tokio::net::lookup_host(&self.remote)
+            .await?
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "remote did not resolve"))?;
+        let local = match peer {
+            SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+            SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        };
+        let socket = udp_socket(local, self.settings.socket_buffer)?;
+        socket.connect(peer).await?;
+        let socket = Arc::new(socket);
+        let conv = Nonces::new()?.next_u32();
+        let inbound = Inbound::Dialer {
+            socket: socket.clone(),
+            protection: self.settings.protection.clone(),
+            buf: vec![0u8; 65_536],
+        };
+        let (stream, driver) = Driver::start(conv, socket, None, inbound, &self.settings, None)?;
+        tokio::spawn(driver.run(true));
+        Ok(stream)
+    }
+}
+
+/// One UDP socket for every dialer: packets are sorted into conversations by peer
+/// address and conversation id.
+pub struct KcpListener {
+    local: SocketAddr,
+    accepted: tokio::sync::Mutex<mpsc::Receiver<(KcpStream, SocketAddr)>>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for KcpListener {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl KcpListener {
+    pub async fn bind(addr: &str, params: &KcpParams, tuning: &Tuning) -> io::Result<Self> {
+        let addr = tokio::net::lookup_host(addr).await?.next().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "listen address did not resolve")
+        })?;
+        let settings = ConnSettings::new(params, tuning);
+        let socket = Arc::new(udp_socket(addr, settings.socket_buffer)?);
+        let local = socket.local_addr()?;
+        let (tx, rx) = mpsc::channel(ACCEPT_QUEUE);
+        let task = tokio::spawn(demultiplex(socket, settings, tx));
+        Ok(Self {
+            local,
+            accepted: tokio::sync::Mutex::new(rx),
+            task,
+        })
+    }
+
+    pub async fn accept(&self) -> io::Result<(KcpStream, SocketAddr)> {
+        self.accepted
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::other("kcp listener stopped"))
+    }
+
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.local)
+    }
+}
+
+async fn demultiplex(
+    socket: Arc<UdpSocket>,
+    settings: ConnSettings,
+    accepted: mpsc::Sender<(KcpStream, SocketAddr)>,
+) {
+    let mut conns: HashMap<ConnKey, mpsc::Sender<Bytes>> = HashMap::new();
+    let (ended_tx, mut ended) = mpsc::unbounded_channel::<ConnKey>();
+    let Ok(mut replies) = Output::new(socket.clone(), None, settings.protection.clone()) else {
+        return;
+    };
+    let mut buf = vec![0u8; 65_536];
+    loop {
+        let (n, peer) = tokio::select! {
+            received = socket.recv_from(&mut buf) => match received {
+                Ok(r) => r,
+                Err(e) if is_icmp_error(&e) => continue,
+                Err(e) => {
+                    debug!(error = %e, "kcp listener socket failed");
+                    return;
+                }
+            },
+            Some(key) = ended.recv() => {
+                conns.remove(&key);
+                continue;
+            }
+        };
+        let Some(plain) = settings.protection.open(&mut buf[..n]) else {
+            // Not made with the token: no answer, as from a closed port.
+            continue;
+        };
+        let Some(conv) = conv_of(plain) else {
+            continue;
+        };
+        let key = (peer, conv);
+        if let Some(tx) = conns.get(&key) {
+            match tx.try_send(Bytes::copy_from_slice(plain)) {
+                Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => continue,
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    conns.remove(&key);
+                }
+            }
+        }
+        if !opens_conversation(plain) {
+            if from_earlier_conversation(plain) {
+                replies.peer = Some(peer);
+                replies.control(PACKET_CLOSE, conv);
+            }
+            continue;
+        }
+        if conns.len() >= MAX_CONVERSATIONS {
+            continue;
+        }
+        let Ok(permit) = accepted.try_reserve() else {
+            continue;
+        };
+        let (tx, rx) = mpsc::channel(CONN_QUEUE);
+        let started = Driver::start(
+            conv,
+            socket.clone(),
+            Some(peer),
+            Inbound::Listener(rx),
+            &settings,
+            Some((ended_tx.clone(), key)),
+        );
+        let Ok((stream, driver)) = started else {
+            continue;
+        };
+        let _ = tx.try_send(Bytes::copy_from_slice(plain));
+        conns.insert(key, tx);
+        tokio::spawn(driver.run(false));
+        permit.send((stream, peer));
+    }
+}
+
+#[cfg(test)]
+mod tests;
