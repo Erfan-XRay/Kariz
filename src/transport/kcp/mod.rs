@@ -320,6 +320,9 @@ struct ConnStats {
     resent: AtomicU64,
     /// KCP packets rebuilt from parity.
     recovered: AtomicU64,
+    /// Data segments received that filled a gap: the resends a loss really needed
+    /// (resends of segments that had arrived, or had been rebuilt, are not counted).
+    gaps_filled: AtomicU64,
 }
 
 /// A snapshot of a connection's packet counts.
@@ -329,6 +332,7 @@ pub struct KcpStats {
     pub parity_packets: u64,
     pub resent: u64,
     pub recovered: u64,
+    pub gaps_filled: u64,
 }
 
 /// The conversation a packet's plaintext belongs to (every type starts with it).
@@ -435,6 +439,7 @@ impl KcpStream {
             parity_packets: get(&stats.parity_packets),
             resent: get(&stats.resent),
             recovered: get(&stats.recovered),
+            gaps_filled: get(&stats.gaps_filled),
         }
     }
 
@@ -650,24 +655,38 @@ fn segment_sn(segment: &[u8]) -> u32 {
 struct SeenSegments {
     set: std::collections::HashSet<u32>,
     order: VecDeque<u32>,
+    /// One past the highest sequence number seen.
+    next: u32,
 }
 
 impl SeenSegments {
     /// Well above any receive window, so a rebuilt segment is never mistaken for new.
     const KEEP: usize = 1 << 16;
 
-    fn record(&mut self, packet: &[u8]) {
+    /// Records the data segments of a packet that came as it was sent, and returns how
+    /// many were new and below the highest seen: they filled a gap left by a loss.
+    fn record(&mut self, packet: &[u8]) -> u64 {
+        let mut filled = 0;
         for segment in segments(packet) {
-            if segment[4] == KCP_CMD_PUSH {
-                self.insert(segment_sn(segment));
+            if segment[4] != KCP_CMD_PUSH {
+                continue;
+            }
+            let sn = segment_sn(segment);
+            let below = self.next.wrapping_sub(sn).wrapping_sub(1) < 1 << 31;
+            if self.insert(sn) && below {
+                filled += 1;
             }
         }
+        filled
     }
 
     /// Returns true if `sn` was not seen before.
     fn insert(&mut self, sn: u32) -> bool {
         if !self.set.insert(sn) {
             return false;
+        }
+        if sn.wrapping_sub(self.next) < 1 << 31 {
+            self.next = sn.wrapping_add(1);
         }
         self.order.push_back(sn);
         if self.order.len() > Self::KEEP {
@@ -780,6 +799,7 @@ impl Driver {
             parity = stats.parity_packets.load(Ordering::Relaxed),
             resent = stats.resent.load(Ordering::Relaxed),
             recovered = stats.recovered.load(Ordering::Relaxed),
+            gaps_filled = stats.gaps_filled.load(Ordering::Relaxed),
             "kcp connection ended"
         );
         let mut st = self.link.lock();
@@ -865,12 +885,20 @@ impl Driver {
         // skip what they cannot use.
         match plain[0] {
             PACKET_DATA => {
-                self.received.record(&plain[1..]);
+                let filled = self.received.record(&plain[1..]);
+                self.link
+                    .stats
+                    .gaps_filled
+                    .fetch_add(filled, Ordering::Relaxed);
                 let _ = self.kcp.input(&plain[1..]);
             }
             PACKET_FEC_DATA => {
                 if let Some(segments) = segments_of(plain) {
-                    self.received.record(segments);
+                    let filled = self.received.record(segments);
+                    self.link
+                        .stats
+                        .gaps_filled
+                        .fetch_add(filled, Ordering::Relaxed);
                     let _ = self.kcp.input(segments);
                     let (group, index) = fec_header(plain);
                     let rebuilt = self.fec.data(group, index, &plain[FEC_DATA_HEADER..]);

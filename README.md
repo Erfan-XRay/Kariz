@@ -258,6 +258,74 @@ Memory (RSS, release build, `scripts/rss.sh`):
 1,000 idle UDP flows over `tcpmux` (`scripts/rss.sh tcpmux 1000 target/release/kariz udp`):
 +3.1 to 3.5 MiB per side.
 
+### `quic` and `kcp`
+
+Measured on GitHub Actions runners (2 vCPU AMD EPYC), a different machine from the
+tables above, so `tcpmux` from the same runs is given for comparison.
+
+| Setup | Localhost, Mbit/s each way | UDP, 100 / 1,400-byte packets per second | Idle UDP round trip added |
+|---|---|---|---|
+| `tcpmux`, AES-256-GCM | 2,960-3,420 | 69,000 / 68,000 | +66 µs |
+| `quic` | 810-950 | 72,000 / 63,000 | +74 µs |
+| `kcp` + mux, AES-256-GCM | 600-670 | 69,000 / 44,000 | +71 µs |
+| `kcp`, FEC 10 / 3 | 500 | | |
+
+QUIC and KCP run their protocol in user space, a packet at a time, so on localhost they
+reach a fraction of what TCP (with the kernel doing that work) does. Between two
+servers this only matters above several hundred Mbit/s.
+
+| Transport | Idle, per side | 100 idle user connections | 1,000 idle UDP flows |
+|---|---|---|---|
+| `quic` | 7.3-7.4 MiB | +0.9 to +1.1 MiB | +4.1 to +4.5 MiB |
+| `kcp` | 6.4-6.7 MiB | +0.8 to +1.0 MiB | +3.2 to +3.6 MiB |
+
+### Over a lossy link
+
+The tests carry a link emulator (delay, random loss, a 50 Mbit/s bottleneck with a
+50 ms queue). Its TCP side models the sender's TCP, so loss slows `tcpmux` the way it
+would on a real path. Measured on the same runner, 60 ms round trip, loss in both
+directions: a 10 s download, and a UDP flow of 100-byte packets every 20 ms, first on
+the idle tunnel, then during the download. Streams use a 4 MiB window here.
+Reproduce with
+`cargo test --release --test tunnel lossy_link -- --ignored --nocapture`.
+
+| Transport | Download, 0 % / 1 % / 5 % loss | UDP p99 on the idle tunnel, 1 % / 5 % loss |
+|---|---|---|
+| `tcpmux` | 48.1 / 2.3 / 0.9 Mbit/s | 164 / 243 ms |
+| `quic` (Cubic) | 47.9 / 2.7 / 1.0 Mbit/s | 64 / 64 ms (1.2 / 9.8 % of packets lost) |
+| `quic` (BBR) | 47.5 / 47.4 / 45.7 Mbit/s | 64 / 64 ms (same) |
+| `kcp` | 31.4 / 28.5 / 22.5 Mbit/s | 141 / 202 ms |
+| `kcp`, FEC 10 / 3 | 25.4 / 26.1 / 26.6 Mbit/s | 64 / 143 ms |
+
+- **Loss-based congestion control collapses on random loss**, TCP or QUIC alike
+  (Cubic: 2-3 Mbit/s at 1 %). `quic` with BBR and `kcp` keep their rate.
+- **UDP over `quic` never waits** for a lost packet (it is lost instead, as on the
+  path itself). Over `tcpmux` and `kcp` nothing is lost, but a loss costs a resend.
+  FEC removes most of that wait.
+- **BBR (experimental in quinn) overfills the bottleneck's queue.** During a download
+  about half of the UDP packets on the same connection were lost, so Cubic stays the
+  default. BBR is for bulk transfer over lossy paths without real-time UDP.
+- **KCP's window (1024 packets) overfills small paths too.** On this one it caused
+  about 35,000 queue drops in 10 s, and a UDP p99 of 230-440 ms during the download.
+  A window near bandwidth x RTT / 1300 packets queues far less (256 here: p99 about
+  100-200 ms), but keeps less of its rate under loss (17 Mbit/s at 1 %). KCP's own
+  congestion control (`no_congestion = false`) reached only 0.4-1.2 Mbit/s.
+- **The default stream window (256 KiB) caps one stream at 256 KiB per round trip**
+  (about 25-30 Mbit/s at 60 ms). The `throughput` profile (1 MiB) or
+  `tunnel.mux.stream_window` raise it.
+
+### Build size
+
+Static musl release binary (x86_64), with and without the optional transports (cargo
+features `quic` and `kcp`, both on by default):
+
+| Features | Size | Crates |
+|---|---|---|
+| default (`quic` + `kcp`) | 6.0 MB | 110 |
+| `kcp` only | 4.8 MB | 88 |
+| `quic` only | 5.8 MB | 106 |
+| neither | 4.5 MB | 82 |
+
 ## Security notes
 
 - The token is the only secret. Anyone who has it can use the tunnel, so generate it

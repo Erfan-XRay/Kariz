@@ -291,19 +291,21 @@ async fn transfer_with_loss(fec: Option<(usize, usize)>) -> (KcpStats, KcpStats)
     (client.stats(), server.stats())
 }
 
-/// With FEC the receiver rebuilds lost packets itself, so the sender resends fewer
-/// segments for the same transfer.
+/// With FEC the receiver rebuilds lost packets itself, so fewer resends are needed:
+/// fewer gaps in the received data are filled by a resent segment. (The sender's own
+/// resend count is no measure: it also counts resends of segments whose acks were only
+/// late, which depend on how busy the machine is.)
 #[tokio::test(flavor = "multi_thread")]
 async fn fec_saves_retransmissions() {
-    let (plain, _) = transfer_with_loss(None).await;
+    let (plain, plain_receiver) = transfer_with_loss(None).await;
     let (fec, receiver) = transfer_with_loss(Some((10, 3))).await;
-    assert_eq!((plain.parity_packets, plain.recovered), (0, 0));
-    assert!(plain.resent > 0, "{plain:?}");
+    assert_eq!((plain.parity_packets, plain_receiver.recovered), (0, 0));
+    assert!(plain_receiver.gaps_filled > 10, "{plain_receiver:?}");
     assert!(fec.parity_packets > 0, "{fec:?}");
     assert!(receiver.recovered > 0, "{receiver:?}");
     assert!(
-        fec.resent < plain.resent,
-        "with FEC {fec:?}, without {plain:?}"
+        receiver.gaps_filled * 2 < plain_receiver.gaps_filled,
+        "with FEC {receiver:?}, without {plain_receiver:?}"
     );
 }
 

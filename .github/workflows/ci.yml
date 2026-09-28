@@ -38,18 +38,3 @@ jobs:
         env:
           KARIZ_REQUIRE_NGINX: "1"
           KARIZ_NGINX: /usr/sbin/nginx
-
-  # TEMPORARY (phase 4.6): Linux numbers for the README. Removed before merging.
-  bench:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: CPU
-        run: nproc && lscpu | grep -E "Model name|^CPU\(s\)"
-      - name: Localhost throughput
-        run: cargo test -q --release --test tunnel -- --ignored --nocapture --exact throughput
-      - name: UDP
-        run: |
-          cargo test -q --release --test tunnel -- --ignored --nocapture --exact udp_throughput
-          cargo test -q --release --test tunnel -- --ignored --nocapture --exact udp_idle_latency

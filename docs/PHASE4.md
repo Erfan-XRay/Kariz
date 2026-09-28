@@ -296,11 +296,13 @@ the plan above, and why:
   send time, which inflates the peer's round-trip time. Their acks get a send time in the
   future, which KCP takes as no round-trip sample at all (kcp-go skips that sample for
   FEC packets in the same way).
-- **What FEC saves, measured:** 2 MiB one way, 5 % loss each way, 20 ms RTT, preset
-  `normal`: without FEC the sender resent 51-175 segments, with 10 / 3 it resent 0 in
-  most runs (57 in one). On the `fast` presets (minimum timeout 30 ms) KCP also resends
-  segments whose acks were merely delayed (51-192 duplicates at the receiver in the same
-  test). FEC cannot save those, so the unit test uses `normal`.
+- **What FEC saves, measured:** 2 MiB one way, 5 % loss each way, 20 ms RTT. The
+  measure is on the receiver: data segments that arrived new and filled a gap, i.e. the
+  resends a loss really needed. Without FEC 92-100, with 10 / 3 0-6. The sender's own
+  resend count is no measure: KCP also resends segments whose acks were only late (on
+  the `fast` presets, minimum timeout 30 ms), and how many depends on how busy the
+  machine is. A first version of the test compared it and failed on the 2-core CI
+  runner (444 resends with FEC against 214 without).
 
 Tests: the encoder and decoder alone (a full group sends data then parity; *every* way
 of losing up to `parity` of the `data + parity` shards rebuilds the group, and more
@@ -476,7 +478,7 @@ retransmits instead and pays in p99.) What the baseline says, for 4.4-4.6:
 | **4.3** Lossy link harness (done) | UDP / TCP link emulator in tests; baseline numbers for `tcpmux` vs `quic`. | Emulator unit tests (loss rate, delay within bounds); benchmark prints the matrix. |
 | **4.4** KCP (done) | Packet protection, KCP driver, listener / dialer, settings and presets. | E2E rows for `kcp` (reverse / direct, mux on / off); probes get no answer; tampered packets are dropped; transfer integrity under 5 % loss. |
 | **4.5** FEC (done) | Reed-Solomon groups, early group close, recovery. | Unit tests: any `data` of `data + parity` rebuild the group; delay bound; E2E under loss with fewer retransmissions than without FEC. |
-| **4.6** Release | Lossy-link benchmark table, defaults decided from it (QUIC congestion, KCP mode), sample configs, README / README_FA, CHANGELOG, version `0.4.0`. | Numbers in the README; release tagged. |
+| **4.6** Release (done; tag pending) | Lossy-link benchmark table, defaults decided from it (QUIC congestion, KCP mode), sample configs, README / README_FA, CHANGELOG, version `0.4.0`. | Numbers in the README; release tagged. |
 
 ## 10. Targets
 
@@ -489,6 +491,44 @@ On the emulated link (60 ms RTT, 50 Mbit/s):
 - No loss: `quic` within 80 % of `tcpmux` throughput on localhost.
 - Memory: an idle QUIC or KCP session under 1 MiB per side; 100 idle streams no worse
   than kmux.
+
+*Results (4.6),* on GitHub Actions runners (2 vCPU AMD EPYC); the lossy-link numbers
+match the Windows measurements of 4.3-4.5 within a few percent:
+
+| Target | Result | |
+|---|---|---|
+| 1 % loss: `quic` (BBR), `kcp` at least 3x `tcpmux` | BBR 47.4, `kcp` 28.5, `tcpmux` 2.3 Mbit/s: 21x and 12x | met |
+| 5 % loss: `kcp` with FEC at least 5x | 26.6 against 0.9 Mbit/s: 30x (without FEC 22.5: 25x) | met |
+| UDP over `quic` datagrams: p99 under 1.5x RTT at 1 % loss | 64 ms at a 60 ms RTT; `tcpmux` 164 ms | met |
+| No loss: `quic` within 80 % of `tcpmux` on localhost | 810-950 against 2,960-3,420 Mbit/s: about 30 % | **missed** |
+| Idle QUIC / KCP session under 1 MiB per side | idle process 7.3-7.4 (`quic`, 2 sessions) and 6.4-6.7 MiB (`kcp`, 4) against 6.3 MiB (`tcpmux`, 4) | met |
+| 100 idle streams no worse than kmux | +0.9 to +1.1 MiB (`quic`), +0.8 to +1.0 (`kcp`) | met |
+
+The miss: quinn and our KCP driver handle every packet in user space, and on localhost
+that, not the network, sets the rate. Links in this project's range (tens to a few
+hundred Mbit/s) are well below it. Where it matters: GSO/GRO for KCP, and profiling
+quinn's per-packet path, both left for later.
+
+Defaults, decided from the benchmark:
+
+- **QUIC: Cubic stays the default.** BBR keeps its rate under loss (21x `tcpmux` at
+  1 %), but overfills the bottleneck queue: about half the datagrams on its connection
+  were lost during a download. It stays an option for bulk transfer without real-time
+  UDP.
+- **KCP: `fast2`, window 1024, FEC off, all unchanged.** A window of 256 removes the
+  queue drops and halves the UDP p99 during a download, but keeps only 17 Mbit/s at 1 %
+  loss (against 28.5) and 12 at 5 % (22.5), because the window must also hold the
+  segments that wait for a resend. 128 is worse still (8.1 at 1 %). KCP's own congestion
+  control (`no_congestion = false`) reached 0.4-1.2 Mbit/s. The README says how to size
+  the window for a path. FEC halves the latency of sparse traffic under loss but costs
+  throughput without loss (31 to 25 Mbit/s), so it stays opt-in.
+- **Stream window: 256 KiB stays.** It caps one stream at about 30 Mbit/s at 60 ms RTT.
+  Raising it costs memory for every stream, and the `throughput` profile (1 MiB) exists
+  for this; the README says so.
+- **Cargo features** (decision 8): done as planned. The static musl binary is 6.0 MB
+  with both (110 crates), 5.8 with `quic` only, 4.8 with `kcp` only, 4.5 without either
+  (82). Without a feature, a stand-in module with value-less types replaces it, so the
+  rest of the code has no `cfg` noise, and config validation rejects the transport.
 
 ## 11. Risks
 
