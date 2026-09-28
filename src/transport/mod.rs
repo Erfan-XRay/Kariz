@@ -2,7 +2,7 @@
 //!
 //! Each transport provides a [`Listener`] and a [`Dialer`] that produce [`TunnelStream`]s.
 //! Dispatch is done with enums instead of trait objects so the hot path stays
-//! statically dispatched. New transports (udp, icmp) are added as new
+//! statically dispatched. New transports (udp) are added as new
 //! variants. `tcpmux` is the `tcp` transport with mux on top, so it has no variant;
 //! `ws` and `wss` share the WebSocket code and differ only in the TLS layer.
 

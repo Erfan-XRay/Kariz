@@ -11,7 +11,7 @@ linking servers together. It is written in Rust and built around three goals:
 
 > Status: **v0.4.0.** v0.4 works with v0.3 over `tcp`, `tcpmux`, `ws` and `wss`; `quic`
 > and `kcp` need both sides at v0.4. See [docs/ROADMAP.md](docs/ROADMAP.md) for what
-> comes next (ICMP, gaming and stealth profiles) and [CHANGELOG.md](CHANGELOG.md) for
+> comes next (gaming and stealth profiles) and [CHANGELOG.md](CHANGELOG.md) for
 > what changed.
 
 ## Features
