@@ -9,10 +9,9 @@ linking servers together. It is written in Rust and built around three goals:
 2. **DPI resistance**: encrypted traffic without fixed bytes, browser-like WebSocket, works through CDNs.
 3. **Maximum speed**: statically dispatched hot path, tuned sockets, per-use-case profiles.
 
-> Status: **v0.4.0.** v0.4 works with v0.3 over `tcp`, `tcpmux`, `ws` and `wss`; `quic`
-> and `kcp` need both sides at v0.4. See [docs/ROADMAP.md](docs/ROADMAP.md) for what
-> comes next (gaming and stealth profiles) and [CHANGELOG.md](CHANGELOG.md) for
-> what changed.
+> Status: **v0.5.0**, the gaming release. v0.5 works with v0.4 over every transport; UDP
+> rules with `duplicate` need both sides at v0.5. See [docs/ROADMAP.md](docs/ROADMAP.md)
+> for what comes next and [CHANGELOG.md](CHANGELOG.md) for what changed.
 
 ## Features
 
@@ -55,8 +54,8 @@ linking servers together. It is written in Rust and built around three goals:
   is blocked. Each client address is a flow with its own socket on the exit side.
   Packets keep their boundaries, go out ahead of bulk TCP data sharing the connection,
   and are dropped rather than queued when the tunnel cannot keep up. Inside a TCP-based
-  transport a lost segment still delays the packets behind it; over `quic` each packet
-  is a QUIC datagram and a loss delays nothing else.
+  transport a lost segment still delays the packets behind it; over `quic` and `kcp`
+  each packet is a datagram of its own and a loss delays nothing else.
 - **QUIC** (`quic`): each user connection is a QUIC stream (no head-of-line blocking
   between them). Both sides authenticate with keys derived from the token (mutual TLS
   1.3, no certificate files). Congestion control: Cubic (default), BBR or NewReno. The
@@ -64,7 +63,11 @@ linking servers together. It is written in Rust and built around three goals:
 - **KCP** (`kcp`): resends aggressively and keeps its rate under loss, with presets from
   gentle to aggressive. Every UDP packet is encrypted with a key from the token, so the
   port answers nothing else and KCP's headers are hidden. Optional Reed-Solomon FEC
-  rebuilds lost packets without a resend.
+  rebuilds lost packets without a resend. UDP flows travel beside KCP's reliable stream,
+  not inside it.
+- **Games and real-time UDP** (see [Games](#games)): the `gaming` profile (FEC on over
+  `kcp`, small buffers), packet duplication per forward rule (`duplicate = 2`), and
+  optional DSCP marks.
 - **Reverse and direct modes** for every transport, with automatic reconnects.
 
 ## Concepts
@@ -101,6 +104,7 @@ Pick a pair of sample configs, put the token in both, and adjust addresses:
 | `entry-wss-cdn.toml`, `exit-wss-cdn.toml` | `wss` through a CDN such as Cloudflare (guide: [docs/CDN.md](docs/CDN.md)) |
 | `entry-quic-direct.toml`, `exit-quic-direct.toml` | `quic`, with WireGuard over QUIC datagrams |
 | `entry-kcp-reverse.toml`, `exit-kcp-reverse.toml` | `kcp` for a lossy link (FEC in comments) |
+| `entry-gaming.toml`, `exit-gaming.toml` | A game server over `kcp` with the gaming profile and duplication |
 
 ```bash
 kariz check -c /etc/kariz/config.toml     # validate, print a summary and warnings
@@ -179,12 +183,16 @@ mode = "fast2"                  # normal | fast | fast2 | fast3 | manual (then n
 # recv_window = 1024
 # mtu = 1350                    # at most 1443 (1429 with FEC)
 # fec_data = 10                 # FEC, per sending side: parity packets per group of
-# fec_parity = 3                #   data packets; both 0 (default) = off
+# fec_parity = 3                #   data packets; both 0 = off. Default: off, 10 / 3 with
+                                #   the gaming profile
+# datagrams = true              # UDP flows beside KCP; false: inside its stream (v0.4)
 
 [[forward]]                     # entry only; as many as needed
 listen = "0.0.0.0:443"          # where users connect
 target = "127.0.0.1:443"        # dialed by the exit side
 protocol = "tcp"                # tcp | udp | tcp+udp (use mux for UDP)
+# duplicate = 2                 # UDP: send each packet 2 or 3 times, both ways (kcp, quic)
+# duplicate_gap_ms = 5          #   time between the copies (0-50)
 
 [tuning]                        # overrides of the profile values
 # nodelay = true
@@ -196,6 +204,7 @@ protocol = "tcp"                # tcp | udp | tcp+udp (use mux for UDP)
 # threads = 2                   # default: one per CPU core
 # udp_timeout_secs = 60         # a UDP flow ends after this long without packets
 # udp_max_flows = 1024          # UDP flows (client addresses) per rule
+# dscp = "ef"                   # DSCP mark (name or 0-63) on tunnel and target sockets
 
 [log]
 level = "info"                  # error | warn | info | debug | trace
@@ -210,6 +219,7 @@ level = "info"                  # error | warn | info | debug | trace
 | Mux stream window | 256 KiB | 1 MiB | 64 KiB |
 | Mux connections | 4 | 8 | 2 |
 | Mux write coalescing | on | on | off |
+| KCP FEC | off | off | 10 / 3 |
 
 ## Performance
 
@@ -294,14 +304,21 @@ Reproduce with
 | `tcpmux` | 48.1 / 2.3 / 0.9 Mbit/s | 164 / 243 ms |
 | `quic` (Cubic) | 47.9 / 2.7 / 1.0 Mbit/s | 64 / 64 ms (1.2 / 9.8 % of packets lost) |
 | `quic` (BBR) | 47.5 / 47.4 / 45.7 Mbit/s | 64 / 64 ms (same) |
-| `kcp` | 31.4 / 28.5 / 22.5 Mbit/s | 141 / 202 ms |
-| `kcp`, FEC 10 / 3 | 25.4 / 26.1 / 26.6 Mbit/s | 64 / 143 ms |
+| `kcp` | 31.4 / 28.5 / 22.5 Mbit/s | 64 / 64 ms (1.4 / 9.8 % lost)\* |
+| `kcp`, FEC 10 / 3 | 25.4 / 26.1 / 26.6 Mbit/s | 64 / 84 ms (0 / 0.6 % lost)\* |
+
+\* v0.5, where UDP travels beside KCP (v0.4: 141 / 202 and 64 / 143 ms, none lost),
+measured on the development machine; its downloads were within 5 % of v0.4's.
 
 - **Loss-based congestion control collapses on random loss**, TCP or QUIC alike
   (Cubic: 2-3 Mbit/s at 1 %). `quic` with BBR and `kcp` keep their rate.
-- **UDP over `quic` never waits** for a lost packet (it is lost instead, as on the
-  path itself). Over `tcpmux` and `kcp` nothing is lost, but a loss costs a resend.
-  FEC removes most of that wait.
+- **UDP over `quic` and `kcp` never waits** for a lost packet (it is lost instead, as on
+  the path itself; over `kcp`, FEC rebuilds most of them). Over `tcpmux` nothing is
+  lost, but a loss costs a resend.
+- **On a link kept full by a download**, UDP packets over `kcp` are now dropped at the
+  link's queue instead of waiting behind it: 5-13 % lost with this benchmark's 4 MiB
+  windows, p99 about 115 ms instead of 200-340 ms. The gaming profile does not fill the
+  link (see [Games](#games)); `[tunnel.kcp] datagrams = false` brings back waiting.
 - **BBR (experimental in quinn) overfills the bottleneck's queue.** During a download
   about half of the UDP packets on the same connection were lost, so Cubic stays the
   default. BBR is for bulk transfer over lossy paths without real-time UDP.
@@ -313,6 +330,45 @@ Reproduce with
 - **The default stream window (256 KiB) caps one stream at 256 KiB per round trip**
   (about 25-30 Mbit/s at 60 ms). The `throughput` profile (1 MiB) or
   `tunnel.mux.stream_window` raise it.
+
+### Games
+
+Game traffic over the emulated path (60 ms round trip, 50 Mbit/s): 128-byte packets at
+64 Hz, each echoed by the server, 30 s, with the `gaming` profile on both sides. Round
+trip p50 / p99 in ms and the share of packets that came back, on an idle tunnel and next
+to four downloads on the same tunnel. Development machine; reproduce with
+`cargo test --release --test tunnel game_traffic -- --ignored --nocapture`.
+
+| Loss | Transport | Idle tunnel | Next to 4 downloads | Downloads |
+|---|---|---|---|---|
+| 1 % | `tcpmux` | 62 / 169, 100 % | 395 / 734, 100 % | 4.6 Mbit/s |
+| 1 % | `kcp` as in v0.4 | 63 / 141, 100 % | 86 / 219, 100 % | 18.0 Mbit/s |
+| 1 % | `kcp` (gaming: FEC 10 / 3) | 63 / 69, 100 % | 66 / 82, 100 % | 29.2 Mbit/s |
+| 1 % | `quic` | 63 / 64, 98.2 % | 77 / 113, 97.5 % | 4.2 Mbit/s |
+| 1 % | `quic`, 2 copies | 62 / 68, 100 % | 76 / 112, 99.2 % | 4.0 Mbit/s |
+| 5 % | `tcpmux` | 77 / 242, 100 % | 1,112 / 1,616, 100 % | 1.9 Mbit/s |
+| 5 % | `kcp` as in v0.4 | 63 / 236, 100 % | 144 / 347, 100 % | 11.5 Mbit/s |
+| 5 % | `kcp`, FEC off | 63 / 64, 90.2 % | 63 / 83, 89.5 % | 11.3 Mbit/s |
+| 5 % | `kcp` (gaming: FEC 10 / 3) | 63 / 84, 99.0 % | 68 / 94, 99.4 % | 26.5 Mbit/s |
+| 5 % | `kcp` (gaming), 2 copies | 63 / 70, 99.5 % | 67 / 91, 100 % | 26.5 Mbit/s |
+| 5 % | `quic`, 2 copies | 63 / 78, 99.2 % | 91 / 154, 94.4 % | 1.7 Mbit/s |
+
+- **Use `kcp` with the `gaming` profile on both sides** (`entry-gaming.toml`). Game
+  packets never wait for a lost one, FEC rebuilds most losses within about 20 ms, and
+  downloads next to the game keep their speed. Its 64 KiB stream window keeps each
+  download from filling the link, so the game's p99 stays under twice the round trip.
+- **`duplicate = 2`** on the game's forward rule sends each packet twice, both ways. It
+  matters most over `quic`, which has no FEC, and costs twice that rule's traffic
+  (about 100 kbit/s for a typical game), so set it only on game or voice rules, not on
+  WireGuard.
+- **`quic` is the weaker choice for games under loss.** quinn sends datagrams under the
+  same congestion control as the streams, which collapses under random loss, and after
+  a long loss burst it holds datagrams for a few hundred milliseconds.
+- **TCP-based transports** (`tcp`, `tcpmux`, `ws`, `wss`) make every packet wait for a
+  lost segment, whatever the profile.
+- **DSCP** (`[tuning] dscp = "ef"`) only helps where the network honours it: links you
+  run yourself, or a qdisc such as `fq` or `cake` on the server. On the public internet
+  the mark is usually cleared, and some networks treat marked traffic worse.
 
 ### Build size
 
@@ -336,10 +392,11 @@ features `quic` and `kcp`, both on by default):
   content from the CDN.
 - The TLS ClientHello of rustls does not look like a browser's, and a plain HTTP request
   to a `wss` port gets a TLS error rather than an nginx page. The same goes for quinn's
-  QUIC handshake. These are for the planned stealth work (phase 6).
+  QUIC handshake. Shaping these is later work (a stealth profile, not scheduled).
 - A `kcp` port answers nothing that was not sealed with the token. The key for this
   packet layer comes from the token and has no forward secrecy of its own; the
-  tunnel's handshake and encryption run inside it as over TCP.
+  tunnel's handshake and encryption run inside it as over TCP, and UDP packets beside
+  KCP are sealed with keys from the same handshake.
 
 ## Development
 
@@ -350,10 +407,12 @@ cargo test                          # nginx tests run too when nginx is installe
 cargo build --release --no-default-features   # without quic and kcp (features `quic`, `kcp`)
 cargo test --release --test tunnel throughput -- --ignored --nocapture
 cargo test --release --test tunnel lossy_link -- --ignored --nocapture   # KARIZ_BENCH_ONLY=kcp
+cargo test --release --test tunnel game_traffic -- --ignored --nocapture # about 45 min
 scripts/rss.sh tcpmux 100           # memory, after cargo build --release
 scripts/rss.sh tcpmux 1000 target/release/kariz udp   # memory per UDP flow
 KARIZ_TEST_LOG=1 cargo test --test tunnel <name>        # with the tunnel's debug logs
 ```
 
 Design documents: [docs/ROADMAP.md](docs/ROADMAP.md), [docs/PHASE2.md](docs/PHASE2.md),
-[docs/PHASE3.md](docs/PHASE3.md), [docs/PHASE4.md](docs/PHASE4.md).
+[docs/PHASE3.md](docs/PHASE3.md), [docs/PHASE4.md](docs/PHASE4.md),
+[docs/PHASE6.md](docs/PHASE6.md).

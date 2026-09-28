@@ -1,6 +1,7 @@
 # Phase 6 plan: gaming profile
 
 Target release: **v0.5.0** (phase 5 was dropped, so the version number does not skip).
+All steps are done; see the status notes in each section.
 Scope: the `gaming` profile done properly, meaning low and steady latency for UDP flows
 such as game traffic and voice. Phase 6 in the roadmap also named a `stealth` profile and
 an active-probe fallback. Those are not part of this phase.
@@ -425,7 +426,7 @@ the table says:
 | **6.3** Duplication (done) | `duplicate` / `duplicate_gap_ms` on UDP rules, both directions; dedup over KCP datagrams and QUIC datagrams (sequence numbers there). | Exactly-once delivery with copies; residual loss about the square of the link's under random loss; config validation. |
 | **6.4** DSCP (done) | `tuning.dscp` on tunnel sockets and the exit's UDP target sockets, v4 and v6. | Option read back on every socket kind; `kariz check` shows it. |
 | **6.5** Benchmark and defaults (done) | Game-traffic pattern and matrix; the gaming profile's KCP mode, window, FEC and duplication decided from it. | Table in this document; targets of section 10 checked. |
-| **6.6** Release | Sample configs (`entry-gaming.toml` / `exit-gaming.toml`), README / README_FA (gaming section, DSCP caveats), CHANGELOG, version `0.5.0`, roadmap. | Numbers in the README; release tagged. |
+| **6.6** Release (done) | Sample configs (`entry-gaming.toml` / `exit-gaming.toml`), README / README_FA (gaming section, DSCP caveats), CHANGELOG, version `0.5.0`, roadmap. | Numbers in the README; release tagged. |
 
 ## 10. Targets
 

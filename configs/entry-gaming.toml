@@ -1,0 +1,32 @@
+# Entry side (Iran), gaming profile over KCP: low, steady latency for game servers and
+# voice. Pair: exit-gaming.toml.
+#
+# UDP flows travel beside KCP and never wait for a lost packet. The gaming profile turns
+# FEC 10 / 3 on, so most lost packets are rebuilt at once instead of lost. duplicate = 2
+# sends each game packet twice, both ways, for fewer losses still, at twice the traffic of
+# that rule only. Over quic, games do worse under loss (README, "Games").
+role = "entry"
+mode = "direct"
+profile = "gaming"
+
+[tunnel]
+transport = "kcp"
+remote = "EXIT_SERVER_IP:4000"     # UDP port
+token = "CHANGE-ME-run-kariz-token"
+
+[tunnel.kcp]
+# fec_data = 0                     # the gaming profile sets FEC 10 / 3; 0 and 0 turn it off
+# fec_parity = 0
+
+[[forward]]                        # the game server, on TCP and UDP
+listen = "0.0.0.0:27015"
+target = "10.0.0.2:27015"
+protocol = "tcp+udp"
+duplicate = 2                      # each UDP packet twice, both ways
+# duplicate_gap_ms = 5             # between the copies
+
+[tuning]
+# dscp = "ef"                      # only where the network honours DSCP (off by default)
+
+[log]
+level = "info"

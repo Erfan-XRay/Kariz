@@ -32,7 +32,7 @@ supported for every transport.
 | 3 | UDP forwarding and UDP-over-stream framing; plan in [PHASE3.md](PHASE3.md) | **done (v0.3.0)** |
 | 4 | `kcp` (full settings + Reed-Solomon FEC) and `quic` (quinn; BBR/Cubic, datagrams, GSO/GRO); plan in [PHASE4.md](PHASE4.md) | **done (v0.4.0)** |
 | 5 | (`icmp` transport) | dropped |
-| 6 | Full `gaming` profile: unreliable datagram path over KCP, packet duplication, DSCP, measured defaults; plan in [PHASE6.md](PHASE6.md) | in progress (v0.5.0) |
+| 6 | Full `gaming` profile: unreliable datagram path over KCP, packet duplication, DSCP, measured defaults; plan in [PHASE6.md](PHASE6.md) | **done (v0.5.0)** |
 | 7 | Release builds (static musl for x86_64 / aarch64 / armv7, mimalloc), integration into XRayMesh as a backend | planned |
 | later | `stealth` profile (padding, timing), active-probe fallback | not scheduled |
 
