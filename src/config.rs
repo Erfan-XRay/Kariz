@@ -52,6 +52,11 @@ pub enum TransportKind {
     Ws,
     /// WebSocket over TLS.
     Wss,
+    /// QUIC: its own streams, datagrams and TLS 1.3 (see docs/PHASE4.md).
+    Quic,
+    /// KCP over UDP, every packet encrypted with a key from the token (see
+    /// docs/PHASE4.md).
+    Kcp,
 }
 
 impl TransportKind {
@@ -61,6 +66,8 @@ impl TransportKind {
             Self::Tcpmux => "tcpmux",
             Self::Ws => "ws",
             Self::Wss => "wss",
+            Self::Quic => "quic",
+            Self::Kcp => "kcp",
         }
     }
 
@@ -163,6 +170,182 @@ pub struct TunnelConfig {
     pub ws: Option<WsConfig>,
     /// Only for `wss`.
     pub tls: Option<TlsConfig>,
+    /// Only for `quic`.
+    pub quic: Option<QuicConfig>,
+    /// Only for `kcp`.
+    pub kcp: Option<KcpConfig>,
+}
+
+/// `[tunnel.kcp]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KcpConfig {
+    #[serde(default)]
+    pub mode: KcpMode,
+    /// `mode = "manual"` only; unset ones are taken from `fast2`.
+    pub nodelay: Option<bool>,
+    pub interval_ms: Option<u32>,
+    pub resend: Option<u32>,
+    pub no_congestion: Option<bool>,
+    /// In packets.
+    #[serde(default = "default_kcp_window")]
+    pub send_window: u16,
+    #[serde(default = "default_kcp_window")]
+    pub recv_window: u16,
+    /// KCP packet size (its 24-byte header included); the UDP packet adds 29 bytes of
+    /// protection, 43 with FEC.
+    #[serde(default = "default_kcp_mtu")]
+    pub mtu: usize,
+    /// Reed-Solomon FEC: parity packets per group of data packets; both 0 = off.
+    #[serde(default)]
+    pub fec_data: usize,
+    #[serde(default)]
+    pub fec_parity: usize,
+}
+
+fn default_kcp_window() -> u16 {
+    1024
+}
+
+fn default_kcp_mtu() -> usize {
+    1350
+}
+
+/// Same values as a `[tunnel.kcp]` table with nothing in it.
+impl Default for KcpConfig {
+    fn default() -> Self {
+        Self {
+            mode: KcpMode::default(),
+            nodelay: None,
+            interval_ms: None,
+            resend: None,
+            no_congestion: None,
+            send_window: default_kcp_window(),
+            recv_window: default_kcp_window(),
+            mtu: default_kcp_mtu(),
+            fec_data: 0,
+            fec_parity: 0,
+        }
+    }
+}
+
+/// KCP presets, as in kcp-go / kcptun: from gentle to aggressive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KcpMode {
+    Normal,
+    Fast,
+    #[default]
+    Fast2,
+    Fast3,
+    /// `nodelay`, `interval_ms`, `resend` and `no_congestion` set by hand.
+    Manual,
+}
+
+impl KcpMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Fast => "fast",
+            Self::Fast2 => "fast2",
+            Self::Fast3 => "fast3",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// The KCP parameters a mode stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KcpTiming {
+    /// Minimum retransmission timeout 30 ms instead of 100 ms, and gentler backoff.
+    pub nodelay: bool,
+    /// How often KCP flushes: acks and retransmissions wait up to this long.
+    pub interval_ms: u32,
+    /// Retransmit after this many acks skip a packet (0: only on timeout).
+    pub resend: u32,
+    /// Send the whole window regardless of loss.
+    pub no_congestion: bool,
+}
+
+impl KcpConfig {
+    /// `(data, parity)` packets per FEC group, or `None` when FEC is off.
+    pub fn fec(&self) -> Option<(usize, usize)> {
+        (self.fec_data > 0).then_some((self.fec_data, self.fec_parity))
+    }
+
+    pub fn timing(&self) -> KcpTiming {
+        let preset = |nodelay, interval_ms, resend, no_congestion| KcpTiming {
+            nodelay,
+            interval_ms,
+            resend,
+            no_congestion,
+        };
+        match self.mode {
+            KcpMode::Normal => preset(false, 40, 2, true),
+            KcpMode::Fast => preset(false, 30, 2, true),
+            KcpMode::Fast2 => preset(true, 20, 2, true),
+            KcpMode::Fast3 => preset(true, 10, 2, true),
+            KcpMode::Manual => {
+                let fast2 = KcpConfig::default().timing();
+                preset(
+                    self.nodelay.unwrap_or(fast2.nodelay),
+                    self.interval_ms.unwrap_or(fast2.interval_ms),
+                    self.resend.unwrap_or(fast2.resend),
+                    self.no_congestion.unwrap_or(fast2.no_congestion),
+                )
+            }
+        }
+    }
+}
+
+/// `[tunnel.quic]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuicConfig {
+    #[serde(default)]
+    pub congestion: Congestion,
+    /// Dialing side: server name in the handshake. Default: the host of `remote` when it
+    /// is a name, none when it is an IP address (as browsers do).
+    pub sni: Option<String>,
+    /// Application protocol announced in the handshake (both sides must agree).
+    #[serde(default = "default_alpn")]
+    pub alpn: String,
+}
+
+fn default_alpn() -> String {
+    "h3".into()
+}
+
+/// Same values as a `[tunnel.quic]` table with nothing in it.
+impl Default for QuicConfig {
+    fn default() -> Self {
+        Self {
+            congestion: Congestion::default(),
+            sni: None,
+            alpn: default_alpn(),
+        }
+    }
+}
+
+/// QUIC congestion controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Congestion {
+    #[default]
+    Cubic,
+    /// Copes much better with random loss; experimental in quinn.
+    Bbr,
+    NewReno,
+}
+
+impl Congestion {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cubic => "cubic",
+            Self::Bbr => "bbr",
+            Self::NewReno => "newreno",
+        }
+    }
 }
 
 /// `[tunnel.mux]`: many user connections over a few long-lived tunnel connections.
@@ -392,6 +575,13 @@ impl MuxSettings {
             Profile::Throughput => (1024 * 1024, 8),
             Profile::Gaming => (64 * 1024, 2),
         };
+        // QUIC streams do not block each other, so more connections only buy more
+        // congestion windows; two keep a spare while one reconnects.
+        let connections = if transport == TransportKind::Quic {
+            2
+        } else {
+            connections
+        };
         Self {
             enabled: transport != TransportKind::Tcp,
             connections,
@@ -425,6 +615,18 @@ impl MuxSettings {
 const MUX_CONNECTIONS: std::ops::RangeInclusive<usize> = 1..=64;
 const MUX_MAX_STREAMS: std::ops::RangeInclusive<usize> = 1..=4096;
 const MUX_STREAM_WINDOW: std::ops::RangeInclusive<usize> = 16 * 1024..=16 * 1024 * 1024;
+const KCP_INTERVAL_MS: std::ops::RangeInclusive<u32> = 10..=1000;
+const KCP_MAX_RESEND: u32 = 10;
+const KCP_SEND_WINDOW: std::ops::RangeInclusive<u16> = 16..=32768;
+/// KCP needs 128 to receive its largest messages.
+const KCP_RECV_WINDOW: std::ops::RangeInclusive<u16> = 128..=32768;
+/// The upper bound keeps the UDP packet (29 bytes of protection added) within 1472 bytes,
+/// the most a 1500-byte path carries unfragmented.
+const KCP_MTU: std::ops::RangeInclusive<usize> = 576..=1443;
+/// With FEC the largest packet is a parity shard: 43 bytes added.
+const KCP_MTU_FEC: usize = 1429;
+const KCP_FEC_DATA: std::ops::RangeInclusive<usize> = 1..=64;
+const KCP_FEC_PARITY: std::ops::RangeInclusive<usize> = 1..=32;
 const MUX_MIN_LIFETIME_SECS: u64 = 60;
 /// See [`Tuning::notsent_lowat`]. Over a throttled 20 Mbit/s link with four bulk
 /// transfers next to UDP pings (`udp_latency_under_load`), it cut the UDP round trip
@@ -502,6 +704,14 @@ impl Config {
                  enable tunnel.mux (or use tcpmux, ws, wss) for UDP",
             );
         }
+        if self
+            .tunnel
+            .quic
+            .as_ref()
+            .is_some_and(|q| q.congestion == Congestion::Bbr)
+        {
+            warnings.push("tunnel.quic.congestion = \"bbr\": quinn marks its BBR as experimental");
+        }
         if self.tunnel.tls.as_ref().is_some_and(|t| t.insecure) {
             warnings.push(
                 "tunnel.tls.insecure = true: the server certificate is not verified; \
@@ -512,6 +722,17 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        let built_without = match self.tunnel.transport {
+            TransportKind::Quic if !cfg!(feature = "quic") => Some("quic"),
+            TransportKind::Kcp if !cfg!(feature = "kcp") => Some("kcp"),
+            _ => None,
+        };
+        if let Some(feature) = built_without {
+            bail!(
+                "transport = \"{feature}\" is not in this build (built without the \
+                 `{feature}` cargo feature)"
+            );
+        }
         if self.tunnel.token.trim().len() < 16 {
             bail!("tunnel.token must be at least 16 characters (generate one with `kariz token`)");
         }
@@ -583,7 +804,113 @@ impl Config {
 
         self.validate_mux()?;
         self.validate_ws()?;
-        self.validate_tls()
+        self.validate_tls()?;
+        self.validate_quic()?;
+        self.validate_kcp()
+    }
+
+    fn validate_kcp(&self) -> Result<()> {
+        let Some(k) = &self.tunnel.kcp else {
+            return Ok(());
+        };
+        if self.tunnel.transport != TransportKind::Kcp {
+            bail!("[tunnel.kcp] is only used with transport = \"kcp\"");
+        }
+        let manual = [
+            k.nodelay.is_some(),
+            k.interval_ms.is_some(),
+            k.resend.is_some(),
+            k.no_congestion.is_some(),
+        ];
+        if k.mode != KcpMode::Manual && manual.contains(&true) {
+            bail!(
+                "tunnel.kcp.nodelay, interval_ms, resend and no_congestion need \
+                 mode = \"manual\" (mode = \"{}\" sets them)",
+                k.mode.name()
+            );
+        }
+        let timing = k.timing();
+        if !KCP_INTERVAL_MS.contains(&timing.interval_ms) {
+            bail!(
+                "tunnel.kcp.interval_ms must be between {} and {}",
+                KCP_INTERVAL_MS.start(),
+                KCP_INTERVAL_MS.end()
+            );
+        }
+        if timing.resend > KCP_MAX_RESEND {
+            bail!("tunnel.kcp.resend must be at most {KCP_MAX_RESEND}");
+        }
+        for (name, window, range) in [
+            ("send_window", k.send_window, KCP_SEND_WINDOW),
+            ("recv_window", k.recv_window, KCP_RECV_WINDOW),
+        ] {
+            if !range.contains(&window) {
+                bail!(
+                    "tunnel.kcp.{name} must be between {} and {} packets",
+                    range.start(),
+                    range.end()
+                );
+            }
+        }
+        if !KCP_MTU.contains(&k.mtu) {
+            bail!(
+                "tunnel.kcp.mtu must be between {} and {} bytes",
+                KCP_MTU.start(),
+                KCP_MTU.end()
+            );
+        }
+        match (k.fec_data, k.fec_parity) {
+            (0, 0) => {}
+            (data, parity) if KCP_FEC_DATA.contains(&data) && KCP_FEC_PARITY.contains(&parity) => {
+                if k.mtu > KCP_MTU_FEC {
+                    bail!("tunnel.kcp.mtu must be at most {KCP_MTU_FEC} bytes with FEC");
+                }
+            }
+            _ => bail!(
+                "tunnel.kcp.fec_data must be between {} and {} and fec_parity between {} and \
+                 {}, or both 0 (FEC off)",
+                KCP_FEC_DATA.start(),
+                KCP_FEC_DATA.end(),
+                KCP_FEC_PARITY.start(),
+                KCP_FEC_PARITY.end()
+            ),
+        }
+        Ok(())
+    }
+
+    fn validate_quic(&self) -> Result<()> {
+        let quic = self.tunnel.transport == TransportKind::Quic;
+        if self.tunnel.quic.is_some() && !quic {
+            bail!("[tunnel.quic] is only used with transport = \"quic\"");
+        }
+        if !quic {
+            return Ok(());
+        }
+        if self.tunnel.encryption != Encryption::Auto {
+            bail!(
+                "transport = \"quic\" always encrypts with TLS 1.3; leave tunnel.encryption \
+                 at \"auto\""
+            );
+        }
+        if !self.mux().enabled {
+            bail!("transport = \"quic\" always multiplexes; tunnel.mux cannot be disabled");
+        }
+        let Some(q) = &self.tunnel.quic else {
+            return Ok(());
+        };
+        if q.alpn.is_empty() || q.alpn.len() > 255 || !is_visible_ascii(&q.alpn) {
+            bail!("tunnel.quic.alpn must be 1 to 255 visible ASCII characters");
+        }
+        if self.is_acceptor() && q.sni.is_some() {
+            bail!("tunnel.quic.sni is only used by the dialing side");
+        }
+        if q.sni
+            .as_deref()
+            .is_some_and(|s| s.is_empty() || !is_visible_ascii(s) || s.contains('/'))
+        {
+            bail!("tunnel.quic.sni must be a host name");
+        }
+        Ok(())
     }
 
     fn validate_mux(&self) -> Result<()> {
@@ -1139,5 +1466,186 @@ mod tests {
         ));
         assert!(insecure.validate_tls().is_ok());
         assert_eq!(insecure.warnings().len(), 1);
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn quic_configs_parse() {
+        let c = Config::parse(&with_transport("entry", "quic", "")).unwrap();
+        assert!(c.mux().enabled);
+        assert_eq!(c.mux().connections, 2);
+        assert!(c.tunnel.quic.is_none());
+        assert!(c.warnings().is_empty());
+        let q = QuicConfig::default();
+        assert_eq!(
+            (q.alpn.as_str(), q.congestion, q.sni),
+            ("h3", Congestion::Cubic, None)
+        );
+
+        let text = with_transport(
+            "entry",
+            "quic",
+            "[tunnel.quic]\ncongestion = \"bbr\"\nsni = \"a.example\"\nalpn = \"hq-29\"",
+        );
+        let q = Config::parse(&text).unwrap().tunnel.quic.unwrap();
+        assert_eq!(q.congestion, Congestion::Bbr);
+        assert_eq!(q.sni.as_deref(), Some("a.example"));
+        assert_eq!(q.alpn, "hq-29");
+        let text = with_transport("entry", "quic", "[tunnel.quic]\ncongestion = \"bbr\"");
+        assert_eq!(Config::parse(&text).unwrap().warnings().len(), 1);
+        // An empty table means the defaults, as no table does.
+        let text = with_transport("exit", "quic", "[tunnel.quic]");
+        assert_eq!(
+            Config::parse(&text).unwrap().tunnel.quic.unwrap().alpn,
+            "h3"
+        );
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn quic_validation() {
+        let err = parse_err(&with_transport("entry", "tcp", "[tunnel.quic]"));
+        assert!(err.contains("[tunnel.quic]"), "{err}");
+        let err = parse_err(&with_transport("entry", "quic", "encryption = \"none\""));
+        assert!(err.contains("TLS 1.3"), "{err}");
+        let err = parse_err(&with_transport(
+            "entry",
+            "quic",
+            "[tunnel.mux]\nenabled = false",
+        ));
+        assert!(err.contains("multiplexes"), "{err}");
+        for (role, extra, expect) in [
+            ("entry", "alpn = \"\"", "tunnel.quic.alpn"),
+            ("entry", "alpn = \"a b\"", "tunnel.quic.alpn"),
+            ("entry", "sni = \"\"", "tunnel.quic.sni"),
+            ("entry", "sni = \"a.example/x\"", "tunnel.quic.sni"),
+            ("exit", "sni = \"a.example\"", "dialing side"),
+            ("entry", "congestion = \"vegas\"", "congestion"),
+        ] {
+            let err = parse_err(&with_transport(
+                role,
+                "quic",
+                &format!("[tunnel.quic]\n{extra}"),
+            ));
+            assert!(err.contains(expect), "{extra}: {err}");
+        }
+    }
+
+    #[cfg(feature = "kcp")]
+    #[test]
+    fn kcp_configs_parse() {
+        let c = Config::parse(&with_transport("entry", "kcp", "")).unwrap();
+        assert!(c.mux().enabled, "mux on by default, as for ws");
+        assert!(c.warnings().is_empty());
+        let k = KcpConfig::default();
+        assert_eq!(k.mode, KcpMode::Fast2);
+        assert_eq!((k.send_window, k.recv_window, k.mtu), (1024, 1024, 1350));
+        assert_eq!(
+            k.timing(),
+            KcpTiming {
+                nodelay: true,
+                interval_ms: 20,
+                resend: 2,
+                no_congestion: true
+            }
+        );
+
+        // Without mux, and with an explicit cipher: KCP is a stream like tcp.
+        let text = with_transport(
+            "exit",
+            "kcp",
+            "encryption = \"chacha20-poly1305\"\n[tunnel.mux]\nenabled = false",
+        );
+        assert!(!Config::parse(&text).unwrap().mux().enabled);
+
+        let text = with_transport(
+            "entry",
+            "kcp",
+            "[tunnel.kcp]\nmode = \"normal\"\nsend_window = 256\nrecv_window = 512\nmtu = 1200",
+        );
+        let k = Config::parse(&text).unwrap().tunnel.kcp.unwrap();
+        assert_eq!((k.send_window, k.recv_window, k.mtu), (256, 512, 1200));
+        assert_eq!(k.fec(), None);
+        assert_eq!(k.timing().interval_ms, 40);
+        assert!(!k.timing().nodelay);
+
+        let text = with_transport(
+            "entry",
+            "kcp",
+            "[tunnel.kcp]\nfec_data = 10\nfec_parity = 3\nmtu = 1429",
+        );
+        let k = Config::parse(&text).unwrap().tunnel.kcp.unwrap();
+        assert_eq!(k.fec(), Some((10, 3)));
+
+        // Manual: what is set, and fast2 for the rest.
+        let text = with_transport(
+            "entry",
+            "kcp",
+            "[tunnel.kcp]\nmode = \"manual\"\ninterval_ms = 15\nno_congestion = false",
+        );
+        let t = Config::parse(&text).unwrap().tunnel.kcp.unwrap().timing();
+        assert_eq!(
+            t,
+            KcpTiming {
+                nodelay: true,
+                interval_ms: 15,
+                resend: 2,
+                no_congestion: false
+            }
+        );
+    }
+
+    /// Only in builds without the transports: their configs are rejected up front.
+    #[cfg(not(all(feature = "quic", feature = "kcp")))]
+    #[test]
+    fn transports_not_built_in_are_rejected() {
+        for (transport, built) in [
+            ("quic", cfg!(feature = "quic")),
+            ("kcp", cfg!(feature = "kcp")),
+        ] {
+            if !built {
+                let err = parse_err(&with_transport("entry", transport, ""));
+                assert!(err.contains("not in this build"), "{err}");
+            }
+        }
+    }
+
+    #[cfg(feature = "kcp")]
+    #[test]
+    fn kcp_validation() {
+        let err = parse_err(&with_transport("entry", "quic", "[tunnel.kcp]"));
+        assert!(err.contains("[tunnel.kcp]"), "{err}");
+        for (extra, expect) in [
+            ("nodelay = false", "mode = \"manual\""),
+            ("mode = \"fast3\"\nresend = 0", "mode = \"manual\""),
+            ("mode = \"turbo\"", "mode"),
+            (
+                "mode = \"manual\"\ninterval_ms = 5",
+                "tunnel.kcp.interval_ms",
+            ),
+            (
+                "mode = \"manual\"\ninterval_ms = 2000",
+                "tunnel.kcp.interval_ms",
+            ),
+            ("mode = \"manual\"\nresend = 11", "tunnel.kcp.resend"),
+            ("send_window = 8", "tunnel.kcp.send_window"),
+            ("recv_window = 64", "tunnel.kcp.recv_window"),
+            ("recv_window = 40000", "tunnel.kcp.recv_window"),
+            ("mtu = 500", "tunnel.kcp.mtu"),
+            ("mtu = 1444", "tunnel.kcp.mtu"),
+            ("fec = 1", "unknown field"),
+            ("fec_data = 10", "fec_parity between"),
+            ("fec_parity = 3", "fec_parity between"),
+            ("fec_data = 65\nfec_parity = 3", "fec_parity between"),
+            ("fec_data = 10\nfec_parity = 33", "fec_parity between"),
+            ("fec_data = 10\nfec_parity = 3\nmtu = 1430", "with FEC"),
+        ] {
+            let err = parse_err(&with_transport(
+                "entry",
+                "kcp",
+                &format!("[tunnel.kcp]\n{extra}"),
+            ));
+            assert!(err.contains(expect), "{extra}: {err}");
+        }
     }
 }

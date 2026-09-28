@@ -11,11 +11,16 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
 use crate::channel::{self, Channel, Link};
-use crate::config::{Config, Mode, Tuning};
+use crate::config::{Config, Mode, TransportKind, Tuning};
 use crate::crypto::{Crypto, ReplayFilter};
-use crate::mux::{maintain, MuxSession, MuxStream, ResetReason, SessionConfig, Side};
+use crate::mux::{MuxSession, SessionConfig, Side};
 use crate::proto::{self, Open, KIND_UDP, STATUS_DIAL_FAILED, STATUS_OK};
-use crate::relay::{relay, relay_mux};
+use crate::relay::{relay, relay_stream};
+#[cfg(feature = "quic")]
+use crate::session::quic::{accept_sessions, QuicSession};
+use crate::session::{maintain, ResetReason, Session, SessionStream};
+#[cfg(feature = "quic")]
+use crate::transport::quic::{QuicDialer, QuicListener, QuicSettings};
 use crate::transport::{tcp, Dialer, Listener, Settings};
 use crate::udp;
 
@@ -38,65 +43,72 @@ pub async fn run(config: Config) -> Result<()> {
     let sessions = SessionConfig::new(&mux, &tuning);
     let mut tasks = JoinSet::new();
 
-    match config.mode {
-        Mode::Reverse if mux.enabled => {
-            let remote = config.tunnel.remote.as_deref().expect("validated");
-            info!(
-                remote,
-                connections = mux.connections,
-                "exit: reverse mode with mux, keeping sessions to the entry side"
-            );
-            let dialer = Arc::new(Dialer::new(&transport, remote, &tuning)?);
-            for _ in 0..mux.connections {
-                let (exit, dialer) = (exit.clone(), dialer.clone());
-                let connect = {
-                    let exit = exit.clone();
-                    move || {
-                        let (exit, dialer) = (exit.clone(), dialer.clone());
-                        async move { connect_once(&exit, &dialer).await }
-                    }
-                };
-                let (sessions, lifetime) = (sessions.clone(), mux.max_lifetime);
-                tasks.spawn(async move {
-                    maintain(
-                        "the entry side",
-                        connect,
-                        Side::Server,
-                        sessions,
-                        lifetime,
-                        move |s| {
+    if transport.kind == TransportKind::Quic {
+        run_quic(&config, &exit, &sessions, &mut tasks).await?;
+    } else {
+        match config.mode {
+            Mode::Reverse if mux.enabled => {
+                let remote = config.tunnel.remote.as_deref().expect("validated");
+                info!(
+                    remote,
+                    connections = mux.connections,
+                    "exit: reverse mode with mux, keeping sessions to the entry side"
+                );
+                let dialer = Arc::new(Dialer::new(&transport, remote, &tuning)?);
+                for _ in 0..mux.connections {
+                    let (exit, dialer) = (exit.clone(), dialer.clone());
+                    let connect = {
+                        let (exit, sessions) = (exit.clone(), sessions.clone());
+                        move || {
+                            let (exit, dialer, sessions) =
+                                (exit.clone(), dialer.clone(), sessions.clone());
+                            async move {
+                                let link = connect_once(&exit, &dialer).await?;
+                                Ok(Session::Kmux(MuxSession::over(
+                                    link,
+                                    Side::Server,
+                                    sessions,
+                                )))
+                            }
+                        }
+                    };
+                    let lifetime = mux.max_lifetime;
+                    tasks.spawn(async move {
+                        let on_session = move |s| {
                             tokio::spawn(run_session(exit.clone(), s));
-                        },
-                    )
-                    .await;
-                    Ok(())
-                });
+                        };
+                        maintain("the entry side", connect, lifetime, on_session).await;
+                        Ok(())
+                    });
+                }
             }
-        }
-        Mode::Reverse => {
-            let remote = config.tunnel.remote.as_deref().expect("validated");
-            info!(
-                remote,
-                pool = config.tunnel.pool,
-                "exit: reverse mode, connecting to the entry side"
-            );
-            let dialer = Arc::new(Dialer::new(&transport, remote, &tuning)?);
-            for _ in 0..config.tunnel.pool {
-                tasks.spawn(pool_worker(exit.clone(), dialer.clone()));
+            Mode::Reverse => {
+                let remote = config.tunnel.remote.as_deref().expect("validated");
+                info!(
+                    remote,
+                    pool = config.tunnel.pool,
+                    "exit: reverse mode, connecting to the entry side"
+                );
+                let dialer = Arc::new(Dialer::new(&transport, remote, &tuning)?);
+                for _ in 0..config.tunnel.pool {
+                    tasks.spawn(pool_worker(exit.clone(), dialer.clone()));
+                }
             }
-        }
-        Mode::Direct => {
-            let addr = config.tunnel.listen.as_deref().expect("validated");
-            let listener = Listener::bind(&transport, addr, &tuning)
-                .await
-                .with_context(|| format!("failed to listen for tunnel connections on {addr}"))?;
-            info!(
-                addr = %listener.local_addr()?,
-                mux = mux.enabled,
-                "exit: direct mode, waiting for the entry side"
-            );
-            let sessions = mux.enabled.then_some(sessions);
-            tasks.spawn(accept_direct(exit.clone(), listener, sessions));
+            Mode::Direct => {
+                let addr = config.tunnel.listen.as_deref().expect("validated");
+                let listener = Listener::bind(&transport, addr, &tuning)
+                    .await
+                    .with_context(|| {
+                        format!("failed to listen for tunnel connections on {addr}")
+                    })?;
+                info!(
+                    addr = %listener.local_addr()?,
+                    mux = mux.enabled,
+                    "exit: direct mode, waiting for the entry side"
+                );
+                let sessions = mux.enabled.then_some(sessions);
+                tasks.spawn(accept_direct(exit.clone(), listener, sessions));
+            }
         }
     }
 
@@ -107,15 +119,96 @@ pub async fn run(config: Config) -> Result<()> {
     }
 }
 
+/// Config validation rejects `transport = "quic"` in a build without it.
+#[cfg(not(feature = "quic"))]
+async fn run_quic(
+    _: &Config,
+    _: &Arc<Exit>,
+    _: &SessionConfig,
+    _: &mut JoinSet<Result<()>>,
+) -> Result<()> {
+    anyhow::bail!("this build has no QUIC support (the `quic` feature is off)")
+}
+
+/// QUIC, either mode: sessions with the entry side, each served by `run_session`.
+/// Reverse mode keeps `mux.connections` of them up; direct mode accepts them.
+#[cfg(feature = "quic")]
+async fn run_quic(
+    config: &Config,
+    exit: &Arc<Exit>,
+    sessions: &SessionConfig,
+    tasks: &mut JoinSet<Result<()>>,
+) -> Result<()> {
+    let (tuning, mux) = (config.tuning(), config.mux());
+    let quic_config = config.tunnel.quic.clone().unwrap_or_default();
+    let quic = QuicSettings::new(exit.crypto.psk(), &quic_config, &mux, &tuning)?;
+    let open_timeout = tuning.handshake_timeout;
+    match config.mode {
+        Mode::Reverse => {
+            let remote = config.tunnel.remote.as_deref().expect("validated");
+            let dialer = Arc::new(QuicDialer::new(remote, quic_config.sni.as_deref(), &quic)?);
+            info!(
+                remote,
+                connections = mux.connections,
+                congestion = quic_config.congestion.name(),
+                "exit: reverse mode over QUIC, keeping sessions to the entry side"
+            );
+            for _ in 0..mux.connections {
+                let (exit, dialer, sessions) = (exit.clone(), dialer.clone(), sessions.clone());
+                let connect = move || {
+                    let (dialer, sessions) = (dialer.clone(), sessions.clone());
+                    async move {
+                        let conn = dialer.connect().await?;
+                        Ok(Session::Quic(QuicSession::new(
+                            conn,
+                            &sessions,
+                            open_timeout,
+                        )))
+                    }
+                };
+                let lifetime = mux.max_lifetime;
+                tasks.spawn(async move {
+                    let on_session = move |s| {
+                        tokio::spawn(run_session(exit.clone(), s));
+                    };
+                    maintain("the entry side", connect, lifetime, on_session).await;
+                    Ok(())
+                });
+            }
+        }
+        Mode::Direct => {
+            let addr = config.tunnel.listen.as_deref().expect("validated");
+            let listener = QuicListener::bind(addr, &quic)
+                .await
+                .with_context(|| format!("failed to listen for QUIC on {addr}"))?;
+            info!(
+                addr = %listener.local_addr()?,
+                "exit: direct mode over QUIC, waiting for the entry side"
+            );
+            let exit = exit.clone();
+            let on_session = move |session: QuicSession, peer: std::net::SocketAddr| {
+                info!(%peer, "quic session from the entry side established");
+                tokio::spawn(run_session(exit.clone(), Arc::new(Session::Quic(session))));
+            };
+            let sessions = sessions.clone();
+            tasks.spawn(async move {
+                accept_sessions(listener, sessions, open_timeout, on_session).await;
+                Ok(())
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Reverse mode: keeps one idle, authenticated channel open towards the entry side.
 /// As soon as it is used, a new one is dialed.
 async fn pool_worker(exit: Arc<Exit>, dialer: Arc<Dialer>) -> Result<()> {
     let mut backoff = BACKOFF_MIN;
     loop {
-        let mut channel = match connect_once(&exit, &dialer).await {
+        let mut link = match connect_once(&exit, &dialer).await {
             Ok(link) => {
                 backoff = BACKOFF_MIN;
-                Channel::from(link)
+                link
             }
             Err(e) => {
                 if matches!(
@@ -133,10 +226,10 @@ async fn pool_worker(exit: Arc<Exit>, dialer: Arc<Dialer>) -> Result<()> {
         };
 
         // Waits as long as needed; TCP keepalive notices a dead entry side.
-        match Open::read(&mut channel).await {
+        match Open::read(&mut link).await {
             Ok(open) => {
                 let exit = exit.clone();
-                tokio::spawn(async move { serve(&exit, channel, open).await });
+                tokio::spawn(async move { serve(&exit, link, open).await });
             }
             Err(e) => debug!(error = %e, "idle tunnel connection closed"),
         }
@@ -178,12 +271,12 @@ async fn accept_direct(
             };
             if let Some(config) = sessions {
                 info!(%peer, "mux session from the entry side established");
-                let session = Arc::new(MuxSession::over(link, Side::Server, config));
-                return run_session(exit, session).await;
+                let session = MuxSession::over(link, Side::Server, config);
+                return run_session(exit, Arc::new(Session::Kmux(session))).await;
             }
-            let mut channel = Channel::from(link);
-            match timeout(hs_timeout, Open::read(&mut channel)).await {
-                Ok(Ok(open)) => serve(&exit, channel, open).await,
+            let mut link = link;
+            match timeout(hs_timeout, Open::read(&mut link)).await {
+                Ok(Ok(open)) => serve(&exit, link, open).await,
                 Ok(Err(e)) => warn!(%peer, error = %e, "bad open request"),
                 Err(_) => warn!(%peer, "open request timed out"),
             }
@@ -191,7 +284,7 @@ async fn accept_direct(
     }
 }
 
-async fn serve(exit: &Exit, mut tunnel: Channel, open: Open) {
+async fn serve(exit: &Exit, mut tunnel: Link, open: Open) {
     if open.kind == KIND_UDP {
         return serve_udp(exit, tunnel, open).await;
     }
@@ -212,7 +305,7 @@ async fn serve(exit: &Exit, mut tunnel: Channel, open: Open) {
 }
 
 /// Serves every stream the entry side opens on `session`, then lets the session drain.
-async fn run_session(exit: Arc<Exit>, session: Arc<MuxSession>) {
+async fn run_session(exit: Arc<Exit>, session: Arc<Session>) {
     while let Some((stream, syn)) = session.accept().await {
         let exit = exit.clone();
         tokio::spawn(async move { serve_stream(&exit, stream, syn).await });
@@ -220,12 +313,13 @@ async fn run_session(exit: Arc<Exit>, session: Arc<MuxSession>) {
     session.drain().await;
     debug!(
         reason = session.close_reason().unwrap_or_default(),
-        "mux session ended"
+        "{} session ended",
+        session.kind()
     );
 }
 
-/// Mux counterpart of [`serve`]: no status byte, a failed dial resets the stream.
-async fn serve_stream(exit: &Exit, stream: MuxStream, syn: Bytes) {
+/// Session counterpart of [`serve`]: no status byte, a failed dial resets the stream.
+async fn serve_stream(exit: &Exit, stream: SessionStream, syn: Bytes) {
     let open = match Open::decode(&syn) {
         Ok(open) => open,
         Err(e) => {
@@ -241,7 +335,7 @@ async fn serve_stream(exit: &Exit, stream: MuxStream, syn: Bytes) {
                 return stream.reset(ResetReason::DialFailed);
             }
         };
-        return relay_udp(exit, Channel::Mux(stream), socket, &open).await;
+        return relay_udp(exit, Channel::Stream(stream), socket, &open).await;
     }
     let mut target = match tcp::connect(&open.target, &exit.tuning).await {
         Ok(t) => t,
@@ -250,14 +344,14 @@ async fn serve_stream(exit: &Exit, stream: MuxStream, syn: Bytes) {
             return stream.reset(ResetReason::DialFailed);
         }
     };
-    if let Err(e) = relay_mux(&mut target, &stream, exit.tuning.buffer_size).await {
+    if let Err(e) = relay_stream(&mut target, &stream, exit.tuning.buffer_size).await {
         debug!(target = %open.target, error = %e, "connection ended with error");
     }
 }
 
 /// UDP counterpart of [`serve`] (a whole channel): the status byte says whether the
 /// target could be resolved, then packets flow length-prefixed.
-async fn serve_udp(exit: &Exit, mut tunnel: Channel, open: Open) {
+async fn serve_udp(exit: &Exit, mut tunnel: Link, open: Open) {
     let socket = match udp::connect(&open.target, &exit.tuning).await {
         Ok(s) => s,
         Err(e) => {
@@ -269,7 +363,7 @@ async fn serve_udp(exit: &Exit, mut tunnel: Channel, open: Open) {
     if proto::write_status(&mut tunnel, STATUS_OK).await.is_err() {
         return;
     }
-    relay_udp(exit, tunnel, socket, &open).await;
+    relay_udp(exit, Channel::Link(tunnel), socket, &open).await;
 }
 
 async fn relay_udp(exit: &Exit, tunnel: Channel, socket: tokio::net::UdpSocket, open: &Open) {

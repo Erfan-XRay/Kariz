@@ -2,10 +2,17 @@
 //!
 //! Each transport provides a [`Listener`] and a [`Dialer`] that produce [`TunnelStream`]s.
 //! Dispatch is done with enums instead of trait objects so the hot path stays
-//! statically dispatched. New transports (quic, kcp, udp, icmp) are added as new
+//! statically dispatched. New transports (udp, icmp) are added as new
 //! variants. `tcpmux` is the `tcp` transport with mux on top, so it has no variant;
 //! `ws` and `wss` share the WebSocket code and differ only in the TLS layer.
 
+#[cfg(feature = "kcp")]
+pub mod kcp;
+#[cfg(not(feature = "kcp"))]
+#[path = "kcp_disabled.rs"]
+pub mod kcp;
+#[cfg(feature = "quic")]
+pub mod quic;
 pub mod tcp;
 pub mod tls;
 pub mod ws;
@@ -35,6 +42,7 @@ pub struct Settings {
     pub kind: TransportKind,
     pub ws: Option<WsConfig>,
     pub tls: Option<TlsConfig>,
+    pub kcp: kcp::KcpParams,
 }
 
 impl Settings {
@@ -43,6 +51,7 @@ impl Settings {
             kind: tunnel.transport,
             ws: tunnel.ws.clone(),
             tls: tunnel.tls.clone(),
+            kcp: kcp::KcpParams::new(tunnel),
         }
     }
 }
@@ -55,6 +64,7 @@ pub enum Listener {
         Arc<ws::ServerConfig>,
         Option<TlsAcceptor>,
     ),
+    Kcp(kcp::KcpListener),
 }
 
 impl Listener {
@@ -76,8 +86,17 @@ impl Listener {
             }
             _ => None,
         };
+        match settings.kind {
+            TransportKind::Quic => return Err(not_a_stream_transport()),
+            TransportKind::Kcp => {
+                let listener = kcp::KcpListener::bind(addr, &settings.kcp, tuning).await?;
+                return Ok(Self::Kcp(listener));
+            }
+            _ => {}
+        }
         let tcp = tcp::TcpTransportListener::bind(addr, tuning).await?;
         match settings.kind {
+            TransportKind::Quic | TransportKind::Kcp => unreachable!("handled above"),
             TransportKind::Tcp | TransportKind::Tcpmux => Ok(Self::Tcp(tcp)),
             TransportKind::Ws | TransportKind::Wss => Ok(Self::Ws(
                 tcp,
@@ -106,12 +125,17 @@ impl Listener {
                 };
                 Ok((incoming, peer))
             }
+            Self::Kcp(l) => {
+                let (s, peer) = l.accept().await?;
+                Ok((Incoming::Kcp(s), peer))
+            }
         }
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         match self {
             Self::Tcp(l) | Self::Ws(l, ..) => l.local_addr(),
+            Self::Kcp(l) => l.local_addr(),
         }
     }
 }
@@ -125,6 +149,7 @@ pub enum Incoming {
         tls: Option<TlsAcceptor>,
         peer: SocketAddr,
     },
+    Kcp(kcp::KcpStream),
 }
 
 impl Incoming {
@@ -136,6 +161,7 @@ impl Incoming {
     pub async fn establish(self) -> io::Result<TunnelStream> {
         match self {
             Self::Tcp(s) => Ok(TunnelStream::Tcp(s)),
+            Self::Kcp(s) => Ok(TunnelStream::Kcp(s)),
             Self::Ws {
                 mut stream,
                 config,
@@ -169,6 +195,7 @@ impl Incoming {
 pub enum Dialer {
     Tcp(tcp::TcpTransportDialer),
     Ws(tcp::TcpTransportDialer, Box<WsDialer>),
+    Kcp(kcp::KcpDialer),
 }
 
 /// WebSocket part of a [`Dialer`].
@@ -182,10 +209,15 @@ pub struct WsDialer {
 
 impl Dialer {
     pub fn new(settings: &Settings, addr: &str, tuning: &Tuning) -> io::Result<Self> {
+        if settings.kind == TransportKind::Kcp {
+            return Ok(Self::Kcp(kcp::KcpDialer::new(addr, &settings.kcp, tuning)));
+        }
         let tcp = tcp::TcpTransportDialer::new(addr, tuning);
         let ws = settings.ws.as_ref();
         let (config, tls) = match settings.kind {
             TransportKind::Tcp | TransportKind::Tcpmux => return Ok(Self::Tcp(tcp)),
+            TransportKind::Quic => return Err(not_a_stream_transport()),
+            TransportKind::Kcp => unreachable!("handled above"),
             TransportKind::Ws => (ws::ClientConfig::new(ws, addr, "http", 80), None),
             TransportKind::Wss => {
                 // SNI: tls.sni, else the Host we send, else the host we dial.
@@ -220,6 +252,13 @@ impl Dialer {
                     stream.flush().await?;
                 }
                 Ok(TunnelStream::Tcp(stream))
+            }
+            Self::Kcp(d) => {
+                let mut stream = d.dial().await?;
+                if !first.is_empty() {
+                    stream.write_all(first).await?;
+                }
+                Ok(TunnelStream::Kcp(stream))
             }
             Self::Ws(d, ws) => {
                 let stream = d.dial().await?;
@@ -266,6 +305,14 @@ impl WsDialer {
     }
 }
 
+/// QUIC is not a byte stream: it has its own endpoints ([`quic`]) and sessions.
+fn not_a_stream_transport() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "quic is not a stream transport; use transport::quic",
+    )
+}
+
 /// A single tunnel connection, whatever transport carries it.
 pub enum TunnelStream {
     Tcp(TcpStream),
@@ -273,6 +320,7 @@ pub enum TunnelStream {
     /// Boxed: the TLS state is large, and it is one allocation per connection.
     /// TLS state is shared by both directions, so its halves share a lock.
     Wss(Box<ws::WsStream<ReadHalf<TlsTcp>, WriteHalf<TlsTcp>>>),
+    Kcp(kcp::KcpStream),
 }
 
 impl TunnelStream {
@@ -280,7 +328,7 @@ impl TunnelStream {
     /// case the caller checks that first (see [`Self::reject_upgrade`]).
     async fn answer_upgrade(&mut self) -> io::Result<()> {
         let early = match self {
-            Self::Tcp(_) => return Ok(()),
+            Self::Tcp(_) | Self::Kcp(_) => return Ok(()),
             Self::Ws(s) => s.reader().has_early(),
             Self::Wss(s) => s.reader().has_early(),
         };
@@ -295,7 +343,7 @@ impl TunnelStream {
     /// else, false: the connection has to be dealt with some other way.
     pub fn reject_upgrade(&mut self) -> bool {
         match self {
-            Self::Tcp(_) => false,
+            Self::Tcp(_) | Self::Kcp(_) => false,
             Self::Ws(s) => s.reject_upgrade(),
             Self::Wss(s) => s.reject_upgrade(),
         }
@@ -310,6 +358,7 @@ impl TunnelStream {
             |r: io::Result<usize>| matches!(r, Err(e) if e.kind() == io::ErrorKind::WouldBlock);
         match self {
             Self::Tcp(s) => would_block(s.try_read(&mut probe)),
+            Self::Kcp(s) => s.is_alive(),
             // Anything from the peer (even a ping) means the connection is not idle.
             Self::Ws(s) => {
                 !s.reader().has_buffered() && would_block(s.reader().get_ref().try_read(&mut probe))
@@ -343,6 +392,7 @@ impl AsyncRead for TunnelStream {
             Self::Tcp(s) => Pin::new(s).poll_read(cx, buf),
             Self::Ws(s) => Pin::new(s).poll_read(cx, buf),
             Self::Wss(s) => Pin::new(&mut **s).poll_read(cx, buf),
+            Self::Kcp(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -357,6 +407,7 @@ impl AsyncWrite for TunnelStream {
             Self::Tcp(s) => Pin::new(s).poll_write(cx, buf),
             Self::Ws(s) => Pin::new(s).poll_write(cx, buf),
             Self::Wss(s) => Pin::new(&mut **s).poll_write(cx, buf),
+            Self::Kcp(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -369,6 +420,7 @@ impl AsyncWrite for TunnelStream {
             Self::Tcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
             Self::Ws(s) => Pin::new(s).poll_write_vectored(cx, bufs),
             Self::Wss(s) => Pin::new(&mut **s).poll_write_vectored(cx, bufs),
+            Self::Kcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
         }
     }
 
@@ -377,6 +429,7 @@ impl AsyncWrite for TunnelStream {
             Self::Tcp(s) => s.is_write_vectored(),
             Self::Ws(s) => s.is_write_vectored(),
             Self::Wss(s) => s.is_write_vectored(),
+            Self::Kcp(_) => false,
         }
     }
 
@@ -385,6 +438,7 @@ impl AsyncWrite for TunnelStream {
             Self::Tcp(s) => Pin::new(s).poll_flush(cx),
             Self::Ws(s) => Pin::new(s).poll_flush(cx),
             Self::Wss(s) => Pin::new(&mut **s).poll_flush(cx),
+            Self::Kcp(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -393,12 +447,15 @@ impl AsyncWrite for TunnelStream {
             Self::Tcp(s) => Pin::new(s).poll_shutdown(cx),
             Self::Ws(s) => Pin::new(s).poll_shutdown(cx),
             Self::Wss(s) => Pin::new(&mut **s).poll_shutdown(cx),
+            Self::Kcp(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }
 
 impl TunnelStream {
     /// Splits into independently usable halves (no lock between them).
+    // Without the `kcp` feature its stream type has no values, so its arm cannot run.
+    #[cfg_attr(not(feature = "kcp"), allow(unreachable_code))]
     pub fn into_split(self) -> (TunnelReader, TunnelWriter) {
         match self {
             Self::Tcp(s) => {
@@ -416,6 +473,10 @@ impl TunnelStream {
                     TunnelWriter::Wss(Box::new(w)),
                 )
             }
+            Self::Kcp(s) => {
+                let (r, w) = s.into_split();
+                (TunnelReader::Kcp(r), TunnelWriter::Kcp(w))
+            }
         }
     }
 }
@@ -425,6 +486,7 @@ pub enum TunnelReader {
     Tcp(OwnedReadHalf),
     Ws(ws::WsReader<OwnedReadHalf>),
     Wss(Box<ws::WsReader<ReadHalf<TlsTcp>>>),
+    Kcp(kcp::KcpReader),
 }
 
 /// Sending half of a [`TunnelStream`].
@@ -432,6 +494,7 @@ pub enum TunnelWriter {
     Tcp(OwnedWriteHalf),
     Ws(ws::WsWriter<OwnedWriteHalf>),
     Wss(Box<ws::WsWriter<WriteHalf<TlsTcp>>>),
+    Kcp(kcp::KcpWriter),
 }
 
 impl AsyncRead for TunnelReader {
@@ -444,6 +507,7 @@ impl AsyncRead for TunnelReader {
             Self::Tcp(s) => Pin::new(s).poll_read(cx, buf),
             Self::Ws(s) => Pin::new(s).poll_read(cx, buf),
             Self::Wss(s) => Pin::new(&mut **s).poll_read(cx, buf),
+            Self::Kcp(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -458,6 +522,7 @@ impl AsyncWrite for TunnelWriter {
             Self::Tcp(s) => Pin::new(s).poll_write(cx, buf),
             Self::Ws(s) => Pin::new(s).poll_write(cx, buf),
             Self::Wss(s) => Pin::new(&mut **s).poll_write(cx, buf),
+            Self::Kcp(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -470,6 +535,7 @@ impl AsyncWrite for TunnelWriter {
             Self::Tcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
             Self::Ws(s) => Pin::new(s).poll_write_vectored(cx, bufs),
             Self::Wss(s) => Pin::new(&mut **s).poll_write_vectored(cx, bufs),
+            Self::Kcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
         }
     }
 
@@ -478,6 +544,7 @@ impl AsyncWrite for TunnelWriter {
             Self::Tcp(s) => s.is_write_vectored(),
             Self::Ws(s) => s.is_write_vectored(),
             Self::Wss(s) => s.is_write_vectored(),
+            Self::Kcp(_) => false,
         }
     }
 
@@ -486,6 +553,7 @@ impl AsyncWrite for TunnelWriter {
             Self::Tcp(s) => Pin::new(s).poll_flush(cx),
             Self::Ws(s) => Pin::new(s).poll_flush(cx),
             Self::Wss(s) => Pin::new(&mut **s).poll_flush(cx),
+            Self::Kcp(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -494,6 +562,7 @@ impl AsyncWrite for TunnelWriter {
             Self::Tcp(s) => Pin::new(s).poll_shutdown(cx),
             Self::Ws(s) => Pin::new(s).poll_shutdown(cx),
             Self::Wss(s) => Pin::new(&mut **s).poll_shutdown(cx),
+            Self::Kcp(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }

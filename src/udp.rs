@@ -25,8 +25,9 @@ use tracing::{debug, warn};
 
 use crate::channel::Channel;
 use crate::config::{Tuning, UdpTuning};
-use crate::mux::{ResetReason, Transport};
+use crate::mux::Transport;
 use crate::proto::{self, MAX_DATAGRAM};
+use crate::session::ResetReason;
 
 /// Receive buffer for one packet: the largest UDP payload fits.
 const PACKET_BUFFER: usize = 64 * 1024;
@@ -88,7 +89,7 @@ where
     };
 
     match channel {
-        Channel::Mux(stream) => {
+        Channel::Stream(stream) => {
             let up = async {
                 while let Some(packet) = source.recv().await? {
                     touch();

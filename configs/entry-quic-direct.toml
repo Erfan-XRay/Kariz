@@ -1,0 +1,33 @@
+# Entry side (Iran), direct mode over QUIC: TCP connections are QUIC streams, and UDP
+# flows (WireGuard here) travel as QUIC datagrams, so a lost packet delays nothing else.
+# Pair: exit-quic-direct.toml.
+#
+# QUIC runs over UDP, which some networks throttle or block (UDP 443 in particular).
+# Where UDP is unreliable, use tcpmux or wss; switching is this one line.
+role = "entry"
+mode = "direct"
+profile = "balanced"
+
+[tunnel]
+transport = "quic"                 # mux is always on; encryption is QUIC's own TLS 1.3
+remote = "EXIT_SERVER_IP:443"
+token = "CHANGE-ME-run-kariz-token"
+
+[tunnel.quic]
+congestion = "cubic"               # cubic | bbr | newreno; bbr keeps the rate on lossy links
+                                   # but can overfill queues (see docs/PHASE4.md)
+# sni = "www.example.com"          # server name in the handshake; default: the remote host
+# alpn = "h3"                      # same on both sides
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"
+protocol = "tcp"
+
+[[forward]]
+listen = "0.0.0.0:51820"           # WireGuard: set its MTU to 1280 in the client config,
+target = "127.0.0.1:51820"         # so its packets fit in a QUIC datagram
+protocol = "udp"
+
+[log]
+level = "info"

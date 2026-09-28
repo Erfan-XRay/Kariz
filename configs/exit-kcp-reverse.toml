@@ -1,0 +1,16 @@
+# Exit side (abroad), reverse mode over KCP. Pair: entry-kcp-reverse.toml.
+role = "exit"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "kcp"
+remote = "ENTRY_SERVER_IP:4000"
+token = "CHANGE-ME-run-kariz-token"
+
+[tunnel.kcp]
+mode = "fast2"                     # FEC is set per sending side: add fec_data / fec_parity
+                                   # here too for the direction towards the entry
+
+[log]
+level = "info"
