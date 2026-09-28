@@ -1,0 +1,14 @@
+# Exit side (abroad), reverse mode with mux. Pair: entry-udp-reverse.toml.
+# Nothing UDP-specific is configured here: the entry side's [[forward]] rules decide
+# what is forwarded, and each UDP flow gets its own socket on this side.
+role = "exit"
+mode = "reverse"
+profile = "gaming"
+
+[tunnel]
+transport = "tcpmux"
+remote = "ENTRY_SERVER_IP:3080"
+token = "CHANGE-ME-run-kariz-token"
+
+[log]
+level = "info"

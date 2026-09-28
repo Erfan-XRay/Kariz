@@ -14,9 +14,10 @@ use crate::channel::{self, Channel, Link};
 use crate::config::{Config, Mode, Tuning};
 use crate::crypto::{Crypto, ReplayFilter};
 use crate::mux::{maintain, MuxSession, MuxStream, ResetReason, SessionConfig, Side};
-use crate::proto::{self, Open, STATUS_DIAL_FAILED, STATUS_OK};
+use crate::proto::{self, Open, KIND_UDP, STATUS_DIAL_FAILED, STATUS_OK};
 use crate::relay::{relay, relay_mux};
 use crate::transport::{tcp, Dialer, Listener, Settings};
+use crate::udp;
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
@@ -191,6 +192,9 @@ async fn accept_direct(
 }
 
 async fn serve(exit: &Exit, mut tunnel: Channel, open: Open) {
+    if open.kind == KIND_UDP {
+        return serve_udp(exit, tunnel, open).await;
+    }
     let mut target = match tcp::connect(&open.target, &exit.tuning).await {
         Ok(t) => t,
         Err(e) => {
@@ -229,6 +233,16 @@ async fn serve_stream(exit: &Exit, stream: MuxStream, syn: Bytes) {
             return stream.reset(ResetReason::Protocol);
         }
     };
+    if open.kind == KIND_UDP {
+        let socket = match udp::connect(&open.target, &exit.tuning).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(target = %open.target, error = %e, "could not open UDP to target");
+                return stream.reset(ResetReason::DialFailed);
+            }
+        };
+        return relay_udp(exit, Channel::Mux(stream), socket, &open).await;
+    }
     let mut target = match tcp::connect(&open.target, &exit.tuning).await {
         Ok(t) => t,
         Err(e) => {
@@ -238,5 +252,31 @@ async fn serve_stream(exit: &Exit, stream: MuxStream, syn: Bytes) {
     };
     if let Err(e) = relay_mux(&mut target, &stream, exit.tuning.buffer_size).await {
         debug!(target = %open.target, error = %e, "connection ended with error");
+    }
+}
+
+/// UDP counterpart of [`serve`] (a whole channel): the status byte says whether the
+/// target could be resolved, then packets flow length-prefixed.
+async fn serve_udp(exit: &Exit, mut tunnel: Channel, open: Open) {
+    let socket = match udp::connect(&open.target, &exit.tuning).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(target = %open.target, error = %e, "could not open UDP to target");
+            let _ = proto::write_status(&mut tunnel, STATUS_DIAL_FAILED).await;
+            return;
+        }
+    };
+    if proto::write_status(&mut tunnel, STATUS_OK).await.is_err() {
+        return;
+    }
+    relay_udp(exit, tunnel, socket, &open).await;
+}
+
+async fn relay_udp(exit: &Exit, tunnel: Channel, socket: tokio::net::UdpSocket, open: &Open) {
+    debug!(target = %open.target, "UDP flow opened");
+    let (source, sink) = udp::Connected::new(socket);
+    match udp::relay(tunnel, source, sink, exit.tuning.udp.timeout).await {
+        Ok(()) => debug!(target = %open.target, "UDP flow closed"),
+        Err(e) => debug!(target = %open.target, error = %e, "UDP flow ended with error"),
     }
 }
