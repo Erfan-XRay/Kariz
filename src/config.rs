@@ -565,14 +565,29 @@ const DSCP_NAMES: [(&str, u8); 24] = [
 pub struct LogConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
+    /// Colours and the startup banner's art: on a terminal (`auto`), always or never.
+    #[serde(default)]
+    pub color: LogColor,
 }
 
 impl Default for LogConfig {
     fn default() -> Self {
         Self {
             level: default_log_level(),
+            color: LogColor::default(),
         }
     }
+}
+
+/// `[log] color`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogColor {
+    /// Colours on a terminal, unless `NO_COLOR` is set.
+    #[default]
+    Auto,
+    Always,
+    Never,
 }
 
 fn default_log_level() -> String {

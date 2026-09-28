@@ -7,6 +7,8 @@ use tracing_subscriber::EnvFilter;
 use kariz::config::{mode_name, role_name, Config, Dscp, Encryption, TransportKind};
 use kariz::crypto::Cipher;
 
+mod logging;
+
 /// musl's allocator is built for size, not speed; mimalloc is much faster on the
 /// many small allocations of the packet path (docs/PHASE8.md).
 #[cfg(feature = "mimalloc")]
@@ -67,9 +69,15 @@ fn main() -> Result<()> {
 }
 
 fn run(config: Config) -> Result<()> {
+    // Still one thread here: the only time the local offset can be read.
+    let style = logging::Style::detect(config.log.color, logging::local_offset());
+    print!("{}", logging::banner(&style, &config));
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log.level));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .event_format(logging::Pretty(style))
+        .init();
     for warning in config.warnings() {
         tracing::warn!("{warning}");
     }

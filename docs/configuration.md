@@ -126,8 +126,16 @@ Overrides of the profile's values.
 | Key | Values | Default |
 |---|---|---|
 | `level` | `error`, `warn`, `info`, `debug`, `trace` | `info` |
+| `color` | `auto`, `always`, `never` | `auto` |
 
-`RUST_LOG=kariz=debug` in the environment overrides it.
+`RUST_LOG=kariz=debug` in the environment overrides `level`. With `color = "auto"`, log
+lines are coloured on a terminal unless `NO_COLOR` is set.
+
+`kariz run` starts with a banner: the version, and what this side is about to do (its
+role and mode, transport, profile, addresses and forward rules). On a terminal, each
+line then shows the local time, a coloured level badge and the fields. Under systemd,
+lines carry systemd's priority prefix instead, so `journalctl` highlights warnings and
+errors itself and `journalctl -u kariz -p warning` shows only those.
 
 ## Settings that must match on both sides
 

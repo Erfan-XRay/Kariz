@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **mimalloc** as the global allocator of the `kariz` binary (cargo feature
+  `mimalloc`, on by default).
+- **A startup banner and new log lines.** `kariz run` starts with the Kariz logo, the
+  version, the author and a summary of this side's setup. On a terminal, log lines
+  carry the local time, coloured level badges and highlighted fields. Under systemd
+  they carry priority prefixes instead, so `journalctl` highlights warnings and errors
+  and `-p warning` filters them. `[log] color = "auto" | "always" | "never"`; `NO_COLOR`
+  is respected.
+
 ## 0.5.1 - 2026-09-29
 
 Works with v0.5 and v0.4 as before; the new settings only change the side they are set on.

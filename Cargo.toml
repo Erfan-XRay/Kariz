@@ -36,6 +36,8 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Local time in log lines (the offset is read once, before any thread starts).
+time = { version = "0.3", features = ["local-offset"] }
 webpki-roots = "1"
 
 [features]
