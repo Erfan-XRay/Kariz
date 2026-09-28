@@ -10,6 +10,7 @@ mod channel;
 mod entry;
 mod exit;
 mod relay;
+mod udp;
 
 use config::{Config, Role};
 

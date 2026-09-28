@@ -118,9 +118,12 @@ than a stale one.
   session. While streams have data queued, datagrams get at most half of each 64 KiB
   write; without coalescing (the `gaming` profile, one frame per write) datagrams and
   streams take turns.
-- **`SYN` before the first datagram.** Datagrams leave before stream data, but a new
-  stream's `SYN` is queued with stream data; the writer therefore emits a pending `SYN`
-  right before that stream's first datagram, so optimistic opens never lose packets.
+- **`SYN` order.** Datagrams leave before stream data, but a stream's `SYN` must precede
+  its first datagram, and the peer requires `SYN`s in increasing id order. Pending
+  `SYN`s therefore have their own queue, sent in id order right after control frames
+  and before any datagram or data. (A first version pulled a stream's `SYN` forward
+  with its first datagram, which could overtake an older stream's `SYN`; the parallel
+  UDP end-to-end tests in 3.3 caught it as sessions closed for "invalid id".)
 - Drops are counted per session (`MuxSession::datagram_stats`).
 - Tests (over a writer the test holds shut, so frame order is deterministic):
   boundaries and order for 0 to 65,535-byte packets with and without coalescing;
@@ -164,6 +167,32 @@ impl MuxStream {
   with `send()`, packets from `recv()` go back as datagrams.
 - The exit also applies `udp_timeout` (in case the entry vanished without closing the
   stream), and ends the flow when the stream is reset or the session closes.
+
+*Status after 3.3 (sections 5 and 6):* implemented in `src/udp.rs` as described. Notes:
+
+- One `relay` serves both paths (mux stream with `DGRAM` frames, or a whole channel with
+  length-prefixed packets) and both sides. Each direction runs as its own loop next to
+  an idle watchdog, so no read is ever cancelled halfway through a framed packet.
+- Without mux, packets waiting on the local side are gathered into one write (up to
+  64 KiB) before flushing.
+- The exit keeps a flow when the target answers with ICMP "port unreachable" (the
+  service may come back); the entry ignores the same errors on its listening socket.
+- The flow table tells flows apart by a generation number, so a flow ending just as
+  the same client starts a new one never removes the new one.
+- A failed open (exit unreachable, target unresolvable, rejected as unsupported) makes
+  the entry ignore that client for 5 s instead of retrying on every packet. With mux the
+  open is optimistic, so a rejection arrives as a reset after the fact and is treated
+  the same; a reset for "protocol error" on a UDP open (what v0.2 sends) counts as
+  "exit side does not support UDP".
+- Tests: a UDP echo scenario in every row of the end-to-end matrix (8 clients at once,
+  packets from 1 byte to 60 KB, forward rules are `tcp+udp` so every row also covers
+  TCP and UDP on one port); idle flows closed and reopened on a new exit socket, with
+  and without mux; `udp_max_flows`; UDP through nginx; flow table unit tests (one flow
+  per client, failed-open backoff, max flows).
+- The parallel end-to-end runs found a bug in 3.2 (a datagram could pull its stream's
+  `SYN` ahead of an older stream's, and the peer closed the session over the id order);
+  fixed in the mux writer with a regression test, see section 4.
+- `KARIZ_TEST_LOG=1 cargo test --test tunnel ...` prints the tunnel sides' debug logs.
 
 ## 7. Configuration
 
@@ -220,7 +249,7 @@ Each step is one PR, keeps CI green, and keeps TCP working in every setup.
 | **3.0** Plan (done) | This document. | Decisions below settled. |
 | **3.1** Config and wire (done) | `KIND_UDP`, `protocol = "udp" \| "tcp+udp"`, UDP tuning fields and validation, non-mux datagram framing in `proto.rs`, "unsupported" status / reset. UDP rules are rejected as "not implemented yet" until 3.3. | Unit tests: open request round trip for both kinds, framing round trip (0-byte and 65,507-byte packets, split reads), config validation. No behaviour change for TCP. |
 | **3.2** Mux datagrams (done) | `DGRAM` queue with priority over stream data, drop policies, `send_datagram` / `recv_datagram`, `DATA` on UDP streams rejected. Tested over `duplex`. | Tests: datagrams keep packet boundaries; they overtake queued bulk data; a full queue drops instead of blocking; unknown ids are ignored; credit is untouched. |
-| **3.3** UDP end to end | Entry flow table and listener, exit per-flow sockets, both over mux and whole channels, idle timeouts, max flows, failed-open backoff, clean failure against a v0.2 exit. | E2E UDP echo for every setup row (`tcp`, `tcpmux`, `ws`, `wss` × reverse / direct, mux on / off); many concurrent flows; idle flows closed on both sides; unreachable target; `tcp+udp` on one port. |
+| **3.3** UDP end to end (done) | Entry flow table and listener, exit per-flow sockets, both over mux and whole channels, idle timeouts, max flows, failed-open backoff, clean failure against a v0.2 exit. | E2E UDP echo for every setup row (`tcp`, `tcpmux`, `ws`, `wss` × reverse / direct, mux on / off); many concurrent flows; idle flows closed on both sides; unreachable target; `tcp+udp` on one port. |
 | **3.4** Hardening and release | Latency test (UDP round trips during a bulk TCP transfer on the same session), packets-per-second and latency benchmarks, memory per flow, sample config (e.g. WireGuard / game server), README / README_FA, CHANGELOG, version `0.3.0`. | UDP p99 round trip under bulk load stays within a few ms of idle on localhost; numbers in the README; release tagged. |
 
 ## 10. Performance and resource targets

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use kariz::config::Config;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 const TOKEN: &str = "test-token-0123456789abcdef";
 
@@ -16,16 +16,46 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// Echoes TCP and UDP on the same port.
 async fn echo_server() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    loop {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // The same port number may be taken for UDP; then try another.
+        let Ok(udp) = UdpSocket::bind(("127.0.0.1", port)).await else {
+            continue;
+        };
+        // Several clients send 60 KB packets at once: with the kernel's default buffer
+        // (about 208 KB) the target itself would drop some, and the tests are strict.
+        let _ = socket2::SockRef::from(&udp).set_recv_buffer_size(4 << 20);
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let (mut r, mut w) = s.split();
+                    let _ = tokio::io::copy(&mut r, &mut w).await;
+                });
+            }
+        });
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65_536];
+            while let Ok((n, from)) = udp.recv_from(&mut buf).await {
+                let _ = udp.send_to(&buf[..n], from).await;
+            }
+        });
+        return port;
+    }
+}
+
+/// A UDP target that answers every packet with the source port it came from, so a test
+/// can tell whether packets used the same flow (same exit socket).
+async fn udp_port_reporter() -> u16 {
+    let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = udp.local_addr().unwrap().port();
     tokio::spawn(async move {
-        loop {
-            let (mut s, _) = listener.accept().await.unwrap();
-            tokio::spawn(async move {
-                let (mut r, mut w) = s.split();
-                let _ = tokio::io::copy(&mut r, &mut w).await;
-            });
+        let mut buf = vec![0u8; 2048];
+        while let Ok((_, from)) = udp.recv_from(&mut buf).await {
+            let _ = udp.send_to(&from.port().to_be_bytes(), from).await;
         }
     });
     port
@@ -47,6 +77,9 @@ struct Setup {
     early_data: bool,
     /// `tuning.keepalive_secs` (mux ping interval); 0 keeps the profile default.
     keepalive_secs: u64,
+    /// `tuning.udp_timeout_secs` / `udp_max_flows`; 0 keeps the default.
+    udp_timeout_secs: u64,
+    udp_max_flows: usize,
 }
 
 impl Setup {
@@ -60,6 +93,22 @@ impl Setup {
             wrong_pin: false,
             early_data: false,
             keepalive_secs: 0,
+            udp_timeout_secs: 0,
+            udp_max_flows: 0,
+        }
+    }
+
+    const fn udp_timeout(self, udp_timeout_secs: u64) -> Self {
+        Self {
+            udp_timeout_secs,
+            ..self
+        }
+    }
+
+    const fn udp_max_flows(self, udp_max_flows: usize) -> Self {
+        Self {
+            udp_max_flows,
+            ..self
         }
     }
 
@@ -147,8 +196,15 @@ impl Setup {
                 format!("[tunnel.tls]\nsni = \"tunnel.example\"\npin_sha256 = \"{pin}\"\n")
             };
         }
+        options += "[tuning]\n";
         if self.keepalive_secs > 0 {
-            options += &format!("[tuning]\nkeepalive_secs = {}\n", self.keepalive_secs);
+            options += &format!("keepalive_secs = {}\n", self.keepalive_secs);
+        }
+        if self.udp_timeout_secs > 0 {
+            options += &format!("udp_timeout_secs = {}\n", self.udp_timeout_secs);
+        }
+        if self.udp_max_flows > 0 {
+            options += &format!("udp_max_flows = {}\n", self.udp_max_flows);
         }
         options
     }
@@ -192,6 +248,12 @@ struct Side {
 
 impl Side {
     fn start(text: &str) -> Self {
+        if std::env::var_os("KARIZ_TEST_LOG").is_some() {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter("kariz=debug")
+                .with_thread_names(true)
+                .try_init();
+        }
         let config = Config::parse(text).unwrap_or_else(|e| panic!("{e:#}\n{text}"));
         let (stop, stopped) = std::sync::mpsc::channel::<()>();
         let thread = std::thread::spawn(move || {
@@ -302,6 +364,7 @@ async fn start_via(
         [[forward]]
         listen = "127.0.0.1:{user_port}"
         target = "127.0.0.1:{target_port}"
+        protocol = "tcp+udp"
         [tunnel]
         {entry_tunnel}
         token = "{entry_token}"
@@ -465,6 +528,53 @@ async fn check_exit_restart(setup: Setup) {
     );
 }
 
+/// A UDP client socket talking to the tunnel's user port.
+async fn udp_client(port: u16) -> UdpSocket {
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    sock.connect(("127.0.0.1", port)).await.unwrap();
+    sock
+}
+
+/// Sends `payload` and waits for the answer.
+async fn udp_roundtrip(sock: &UdpSocket, payload: &[u8], wait: Duration) -> Option<Vec<u8>> {
+    sock.send(payload).await.unwrap();
+    let mut buf = vec![0u8; 65_536];
+    match tokio::time::timeout(wait, sock.recv(&mut buf)).await {
+        Ok(Ok(n)) => Some(buf[..n].to_vec()),
+        _ => None,
+    }
+}
+
+/// Several UDP clients at once, each with its own flow, packets from 1 byte to 60 KB.
+async fn check_udp_echo(setup: Setup) {
+    let target = echo_server().await;
+    let tunnel = start(setup, TOKEN, TOKEN, target).await;
+    let mut handles = Vec::new();
+    for client in 0..8u8 {
+        let port = tunnel.user_port;
+        handles.push(tokio::spawn(async move {
+            let sock = udp_client(port).await;
+            for (i, len) in [1, 100, 1400, 8000, 60_000, 1].into_iter().enumerate() {
+                let mut payload = pattern(len);
+                payload[0] = client;
+                if len > 1 {
+                    payload[1] = i as u8;
+                }
+                let got = udp_roundtrip(&sock, &payload, Duration::from_secs(10))
+                    .await
+                    .unwrap_or_else(|| panic!("client {client}: no answer for {len} bytes"));
+                assert!(
+                    got == payload,
+                    "client {client}: {len}-byte packet corrupted"
+                );
+            }
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+}
+
 macro_rules! tunnel_tests {
     ($($name:ident: $setup:expr;)*) => {
         $(
@@ -489,6 +599,11 @@ macro_rules! tunnel_tests {
                 #[tokio::test(flavor = "multi_thread")]
                 async fn recovers_after_exit_restart() {
                     check_exit_restart($setup).await;
+                }
+
+                #[tokio::test(flavor = "multi_thread")]
+                async fn udp_echo() {
+                    check_udp_echo($setup).await;
                 }
             }
         )*
@@ -735,6 +850,17 @@ async fn check_through_nginx(entry: Setup, exit: Setup, survives: bool) {
     let got = echo_roundtrip(tunnel.user_port, &payload).await.unwrap();
     assert!(got == payload, "payload corrupted through nginx");
 
+    // UDP rides the same WebSocket sessions.
+    let sock = udp_client(tunnel.user_port).await;
+    for len in [1, 1400, 30_000] {
+        let packet = pattern(len);
+        let got = udp_roundtrip(&sock, &packet, Duration::from_secs(10)).await;
+        assert!(
+            got.as_deref() == Some(&packet[..]),
+            "UDP through nginx ({len} bytes)"
+        );
+    }
+
     let mut user = TcpStream::connect(("127.0.0.1", tunnel.user_port))
         .await
         .unwrap();
@@ -810,4 +936,62 @@ mod nginx {
         let setup = Setup::ws("direct");
         check_through_nginx(setup, setup, false).await;
     }
+}
+
+/// A quiet flow is closed after `udp_timeout_secs` on both sides: the next packet from
+/// the same client opens a new flow, which reaches the target from a new source port.
+#[tokio::test(flavor = "multi_thread")]
+async fn udp_idle_flows_are_closed() {
+    let target = udp_port_reporter().await;
+    let runs = [Setup::tcp("direct").mux(), Setup::tcp("reverse")].map(|setup| {
+        tokio::spawn(async move {
+            let setup = setup.udp_timeout(5);
+            let tunnel = start(setup, TOKEN, TOKEN, target).await;
+            let sock = udp_client(tunnel.user_port).await;
+            let wait = Duration::from_secs(10);
+            let first = udp_roundtrip(&sock, b"a", wait)
+                .await
+                .expect("first answer");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let again = udp_roundtrip(&sock, b"b", wait)
+                .await
+                .expect("second answer");
+            assert_eq!(first, again, "{setup:?}: same flow within the timeout");
+            tokio::time::sleep(Duration::from_secs(7)).await;
+            let later = udp_roundtrip(&sock, b"c", wait)
+                .await
+                .expect("answer after idle");
+            assert_ne!(first, later, "{setup:?}: new flow after the timeout");
+        })
+    });
+    for run in runs {
+        run.await.unwrap();
+    }
+}
+
+/// Clients beyond `udp_max_flows` are not served; the others keep working.
+#[tokio::test(flavor = "multi_thread")]
+async fn udp_max_flows_is_enforced() {
+    let target = echo_server().await;
+    let tunnel = start(
+        Setup::tcp("direct").mux().udp_max_flows(2),
+        TOKEN,
+        TOKEN,
+        target,
+    )
+    .await;
+    let wait = Duration::from_secs(5);
+    let (a, b, c) = (
+        udp_client(tunnel.user_port).await,
+        udp_client(tunnel.user_port).await,
+        udp_client(tunnel.user_port).await,
+    );
+    assert!(udp_roundtrip(&a, b"a", wait).await.is_some());
+    assert!(udp_roundtrip(&b, b"b", wait).await.is_some());
+    let short = Duration::from_secs(2);
+    assert!(
+        udp_roundtrip(&c, b"c", short).await.is_none(),
+        "third flow must be refused"
+    );
+    assert!(udp_roundtrip(&a, b"a2", wait).await.is_some());
 }

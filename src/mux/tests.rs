@@ -908,3 +908,49 @@ async fn stray_datagrams_are_ignored() {
     assert!(within(2, stream.recv_datagram()).await.is_err(), "reset");
     assert!(!server.is_closed());
 }
+
+/// Regression: a stream's first datagram once pulled its `SYN` ahead of the `SYN`s of
+/// streams opened earlier, and the peer (rightly) closed the session over the id order.
+#[tokio::test]
+async fn syns_keep_id_order_when_datagrams_come_first() {
+    let (gate, session, _a, _keep) = gated(config()).await;
+    let c = session.open(Bytes::from_static(b"c")).unwrap();
+    let d = session.open(Bytes::from_static(b"d")).unwrap();
+    assert!(d.send_datagram(Bytes::from_static(b"first")));
+    gate.open();
+    eventually(|| gate.frames().iter().any(|f| f.0 == FrameType::Dgram)).await;
+    let frames = gate.frames();
+    let pos = |kind, id| {
+        frames
+            .iter()
+            .position(|f| f.0 == kind && f.1 == id)
+            .unwrap()
+    };
+    assert!(
+        pos(FrameType::Syn, c.id()) < pos(FrameType::Syn, d.id()),
+        "{frames:?}"
+    );
+    assert!(
+        pos(FrameType::Syn, d.id()) < pos(FrameType::Dgram, d.id()),
+        "{frames:?}"
+    );
+}
+
+/// The same with a real peer: many streams, some sending a datagram right away and some
+/// not, must all be accepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn mixed_opens_are_all_accepted() {
+    let (client, server) = pair();
+    let mut streams = Vec::new();
+    for i in 0..200u32 {
+        let s = client.open(Bytes::from(i.to_be_bytes().to_vec())).unwrap();
+        if i % 3 == 0 {
+            assert!(s.send_datagram(Bytes::from_static(b"x")));
+        }
+        streams.push(s);
+    }
+    for _ in 0..200 {
+        within(5, server.accept()).await.expect("stream accepted");
+    }
+    assert!(!client.is_closed() && !server.is_closed());
+}

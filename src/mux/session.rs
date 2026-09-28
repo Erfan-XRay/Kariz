@@ -143,6 +143,10 @@ struct State {
     ready: VecDeque<u32>,
     /// Encoded control frames, sent before any stream data.
     control: Vec<u8>,
+    /// Streams whose `SYN` is not sent yet, in id order. They go out right after the
+    /// control frames: the peer requires increasing ids, and a stream's `SYN` must
+    /// precede its first `DATA` or `DGRAM`.
+    syns: VecDeque<u32>,
     next_id: u32,
     last_peer_id: u32,
     goaway: bool,
@@ -370,11 +374,27 @@ impl Shared {
         let State {
             streams,
             ready,
+            syns,
             dgrams,
             dgram_bytes,
             dgram_turn,
             ..
         } = &mut *st;
+
+        for id in syns.drain(..) {
+            let Some(s) = streams.get_mut(&id) else {
+                continue;
+            };
+            if s.reset.is_some() {
+                continue;
+            }
+            if let Some(syn) = s.syn.take() {
+                out.put_frame(FrameType::Syn, id, &syn);
+                if let Some(inc) = s.syn_window.take() {
+                    out.put_frame(FrameType::Window, id, &inc.to_be_bytes());
+                }
+            }
+        }
 
         // Datagrams first, so real-time packets do not wait behind bulk stream data. They
         // get at most half of a batch while streams have data too, and without
@@ -392,13 +412,6 @@ impl Shared {
             };
             if s.reset.is_some() {
                 continue;
-            }
-            // The peer must know the stream before its first datagram arrives.
-            if let Some(syn) = s.syn.take() {
-                out.put_frame(FrameType::Syn, id, &syn);
-                if let Some(inc) = s.syn_window.take() {
-                    out.put_frame(FrameType::Window, id, &inc.to_be_bytes());
-                }
             }
             used += HEADER_LEN + packet.len();
             out.put_payload(FrameType::Dgram, id, packet);
@@ -418,12 +431,6 @@ impl Shared {
             s.queued = false;
             if s.reset.is_some() {
                 continue;
-            }
-            if let Some(syn) = s.syn.take() {
-                out.put_frame(FrameType::Syn, id, &syn);
-                if let Some(inc) = s.syn_window.take() {
-                    out.put_frame(FrameType::Window, id, &inc.to_be_bytes());
-                }
             }
             if let Some(front) = s.send_queue.front_mut() {
                 let data = if front.len() <= MAX_DATA_FRAME {
@@ -582,6 +589,7 @@ impl MuxSession {
                 streams: HashMap::new(),
                 ready: VecDeque::new(),
                 control: Vec::new(),
+                syns: VecDeque::new(),
                 next_id: match side {
                     Side::Client => 1,
                     Side::Server => 2,
@@ -662,9 +670,8 @@ impl MuxSession {
             let mut stream = Stream::new();
             stream.syn = Some(syn);
             stream.syn_window = stream.window_update(window);
-            stream.queued = true;
             st.streams.insert(id, stream);
-            st.ready.push_back(id);
+            st.syns.push_back(id);
             id
         };
         self.shared.writer.notify_one();
@@ -833,6 +840,15 @@ impl std::fmt::Debug for MuxStream {
 impl MuxStream {
     pub fn id(&self) -> u32 {
         self.id
+    }
+
+    /// Why the stream was reset, once it has been (by either side).
+    pub fn reset_reason(&self) -> Option<ResetReason> {
+        self.shared
+            .lock()
+            .streams
+            .get(&self.id)
+            .and_then(|s| s.reset)
     }
 
     /// Aborts the stream and tells the peer why.
