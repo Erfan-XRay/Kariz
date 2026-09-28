@@ -68,11 +68,51 @@ pub async fn connect(addr: &str, tuning: &Tuning) -> io::Result<TcpStream> {
 }
 
 /// Socket options for long-lived tunnel connections: nodelay plus TCP keepalive,
-/// so NAT mappings stay open and dead peers are noticed.
+/// so NAT mappings stay open and dead peers are noticed, and with mux a small
+/// unsent-data limit (see [`Tuning::notsent_lowat`]).
 fn tune_tunnel_socket(stream: &TcpStream, tuning: &Tuning) -> io::Result<()> {
     stream.set_nodelay(tuning.nodelay)?;
     let keepalive = TcpKeepalive::new()
         .with_time(tuning.keepalive)
         .with_interval(tuning.keepalive);
-    SockRef::from(stream).set_tcp_keepalive(&keepalive)
+    let sock = SockRef::from(stream);
+    sock.set_tcp_keepalive(&keepalive)?;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Some(lowat) = tuning.notsent_lowat {
+        // Only a latency optimisation: an old kernel without it is no reason to fail.
+        if let Err(e) = sock.set_tcp_notsent_lowat(lowat) {
+            tracing::debug!(error = %e, "TCP_NOTSENT_LOWAT not available");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Profile;
+
+    #[tokio::test]
+    async fn tunnel_sockets_get_the_unsent_limit() {
+        for lowat in [None, Some(16 * 1024)] {
+            let tuning = Tuning {
+                notsent_lowat: lowat,
+                ..Tuning::for_profile(Profile::Balanced)
+            };
+            let listener = TcpTransportListener::bind("127.0.0.1:0", &tuning)
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap().to_string();
+            let dialer = TcpTransportDialer::new(&addr, &tuning);
+            let (dialed, accepted) = tokio::join!(dialer.dial(), listener.accept());
+            for stream in [&dialed.unwrap(), &accepted.unwrap().0] {
+                let got = SockRef::from(stream).tcp_notsent_lowat().unwrap();
+                match lowat {
+                    Some(v) => assert_eq!(got, v),
+                    // Kernel default: no limit.
+                    None => assert!(got == 0 || got == u32::MAX, "{got}"),
+                }
+            }
+        }
+    }
 }

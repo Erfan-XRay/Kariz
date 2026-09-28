@@ -80,6 +80,8 @@ struct Setup {
     /// `tuning.udp_timeout_secs` / `udp_max_flows`; 0 keeps the default.
     udp_timeout_secs: u64,
     udp_max_flows: usize,
+    /// `tunnel.mux.connections`; 0 keeps the default.
+    mux_connections: usize,
 }
 
 impl Setup {
@@ -95,6 +97,14 @@ impl Setup {
             keepalive_secs: 0,
             udp_timeout_secs: 0,
             udp_max_flows: 0,
+            mux_connections: 0,
+        }
+    }
+
+    const fn mux_connections(self, mux_connections: usize) -> Self {
+        Self {
+            mux_connections,
+            ..self
         }
     }
 
@@ -174,6 +184,9 @@ impl Setup {
             "transport = \"{}\"\nencryption = \"{}\"\n[tunnel.mux]\nenabled = {}\n",
             self.transport, self.encryption, self.mux
         );
+        if self.mux_connections > 0 {
+            options += &format!("connections = {}\n", self.mux_connections);
+        }
         if self.transport.starts_with("ws") {
             options += &format!("[tunnel.ws]\npath = \"{}\"\n", self.ws_path);
             if self.early_data && !listening {
@@ -994,4 +1007,250 @@ async fn udp_max_flows_is_enforced() {
         "third flow must be refused"
     );
     assert!(udp_roundtrip(&a, b"a2", wait).await.is_some());
+}
+
+/// A TCP proxy that forwards at most `rate` bytes per second each way, with small
+/// socket buffers, like a slow link between the servers: a sender that writes faster
+/// queues the rest in its own socket buffer, as it would on a real path.
+fn throttled_proxy(to: u16, rate: u64) -> u16 {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket.set_recv_buffer_size(64 * 1024).unwrap();
+    socket.set_reuse_address(true).unwrap();
+    socket
+        .bind(
+            &"127.0.0.1:0"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .into(),
+        )
+        .unwrap();
+    socket.listen(64).unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let listener = TcpListener::from_std(socket.into()).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    async fn pump(
+        mut from: tokio::net::tcp::OwnedReadHalf,
+        mut to: tokio::net::tcp::OwnedWriteHalf,
+        rate: u64,
+    ) {
+        let start = Instant::now();
+        let mut sent = 0u64;
+        let mut buf = vec![0u8; 16 * 1024];
+        while let Ok(n @ 1..) = from.read(&mut buf).await {
+            if to.write_all(&buf[..n]).await.is_err() {
+                return;
+            }
+            sent += n as u64;
+            let due = start + Duration::from_secs_f64(sent as f64 / rate as f64);
+            tokio::time::sleep_until(due.into()).await;
+        }
+        let _ = to.shutdown().await;
+    }
+    tokio::spawn(async move {
+        while let Ok((down, _)) = listener.accept().await {
+            let up = tokio::net::TcpSocket::new_v4().unwrap();
+            up.set_recv_buffer_size(64 * 1024).unwrap();
+            let Ok(up) = up.connect(([127, 0, 0, 1], to).into()).await else {
+                continue;
+            };
+            let (dr, dw) = down.into_split();
+            let (ur, uw) = up.into_split();
+            tokio::spawn(pump(dr, uw, rate));
+            tokio::spawn(pump(ur, dw, rate));
+        }
+    });
+    port
+}
+
+fn percentile(sorted: &[Duration], p: f64) -> Duration {
+    sorted[((sorted.len() - 1) as f64 * p).round() as usize]
+}
+
+/// UDP round trips while idle and while a bulk TCP transfer shares the same mux session,
+/// over a throttled link. Returns (idle, loaded) sorted round trips and lost pings.
+async fn udp_rtt_under_load(
+    setup: Setup,
+    rate: u64,
+    bulk: usize,
+) -> (Vec<Duration>, Vec<Duration>, usize) {
+    let target = echo_server().await;
+    let tunnel = start_via(setup, setup, TOKEN, TOKEN, target, |upstream| {
+        (throttled_proxy(upstream, rate), None)
+    })
+    .await;
+    let sock = udp_client(tunnel.user_port).await;
+    async fn pings(sock: &UdpSocket, until: impl Fn() -> bool) -> (Vec<Duration>, usize) {
+        let (mut rtts, mut lost) = (Vec::new(), 0);
+        let mut seq = 0u32;
+        while !until() {
+            seq += 1;
+            let sent = Instant::now();
+            match udp_roundtrip(sock, &seq.to_be_bytes(), Duration::from_secs(2)).await {
+                Some(r) if r == seq.to_be_bytes() => rtts.push(sent.elapsed()),
+                _ => lost += 1,
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        rtts.sort();
+        (rtts, lost)
+    }
+    let idle_until = Instant::now() + Duration::from_secs(2);
+    let (idle, _) = pings(&sock, || Instant::now() >= idle_until).await;
+
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let d = done.clone();
+    let port = tunnel.user_port;
+    // Several transfers at once, like a few downloads next to the real-time traffic.
+    let transfer = tokio::spawn(async move {
+        let each = bulk / 4;
+        let transfers = (0..4).map(|_| {
+            tokio::spawn(async move {
+                let got = echo_roundtrip(port, &pattern(each)).await.unwrap();
+                assert_eq!(got.len(), each);
+            })
+        });
+        for t in transfers.collect::<Vec<_>>() {
+            t.await.unwrap();
+        }
+        d.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    // Let the transfer fill the buffers first.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (loaded, lost) = pings(&sock, || done.load(std::sync::atomic::Ordering::SeqCst)).await;
+    transfer.await.unwrap();
+    drop(tunnel);
+    (idle, loaded, lost)
+}
+
+/// Latency report: `cargo test --release --test tunnel udp_latency -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn udp_latency_under_load() {
+    // 20 Mbit/s link, 12 MiB echoed (about 5 s each way at once).
+    let (rate, bulk) = (2_500_000, 12 << 20);
+    for (name, setup) in [
+        (
+            "tcpmux",
+            Setup::tcp("direct")
+                .transport("tcpmux")
+                .mux()
+                .mux_connections(1),
+        ),
+        ("ws + mux", Setup::ws("direct").mux_connections(1)),
+    ] {
+        let (idle, loaded, lost) = udp_rtt_under_load(setup, rate, bulk).await;
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        println!(
+            "{name}: idle p50 {:.1} ms p99 {:.1} ms | under bulk TCP p50 {:.1} ms p99 {:.1} ms max {:.1} ms, {} pings, {lost} lost",
+            ms(percentile(&idle, 0.5)),
+            ms(percentile(&idle, 0.99)),
+            ms(percentile(&loaded, 0.5)),
+            ms(percentile(&loaded, 0.99)),
+            ms(*loaded.last().unwrap()),
+            loaded.len()
+        );
+    }
+}
+
+/// UDP packets per second through the tunnel, 8 clients each keeping 32 packets in
+/// flight: `cargo test --release --test tunnel udp_throughput -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn udp_throughput() {
+    const CLIENTS: usize = 8;
+    const WINDOW: usize = 32;
+    let run = Duration::from_secs(3);
+    for (name, setup) in [
+        ("tcpmux", Setup::tcp("direct").transport("tcpmux").mux()),
+        ("tcp, no mux", Setup::tcp("direct")),
+        ("ws + mux", Setup::ws("direct")),
+        ("wss + mux", Setup::wss("direct")),
+    ] {
+        for size in [100usize, 1400] {
+            let target = echo_server().await;
+            let tunnel = start(setup, TOKEN, TOKEN, target).await;
+            let deadline = Instant::now() + run;
+            let clients = (0..CLIENTS).map(|_| {
+                let port = tunnel.user_port;
+                tokio::spawn(async move {
+                    let sock = udp_client(port).await;
+                    let packet = vec![7u8; size];
+                    let mut buf = vec![0u8; 2048];
+                    let mut received = 0u64;
+                    for _ in 0..WINDOW {
+                        sock.send(&packet).await.unwrap();
+                    }
+                    while Instant::now() < deadline {
+                        match tokio::time::timeout(Duration::from_millis(100), sock.recv(&mut buf))
+                            .await
+                        {
+                            Ok(Ok(_)) => {
+                                received += 1;
+                                sock.send(&packet).await.unwrap();
+                            }
+                            // Lost packets would shrink the window: refill it.
+                            _ => {
+                                for _ in 0..WINDOW {
+                                    sock.send(&packet).await.unwrap();
+                                }
+                            }
+                        }
+                    }
+                    received
+                })
+            });
+            let mut total = 0;
+            for c in clients.collect::<Vec<_>>() {
+                total += c.await.unwrap();
+            }
+            let pps = total as f64 / run.as_secs_f64();
+            println!(
+                "{name}, {size}-byte packets: {:.0} packets/s each way ({:.0} Mbit/s)",
+                pps,
+                pps * size as f64 * 8.0 / 1e6
+            );
+        }
+    }
+}
+
+/// UDP round trip on an idle tunnel versus straight to the target:
+/// `cargo test --release --test tunnel udp_idle_latency -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn udp_idle_latency() {
+    async fn rtts(port: u16) -> Vec<Duration> {
+        let sock = udp_client(port).await;
+        let mut out = Vec::new();
+        for i in 0..2000u32 {
+            let sent = Instant::now();
+            udp_roundtrip(&sock, &i.to_be_bytes(), Duration::from_secs(2))
+                .await
+                .expect("answer");
+            out.push(sent.elapsed());
+        }
+        out.sort();
+        out
+    }
+    let us = |d: Duration| d.as_secs_f64() * 1e6;
+    let target = echo_server().await;
+    let direct = rtts(target).await;
+    println!(
+        "direct to the target: p50 {:.0} us, p99 {:.0} us",
+        us(percentile(&direct, 0.5)),
+        us(percentile(&direct, 0.99))
+    );
+    for (name, setup) in [
+        ("tcpmux", Setup::tcp("direct").transport("tcpmux").mux()),
+        ("tcp, no mux", Setup::tcp("direct")),
+        ("wss + mux", Setup::wss("direct")),
+    ] {
+        let tunnel = start(setup, TOKEN, TOKEN, target).await;
+        let t = rtts(tunnel.user_port).await;
+        println!(
+            "{name}: p50 {:.0} us (+{:.0}), p99 {:.0} us",
+            us(percentile(&t, 0.5)),
+            us(percentile(&t, 0.5)) - us(percentile(&direct, 0.5)),
+            us(percentile(&t, 0.99))
+        );
+    }
 }
