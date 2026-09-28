@@ -6,7 +6,7 @@ use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::mux::MuxStream;
+use crate::session::SessionStream;
 
 /// Copies data in both directions until both sides are done.
 /// Returns `(a_to_b, b_to_a)` byte counts.
@@ -18,13 +18,13 @@ where
     tokio::io::copy_bidirectional_with_sizes(a, b, buffer_size, buffer_size).await
 }
 
-/// Relays between a TCP connection and a mux stream without copying payloads in user
-/// space: what is read from the socket is handed to the mux as is, and what arrives on
-/// the stream is written to the socket straight from the frames it came in.
+/// Relays between a TCP connection and a session stream without copying payloads in
+/// user space: what is read from the socket is handed to the session as is, and what
+/// arrives on the stream is written to the socket straight from the frames it came in.
 /// Returns `(socket_to_stream, stream_to_socket)` byte counts.
-pub async fn relay_mux(
+pub async fn relay_stream(
     socket: &mut TcpStream,
-    stream: &MuxStream,
+    stream: &SessionStream,
     buffer_size: usize,
 ) -> io::Result<(u64, u64)> {
     let (mut from_socket, mut to_socket) = socket.split();

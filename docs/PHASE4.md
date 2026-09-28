@@ -63,6 +63,15 @@ Statically dispatched, like `TunnelStream`.
               [ TunnelStream: tcp | ws | wss | kcp ]    [ UDP socket (quinn) ]
 ```
 
+*Status after 4.1:* `src/session/` holds the two enums (one variant, `Kmux`, for now)
+and the manager moved from `src/mux/`: the pool places streams on any `Session`, and
+`maintain` takes a `connect` that returns a ready `Session` (for kmux: dial, handshake,
+start kmux over the link), so it no longer needs to know how a session is built.
+`Channel::Mux` became `Channel::Stream(SessionStream)` and `relay_mux` became
+`relay_stream`. `SessionStream` also implements `AsyncRead` / `AsyncWrite`. No test
+changed; throughput is unchanged (checked A/B against `main`, alternating runs on the
+same machine, since the machine's own speed varied between sessions).
+
 KCP is a reliable byte stream, so it slots in under the existing stack as a new
 `TunnelStream` variant (handshake, records and kmux unchanged). QUIC replaces the three
 middle layers with its own.
@@ -216,8 +225,8 @@ without FEC).
 
 | Step | Content | Done when |
 |---|---|---|
-| **4.0** Plan | This document. | Decisions settled (section 12). |
-| **4.1** Session layer | `Session` / `SessionStream` over kmux; pool, `maintain`, entry, exit and UDP code use it. | No behaviour change; every existing test passes unchanged. |
+| **4.0** Plan (done) | This document. | Decisions settled (section 12). |
+| **4.1** Session layer (done) | `Session` / `SessionStream` over kmux; pool, `maintain`, entry, exit and UDP code use it. | No behaviour change; every existing test passes unchanged. |
 | **4.2** QUIC | quinn endpoints in both modes, token-derived mutual TLS, streams and datagrams (stream fallback for large packets), congestion choice, keep-alive, 0-RTT, config and validation. | E2E matrix rows for `quic` (reverse / direct), TCP and UDP scenarios pass; wrong token fails the TLS handshake; a packet above the datagram limit still arrives; the TLS identity tests (wrong key rejected both ways). |
 | **4.3** Lossy link harness | UDP / TCP link emulator in tests; baseline numbers for `tcpmux` vs `quic`. | Emulator unit tests (loss rate, delay within bounds); benchmark prints the matrix. |
 | **4.4** KCP | Packet protection, KCP driver, listener / dialer, settings and presets. | E2E rows for `kcp` (reverse / direct, mux on / off); probes get no answer; tampered packets are dropped; transfer integrity under 5 % loss. |

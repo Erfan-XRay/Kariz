@@ -1,5 +1,5 @@
-//! Session management: which mux sessions a tunnel has, where new streams go, and
-//! keeping sessions up on the dialing side.
+//! Session management: which sessions a tunnel has, where new streams go, and keeping
+//! sessions up on the dialing side. Works for any [`Session`] kind.
 
 use std::future::Future;
 use std::io;
@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 use tokio::time::{sleep, timeout_at, Instant};
 use tracing::{debug, error, info, warn};
 
-use super::{MuxSession, MuxStream, SessionConfig, Side, Transport};
+use super::{Session, SessionStream};
 use crate::crypto::random_below;
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
@@ -24,16 +24,16 @@ const RETRY: Duration = Duration::from_millis(100);
 /// The live sessions of one tunnel. New streams go to the least busy one.
 #[derive(Default)]
 pub struct SessionPool {
-    sessions: Mutex<Vec<Arc<MuxSession>>>,
+    sessions: Mutex<Vec<Arc<Session>>>,
     added: Notify,
 }
 
 impl SessionPool {
-    fn lock(&self) -> MutexGuard<'_, Vec<Arc<MuxSession>>> {
+    fn lock(&self) -> MutexGuard<'_, Vec<Arc<Session>>> {
         self.sessions.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn add(&self, session: Arc<MuxSession>) {
+    pub fn add(&self, session: Arc<Session>) {
         {
             let mut sessions = self.lock();
             sessions.retain(|s| !s.is_closed());
@@ -49,7 +49,7 @@ impl SessionPool {
 
     /// Opens a stream on the live session with the fewest streams, waiting until
     /// `deadline` for one to become available.
-    pub async fn open(&self, syn: Bytes, deadline: Instant) -> io::Result<MuxStream> {
+    pub async fn open(&self, syn: Bytes, deadline: Instant) -> io::Result<SessionStream> {
         loop {
             let added = self.added.notified();
             tokio::pin!(added);
@@ -67,10 +67,10 @@ impl SessionPool {
         }
     }
 
-    fn try_open(&self, syn: &Bytes) -> Option<MuxStream> {
+    fn try_open(&self, syn: &Bytes) -> Option<SessionStream> {
         let mut sessions = self.lock();
         sessions.retain(|s| !s.is_closed());
-        let mut candidates: Vec<(usize, &Arc<MuxSession>)> = sessions
+        let mut candidates: Vec<(usize, &Arc<Session>)> = sessions
             .iter()
             .filter(|s| !s.is_draining())
             .map(|s| (s.stream_count(), s))
@@ -82,30 +82,27 @@ impl SessionPool {
     }
 }
 
-/// Keeps one mux session up on the dialing side. `connect` opens and authenticates a
-/// tunnel connection; each new session is handed to `on_session`. A closed session is
-/// replaced, with backoff while connecting fails.
+/// Keeps one session up on the dialing side. `connect` opens, authenticates and starts a
+/// session; each new one is handed to `on_session`. A closed session is replaced, with
+/// backoff while connecting fails.
 ///
 /// With `lifetime`, a session is also replaced after roughly that long (±10 %, so
 /// several sessions do not rotate in lockstep): the replacement is connected first, then
 /// the old session stops taking streams and closes once its streams are done.
-pub async fn maintain<T, C, Fut>(
+pub async fn maintain<C, Fut>(
     peer: &'static str,
     mut connect: C,
-    side: Side,
-    config: SessionConfig,
     lifetime: Option<Duration>,
-    on_session: impl Fn(Arc<MuxSession>),
+    on_session: impl Fn(Arc<Session>),
 ) where
     C: FnMut() -> Fut,
-    Fut: Future<Output = io::Result<T>>,
-    T: Transport,
+    Fut: Future<Output = io::Result<Session>>,
 {
     let mut backoff = BACKOFF_MIN;
-    let mut retiring: Option<Arc<MuxSession>> = None;
+    let mut retiring: Option<Arc<Session>> = None;
     loop {
-        let io = match connect().await {
-            Ok(io) => io,
+        let session = match connect().await {
+            Ok(session) => Arc::new(session),
             Err(e) => {
                 match e.kind() {
                     io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported => {
@@ -118,10 +115,10 @@ pub async fn maintain<T, C, Fut>(
                 continue;
             }
         };
-        let session = Arc::new(MuxSession::over(io, side, config.clone()));
+        let kind = session.kind();
         let started = Instant::now();
         on_session(session.clone());
-        info!("mux session to {peer} established");
+        info!("{kind} session to {peer} established");
         if let Some(old) = retiring.take() {
             tokio::spawn(async move { old.drain().await });
         }
@@ -136,16 +133,16 @@ pub async fn maintain<T, C, Fut>(
             _ = session.closed() => {
                 let reason = session.close_reason().unwrap_or_default();
                 if started.elapsed() < MIN_HEALTHY {
-                    warn!(%reason, "mux session to {peer} closed right after connecting");
+                    warn!(%reason, "{kind} session to {peer} closed right after connecting");
                     sleep(backoff).await;
                     backoff = (backoff * 2).min(BACKOFF_MAX);
                 } else {
-                    info!(%reason, "mux session to {peer} closed, reconnecting");
+                    info!(%reason, "{kind} session to {peer} closed, reconnecting");
                     backoff = BACKOFF_MIN;
                 }
             }
             _ = rotate => {
-                debug!("rotating mux session to {peer}");
+                debug!("rotating {kind} session to {peer}");
                 backoff = BACKOFF_MIN;
                 retiring = Some(session);
             }
@@ -163,11 +160,12 @@ fn jitter(d: Duration) -> Duration {
 mod tests {
     use super::*;
     use crate::mux::tests::config;
+    use crate::mux::{MuxSession, Side};
 
-    fn session_pair() -> (Arc<MuxSession>, MuxSession) {
+    fn session_pair() -> (Arc<Session>, MuxSession) {
         let (a, b) = tokio::io::duplex(64 * 1024);
         (
-            Arc::new(MuxSession::new(a, Side::Client, config())),
+            Arc::new(Session::Kmux(MuxSession::new(a, Side::Client, config()))),
             MuxSession::new(b, Side::Server, config()),
         )
     }
@@ -213,18 +211,11 @@ mod tests {
         let connect = move || {
             let (a, b) = tokio::io::duplex(64 * 1024);
             let _ = peers_tx.send(MuxSession::new(b, Side::Server, config()));
-            async move { Ok::<_, io::Error>(a) }
+            async move { Ok(Session::Kmux(MuxSession::new(a, Side::Client, config()))) }
         };
         let p = pool.clone();
         let lifetime = Some(Duration::from_millis(300));
-        tokio::spawn(maintain(
-            "test peer",
-            connect,
-            Side::Client,
-            config(),
-            lifetime,
-            move |s| p.add(s),
-        ));
+        tokio::spawn(maintain("test peer", connect, lifetime, move |s| p.add(s)));
 
         // First session comes up.
         let first = peers_rx.recv().await.unwrap();

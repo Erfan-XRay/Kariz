@@ -19,7 +19,7 @@ impl Transport for DuplexStream {
     }
 }
 
-pub(super) fn config() -> SessionConfig {
+pub(crate) fn config() -> SessionConfig {
     SessionConfig {
         stream_window: WINDOW,
         max_streams: 2048,

@@ -17,9 +17,10 @@ use tracing::{debug, info, warn};
 use crate::channel::{self, Channel, Link};
 use crate::config::{Config, Forward, Mode, Tuning};
 use crate::crypto::{Crypto, ReplayFilter};
-use crate::mux::{maintain, MuxSession, SessionConfig, SessionPool, Side};
+use crate::mux::{MuxSession, SessionConfig, Side};
 use crate::proto::{self, Open};
-use crate::relay::{relay, relay_mux};
+use crate::relay::{relay, relay_stream};
+use crate::session::{maintain, Session, SessionPool};
 use crate::transport::{Dialer, Listener, Settings};
 use crate::udp;
 
@@ -62,27 +63,26 @@ pub async fn run(config: Config) -> Result<()> {
             for _ in 0..mux.connections {
                 let (dialer, crypto, pool) = (dialer.clone(), crypto.clone(), pool.clone());
                 let wait = tuning.dial_timeout + tuning.handshake_timeout;
+                let sessions = sessions.clone();
                 let connect = move || {
-                    let (dialer, crypto) = (dialer.clone(), crypto.clone());
+                    let (dialer, crypto, sessions) =
+                        (dialer.clone(), crypto.clone(), sessions.clone());
                     async move {
-                        timeout(wait, channel::connect(&dialer, &crypto, &[]))
+                        let link = timeout(wait, channel::connect(&dialer, &crypto, &[]))
                             .await
                             .map_err(|_| {
                                 io::Error::new(io::ErrorKind::TimedOut, "handshake timed out")
-                            })?
+                            })??;
+                        Ok(Session::Kmux(MuxSession::over(
+                            link,
+                            Side::Client,
+                            sessions,
+                        )))
                     }
                 };
-                let (sessions, lifetime) = (sessions.clone(), mux.max_lifetime);
+                let lifetime = mux.max_lifetime;
                 tasks.spawn(async move {
-                    maintain(
-                        "the exit side",
-                        connect,
-                        Side::Client,
-                        sessions,
-                        lifetime,
-                        move |s| pool.add(s),
-                    )
-                    .await;
+                    maintain("the exit side", connect, lifetime, move |s| pool.add(s)).await;
                     Ok(())
                 });
             }
@@ -111,11 +111,8 @@ pub async fn run(config: Config) -> Result<()> {
                 let pool = Arc::new(SessionPool::default());
                 let p = pool.clone();
                 let on_link = move |link: Link, peer: SocketAddr| {
-                    p.add(Arc::new(MuxSession::over(
-                        link,
-                        Side::Client,
-                        sessions.clone(),
-                    )));
+                    let session = MuxSession::over(link, Side::Client, sessions.clone());
+                    p.add(Arc::new(Session::Kmux(session)));
                     info!(%peer, "mux session from the exit side established");
                 };
                 tasks.spawn(accept_reverse(listener, crypto.clone(), hs, on_link));
@@ -243,7 +240,7 @@ async fn handle_user(entry: &Entry, mut user: TcpStream, open: &Bytes) -> io::Re
     user.set_nodelay(entry.tuning.nodelay)?;
     let size = entry.tuning.buffer_size;
     match entry.open_channel(open).await? {
-        Channel::Mux(stream) => relay_mux(&mut user, &stream, size).await?,
+        Channel::Stream(stream) => relay_stream(&mut user, &stream, size).await?,
         mut channel => relay(&mut user, &mut channel, size).await?,
     };
     Ok(())
@@ -261,7 +258,7 @@ impl Entry {
             Source::Mux(pool) => {
                 let deadline =
                     Instant::now() + self.tuning.handshake_timeout + self.tuning.dial_timeout;
-                Ok(Channel::Mux(pool.open(open.clone(), deadline).await?))
+                Ok(Channel::Stream(pool.open(open.clone(), deadline).await?))
             }
         }
     }

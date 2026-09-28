@@ -3,13 +3,11 @@
 //! See `docs/PHASE2.md`, section 5, for the design and the frame format.
 
 pub mod frame;
-mod manager;
 mod session;
 
 use std::io;
 use std::time::Duration;
 
-pub use manager::{maintain, SessionPool};
 pub use session::{DatagramStats, MuxSession, MuxStream, INITIAL_WINDOW, MAX_DATA_FRAME};
 
 use crate::config::{MuxSettings, Tuning};
@@ -123,4 +121,4 @@ impl ResetReason {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
