@@ -160,9 +160,9 @@ async fn proxy(
     drop: u64,
     delay: Duration,
 ) -> (String, tokio::task::JoinHandle<()>) {
-    let front = Arc::new(udp_socket("127.0.0.1:0".parse().unwrap(), 4 << 20).unwrap());
+    let front = Arc::new(udp_socket("127.0.0.1:0".parse().unwrap(), 4 << 20, None).unwrap());
     let front_addr = front.local_addr().unwrap().to_string();
-    let upstream = Arc::new(udp_socket("127.0.0.1:0".parse().unwrap(), 4 << 20).unwrap());
+    let upstream = Arc::new(udp_socket("127.0.0.1:0".parse().unwrap(), 4 << 20, None).unwrap());
     upstream.connect(to).await.unwrap();
     // Sends after the delay, in order: (due, packet, destination or the connected peer).
     type Delayed = (Instant, Vec<u8>, Option<SocketAddr>);
@@ -599,4 +599,20 @@ fn only_a_first_data_segment_opens_a_conversation() {
     ping[0] = PACKET_PING;
     assert!(!opens_conversation(&ping));
     assert!(!opens_conversation(&first[..10]));
+}
+
+/// `tuning.dscp` reaches the sockets of dialers and listeners.
+#[tokio::test]
+async fn kcp_sockets_are_marked() {
+    use crate::transport::tests::{local_addrs, mark_of, tos};
+    for dscp in [None, Some(46)] {
+        let mut t = tuning();
+        t.dscp = dscp;
+        let settings = ConnSettings::new(&params(1), &t);
+        for addr in local_addrs() {
+            let socket = udp_socket(addr.parse().unwrap(), 1 << 20, settings.dscp).unwrap();
+            let mark = mark_of(socket2::SockRef::from(&socket));
+            assert_eq!(mark, tos(dscp), "{addr} {dscp:?}");
+        }
+    }
 }

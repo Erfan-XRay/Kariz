@@ -459,7 +459,68 @@ pub struct TuningOverrides {
     pub udp_timeout_secs: Option<u64>,
     /// Concurrent UDP flows (client addresses) per UDP forward rule.
     pub udp_max_flows: Option<usize>,
+    /// DSCP mark for tunnel sockets and the exit's UDP sockets to targets (unset: none).
+    pub dscp: Option<Dscp>,
 }
+
+/// A DSCP codepoint as written in `[tuning] dscp`: a name (`"ef"`, `"af41"`, `"cs4"`,
+/// ...) or a number 0-63.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum Dscp {
+    Name(String),
+    Value(u64),
+}
+
+impl Dscp {
+    /// The 6-bit codepoint; `None` for an unknown name or a number above 63.
+    pub fn codepoint(&self) -> Option<u8> {
+        match self {
+            Self::Value(v) => u8::try_from(*v).ok().filter(|v| *v < 64),
+            Self::Name(name) => DSCP_NAMES
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|&(_, v)| v),
+        }
+    }
+
+    /// The name of `codepoint`, if it has one.
+    pub fn name_of(codepoint: u8) -> Option<&'static str> {
+        DSCP_NAMES
+            .iter()
+            .find(|&&(_, v)| v == codepoint)
+            .map(|&(n, _)| n)
+    }
+}
+
+/// Codepoint names of RFC 2474 (class selectors), RFC 2597 (assured forwarding), RFC
+/// 3246 (expedited forwarding), RFC 5865 (voice admit) and RFC 8622 (lower effort).
+const DSCP_NAMES: [(&str, u8); 24] = [
+    ("cs0", 0),
+    ("le", 1),
+    ("cs1", 8),
+    ("af11", 10),
+    ("af12", 12),
+    ("af13", 14),
+    ("cs2", 16),
+    ("af21", 18),
+    ("af22", 20),
+    ("af23", 22),
+    ("cs3", 24),
+    ("af31", 26),
+    ("af32", 28),
+    ("af33", 30),
+    ("cs4", 32),
+    ("af41", 34),
+    ("af42", 36),
+    ("af43", 38),
+    ("cs5", 40),
+    ("va", 44),
+    ("ef", 46),
+    ("cs6", 48),
+    ("cs7", 56),
+    ("default", 0),
+];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -496,6 +557,9 @@ pub struct Tuning {
     /// the socket. Without it, a UDP packet waits behind everything already queued in the
     /// kernel on a slow link.
     pub notsent_lowat: Option<u32>,
+    /// DSCP codepoint for tunnel sockets and the exit's UDP sockets to targets
+    /// (docs/PHASE6.md, section 5); `None` leaves the OS default (0).
+    pub dscp: Option<u8>,
 }
 
 /// UDP forwarding limits and buffers (phase 3).
@@ -546,6 +610,7 @@ impl Tuning {
             threads: None,
             udp: UdpTuning::for_profile(profile),
             notsent_lowat: None,
+            dscp: None,
         }
     }
 
@@ -573,6 +638,10 @@ impl Tuning {
         }
         if let Some(v) = o.udp_max_flows {
             self.udp.max_flows = v;
+        }
+        // An invalid value is reported by `Config::validate`.
+        if let Some(d) = &o.dscp {
+            self.dscp = d.codepoint();
         }
         self
     }
@@ -750,6 +819,18 @@ impl Config {
                  prefer tls.pin_sha256",
             );
         }
+        if self.tuning().dscp.is_some() {
+            if self.tunnel.transport == TransportKind::Quic {
+                warnings.push(
+                    "tuning.dscp does not mark QUIC tunnel packets: quinn sets the TOS byte of \
+                     every packet itself (for ECN); the exit's UDP sockets to targets are \
+                     still marked",
+                );
+            }
+            if cfg!(windows) {
+                warnings.push("tuning.dscp has no effect on Windows unless a QoS policy allows it");
+            }
+        }
         warnings
     }
 
@@ -843,6 +924,17 @@ impl Config {
                 "tuning.udp_max_flows must be between {} and {}",
                 UDP_MAX_FLOWS.start(),
                 UDP_MAX_FLOWS.end()
+            );
+        }
+        if let Some(d) = self
+            .tuning
+            .dscp
+            .as_ref()
+            .filter(|d| d.codepoint().is_none())
+        {
+            bail!(
+                "tuning.dscp must be a codepoint name (ef, af41, cs4, ...) or a number from \
+                 0 to 63, not {d:?}"
             );
         }
 
@@ -1335,6 +1427,39 @@ mod tests {
         assert!(parse_unchecked(&with_forward("tcp", "tcp", ""))
             .warnings()
             .is_empty());
+    }
+
+    #[test]
+    fn dscp_names_and_numbers() {
+        let with = |value: &str| format!("{}[tuning]\ndscp = {value}\n", entry_reverse());
+        for (value, codepoint) in [
+            ("\"ef\"", 46),
+            ("\"EF\"", 46),
+            ("\"af41\"", 34),
+            ("\"cs4\"", 32),
+            ("\"le\"", 1),
+            ("\"default\"", 0),
+            ("0", 0),
+            ("63", 63),
+        ] {
+            let c = Config::parse(&with(value)).unwrap();
+            assert_eq!(c.tuning().dscp, Some(codepoint), "{value}");
+        }
+        assert_eq!(Config::parse(&entry_reverse()).unwrap().tuning().dscp, None);
+        for bad in ["\"fast\"", "64", "-1", "\"\""] {
+            let err = parse_err(&with(bad));
+            assert!(err.contains("dscp"), "{bad}: {err}");
+        }
+        assert_eq!(Dscp::name_of(46), Some("ef"));
+        assert_eq!(Dscp::name_of(0), Some("cs0"));
+        assert_eq!(Dscp::name_of(7), None);
+        // Over QUIC the tunnel's own packets cannot be marked: said, not hidden.
+        let quic = Config::parse(&format!(
+            "{}[tuning]\ndscp = \"ef\"\n",
+            with_transport("entry", "quic", "")
+        ))
+        .unwrap();
+        assert!(quic.warnings().iter().any(|w| w.contains("QUIC")));
     }
 
     #[test]

@@ -240,6 +240,35 @@ measured). With 2 copies 5 ms apart, over `kcp` direct and reverse and `quic` di
 - Windows ignores `IP_TOS` without a QoS policy. The option is accepted there, and
   `kariz check` notes that it has no effect.
 
+*Status after 6.4:* `[tuning] dscp` marks TCP tunnel sockets (both ends, so `tcp`,
+`tcpmux`, `ws`, `wss`), KCP sockets (dialer and listener) and the exit's UDP sockets to
+targets. The code is `transport::mark_dscp`, called where each of those sockets is
+set up. Names follow RFC 2474, 2597, 3246, 5865 and 8622 (`cs0`-`cs7`, `af11`-`af43`,
+`ef`, `va`, `le`, `default`), case-insensitive, or a number 0-63. Where the result
+differs from the plan above, and why:
+
+- **QUIC sockets are not marked.** On Linux, quinn-udp sends every packet with an
+  `IP_TOS` / `IPV6_TCLASS` control message that holds the ECN bits alone (0 when ECN is
+  off). That per-packet value overrides the socket's, so a mark set on the socket would
+  never reach the wire. Rather than set an option that does nothing, Kariz leaves QUIC
+  sockets alone. `kariz check` warns that the tunnel's own packets are not marked over
+  QUIC and that the exit's sockets to targets still are. Marking QUIC would take a
+  socket wrapper that writes DSCP and ECN into that control message together, and
+  that is only worth building if 6.5 shows marks matter.
+- **IPv6 only on Unix.** `IPV6_TCLASS` is set on Unix, where a dual-stack socket also
+  gets `IP_TOS` for its IPv4 peers. socket2 has no traffic-class call on Windows, where
+  marks need a QoS policy anyway.
+- A socket that refuses the option loses only the mark: it is logged at debug level,
+  never an error.
+
+Tests: the mark read back from plain UDP sockets, TCP tunnel sockets (dialed and
+accepted), KCP sockets and the exit's target sockets, over IPv4 everywhere and IPv6
+on Unix, with the mark set and unset; config names, numbers, case, bad values, and the
+QUIC warning. The Windows development machine reads the IPv4 mark back as set (it is
+the QoS policy, not the option, that decides whether it goes out). Nobody has checked
+yet whether marks survive a real path: that is for 6.5, and for the operator's own
+network.
+
 ## 6. Configuration
 
 ```toml
@@ -311,7 +340,7 @@ loss and with bursty loss (mean burst 3). Rows: `tcpmux` (baseline), `kcp` as in
 | **6.1** Datagram sealing (done) | `src/crypto/datagram.rs`: keys from the record keys, explicit packet numbers, receive window. No transport changes yet. | Unit tests of section 8 pass; no other behaviour change. |
 | **6.2** KCP datagram path (done) | `PACKET_DATAGRAM`, driver queue and fairness, `KcpStream` datagram half, kmux placement and in-band probe, `kariz check` warning without mux. | Loss on the link does not delay other UDP packets; large ones fall back; without the probe everything stays in the stream; every existing test passes. |
 | **6.3** Duplication (done) | `duplicate` / `duplicate_gap_ms` on UDP rules, both directions; dedup over KCP datagrams and QUIC datagrams (sequence numbers there). | Exactly-once delivery with copies; residual loss about the square of the link's under random loss; config validation. |
-| **6.4** DSCP | `tuning.dscp` on tunnel sockets and the exit's UDP target sockets, v4 and v6. | Option read back on every socket kind; `kariz check` shows it. |
+| **6.4** DSCP (done) | `tuning.dscp` on tunnel sockets and the exit's UDP target sockets, v4 and v6. | Option read back on every socket kind; `kariz check` shows it. |
 | **6.5** Benchmark and defaults | Game-traffic pattern and matrix; the gaming profile's KCP mode, window, FEC and duplication decided from it. | Table in this document; targets of section 10 checked. |
 | **6.6** Release | Sample configs (`entry-gaming.toml` / `exit-gaming.toml`), README / README_FA (gaming section, DSCP caveats), CHANGELOG, version `0.5.0`, roadmap. | Numbers in the README; release tagged. |
 

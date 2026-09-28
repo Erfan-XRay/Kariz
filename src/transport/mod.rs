@@ -305,6 +305,45 @@ impl WsDialer {
     }
 }
 
+/// Marks a socket's packets with the DSCP codepoint `dscp` (docs/PHASE6.md, section 5):
+/// `IP_TOS` for IPv4, and on Unix `IPV6_TCLASS` for IPv6 (plus `IP_TOS` for the IPv4
+/// traffic of a dual-stack socket). The ECN bits stay 0. Failing only costs the mark,
+/// so it is logged rather than returned. Not for QUIC sockets: quinn sets the TOS byte of
+/// every packet itself.
+pub fn mark_dscp(sock: socket2::SockRef<'_>, dscp: Option<u8>) {
+    let Some(dscp) = dscp else {
+        return;
+    };
+    let tos = u32::from(dscp) << 2;
+    let ipv6 = sock
+        .local_addr()
+        .is_ok_and(|a| a.as_socket().is_some_and(|a| a.is_ipv6()));
+    let result = if ipv6 {
+        set_tclass(&sock, tos)
+    } else {
+        sock.set_tos_v4(tos)
+    };
+    if let Err(e) = result {
+        tracing::debug!(error = %e, dscp, "could not set the DSCP mark");
+    }
+}
+
+#[cfg(unix)]
+fn set_tclass(sock: &socket2::SockRef<'_>, tos: u32) -> io::Result<()> {
+    let result = sock.set_tclass_v6(tos);
+    // IPv4 peers of a dual-stack socket; a v6-only socket refuses it, which is fine.
+    let _ = sock.set_tos_v4(tos);
+    result
+}
+
+#[cfg(not(unix))]
+fn set_tclass(_: &socket2::SockRef<'_>, _: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "IPV6_TCLASS is not available on this system",
+    ))
+}
+
 /// QUIC is not a byte stream: it has its own endpoints ([`quic`]) and sessions.
 fn not_a_stream_transport() -> io::Error {
     io::Error::new(
@@ -571,6 +610,81 @@ impl AsyncWrite for TunnelWriter {
             Self::Ws(s) => Pin::new(s).poll_shutdown(cx),
             Self::Wss(s) => Pin::new(&mut **s).poll_shutdown(cx),
             Self::Kcp(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use socket2::SockRef;
+
+    use super::*;
+    use crate::config::Profile;
+
+    /// The TOS byte (IPv4) or traffic class (IPv6) a socket reports back.
+    pub(crate) fn mark_of(sock: SockRef<'_>) -> u32 {
+        let local = sock.local_addr().unwrap().as_socket().unwrap();
+        if local.is_ipv4() {
+            return sock.tos_v4().unwrap();
+        }
+        #[cfg(unix)]
+        return sock.tclass_v6().unwrap();
+        #[cfg(not(unix))]
+        unreachable!("IPv6 marks are only set on Unix");
+    }
+
+    /// Addresses to test marks on: IPv4, and IPv6 where it can be read back and the
+    /// machine has it.
+    pub(crate) fn local_addrs() -> Vec<&'static str> {
+        let mut addrs = vec!["127.0.0.1:0"];
+        if cfg!(unix) && std::net::UdpSocket::bind("[::1]:0").is_ok() {
+            addrs.push("[::1]:0");
+        }
+        addrs
+    }
+
+    pub(crate) fn tos(dscp: Option<u8>) -> u32 {
+        dscp.map_or(0, |d| u32::from(d) << 2)
+    }
+
+    #[test]
+    fn udp_sockets_are_marked() {
+        for addr in local_addrs() {
+            for dscp in [None, Some(46), Some(34)] {
+                let socket = std::net::UdpSocket::bind(addr).unwrap();
+                mark_dscp(SockRef::from(&socket), dscp);
+                assert_eq!(
+                    mark_of(SockRef::from(&socket)),
+                    tos(dscp),
+                    "{addr} {dscp:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_tunnel_sockets_are_marked_both_ways() {
+        for addr in local_addrs() {
+            for dscp in [None, Some(46)] {
+                let tuning = Tuning {
+                    dscp,
+                    ..Tuning::for_profile(Profile::Balanced)
+                };
+                let settings = Settings::default();
+                let l = Listener::bind(&settings, addr, &tuning).await.unwrap();
+                let remote = l.local_addr().unwrap().to_string();
+                let d = Dialer::new(&settings, &remote, &tuning).unwrap();
+                let (dialed, accepted) = tokio::join!(d.dial(), l.accept());
+                let TunnelStream::Tcp(dialed) = dialed.unwrap() else {
+                    panic!("not tcp")
+                };
+                let Incoming::Tcp(accepted) = accepted.unwrap().0 else {
+                    panic!("not tcp")
+                };
+                for s in [&dialed, &accepted] {
+                    assert_eq!(mark_of(SockRef::from(s)), tos(dscp), "{addr} {dscp:?}");
+                }
+            }
         }
     }
 }

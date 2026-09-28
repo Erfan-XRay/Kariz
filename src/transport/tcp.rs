@@ -77,6 +77,7 @@ fn tune_tunnel_socket(stream: &TcpStream, tuning: &Tuning) -> io::Result<()> {
         .with_interval(tuning.keepalive);
     let sock = SockRef::from(stream);
     sock.set_tcp_keepalive(&keepalive)?;
+    super::mark_dscp(sock, tuning.dscp);
     #[cfg(any(target_os = "linux", target_os = "android"))]
     if let Some(lowat) = tuning.notsent_lowat {
         // Only a latency optimisation: an old kernel without it is no reason to fail.

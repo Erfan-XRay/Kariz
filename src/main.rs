@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use kariz::config::{mode_name, role_name, Config, Encryption, TransportKind};
+use kariz::config::{mode_name, role_name, Config, Dscp, Encryption, TransportKind};
 use kariz::crypto::Cipher;
 
 #[derive(Parser)]
@@ -205,6 +205,15 @@ fn print_summary(config: &Config) {
         tuning.buffer_size,
         tuning.keepalive.as_secs()
     );
+    if let Some(dscp) = tuning.dscp {
+        let name = Dscp::name_of(dscp).map_or(String::new(), |n| format!(" ({n})"));
+        let sockets = if config.tunnel.transport == TransportKind::Quic {
+            "UDP sockets to targets (not QUIC's)"
+        } else {
+            "tunnel sockets and UDP sockets to targets"
+        };
+        println!("  dscp      : {dscp}{name} on {sockets}");
+    }
     if config.forward.iter().any(|f| f.protocol.has_udp()) {
         println!(
             "  udp       : timeout={}s max_flows={} per rule",

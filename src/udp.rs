@@ -330,6 +330,7 @@ pub async fn connect(target: &str, tuning: &Tuning) -> io::Result<UdpSocket> {
     };
     let socket = UdpSocket::bind(local).await?;
     tune(&socket, &tuning.udp);
+    crate::transport::mark_dscp(SockRef::from(&socket), tuning.dscp);
     socket.connect(addr).await?;
     Ok(socket)
 }
@@ -740,6 +741,28 @@ mod tests {
         }
         sleep(Duration::from_millis(200)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// `tuning.dscp` marks the exit's sockets to UDP targets.
+    #[tokio::test]
+    async fn target_sockets_are_marked() {
+        use crate::transport::tests::{local_addrs, mark_of, tos};
+        for addr in local_addrs() {
+            let target = UdpSocket::bind(addr).await.unwrap();
+            let target = target.local_addr().unwrap().to_string();
+            for dscp in [None, Some(46)] {
+                let tuning = Tuning {
+                    dscp,
+                    ..Tuning::for_profile(crate::config::Profile::Gaming)
+                };
+                let socket = connect(&target, &tuning).await.unwrap();
+                assert_eq!(
+                    mark_of(SockRef::from(&socket)),
+                    tos(dscp),
+                    "{addr} {dscp:?}"
+                );
+            }
+        }
     }
 
     #[test]

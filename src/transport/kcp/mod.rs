@@ -136,6 +136,7 @@ struct ConnSettings {
     /// A ping goes out every third of it; a peer silent for twice as long is dead.
     keepalive: Duration,
     socket_buffer: usize,
+    dscp: Option<u8>,
     protection: Arc<Protection>,
     /// Data and parity shards per FEC group; `None`: FEC off.
     fec: Option<(usize, usize)>,
@@ -150,13 +151,14 @@ impl ConnSettings {
             mtu: params.config.mtu,
             keepalive: tuning.keepalive,
             socket_buffer: tuning.udp.socket_buffer,
+            dscp: tuning.dscp,
             protection: Arc::new(Protection::new(&params.key)),
             fec: params.config.fec(),
         }
     }
 }
 
-fn udp_socket(addr: SocketAddr, buffer: usize) -> io::Result<UdpSocket> {
+fn udp_socket(addr: SocketAddr, buffer: usize, dscp: Option<u8>) -> io::Result<UdpSocket> {
     let socket = std::net::UdpSocket::bind(addr)?;
     let sock = socket2::SockRef::from(&socket);
     if let Err(e) = sock
@@ -165,6 +167,7 @@ fn udp_socket(addr: SocketAddr, buffer: usize) -> io::Result<UdpSocket> {
     {
         debug!(error = %e, "could not set KCP socket buffers");
     }
+    super::mark_dscp(sock, dscp);
     socket.set_nonblocking(true)?;
     UdpSocket::from_std(socket)
 }
@@ -1205,7 +1208,7 @@ impl KcpDialer {
             SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
             SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
         };
-        let socket = udp_socket(local, self.settings.socket_buffer)?;
+        let socket = udp_socket(local, self.settings.socket_buffer, self.settings.dscp)?;
         socket.connect(peer).await?;
         let socket = Arc::new(socket);
         let conv = Nonces::new()?.next_u32();
@@ -1240,7 +1243,7 @@ impl KcpListener {
             io::Error::new(io::ErrorKind::NotFound, "listen address did not resolve")
         })?;
         let settings = ConnSettings::new(params, tuning);
-        let socket = Arc::new(udp_socket(addr, settings.socket_buffer)?);
+        let socket = Arc::new(udp_socket(addr, settings.socket_buffer, settings.dscp)?);
         let local = socket.local_addr()?;
         let (tx, rx) = mpsc::channel(ACCEPT_QUEUE);
         let task = tokio::spawn(demultiplex(socket, settings, tx));
