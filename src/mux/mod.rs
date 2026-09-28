@@ -64,6 +64,8 @@ pub enum ResetReason {
     /// The peer did not accept a new stream (going away or too many streams).
     Refused,
     Protocol,
+    /// The peer does not support what the `SYN` asked for (e.g. a UDP flow).
+    Unsupported,
 }
 
 impl ResetReason {
@@ -73,6 +75,7 @@ impl ResetReason {
             Self::DialFailed => 1,
             Self::Refused => 2,
             Self::Protocol => 3,
+            Self::Unsupported => 4,
         }
     }
 
@@ -81,6 +84,7 @@ impl ResetReason {
             1 => Self::DialFailed,
             2 => Self::Refused,
             3 => Self::Protocol,
+            4 => Self::Unsupported,
             _ => Self::Cancel,
         }
     }
@@ -102,6 +106,10 @@ impl ResetReason {
             Self::Protocol => io::Error::new(
                 io::ErrorKind::ConnectionReset,
                 "stream reset: protocol error",
+            ),
+            Self::Unsupported => io::Error::new(
+                io::ErrorKind::Unsupported,
+                "exit side does not support this kind of connection (older version?)",
             ),
         }
     }

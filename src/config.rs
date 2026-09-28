@@ -96,10 +96,33 @@ impl Encryption {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum ForwardProtocol {
     #[default]
+    #[serde(rename = "tcp")]
     Tcp,
+    #[serde(rename = "udp")]
+    Udp,
+    /// Both, on the same port.
+    #[serde(rename = "tcp+udp")]
+    TcpUdp,
+}
+
+impl ForwardProtocol {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+            Self::TcpUdp => "tcp+udp",
+        }
+    }
+
+    pub fn has_tcp(self) -> bool {
+        matches!(self, Self::Tcp | Self::TcpUdp)
+    }
+
+    pub fn has_udp(self) -> bool {
+        matches!(self, Self::Udp | Self::TcpUdp)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -227,6 +250,10 @@ pub struct TuningOverrides {
     pub handshake_timeout_secs: Option<u64>,
     /// Number of worker threads. Defaults to the number of CPU cores.
     pub threads: Option<usize>,
+    /// Idle time after which a UDP flow is closed.
+    pub udp_timeout_secs: Option<u64>,
+    /// Concurrent UDP flows (client addresses) per UDP forward rule.
+    pub udp_max_flows: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -257,6 +284,39 @@ pub struct Tuning {
     pub dial_timeout: Duration,
     pub handshake_timeout: Duration,
     pub threads: Option<usize>,
+    pub udp: UdpTuning,
+}
+
+/// UDP forwarding limits and buffers (phase 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdpTuning {
+    /// A flow with no packet in either direction for this long is closed.
+    pub timeout: Duration,
+    /// Concurrent flows per UDP forward rule; packets from further clients are dropped.
+    pub max_flows: usize,
+    /// `SO_RCVBUF` / `SO_SNDBUF` of UDP sockets.
+    pub socket_buffer: usize,
+    /// Packets queued per flow and direction before dropping.
+    pub flow_queue: usize,
+    /// Datagram bytes a mux session queues for sending before dropping.
+    pub session_buffer: usize,
+}
+
+impl UdpTuning {
+    fn for_profile(profile: Profile) -> Self {
+        let (socket_buffer, flow_queue, session_buffer) = match profile {
+            Profile::Balanced => (1 << 20, 128, 256 * 1024),
+            Profile::Throughput => (4 << 20, 512, 1 << 20),
+            Profile::Gaming => (1 << 20, 64, 128 * 1024),
+        };
+        Self {
+            timeout: Duration::from_secs(60),
+            max_flows: 1024,
+            socket_buffer,
+            flow_queue,
+            session_buffer,
+        }
+    }
 }
 
 impl Tuning {
@@ -273,6 +333,7 @@ impl Tuning {
             dial_timeout: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(10),
             threads: None,
+            udp: UdpTuning::for_profile(profile),
         }
     }
 
@@ -294,6 +355,12 @@ impl Tuning {
         }
         if o.threads.is_some() {
             self.threads = o.threads;
+        }
+        if let Some(v) = o.udp_timeout_secs {
+            self.udp.timeout = Duration::from_secs(v);
+        }
+        if let Some(v) = o.udp_max_flows {
+            self.udp.max_flows = v;
         }
         self
     }
@@ -352,6 +419,8 @@ const MUX_CONNECTIONS: std::ops::RangeInclusive<usize> = 1..=64;
 const MUX_MAX_STREAMS: std::ops::RangeInclusive<usize> = 1..=4096;
 const MUX_STREAM_WINDOW: std::ops::RangeInclusive<usize> = 16 * 1024..=16 * 1024 * 1024;
 const MUX_MIN_LIFETIME_SECS: u64 = 60;
+const UDP_TIMEOUT_SECS: std::ops::RangeInclusive<u64> = 5..=3600;
+const UDP_MAX_FLOWS: std::ops::RangeInclusive<usize> = 1..=65536;
 /// Keepalives (mux pings) at most this far apart keep a WebSocket through a CDN.
 const CDN_IDLE_SAFE: Duration = Duration::from_secs(90);
 
@@ -409,6 +478,12 @@ impl Config {
             warnings.push(
                 "tuning.keepalive_secs is above 90: CDNs close WebSocket connections that \
                  are idle for about 100 s (Cloudflare)",
+            );
+        }
+        if self.forward.iter().any(|f| f.protocol.has_udp()) && !self.mux().enabled {
+            warnings.push(
+                "UDP is forwarded without mux: every UDP flow uses its own tunnel connection; \
+                 enable tunnel.mux (or use tcpmux, ws, wss) for UDP",
             );
         }
         if self.tunnel.tls.as_ref().is_some_and(|t| t.insecure) {
@@ -474,10 +549,38 @@ impl Config {
         if tuning.threads == Some(0) {
             bail!("tuning.threads must be at least 1");
         }
+        let udp_timeout = tuning.udp.timeout.as_secs();
+        if !UDP_TIMEOUT_SECS.contains(&udp_timeout) {
+            bail!(
+                "tuning.udp_timeout_secs must be between {} and {}",
+                UDP_TIMEOUT_SECS.start(),
+                UDP_TIMEOUT_SECS.end()
+            );
+        }
+        if !UDP_MAX_FLOWS.contains(&tuning.udp.max_flows) {
+            bail!(
+                "tuning.udp_max_flows must be between {} and {}",
+                UDP_MAX_FLOWS.start(),
+                UDP_MAX_FLOWS.end()
+            );
+        }
 
         self.validate_mux()?;
         self.validate_ws()?;
-        self.validate_tls()
+        self.validate_tls()?;
+        self.check_implemented()
+    }
+
+    /// Rejects settings that parse and validate but are not implemented yet.
+    /// Each phase 3 step removes the part it implements.
+    fn check_implemented(&self) -> Result<()> {
+        if self.forward.iter().any(|f| f.protocol.has_udp()) {
+            bail!(
+                "UDP forwarding (protocol = \"udp\" / \"tcp+udp\") is not implemented yet \
+                 (planned for v0.3, see docs/PHASE3.md)"
+            );
+        }
+        Ok(())
     }
 
     fn validate_mux(&self) -> Result<()> {
@@ -786,6 +889,76 @@ mod tests {
         assert_eq!(c.warnings().len(), 1);
         let c = Config::parse(&format!("{}{slow}", with_transport("entry", "tcp", ""))).unwrap();
         assert!(c.warnings().is_empty());
+    }
+
+    /// An entry config with one forward rule using `protocol` and extra top-level lines.
+    fn with_forward(protocol: &str, transport: &str, extra: &str) -> String {
+        with_transport("entry", transport, extra).replace(
+            "target = \"127.0.0.1:443\"",
+            &format!("target = \"127.0.0.1:443\"\nprotocol = \"{protocol}\""),
+        )
+    }
+
+    #[test]
+    fn forward_protocols() {
+        for (name, tcp, udp) in [
+            ("tcp", true, false),
+            ("udp", false, true),
+            ("tcp+udp", true, true),
+        ] {
+            let c = parse_unchecked(&with_forward(name, "tcpmux", ""));
+            let p = c.forward[0].protocol;
+            assert_eq!((p.name(), p.has_tcp(), p.has_udp()), (name, tcp, udp));
+        }
+        assert_eq!(
+            Config::parse(&entry_reverse()).unwrap().forward[0].protocol,
+            ForwardProtocol::Tcp
+        );
+        assert!(toml::from_str::<Config>(&with_forward("sctp", "tcp", "")).is_err());
+    }
+
+    #[test]
+    fn udp_tuning_defaults_and_overrides() {
+        let t = Tuning::for_profile(Profile::Balanced);
+        assert_eq!(t.udp.timeout, Duration::from_secs(60));
+        assert_eq!(t.udp.max_flows, 1024);
+        assert!(Tuning::for_profile(Profile::Gaming).udp.flow_queue < t.udp.flow_queue);
+        let c = parse_unchecked(&format!(
+            "{}[tuning]\nudp_timeout_secs = 30\nudp_max_flows = 10\n",
+            with_forward("udp", "tcpmux", "")
+        ));
+        assert_eq!(c.tuning().udp.timeout, Duration::from_secs(30));
+        assert_eq!(c.tuning().udp.max_flows, 10);
+        for bad in [
+            "udp_timeout_secs = 1",
+            "udp_timeout_secs = 4000",
+            "udp_max_flows = 0",
+        ] {
+            let err = parse_err(&format!("{}[tuning]\n{bad}\n", entry_reverse()));
+            assert!(err.contains("tuning.udp_"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn udp_forwarding_is_not_implemented_yet() {
+        for protocol in ["udp", "tcp+udp"] {
+            let err = parse_err(&with_forward(protocol, "tcpmux", ""));
+            assert!(err.contains("not implemented yet"), "{protocol}: {err}");
+        }
+        assert!(Config::parse(&with_forward("tcp", "tcpmux", "")).is_ok());
+    }
+
+    #[test]
+    fn udp_without_mux_is_warned() {
+        let c = parse_unchecked(&with_forward("udp", "tcp", ""));
+        assert_eq!(c.warnings().len(), 1);
+        assert!(c.warnings()[0].contains("mux"));
+        assert!(parse_unchecked(&with_forward("udp", "tcpmux", ""))
+            .warnings()
+            .is_empty());
+        assert!(parse_unchecked(&with_forward("tcp", "tcp", ""))
+            .warnings()
+            .is_empty());
     }
 
     #[test]

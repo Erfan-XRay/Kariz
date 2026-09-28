@@ -198,8 +198,8 @@ Each step is one PR, keeps CI green, and keeps TCP working in every setup.
 
 | Step | Content | Done when |
 |---|---|---|
-| **3.0** Plan | This document. | Decisions below confirmed. |
-| **3.1** Config and wire | `KIND_UDP`, `protocol = "udp" \| "tcp+udp"`, UDP tuning fields and validation, non-mux datagram framing in `proto.rs`. | Unit tests: open request round trip for both kinds, framing round trip (0-byte and 65,507-byte packets, split reads), config validation. No behaviour change for TCP. |
+| **3.0** Plan (done) | This document. | Decisions below settled. |
+| **3.1** Config and wire (done) | `KIND_UDP`, `protocol = "udp" \| "tcp+udp"`, UDP tuning fields and validation, non-mux datagram framing in `proto.rs`, "unsupported" status / reset. UDP rules are rejected as "not implemented yet" until 3.3. | Unit tests: open request round trip for both kinds, framing round trip (0-byte and 65,507-byte packets, split reads), config validation. No behaviour change for TCP. |
 | **3.2** Mux datagrams | `DGRAM` queue with priority over stream data, drop policies, `send_datagram` / `recv_datagram`, `DATA` on UDP streams rejected. Tested over `duplex`. | Tests: datagrams keep packet boundaries; they overtake queued bulk data; a full queue drops instead of blocking; unknown ids are ignored; credit is untouched. |
 | **3.3** UDP end to end | Entry flow table and listener, exit per-flow sockets, both over mux and whole channels, idle timeouts, max flows, failed-open backoff, clean failure against a v0.2 exit. | E2E UDP echo for every setup row (`tcp`, `tcpmux`, `ws`, `wss` × reverse / direct, mux on / off); many concurrent flows; idle flows closed on both sides; unreachable target; `tcp+udp` on one port. |
 | **3.4** Hardening and release | Latency test (UDP round trips during a bulk TCP transfer on the same session), packets-per-second and latency benchmarks, memory per flow, sample config (e.g. WireGuard / game server), README / README_FA, CHANGELOG, version `0.3.0`. | UDP p99 round trip under bulk load stays within a few ms of idle on localhost; numbers in the README; release tagged. |
@@ -225,15 +225,25 @@ Measured on localhost like phase 2 (both sides on one machine), with an echo tar
 | Flow table abuse (spoofed source addresses creating flows). | `udp_max_flows`, flows only live `udp_timeout`, failed-open backoff. |
 | Mixing v0.2 and v0.3. | TCP unaffected; UDP opens are reset by v0.2 and logged clearly. |
 
-## 12. Decisions to confirm
+## 12. Decisions
 
-1. **Flow = mux stream + `DGRAM` frames** (not packets inside the stream's byte data):
-   packets skip flow control, can be dropped, and overtake bulk TCP data. Proposed: yes.
-2. **UDP without mux** is supported, one tunnel connection per flow with length-prefixed
-   packets; mux is recommended. Alternative: require mux for UDP forwards. Proposed:
-   support both, so every setup from phase 2 can carry UDP.
-3. **Drop policy**: new packets dropped when the session's datagram buffer is full;
-   oldest packets dropped when a flow's receive queue is full. Proposed: yes.
-4. **`protocol = "tcp+udp"`** for both on one port. Proposed: yes.
-5. **Default idle timeout 60 s** for all profiles (games send constantly, so it only
-   matters for cleanup). Proposed: yes.
+Settled when the plan was accepted (the owner left the design to the implementation,
+asking for the principled choice in each case):
+
+1. **Flow = mux stream + `DGRAM` frames**, not packets inside the stream's byte data.
+   The stream gives the flow a lifecycle (open with a target, reset on dial failure,
+   close) using machinery that already exists; the separate frame type keeps what makes
+   UDP UDP: no flow control, packets can be dropped, and they can overtake bulk data.
+2. **UDP without mux is supported**, one tunnel connection per flow with length-prefixed
+   packets. Every setup from phase 2 then carries UDP, and "no mux" keeps meaning the
+   same thing for TCP and UDP. Mux is recommended, and `kariz check` warns when UDP is
+   forwarded without it.
+3. **Drop policy**: a new packet is dropped when a session's datagram buffer is full
+   (the sender side cannot usefully wait); the oldest packet is dropped when a flow's
+   receive queue is full (for real-time traffic a fresh packet is worth more).
+4. **`protocol = "tcp+udp"`** forwards both on one port.
+5. **Idle timeout 60 s** for all profiles, `tuning.udp_timeout_secs` to change it.
+6. Added in 3.1: a dedicated "unsupported" answer (status 2 without mux,
+   `RST(unsupported)` with mux) instead of reusing "protocol error", so an entry can tell
+   "the exit does not do UDP" from a real fault. v0.2 peers send "protocol error" for the
+   same case; the entry treats both as unsupported for UDP opens.
