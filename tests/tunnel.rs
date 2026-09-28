@@ -1,8 +1,11 @@
 //! End-to-end tests: user -> entry -> tunnel -> exit -> echo server, on localhost.
 
+mod link;
+
 use std::time::{Duration, Instant};
 
 use kariz::config::Config;
+use link::{Counts, Impairment, TcpLink, UdpLink};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
@@ -25,9 +28,6 @@ async fn echo_server() -> u16 {
         let Ok(udp) = UdpSocket::bind(("127.0.0.1", port)).await else {
             continue;
         };
-        // Several clients send 60 KB packets at once: with the kernel's default buffer
-        // (about 208 KB) the target itself would drop some, and the tests are strict.
-        let _ = socket2::SockRef::from(&udp).set_recv_buffer_size(4 << 20);
         tokio::spawn(async move {
             loop {
                 let (mut s, _) = listener.accept().await.unwrap();
@@ -37,13 +37,18 @@ async fn echo_server() -> u16 {
                 });
             }
         });
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 65_536];
-            while let Ok((n, from)) = udp.recv_from(&mut buf).await {
-                let _ = udp.send_to(&buf[..n], from).await;
-            }
-        });
+        tokio::spawn(udp_echo(udp));
         return port;
+    }
+}
+
+async fn udp_echo(udp: UdpSocket) {
+    // Several clients send 60 KB packets at once: with the kernel's default buffer
+    // (about 208 KB) the target itself would drop some, and the tests are strict.
+    let _ = socket2::SockRef::from(&udp).set_recv_buffer_size(4 << 20);
+    let mut buf = vec![0u8; 65_536];
+    while let Ok((n, from)) = udp.recv_from(&mut buf).await {
+        let _ = udp.send_to(&buf[..n], from).await;
     }
 }
 
@@ -82,6 +87,10 @@ struct Setup {
     udp_max_flows: usize,
     /// `tunnel.mux.connections`; 0 keeps the default.
     mux_connections: usize,
+    /// `tunnel.quic.congestion`; empty keeps the default.
+    congestion: &'static str,
+    /// `tunnel.mux.stream_window`; 0 keeps the default.
+    stream_window: usize,
 }
 
 impl Setup {
@@ -98,6 +107,19 @@ impl Setup {
             udp_timeout_secs: 0,
             udp_max_flows: 0,
             mux_connections: 0,
+            congestion: "",
+            stream_window: 0,
+        }
+    }
+
+    const fn congestion(self, congestion: &'static str) -> Self {
+        Self { congestion, ..self }
+    }
+
+    const fn stream_window(self, stream_window: usize) -> Self {
+        Self {
+            stream_window,
+            ..self
         }
     }
 
@@ -198,6 +220,9 @@ impl Setup {
         if self.mux_connections > 0 {
             options += &format!("connections = {}\n", self.mux_connections);
         }
+        if self.stream_window > 0 {
+            options += &format!("stream_window = {}\n", self.stream_window);
+        }
         if self.transport.starts_with("ws") {
             options += &format!("[tunnel.ws]\npath = \"{}\"\n", self.ws_path);
             if self.early_data && !listening {
@@ -219,6 +244,9 @@ impl Setup {
                 };
                 format!("[tunnel.tls]\nsni = \"tunnel.example\"\npin_sha256 = \"{pin}\"\n")
             };
+        }
+        if !self.congestion.is_empty() {
+            options += &format!("[tunnel.quic]\ncongestion = \"{}\"\n", self.congestion);
         }
         options += "[tuning]\n";
         if self.keepalive_secs > 0 {
@@ -315,10 +343,13 @@ impl Drop for Side {
     }
 }
 
+/// Something between the two sides (nginx, a link emulator) that runs while it is held.
+type Proxy = Box<dyn Send + Sync>;
+
 struct Tunnel {
     user_port: u16,
     /// Held only to keep a proxy between the two sides running.
-    _proxy: Option<Nginx>,
+    _proxy: Option<Proxy>,
     /// Held only to keep the entry side running.
     _entry: Side,
     exit: Option<Side>,
@@ -367,7 +398,7 @@ async fn start_via(
     entry_token: &str,
     exit_token: &str,
     target_port: u16,
-    proxy: impl FnOnce(u16) -> (u16, Option<Nginx>),
+    proxy: impl FnOnce(u16) -> (u16, Option<Proxy>),
 ) -> Tunnel {
     let tunnel_port = free_port();
     let (dial_port, proxy) = proxy(tunnel_port);
@@ -872,7 +903,7 @@ async fn check_through_nginx(entry: Setup, exit: Setup, survives: bool) {
     let target = echo_server().await;
     let tunnel = start_via(entry, exit, TOKEN, TOKEN, target, |upstream| {
         let nginx = Nginx::start(&bin, upstream, path, tls, NGINX_IDLE_SECS);
-        (nginx.port, Some(nginx))
+        (nginx.port, Some(Box::new(nginx)))
     })
     .await;
 
@@ -1270,5 +1301,221 @@ async fn udp_idle_latency() {
             us(percentile(&t, 0.5)) - us(percentile(&direct, 0.5)),
             us(percentile(&t, 0.99))
         );
+    }
+}
+
+/// A target for the lossy-link benchmark: each TCP connection gets an endless download,
+/// UDP packets on the same port are echoed.
+async fn download_server() -> u16 {
+    loop {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let Ok(udp) = UdpSocket::bind(("127.0.0.1", port)).await else {
+            continue;
+        };
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let chunk = pattern(64 * 1024);
+                    while s.write_all(&chunk).await.is_ok() {}
+                });
+            }
+        });
+        tokio::spawn(udp_echo(udp));
+        return port;
+    }
+}
+
+/// Download rate in Mbit/s, measured over `window` after `warmup`.
+async fn download(port: u16, warmup: Duration, window: Duration) -> f64 {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut buf = vec![0u8; 256 * 1024];
+    let from = Instant::now() + warmup;
+    let until = from + window;
+    let mut total = 0;
+    while let Ok(read) = tokio::time::timeout_at(until.into(), s.read(&mut buf)).await {
+        let n = read.expect("download failed");
+        assert!(n > 0, "download ended early");
+        if Instant::now() >= from {
+            total += n;
+        }
+    }
+    total as f64 * 8.0 / window.as_secs_f64() / 1e6
+}
+
+/// UDP round trips of a flow, sorted, and how many packets were sent.
+struct Pings {
+    rtts: Vec<Duration>,
+    sent: usize,
+}
+
+impl std::fmt::Display for Pings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ms = |p| percentile(&self.rtts, p).as_secs_f64() * 1000.0;
+        let lost = 100.0 * (1.0 - self.rtts.len() as f64 / self.sent as f64);
+        if self.rtts.is_empty() {
+            return write!(f, "{:>34}", "no answers");
+        }
+        write!(
+            f,
+            "p50 {:>4.0} p99 {:>4.0} ms, {lost:>4.1} % lost",
+            ms(0.5),
+            ms(0.99)
+        )
+    }
+}
+
+/// Sends `count` 100-byte packets on one flow, one every `every` without waiting for
+/// answers (a lost packet is lost, not waited for), like a game or a voice call.
+async fn pings(port: u16, count: u32, every: Duration) -> Pings {
+    let sock = std::sync::Arc::new(udp_client(port).await);
+    let deadline = Instant::now() + every * count + Duration::from_secs(2);
+    let receiver = {
+        let sock = sock.clone();
+        tokio::spawn(async move {
+            let mut got = Vec::new();
+            let mut buf = [0u8; 2048];
+            while let Ok(Ok(4..)) =
+                tokio::time::timeout_at(deadline.into(), sock.recv(&mut buf)).await
+            {
+                got.push((
+                    u32::from_be_bytes(buf[..4].try_into().unwrap()),
+                    Instant::now(),
+                ));
+            }
+            got
+        })
+    };
+    let mut sent = Vec::new();
+    let mut packet = [0u8; 100];
+    let mut interval = tokio::time::interval(every);
+    for seq in 0..count {
+        interval.tick().await;
+        packet[..4].copy_from_slice(&seq.to_be_bytes());
+        sent.push(Instant::now());
+        let _ = sock.send(&packet).await;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut rtts: Vec<_> = receiver
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|&(seq, _)| seen.insert(seq))
+        .map(|(seq, at)| at - sent[seq as usize])
+        .collect();
+    rtts.sort();
+    Pings {
+        rtts,
+        sent: count as usize,
+    }
+}
+
+/// One cell of the lossy-link benchmark.
+struct LinkRun {
+    mbps: f64,
+    idle: Pings,
+    loaded: Pings,
+    link: Counts,
+}
+
+/// Runs the tunnel over an emulated link (UDP for `quic`, TCP otherwise): UDP pings on
+/// the idle tunnel, then a download with pings next to it.
+async fn over_link(setup: Setup, imp: Impairment) -> LinkRun {
+    const WARMUP: Duration = Duration::from_secs(3);
+    const EVERY: Duration = Duration::from_millis(20);
+    const PINGS: u32 = 500;
+    let target = download_server().await;
+    let mut stats = None;
+    let tunnel = start_via(setup, setup, TOKEN, TOKEN, target, |upstream| {
+        let (port, link_stats, proxy): (_, _, Proxy) = if setup.transport == "quic" {
+            let link = UdpLink::start(upstream, imp);
+            (link.port, link.stats(), Box::new(link))
+        } else {
+            let link = TcpLink::start(upstream, imp);
+            (link.port, link.stats(), Box::new(link))
+        };
+        stats = Some(link_stats);
+        (port, Some(proxy))
+    })
+    .await;
+    let idle = pings(tunnel.user_port, PINGS, EVERY).await;
+    let window = EVERY * PINGS;
+    let download = tokio::spawn(download(tunnel.user_port, WARMUP, window));
+    tokio::time::sleep(WARMUP).await;
+    let loaded = pings(tunnel.user_port, PINGS, EVERY).await;
+    let mbps = download.await.unwrap();
+    LinkRun {
+        mbps,
+        idle,
+        loaded,
+        link: stats.unwrap().counts(),
+    }
+}
+
+/// Transports over a long, lossy path (PHASE4.md, section 8): 60 ms RTT, 50 Mbit/s each
+/// way with a 50 ms queue, random loss of 0, 1 and 5 % in both directions:
+/// `cargo test --release --test tunnel lossy_link -- --ignored --nocapture`.
+/// `KARIZ_BENCH_LOSS=1` (in percent) runs one loss rate only.
+///
+/// Streams get a 4 MiB window, above the path's bandwidth-delay product plus its queue
+/// (about 690 KB), so congestion control sets the rate. With the default 256 KiB a
+/// stream cannot go faster than 256 KiB per round trip, about 30 Mbit/s here; the
+/// `default window` rows show that cap.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn lossy_link() {
+    link::fine_timers();
+    const WINDOW: usize = 4 << 20;
+    let tcpmux = Setup::tcp("direct").transport("tcpmux").mux();
+    let setups = [
+        ("tcpmux", tcpmux.stream_window(WINDOW)),
+        ("quic cubic", Setup::quic("direct").stream_window(WINDOW)),
+        (
+            "quic bbr",
+            Setup::quic("direct")
+                .congestion("bbr")
+                .stream_window(WINDOW),
+        ),
+    ];
+    let default_window = [
+        ("tcpmux, default window", tcpmux),
+        ("quic cubic, default window", Setup::quic("direct")),
+    ];
+    let losses: Vec<f64> = match std::env::var("KARIZ_BENCH_LOSS") {
+        Ok(percent) => vec![percent.parse::<f64>().expect("KARIZ_BENCH_LOSS") / 100.0],
+        Err(_) => vec![0.0, 0.01, 0.05],
+    };
+    println!(
+        "RTT 60 ms, 50 Mbit/s, 50 ms queue. Download over 10 s; UDP: 100-byte packets every 20 ms"
+    );
+    println!(
+        "{:<5} {:<26} {:>13}   {:<33}   {:<33}   link (lost / queue drops)",
+        "loss", "transport", "download", "UDP, idle tunnel", "UDP, during the download"
+    );
+    for loss in losses {
+        let extra = if loss == 0.0 {
+            &default_window[..]
+        } else {
+            &[]
+        };
+        for &(name, setup) in setups.iter().chain(extra) {
+            let imp = Impairment {
+                delay: Duration::from_millis(30),
+                loss,
+                rate: 50_000_000,
+                queue: Duration::from_millis(50),
+                ..Default::default()
+            };
+            let run = over_link(setup, imp).await;
+            println!(
+                "{:<5} {name:<26} {:>7.1} Mbit/s   {}   {}   {} / {}",
+                format!("{} %", loss * 100.0),
+                run.mbps,
+                run.idle,
+                run.loaded,
+                run.link.lost,
+                run.link.dropped
+            );
+        }
     }
 }

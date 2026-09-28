@@ -245,7 +245,7 @@ src/transport/quic.rs     endpoint setup, token-derived mutual TLS, QuicSession
 src/transport/kcp/mod.rs  KcpStream (TunnelStream variant), listener / dialer, driver
 src/transport/kcp/protect.rs   packet protection
 src/transport/kcp/fec.rs  Reed-Solomon groups
-tests/lossy.rs (or in tunnel.rs)  UDP link emulator: loss, delay, jitter, reordering
+tests/link/mod.rs         UDP / TCP link emulators: loss, delay, jitter, reordering, rate
 ```
 
 Cargo features `quic` and `kcp`, both on by default, so a minimal build can leave them
@@ -262,14 +262,85 @@ benchmark: RTT 60 ms, loss 0 / 1 / 5 %, rate 50 Mbit/s; measure bulk throughput 
 flow round trips (p50 / p99) for `tcpmux`, `quic` (Cubic and BBR) and `kcp` (with and
 without FEC).
 
+*Status after 4.3:* `tests/link/mod.rs` holds a `UdpLink` and a `TcpLink`, local proxies
+that the E2E harness puts between the two sides (`start_via`). Each direction has one
+**bottleneck** (rate counting IP / UDP / TCP headers, a queue bounded in time, tail drop)
+that everything going that way shares. Every flow then gets its own **loss** (random, or
+in bursts with a Gilbert model of a given mean length), **delay**, **jitter** (order kept)
+and **reordering** (a share of packets held back by a gap), from a seeded generator so a
+run can be repeated. Where the result differs from the plan above, and why:
+
+- **The TCP link models TCP instead of adding delay spikes.** A proxy that forwards bytes
+  without loss leaves the TCP stacks at both ends unaware of any loss. They never shrink
+  their windows, so `tcpmux` would get almost the full rate at 5 % loss, the opposite of
+  what happens on a real path. Delay spikes reproduce the stalls but not the rate
+  collapse. So each direction of each proxied connection runs a model of the sender's TCP
+  over the path: 1448-byte segments, Cubic (RFC 9438: slow start, the 0.7 decrease, the
+  cubic growth and the Reno-friendly estimate), SACK-style fast retransmission after
+  three duplicate acks, a tail loss probe after three smoothed RTTs, and in-order delivery
+  (a lost segment holds back everything after it). The sender holds at most 16 KiB not
+  yet sent, like Kariz's `TCP_NOTSENT_LOWAT` on mux connections. Checked against Mathis
+  et al. (window of about 1.22 / sqrt(p) segments): at 2 % loss and 20 ms RTT the model
+  gets about 0.8 of that (unit test bounds: 0.5-2x). Not modelled: retransmission
+  timeouts and their backoff, delayed acks, lost acks. The model is therefore somewhat
+  kinder to TCP than a real path, so if anything the comparison favours `tcpmux`.
+- **Model events run at the time they are due**, not when the timer fires, so a late
+  wake-up does not stretch the emulated RTT. The benchmark also asks Windows for 1 ms
+  timer ticks (`fine_timers`): the default 15.6 ms tick added up to 30 ms to p99 round
+  trips.
+
+Tests: loss rate and burst length from the loss model (pure, 2 M draws), queue drops and
+rate spacing, and over real sockets: UDP loss rate, delay within bounds with jitter
+keeping order, reordering, rate limit, several dialers behind one link. For TCP: a
+stream that stays intact under 5 % bursty loss, the round trip, three downloads sharing
+and filling the bottleneck, and the Mathis check above.
+
+Benchmark: `cargo test --release --test tunnel lossy_link -- --ignored --nocapture`
+(`KARIZ_BENCH_LOSS=1` for one loss rate). Direct mode; a 10 s download (one user
+connection) after 3 s of warm-up; a UDP flow sending 100-byte packets every 20 ms
+without waiting for answers, first on the idle tunnel, then during the download. Streams
+get a 4 MiB window so congestion control, not flow control, sets the rate (rows marked
+*256 KiB* use the default). Baseline, release build on the Windows 11 development
+machine (Linux numbers follow in 4.6):
+
+| Loss | Transport | Download | UDP idle p50 / p99, lost | UDP during download p50 / p99, lost |
+|---|---|---|---|---|
+| 0 % | `tcpmux` | 48.1 Mbit/s | 63 / 64 ms, 0 % | 104 / 113 ms, 0 % |
+| 0 % | `quic` Cubic | 47.9 Mbit/s | 63 / 64 ms, 0 % | 108 / 112 ms, 0 % |
+| 0 % | `quic` BBR | 46.9 Mbit/s | 63 / 64 ms, 0 % | 110 / 113 ms, **52 %** |
+| 0 % | `tcpmux`, 256 KiB | 25.1 Mbit/s | 63 / 64 ms, 0 % | 64 / 84 ms, 0 % |
+| 0 % | `quic` Cubic, 256 KiB | 30.5 Mbit/s | 63 / 64 ms, 0 % | 64 / 69 ms, 0 % |
+| 1 % | `tcpmux` | 2.2 Mbit/s | 63 / 164 ms, 0 % | 63 / 183 ms, 0 % |
+| 1 % | `quic` Cubic | 2.4 Mbit/s | 63 / 64 ms, 1.0 % | 63 / 64 ms, 1.4 % |
+| 1 % | `quic` BBR | 46.2 Mbit/s | 63 / 64 ms, 1.2 % | 110 / 113 ms, **54 %** |
+| 5 % | `tcpmux` | 1.0 Mbit/s | 64 / 282 ms, 0 % | 65 / 263 ms, 0 % |
+| 5 % | `quic` Cubic | 1.0 Mbit/s | 63 / 64 ms, 10 % | 63 / 64 ms, 8.8 % |
+| 5 % | `quic` BBR | 44.7 Mbit/s | 63 / 64 ms, 8.8 % | 110 / 113 ms, **52 %** |
+
+(UDP loss on `quic` is per round trip, so about twice the link's one-way loss; `tcpmux`
+retransmits instead and pays in p99.) What the baseline says, for 4.4-4.6:
+
+- **Loss-based congestion control collapses on random loss, QUIC or not.** quinn's Cubic
+  does no better than TCP: 2.4 against 2.2 Mbit/s at 1 %. QUIC's gain there is the UDP
+  flow: datagrams keep p99 at the link RTT, where `tcpmux` waits for retransmissions
+  (164 ms at 1 %, 282 ms at 5 %).
+- **quinn's BBR holds the rate under loss** (46 and 45 Mbit/s at 1 and 5 %, 20-45x the
+  others), well past the 3x target of section 10. **But it overfills the bottleneck
+  queue:** about 60,000 packets dropped at the queue in 10 s, and half of the UDP
+  datagrams on the same connection with them. BBR as the default needs this fixed (or a
+  pacing / cwnd cap) first; 4.6 decides.
+- **The default 256 KiB stream window caps a stream at 256 KiB per round trip**, about
+  25-30 Mbit/s on this path. The `throughput` profile (1 MiB) lifts that; whether the
+  default should grow is for 4.6.
+
 ## 9. Work breakdown
 
 | Step | Content | Done when |
 |---|---|---|
 | **4.0** Plan (done) | This document. | Decisions settled (section 12). |
 | **4.1** Session layer (done) | `Session` / `SessionStream` over kmux; pool, `maintain`, entry, exit and UDP code use it. | No behaviour change; every existing test passes unchanged. |
-| **4.2** QUIC | quinn endpoints in both modes, token-derived mutual TLS, streams and datagrams (stream fallback for large packets), congestion choice, keep-alive, 0-RTT, config and validation. | E2E matrix rows for `quic` (reverse / direct), TCP and UDP scenarios pass; wrong token fails the TLS handshake; a packet above the datagram limit still arrives; the TLS identity tests (wrong key rejected both ways). |
-| **4.3** Lossy link harness | UDP / TCP link emulator in tests; baseline numbers for `tcpmux` vs `quic`. | Emulator unit tests (loss rate, delay within bounds); benchmark prints the matrix. |
+| **4.2** QUIC (done) | quinn endpoints in both modes, token-derived mutual TLS, streams and datagrams (stream fallback for large packets), congestion choice, keep-alive, 0-RTT, config and validation. | E2E matrix rows for `quic` (reverse / direct), TCP and UDP scenarios pass; wrong token fails the TLS handshake; a packet above the datagram limit still arrives; the TLS identity tests (wrong key rejected both ways). |
+| **4.3** Lossy link harness (done) | UDP / TCP link emulator in tests; baseline numbers for `tcpmux` vs `quic`. | Emulator unit tests (loss rate, delay within bounds); benchmark prints the matrix. |
 | **4.4** KCP | Packet protection, KCP driver, listener / dialer, settings and presets. | E2E rows for `kcp` (reverse / direct, mux on / off); probes get no answer; tampered packets are dropped; transfer integrity under 5 % loss. |
 | **4.5** FEC | Reed-Solomon groups, early group close, recovery. | Unit tests: any `data` of `data + parity` rebuild the group; delay bound; E2E under loss with fewer retransmissions than without FEC. |
 | **4.6** Release | Lossy-link benchmark table, defaults decided from it (QUIC congestion, KCP mode), sample configs, README / README_FA, CHANGELOG, version `0.4.0`. | Numbers in the README; release tagged. |
