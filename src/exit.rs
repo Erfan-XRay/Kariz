@@ -369,7 +369,8 @@ async fn serve_udp(exit: &Exit, mut tunnel: Link, open: Open) {
 async fn relay_udp(exit: &Exit, tunnel: Channel, socket: tokio::net::UdpSocket, open: &Open) {
     debug!(target = %open.target, "UDP flow opened");
     let (source, sink) = udp::Connected::new(socket);
-    match udp::relay(tunnel, source, sink, exit.tuning.udp.timeout).await {
+    let (idle, duplicate) = (exit.tuning.udp.timeout, open.duplicate);
+    match udp::relay(tunnel, source, sink, idle, duplicate).await {
         Ok(()) => debug!(target = %open.target, "UDP flow closed"),
         Err(e) => debug!(target = %open.target, error = %e, "UDP flow ended with error"),
     }

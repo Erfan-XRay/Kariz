@@ -1167,6 +1167,19 @@ impl MuxStream {
         true
     }
 
+    /// Whether a datagram of `len` bytes would take the datagram path now, where it may
+    /// be lost, rather than the connection.
+    pub fn sends_unreliably(&self, len: usize) -> bool {
+        let Some(path) = &self.shared.path else {
+            return false;
+        };
+        if HEADER_LEN + len > path.max_frame() {
+            return false;
+        }
+        let st = self.shared.lock();
+        st.peer_path && st.streams.get(&self.id).is_some_and(|s| s.peer_knows)
+    }
+
     fn send_on_path(&self, path: &DatagramPath, packet: &[u8]) -> bool {
         let mut frame = Vec::with_capacity(HEADER_LEN + packet.len());
         frame.extend_from_slice(&frame::header(FrameType::Dgram, self.id, packet.len()));

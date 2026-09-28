@@ -507,6 +507,17 @@ impl QuicStream {
         self.state().reset
     }
 
+    /// Whether a packet of `len` bytes would go as a datagram, where it may be lost,
+    /// rather than on the stream.
+    pub fn sends_unreliably(&self, len: usize) -> bool {
+        let mut id = BytesMut::with_capacity(8);
+        put_varint(self.id, &mut id);
+        self.shared
+            .conn
+            .max_datagram_size()
+            .is_some_and(|max| id.len() + len <= max)
+    }
+
     /// Sends one packet as a datagram, or on the stream if it is too large for one.
     /// Never waits; false if dropped.
     pub fn send_datagram(&self, packet: Bytes) -> bool {

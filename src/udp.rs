@@ -6,6 +6,12 @@
 //! `DGRAM` frames; without mux it is a whole channel carrying length-prefixed packets.
 //! Either way [`relay`] moves packets both ways until the flow has been idle for the
 //! configured timeout or one side ends it.
+//!
+//! **Duplication** (docs/PHASE6.md, section 4): a flow opened with it numbers every
+//! packet, `seq (4, BE) | packet`, in both directions. A packet that goes where it may be
+//! lost (KCP's datagram path, a QUIC datagram) is sent again `gap` later, once or twice;
+//! the receiver drops the numbers it has seen. Packets that go reliably are numbered but
+//! not copied.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -15,19 +21,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use socket2::SockRef;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
-use tokio::time::{sleep, timeout, Instant};
+use tokio::time::{sleep, sleep_until, timeout, Instant};
 use tracing::{debug, warn};
 
 use crate::channel::Channel;
 use crate::config::{Tuning, UdpTuning};
+use crate::crypto::datagram::ReplayWindow;
 use crate::mux::Transport;
-use crate::proto::{self, MAX_DATAGRAM};
-use crate::session::ResetReason;
+use crate::proto::{self, Duplicate, MAX_DATAGRAM};
+use crate::session::{ResetReason, SessionStream};
 
 /// Receive buffer for one packet: the largest UDP payload fits.
 const PACKET_BUFFER: usize = 64 * 1024;
@@ -54,14 +61,103 @@ pub trait PacketSink: Send + Sync {
     fn send(&self, packet: &[u8]) -> impl Future<Output = io::Result<()>> + Send;
 }
 
+/// Bytes in front of every packet of a flow with duplication.
+const SEQUENCE_LEN: usize = 4;
+
+/// Numbers the packets of a flow with duplication.
+#[derive(Default)]
+struct Numbering(u32);
+
+impl Numbering {
+    fn number(&mut self, packet: &[u8]) -> Bytes {
+        let mut out = BytesMut::with_capacity(SEQUENCE_LEN + packet.len());
+        out.put_u32(self.0);
+        out.put_slice(packet);
+        self.0 = self.0.wrapping_add(1);
+        out.freeze()
+    }
+}
+
+/// Drops the copies of packets already received, and strips the numbers.
+#[derive(Default)]
+struct Dedup(ReplayWindow);
+
+impl Dedup {
+    fn accept(&mut self, packet: Bytes) -> Option<Bytes> {
+        let seq = u32::from_be_bytes(packet.get(..SEQUENCE_LEN)?.try_into().ok()?);
+        let n = unwrap_sequence(self.0.end(), seq);
+        if !self.0.is_new(n) {
+            return None;
+        }
+        self.0.insert(n);
+        Some(packet.slice(SEQUENCE_LEN..))
+    }
+}
+
+/// The 64-bit number whose low 32 bits are `seq`, nearest to `expected` (the way QUIC
+/// decodes packet numbers), so numbering goes on past 2^32 packets.
+fn unwrap_sequence(expected: u64, seq: u32) -> u64 {
+    const SPAN: u64 = 1 << 32;
+    let candidate = (expected & !(SPAN - 1)) | u64::from(seq);
+    if candidate + SPAN / 2 <= expected {
+        candidate + SPAN
+    } else if candidate > expected + SPAN / 2 && candidate >= SPAN {
+        candidate - SPAN
+    } else {
+        candidate
+    }
+}
+
+/// Copies waiting for their time: one queue for second copies and one for third ones.
+/// Each is in sending order, so the earliest due copy is at a front.
+#[derive(Default)]
+struct Copies {
+    rounds: [VecDeque<(Instant, Bytes)>; 2],
+}
+
+impl Copies {
+    /// Sends the copies of `packet` now (no gap) or queues them.
+    fn add(&mut self, packet: &Bytes, duplicate: Duplicate, stream: &SessionStream) {
+        let gap = Duration::from_millis(duplicate.gap_ms.into());
+        let now = Instant::now();
+        for round in 1..duplicate.copies as u32 {
+            if gap.is_zero() {
+                stream.send_datagram(packet.clone());
+            } else {
+                self.rounds[round as usize - 1].push_back((now + gap * round, packet.clone()));
+            }
+        }
+    }
+
+    fn next_due(&self) -> Option<Instant> {
+        self.rounds
+            .iter()
+            .filter_map(|r| r.front())
+            .map(|c| c.0)
+            .min()
+    }
+
+    fn send_due(&mut self, stream: &SessionStream) {
+        let now = Instant::now();
+        for round in &mut self.rounds {
+            while round.front().is_some_and(|c| c.0 <= now) {
+                let (_, packet) = round.pop_front().expect("not empty");
+                stream.send_datagram(packet);
+            }
+        }
+    }
+}
+
 /// Moves packets between `channel` and the local side until the flow has seen no packet
 /// in either direction for `idle`, or either side ends it. Ends the tunnel side cleanly
-/// (`FIN` or shutdown) so the peer ends its side too.
+/// (`FIN` or shutdown) so the peer ends its side too. `duplicate`: the flow's packet
+/// duplication, as both sides know it from the open request.
 pub async fn relay<Src, Snk>(
     channel: Channel,
     mut source: Src,
     sink: Snk,
     idle: Duration,
+    duplicate: Option<Duplicate>,
 ) -> io::Result<()>
 where
     Src: PacketSource,
@@ -91,18 +187,47 @@ where
     match channel {
         Channel::Stream(stream) => {
             let up = async {
-                while let Some(packet) = source.recv().await? {
+                let (mut numbering, mut copies) = (Numbering::default(), Copies::default());
+                loop {
+                    let due = copies.next_due();
+                    let packet = tokio::select! {
+                        packet = source.recv() => packet?,
+                        () = sleep_until(due.unwrap_or_else(Instant::now)), if due.is_some() => {
+                            copies.send_due(&stream);
+                            continue;
+                        }
+                    };
+                    let Some(packet) = packet else {
+                        return Ok(());
+                    };
                     touch();
-                    // A full session queue drops the packet (counted by the session).
-                    stream.send_datagram(packet);
+                    let Some(duplicate) = duplicate else {
+                        // A full session queue drops the packet (counted by the session).
+                        stream.send_datagram(packet);
+                        continue;
+                    };
+                    let packet = numbering.number(&packet);
+                    // Copies only where the packet may be lost.
+                    let unreliable = stream.sends_unreliably(packet.len());
+                    stream.send_datagram(packet.clone());
+                    if unreliable {
+                        copies.add(&packet, duplicate, &stream);
+                    }
                 }
-                Ok(())
             };
             let down = async {
+                let mut dedup = duplicate.map(|_| Dedup::default());
                 loop {
                     match stream.recv_datagram().await {
                         Ok(Some(packet)) => {
                             touch();
+                            let packet = match &mut dedup {
+                                Some(dedup) => match dedup.accept(packet) {
+                                    Some(packet) => packet,
+                                    None => continue,
+                                },
+                                None => packet,
+                            };
                             deliver(packet).await;
                         }
                         Ok(None) => return Ok(()),
@@ -126,11 +251,17 @@ where
             let (mut reader, mut writer) = link.into_halves();
             let up = async {
                 let mut batch = Vec::with_capacity(WRITE_BATCH);
+                // Numbered like any flow with duplication, but a channel loses nothing,
+                // so nothing is copied.
+                let mut numbering = duplicate.map(|_| Numbering::default());
                 while let Some(packet) = source.recv().await? {
                     touch();
                     batch.clear();
                     let mut next = Some(packet);
-                    while let Some(packet) = next {
+                    while let Some(mut packet) = next {
+                        if let Some(numbering) = &mut numbering {
+                            packet = numbering.number(&packet);
+                        }
                         // Larger than UDP over IPv4 allows (IPv6 jumbo); cannot be framed.
                         if packet.len() <= MAX_DATAGRAM {
                             proto::put_datagram(&packet, &mut batch)?;
@@ -147,8 +278,16 @@ where
                 Ok(())
             };
             let down = async {
+                let mut dedup = duplicate.map(|_| Dedup::default());
                 while let Some(packet) = proto::read_datagram(&mut reader).await? {
                     touch();
+                    let packet = match &mut dedup {
+                        Some(dedup) => match dedup.accept(packet) {
+                            Some(packet) => packet,
+                            None => continue,
+                        },
+                        None => packet,
+                    };
                     deliver(packet).await;
                 }
                 Ok(())
@@ -392,11 +531,13 @@ impl Flows {
 }
 
 /// Entry side: serves one UDP forward rule on `socket`. `open` opens a tunnel path for a
-/// new flow (the open request is the caller's). Runs until the socket fails.
+/// new flow (the open request is the caller's, and carries `duplicate`). Runs until the
+/// socket fails.
 pub async fn serve<O, F>(
     socket: UdpSocket,
     udp: UdpTuning,
     target: String,
+    duplicate: Option<Duplicate>,
     open: O,
 ) -> io::Result<()>
 where
@@ -425,7 +566,8 @@ where
                 Err(PushError::Full) => continue,
                 // The flow just ended; start a new one.
                 Err(PushError::Closed(p)) => {
-                    start_flow(table, client, p, &socket, &udp, &target, &flows, &open);
+                    let rule = (&udp, target.as_str(), duplicate);
+                    start_flow(table, client, p, &socket, rule, &flows, &open);
                     continue;
                 }
             },
@@ -442,25 +584,26 @@ where
             }
             continue;
         }
-        start_flow(table, client, packet, &socket, &udp, &target, &flows, &open);
+        let rule = (&udp, target.as_str(), duplicate);
+        start_flow(table, client, packet, &socket, rule, &flows, &open);
     }
 }
 
-/// Starts a flow for `client` with `packet` as its first packet.
-#[allow(clippy::too_many_arguments)]
+/// Starts a flow for `client` with `packet` as its first packet. `rule`: the rule's
+/// tuning, target and duplication.
 fn start_flow<O, F>(
     table: &mut Flows,
     client: SocketAddr,
     packet: Bytes,
     socket: &Arc<UdpSocket>,
-    udp: &UdpTuning,
-    target: &str,
+    rule: (&UdpTuning, &str, Option<Duplicate>),
     flows: &Arc<Mutex<Flows>>,
     open: &Arc<O>,
 ) where
     O: Fn() -> F + Send + Sync + 'static,
     F: Future<Output = io::Result<Channel>> + Send + 'static,
 {
+    let (udp, target, duplicate) = rule;
     if matches!(table.map.get(&client), Some(FlowState::Active { .. })) {
         table.active -= 1;
     }
@@ -482,7 +625,7 @@ fn start_flow<O, F>(
             // than relaying, and an unboxed future would reserve that for the flow's life.
             let channel = Box::pin(open()).await?;
             opened = true;
-            relay(channel, rx, ReplyTo { socket, client }, idle).await
+            relay(channel, rx, ReplyTo { socket, client }, idle, duplicate).await
         }
         .await;
         let open_failed = match &result {
@@ -547,7 +690,13 @@ mod tests {
                 }
             }
         };
-        tokio::spawn(serve(socket, tuning(max_flows), "target".into(), opener));
+        tokio::spawn(serve(
+            socket,
+            tuning(max_flows),
+            "target".into(),
+            None,
+            opener,
+        ));
         (addr, calls)
     }
 
@@ -591,5 +740,49 @@ mod tests {
         }
         sleep(Duration::from_millis(200)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn copies_are_dropped_and_numbers_stripped() {
+        let (mut numbering, mut dedup) = (Numbering::default(), Dedup::default());
+        let packets: Vec<Bytes> = (0..5u8).map(|i| numbering.number(&[i; 3])).collect();
+        assert_eq!(&packets[1][..SEQUENCE_LEN], 1u32.to_be_bytes());
+        // Out of order, each twice: every packet once, in the order it first came.
+        let mut got = Vec::new();
+        for i in [0, 2, 1, 2, 0, 4, 3, 4, 1, 3] {
+            if let Some(p) = dedup.accept(packets[i].clone()) {
+                got.push(p[0]);
+            }
+        }
+        assert_eq!(got, [0, 2, 1, 4, 3]);
+        assert_eq!(dedup.accept(Bytes::from_static(b"abc")), None, "too short");
+        assert_eq!(
+            dedup.accept(numbering.number(b"")).as_deref(),
+            Some(&b""[..]),
+            "an empty packet"
+        );
+    }
+
+    #[test]
+    fn sequence_numbers_go_on_past_32_bits() {
+        const SPAN: u64 = 1 << 32;
+        assert_eq!(unwrap_sequence(0, 0), 0);
+        assert_eq!(unwrap_sequence(10, 7), 7);
+        // Across the wrap, forwards and a late one from before it.
+        assert_eq!(unwrap_sequence(SPAN - 1, 0), SPAN);
+        assert_eq!(unwrap_sequence(SPAN + 5, u32::MAX - 1), SPAN - 2);
+        assert_eq!(unwrap_sequence(3 * SPAN + 2, 1), 3 * SPAN + 1);
+        // A flow numbered from 0 through the wrap, each packet sent twice.
+        let (mut numbering, mut dedup) = (Numbering(u32::MAX - 2), Dedup::default());
+        dedup.0.insert(u64::from(u32::MAX - 3));
+        let mut delivered = 0;
+        for _ in 0..6 {
+            let packet = numbering.number(b"x");
+            for _ in 0..2 {
+                delivered += usize::from(dedup.accept(packet.clone()).is_some());
+            }
+        }
+        assert_eq!(delivered, 6);
+        assert_eq!(dedup.0.end(), SPAN + 3);
     }
 }

@@ -99,6 +99,8 @@ struct Setup {
     fec: (usize, usize),
     /// More `[tunnel.kcp]` lines.
     kcp_options: &'static str,
+    /// The forward rule's `duplicate` / `duplicate_gap_ms`; 0 copies leaves them out.
+    duplicate: (u8, u8),
 }
 
 impl Setup {
@@ -119,6 +121,14 @@ impl Setup {
             stream_window: 0,
             fec: (0, 0),
             kcp_options: "",
+            duplicate: (0, 0),
+        }
+    }
+
+    const fn duplicate(self, copies: u8, gap_ms: u8) -> Self {
+        Self {
+            duplicate: (copies, gap_ms),
+            ..self
         }
     }
 
@@ -460,6 +470,10 @@ async fn start_via(
     let entry_listens = mode == "reverse";
     let options = setup.tunnel_options(entry_listens);
     let exit_options = exit_setup.tunnel_options(!entry_listens);
+    let duplicate = match setup.duplicate {
+        (0, _) => String::new(),
+        (copies, gap) => format!("duplicate = {copies}\nduplicate_gap_ms = {gap}"),
+    };
     let entry = format!(
         r#"
         role = "entry"
@@ -468,6 +482,7 @@ async fn start_via(
         listen = "127.0.0.1:{user_port}"
         target = "127.0.0.1:{target_port}"
         protocol = "tcp+udp"
+        {duplicate}
         [tunnel]
         {entry_tunnel}
         token = "{entry_token}"
@@ -1588,6 +1603,59 @@ async fn lossy_link() {
                 run.link.lost,
                 run.link.dropped
             );
+        }
+    }
+}
+
+/// Game-like traffic (100-byte packets every 10 ms, echoed) over a link that drops 10 %
+/// of the packets each way, so about 19 % of the round trips fail. With each packet sent
+/// twice, both ways, a round trip fails only when both copies are lost on one of its
+/// two legs: about 2 %. Over kcp's datagram path and QUIC datagrams, in both modes.
+#[tokio::test(flavor = "multi_thread")]
+async fn duplication_hides_random_loss() {
+    let runs = [
+        (Setup::kcp("direct"), 2),
+        (Setup::kcp("reverse"), 2),
+        (Setup::quic("direct"), 2),
+        (Setup::kcp("direct"), 1),
+    ]
+    .map(|(setup, copies)| {
+        tokio::spawn(async move {
+            let setup = if copies > 1 {
+                setup.duplicate(copies, 5)
+            } else {
+                setup
+            };
+            let target = echo_server().await;
+            let imp = Impairment {
+                delay: Duration::from_millis(5),
+                loss: 0.10,
+                ..Default::default()
+            };
+            let tunnel = start_via(setup, setup, TOKEN, TOKEN, target, |upstream| {
+                let link = UdpLink::start(upstream, imp);
+                (link.port, Some(Box::new(link)))
+            })
+            .await;
+            // Let the datagram path's probes cross (they can be lost too), then measure.
+            let _ = pings(tunnel.user_port, 100, Duration::from_millis(10)).await;
+            let run = pings(tunnel.user_port, 400, Duration::from_millis(10)).await;
+            let lost = 1.0 - run.rtts.len() as f64 / run.sent as f64;
+            (setup, copies, lost)
+        })
+    });
+    for run in runs {
+        let (setup, copies, lost) = run.await.unwrap();
+        eprintln!(
+            "{} {} copies {copies}: {:.1} % of round trips lost",
+            setup.transport,
+            setup.mode,
+            lost * 100.0
+        );
+        if copies > 1 {
+            assert!(lost < 0.06, "{setup:?}: {:.1} % lost", lost * 100.0);
+        } else {
+            assert!(lost > 0.10, "{setup:?}: {:.1} % lost", lost * 100.0);
         }
     }
 }

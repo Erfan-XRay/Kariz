@@ -158,7 +158,7 @@ pub async fn run(config: Config) -> Result<()> {
             let socket = udp::bind(&forward.listen, &entry.tuning.udp)
                 .await
                 .with_context(|| format!("failed to bind UDP forward port {}", forward.listen))?;
-            let open = encode_open(Open::udp(forward.target.clone()));
+            let open = encode_open(Open::udp(forward.target.clone(), forward.duplication()));
             let opener = {
                 let entry = entry.clone();
                 move || {
@@ -167,9 +167,9 @@ pub async fn run(config: Config) -> Result<()> {
                 }
             };
             let (udp_tuning, target) = (entry.tuning.udp.clone(), forward.target.clone());
-            let listen = forward.listen.clone();
+            let (listen, duplicate) = (forward.listen.clone(), forward.duplication());
             tasks.spawn(async move {
-                udp::serve(socket, udp_tuning, target, opener)
+                udp::serve(socket, udp_tuning, target, duplicate, opener)
                     .await
                     .with_context(|| format!("UDP forward port {listen} failed"))
             });

@@ -124,8 +124,9 @@ impl DatagramOpener {
 }
 
 /// The numbers seen among the last [`WINDOW`] up to the highest one: bit `n % WINDOW`.
+/// Also drops copies of duplicated UDP packets (`src/udp.rs`).
 #[derive(Default)]
-struct ReplayWindow {
+pub(crate) struct ReplayWindow {
     /// One more than the highest number seen; 0 before the first.
     end: u64,
     bits: [u64; (WINDOW / 64) as usize],
@@ -137,7 +138,12 @@ impl ReplayWindow {
         ((i / 64) as usize, 1 << (i % 64))
     }
 
-    fn is_new(&self, n: u64) -> bool {
+    /// One more than the highest number seen; 0 before the first.
+    pub(crate) fn end(&self) -> u64 {
+        self.end
+    }
+
+    pub(crate) fn is_new(&self, n: u64) -> bool {
         if n >= self.end {
             return true;
         }
@@ -148,7 +154,7 @@ impl ReplayWindow {
         self.bits[word] & mask == 0
     }
 
-    fn insert(&mut self, n: u64) {
+    pub(crate) fn insert(&mut self, n: u64) {
         if n >= self.end {
             // Numbers skipped on the way to `n` have not been seen: clear their bits,
             // which still hold numbers a whole window older.

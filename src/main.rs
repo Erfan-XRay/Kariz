@@ -213,8 +213,12 @@ fn print_summary(config: &Config) {
         );
     }
     for f in &config.forward {
+        let copies = f
+            .duplication()
+            .map(|d| format!(", {} copies {} ms apart", d.copies, d.gap_ms))
+            .unwrap_or_default();
         println!(
-            "  forward   : {} -> {} ({})",
+            "  forward   : {} -> {} ({}{copies})",
             f.listen,
             f.target,
             f.protocol.name()

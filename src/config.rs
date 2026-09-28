@@ -18,6 +18,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
+use crate::proto::Duplicate;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -420,7 +422,27 @@ pub struct Forward {
     pub target: String,
     #[serde(default)]
     pub protocol: ForwardProtocol,
+    /// UDP rules: how many times each packet is sent in all, both ways (1-3; default 1).
+    /// Copies go only where packets may be lost (KCP's datagram path, QUIC datagrams).
+    pub duplicate: Option<u8>,
+    /// Milliseconds between the copies of a packet (0-50; default 5).
+    pub duplicate_gap_ms: Option<u8>,
 }
+
+impl Forward {
+    /// Packet duplication for this rule's UDP flows; `None` with a single copy.
+    pub fn duplication(&self) -> Option<Duplicate> {
+        let copies = self.duplicate.unwrap_or(1);
+        (copies > 1).then(|| Duplicate {
+            copies,
+            gap_ms: self.duplicate_gap_ms.unwrap_or(DEFAULT_DUPLICATE_GAP_MS),
+        })
+    }
+}
+
+const DEFAULT_DUPLICATE_GAP_MS: u8 = 5;
+const DUPLICATE_COPIES: std::ops::RangeInclusive<u8> = 1..=3;
+const MAX_DUPLICATE_GAP_MS: u8 = 50;
 
 /// Optional per-field overrides applied on top of the selected profile.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -704,6 +726,16 @@ impl Config {
                  enable tunnel.mux (or use tcpmux, ws, wss) for UDP",
             );
         }
+        let unreliable = matches!(
+            self.tunnel.transport,
+            TransportKind::Kcp | TransportKind::Quic
+        ) && self.mux().enabled;
+        if self.forward.iter().any(|f| f.duplication().is_some()) && !unreliable {
+            warnings.push(
+                "forward.duplicate has no effect here: copies are only sent over kcp (with mux) \
+                 or quic, where packets may be lost; other transports deliver every packet",
+            );
+        }
         if self
             .tunnel
             .quic
@@ -776,6 +808,18 @@ impl Config {
         for f in &self.forward {
             if f.target.len() > u16::MAX as usize {
                 bail!("forward target is too long: {}", f.target);
+            }
+            if (f.duplicate.is_some() || f.duplicate_gap_ms.is_some()) && !f.protocol.has_udp() {
+                bail!(
+                    "forward {}: duplicate and duplicate_gap_ms are for UDP rules",
+                    f.listen
+                );
+            }
+            if !DUPLICATE_COPIES.contains(&f.duplicate.unwrap_or(1)) {
+                bail!("forward.duplicate must be between 1 and 3");
+            }
+            if f.duplicate_gap_ms.unwrap_or(0) > MAX_DUPLICATE_GAP_MS {
+                bail!("forward.duplicate_gap_ms must be at most {MAX_DUPLICATE_GAP_MS}");
             }
         }
 
@@ -1291,6 +1335,52 @@ mod tests {
         assert!(parse_unchecked(&with_forward("tcp", "tcp", ""))
             .warnings()
             .is_empty());
+    }
+
+    #[test]
+    fn duplication_on_udp_rules() {
+        let dup = |protocol: &str, transport: &str, lines: &str| {
+            with_forward(protocol, transport, "").replace(
+                &format!("protocol = \"{protocol}\""),
+                &format!("protocol = \"{protocol}\"\n{lines}"),
+            )
+        };
+        let c = Config::parse(&dup("udp", "kcp", "duplicate = 2")).unwrap();
+        assert_eq!(
+            c.forward[0].duplication(),
+            Some(Duplicate {
+                copies: 2,
+                gap_ms: 5
+            })
+        );
+        assert!(c.warnings().is_empty(), "{:?}", c.warnings());
+        let c = Config::parse(&dup(
+            "tcp+udp",
+            "quic",
+            "duplicate = 3\nduplicate_gap_ms = 0",
+        ))
+        .unwrap();
+        assert_eq!(
+            c.forward[0].duplication(),
+            Some(Duplicate {
+                copies: 3,
+                gap_ms: 0
+            })
+        );
+        let one = Config::parse(&dup("udp", "kcp", "duplicate = 1")).unwrap();
+        assert_eq!(one.forward[0].duplication(), None);
+        // Accepted, but pointless over transports that lose nothing.
+        let c = Config::parse(&dup("udp", "tcpmux", "duplicate = 2")).unwrap();
+        assert!(c.warnings().iter().any(|w| w.contains("duplicate")));
+        for (protocol, lines, needle) in [
+            ("tcp", "duplicate = 2", "for UDP rules"),
+            ("udp", "duplicate = 0", "between 1 and 3"),
+            ("udp", "duplicate = 4", "between 1 and 3"),
+            ("udp", "duplicate = 2\nduplicate_gap_ms = 51", "at most 50"),
+        ] {
+            let err = parse_err(&dup(protocol, "kcp", lines));
+            assert!(err.contains(needle), "{lines}: {err}");
+        }
     }
 
     #[test]

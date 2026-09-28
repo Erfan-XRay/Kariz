@@ -186,6 +186,43 @@ with older ones; a jump past the window; a forged number that leaves the window 
   bytes, 2 copies add about 100 kbit/s, nothing on any link games run on. For
   WireGuard or bulk UDP it would be real, which is why duplication is set per rule.
 
+*Status after 6.3:* `[[forward]] duplicate` / `duplicate_gap_ms` work over `kcp` (with
+mux) and `quic`, in both modes. The code is in `src/udp.rs` (numbering, copies, dropping
+copies), `src/proto.rs` (open request) and `src/config.rs`. Where the result differs from
+the plan above, and why:
+
+- **Copies are dropped by the UDP flow, not by each transport.** A flow with duplication
+  puts a sequence number in front of every packet, `seq (4, BE) | packet`, in both
+  directions, and the receiving side keeps the 6.1 window over those numbers. Each copy
+  is then an ordinary datagram (over KCP sealed on its own, with its own packet
+  number). This one mechanism covers KCP's datagram path and QUIC datagrams alike, so
+  QUIC's datagram format and kmux are unchanged. It costs 4 bytes per packet. The
+  numbers are 32 bits on the wire and go on past 2^32 (each is read as the 64-bit number
+  nearest the highest seen, as QUIC does with packet numbers).
+- **Copies only where a packet may be lost.** The flow asks its stream whether a packet
+  of that size would go unreliably (`SessionStream::sends_unreliably`: on KCP's datagram
+  path, or as a QUIC datagram). Packets that go in the connection or on QUIC's stream
+  fallback are numbered but sent once. Without mux, a flow is a whole channel and is
+  numbered the same way, so both sides agree on the format, but nothing is copied.
+- **The open request has a new kind**, 3 (`kind | target_len | target | copies | gap_ms`),
+  decoded as a UDP open with duplication. A v0.4 exit rejects kind 3 as unknown, which
+  the entry reports as an exit that does not support the flow (older version), and
+  the client is backed off for 5 s, as with any rejected flow. Flows without
+  duplication still use kind 2, so they work with v0.4.
+- **Copies wait in two queues** (second copies and third copies), each in sending
+  order, served by the flow's sending loop when due. There is no task or timer per
+  packet. With `duplicate_gap_ms = 0` copies go out at once.
+- **`kariz check`** prints each rule's copies and gap. It warns when duplication is set
+  on a transport where nothing is copied.
+
+Tests: numbering and dropping copies (out of order, each packet twice, too short),
+sequence numbers across the 32-bit wrap; open requests of kind 3 (round trip, missing
+or out-of-range options rejected); config (UDP rules only, bounds, the warning). E2E
+`duplication_hides_random_loss`: 100-byte packets every 10 ms, echoed, over a link
+dropping 10 % each way (about 19 % of round trips lost without duplication; 21-23 %
+measured). With 2 copies 5 ms apart, over `kcp` direct and reverse and `quic` direct,
+0.5-3.5 % were lost in eight runs (the square law predicts about 2 %).
+
 ## 5. DSCP
 
 - `[tuning] dscp = "ef" | "af41" | "cs4" | ... | <0-63>` (default: unset, the socket
@@ -273,7 +310,7 @@ loss and with bursty loss (mean burst 3). Rows: `tcpmux` (baseline), `kcp` as in
 | **6.0** Plan (done) | This document; roadmap updated. | Decisions settled (section 12). |
 | **6.1** Datagram sealing (done) | `src/crypto/datagram.rs`: keys from the record keys, explicit packet numbers, receive window. No transport changes yet. | Unit tests of section 8 pass; no other behaviour change. |
 | **6.2** KCP datagram path (done) | `PACKET_DATAGRAM`, driver queue and fairness, `KcpStream` datagram half, kmux placement and in-band probe, `kariz check` warning without mux. | Loss on the link does not delay other UDP packets; large ones fall back; without the probe everything stays in the stream; every existing test passes. |
-| **6.3** Duplication | `duplicate` / `duplicate_gap_ms` on UDP rules, both directions; dedup over KCP datagrams and QUIC datagrams (sequence numbers there). | Exactly-once delivery with copies; residual loss about the square of the link's under random loss; config validation. |
+| **6.3** Duplication (done) | `duplicate` / `duplicate_gap_ms` on UDP rules, both directions; dedup over KCP datagrams and QUIC datagrams (sequence numbers there). | Exactly-once delivery with copies; residual loss about the square of the link's under random loss; config validation. |
 | **6.4** DSCP | `tuning.dscp` on tunnel sockets and the exit's UDP target sockets, v4 and v6. | Option read back on every socket kind; `kariz check` shows it. |
 | **6.5** Benchmark and defaults | Game-traffic pattern and matrix; the gaming profile's KCP mode, window, FEC and duplication decided from it. | Table in this document; targets of section 10 checked. |
 | **6.6** Release | Sample configs (`entry-gaming.toml` / `exit-gaming.toml`), README / README_FA (gaming section, DSCP caveats), CHANGELOG, version `0.5.0`, roadmap. | Numbers in the README; release tagged. |
