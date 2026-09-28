@@ -39,7 +39,7 @@ or off on both sides.
 | `stream_window` | 16 KiB - 16 MiB | profile | Bytes a stream may have in flight. One stream moves at most one window per round trip. |
 | `max_lifetime_secs` | at least 60 | off | Replace each connection after this long (streams on it finish first). |
 | `coalesce` | `true`, `false` | on (`gaming`: off) | Gather frames into larger writes (speed) or write each at once (latency). |
-| `ping_interval_secs` | 2-600 | `tuning.keepalive_secs` | Pings; a peer silent for twice this long is dead. Also QUIC's keep-alive. Keep it at 90 or less behind a CDN. |
+| `ping_interval_secs` | 1-600 | `tuning.keepalive_secs` | Pings; a peer silent for twice this long is dead. Also QUIC's keep-alive. Keep it at 90 or less behind a CDN. |
 | `datagram_buffer` | 16 KiB - 64 MiB | profile | UDP bytes a session queues for sending; more are dropped. |
 | `datagram_queue` | 8-65536 | profile | UDP packets each flow queues on the receiving side; the oldest are dropped. |
 | `notsent_lowat` | 0, or 4 KiB - 16 MiB | 16384 | `TCP_NOTSENT_LOWAT` on TCP connections carrying mux, so UDP and new data are not stuck behind a kernel backlog. 0 turns it off. Linux only. |

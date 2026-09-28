@@ -788,7 +788,7 @@ const KCP_MTU_FEC: usize = 1429;
 const KCP_FEC_DATA: std::ops::RangeInclusive<usize> = 1..=64;
 const KCP_FEC_PARITY: std::ops::RangeInclusive<usize> = 1..=32;
 const MUX_MIN_LIFETIME_SECS: u64 = 60;
-const MUX_PING_INTERVAL_SECS: std::ops::RangeInclusive<u64> = 2..=600;
+const MUX_PING_INTERVAL_SECS: std::ops::RangeInclusive<u64> = 1..=600;
 const MUX_DATAGRAM_BUFFER: std::ops::RangeInclusive<usize> = 16 * 1024..=64 * 1024 * 1024;
 const MUX_DATAGRAM_QUEUE: std::ops::RangeInclusive<usize> = 8..=65536;
 const MUX_NOTSENT_LOWAT: std::ops::RangeInclusive<u32> = 4 * 1024..=16 * 1024 * 1024;
@@ -1704,6 +1704,14 @@ mod tests {
         );
         let c = Config::parse(&text).unwrap();
         assert_eq!(c.mux().ping_interval, Duration::from_secs(20));
+        // A 1 s keepalive, valid before the mux setting existed, stays valid.
+        let text = format!(
+            "{}[tuning]
+keepalive_secs = 1
+",
+            with_transport("entry", "ws", "")
+        );
+        assert!(Config::parse(&text).is_ok());
 
         // Set by hand.
         let (mux, tuning) = mux_of(
@@ -1719,7 +1727,7 @@ mod tests {
         assert_eq!((mux.notsent_lowat, tuning.notsent_lowat), (None, None));
 
         for (table, needle) in [
-            ("ping_interval_secs = 1", "ping_interval_secs"),
+            ("ping_interval_secs = 0", "ping_interval_secs"),
             ("ping_interval_secs = 601", "ping_interval_secs"),
             ("datagram_buffer = 1024", "datagram_buffer"),
             ("datagram_queue = 4", "datagram_queue"),
