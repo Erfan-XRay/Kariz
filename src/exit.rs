@@ -35,7 +35,7 @@ struct Exit {
 pub async fn run(config: Config) -> Result<()> {
     let tuning = config.tuning();
     let mux = config.mux();
-    let transport = Settings::new(&config.tunnel);
+    let transport = Settings::new(&config.tunnel, config.kcp());
     let exit = Arc::new(Exit {
         crypto: Crypto::new(&config.tunnel.token, config.tunnel.encryption).with_mux(mux.enabled),
         tuning: tuning.clone(),

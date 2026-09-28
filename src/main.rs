@@ -159,7 +159,7 @@ fn print_summary(config: &Config) {
         );
     }
     if config.tunnel.transport == TransportKind::Kcp {
-        let kcp = config.tunnel.kcp.clone().unwrap_or_default();
+        let kcp = config.kcp();
         let t = kcp.timing();
         println!(
             "  kcp       : mode={} (nodelay={} interval={}ms resend={} no_congestion={}) \

@@ -294,6 +294,11 @@ on by itself are decided in 6.5 from the benchmark, and set as profile values th
 `[tunnel.kcp]` and `[[forward]]` override. Validation: `duplicate` 1-3 and
 `duplicate_gap_ms` 0-50 on UDP rules only; `dscp` a known name or 0-63.
 
+*Decided in 6.5* (section 10): the gaming profile turns FEC 10 / 3 on over `kcp` unless
+`[tunnel.kcp]` sets `fec_data` / `fec_parity`; mode, window, duplication and DSCP keep
+their general defaults. `[tunnel.kcp] datagrams = false` keeps UDP flows in the
+reliable stream, as in v0.4.
+
 ## 7. Code layout
 
 ```
@@ -332,6 +337,84 @@ runs on an idle tunnel and during a download on the same tunnel, at 0 / 1 / 5 % 
 loss and with bursty loss (mean burst 3). Rows: `tcpmux` (baseline), `kcp` as in v0.4,
 `kcp` + datagram path, + FEC, + duplication 2; `quic` ± duplication 2.
 
+*Status after 6.5:* `cargo test --release --test tunnel game_traffic -- --ignored
+--nocapture` (options in its doc comment: rows, one loss rate, length, seed, and a
+detail line saying where the losses and the slow packets were). Every row uses the
+gaming profile. The download is four parallel downloads on the same tunnel, since one
+alone is capped by the profile's 64 KiB stream window. Bursty loss is 2 % with a mean
+burst of 3 packets. To show v0.4 behaviour on the same code, `[tunnel.kcp] datagrams =
+false` (new, default `true`) keeps UDP flows in the reliable stream. Release build on
+the Windows 11 development machine, 30 s per measurement (1,920 packets), round trips
+p50 / p99 / p99.9 in ms, share of packets that came back:
+
+| Loss | Transport | Idle tunnel | During 4 downloads | Downloads |
+|---|---|---|---|---|
+| 1 % | `tcpmux` | 62 / 169 / 171, 100 % | 395 / 734 / 837, 100 % | 4.6 Mbit/s |
+| 1 % | `kcp`, datagrams off (v0.4) | 63 / 141 / 156, 100 % | 86 / 219 / 255, 100 % | 18.0 Mbit/s |
+| 1 % | `kcp`, FEC off | 63 / **64** / 65, 98.18 % | 63 / 88 / 95, 97.50 % | 17.2 Mbit/s |
+| 1 % | `kcp`, FEC 10 / 3 | 63 / 69 / 84, **100 %** | 66 / 82 / 90, 100 % | **29.2 Mbit/s** |
+| 1 % | `kcp`, FEC off, 2 copies | 63 / 68 / 70, 100 % | 63 / 84 / 93, 100 % | 17.7 Mbit/s |
+| 1 % | `kcp`, FEC 10 / 3, 2 copies | 63 / 68 / 70, 100 % | 66 / 81 / 89, 100 % | 28.9 Mbit/s |
+| 1 % | `quic` | 63 / 64 / 64, 98.23 % | 77 / 113 / 121, 97.50 % | 4.2 Mbit/s |
+| 1 % | `quic`, 2 copies | 62 / 68 / 69, 100 % | 76 / 112 / 126, 99.22 % | 4.0 Mbit/s |
+| 5 % | `tcpmux` | 77 / 242 / 290, 100 % | 1,112 / 1,616 / 1,676, 100 % | 1.9 Mbit/s |
+| 5 % | `kcp`, datagrams off (v0.4) | 63 / 236 / 265, 100 % | 144 / 347 / 424, 100 % | 11.5 Mbit/s |
+| 5 % | `kcp`, FEC off | 63 / **64** / 66, 90.21 % | 63 / 83 / 112, 89.53 % | 11.3 Mbit/s |
+| 5 % | `kcp`, FEC 10 / 3 | 63 / 84 / 89, **98.96 %** | 68 / 94 / 110, 99.43 % | **26.5 Mbit/s** |
+| 5 % | `kcp`, FEC off, 2 copies | 63 / 70 / 193, 99.22 % | 63 / 84 / 94, 99.48 % | 11.1 Mbit/s |
+| 5 % | `kcp`, FEC 10 / 3, 2 copies | 63 / 70 / 84, 99.53 % | 67 / 91 / 99, 100 % | 26.5 Mbit/s |
+| 5 % | `quic` | 63 / 64 / 65, 90.00 % | 87 / 154 / 184, 87.81 % | 1.8 Mbit/s |
+| 5 % | `quic`, 2 copies | 63 / 78 / 85, 99.22 % | 91 / 154 / 183, 94.43 % | 1.7 Mbit/s |
+| 2 % bursts | `tcpmux` | 62 / 202 / 244, 100 % | 352 / 713 / 770, 100 % | 5.5 Mbit/s |
+| 2 % bursts | `kcp`, datagrams off (v0.4) | 63 / 219 / 328, 100 % | 81 / 251 / 328, 100 % | 18.8 Mbit/s |
+| 2 % bursts | `kcp`, FEC off | 62 / 64 / 64, 95.57 % | 63 / 86 / 95, 95.62 % | 18.8 Mbit/s |
+| 2 % bursts | `kcp`, FEC 10 / 3 | 63 / 65 / 85, 96.88 % | 66 / 98 / 108, 98.07 % | 23.2 Mbit/s |
+| 2 % bursts | `kcp`, FEC off, 2 copies | 63 / 68 / 70, 97.55 % | 63 / 87 / 91, 98.07 % | 19.0 Mbit/s |
+| 2 % bursts | `kcp`, FEC 10 / 3, 2 copies | 63 / 68 / 90, 98.12 % | 66 / 96 / 107, 98.96 % | 23.1 Mbit/s |
+| 2 % bursts | `quic` | 62 / 116 / 213, 95.42 % | 78 / 119 / 125, 95.99 % | 4.6 Mbit/s |
+| 2 % bursts | `quic`, 2 copies | 63 / 941 / 1,035, 96.51 % | 77 / 118 / 127, 96.93 % | 4.2 Mbit/s |
+
+Without loss every row is alike: p99 64-65 ms idle and 67-73 ms during the downloads,
+which reach 30-32 Mbit/s. A KCP window of 256 and the `fast3` preset changed nothing
+(within a millisecond or a packet of the `kcp`, FEC off rows) and are left out. What
+the table says:
+
+- **The datagram path does what it is for.** On `kcp`, p99 on an idle tunnel stays at
+  the link RTT whatever the random loss (64 ms), where v0.4 waited for retransmissions
+  (141 ms at 1 %, 236 ms at 5 %). The price is UDP's: a lost packet is lost (98.2 %
+  and 90.2 % of round trips come back, two legs each).
+- **FEC 10 / 3 is what the gaming profile wants over `kcp`.** It brings back nearly
+  every lost packet (100 % at 1 %, 99 % at 5 %) for at most one KCP interval of delay
+  on the rebuilt ones (p99 69 and 84 ms). It also rebuilds the streams' lost
+  segments, so downloads next to the game go 1.7x and 2.3x faster under loss (17 to 29,
+  11 to 26 Mbit/s). Without loss it costs 30 % more packets and about 1 Mbit/s. **The
+  gaming profile now turns it on over `kcp`** (below).
+- **Duplication is the lever for QUIC**, which has no FEC: 98.2 to 100 % at 1 %, 90 to
+  99.2 % at 5 %. Over `kcp` it adds little to FEC (99.53 against 98.96 % at 5 %). With
+  bursty loss, copies 5 ms apart often fall into the same burst, because on an idle flow
+  the copy is the next packet on the link, and the emulator draws bursts per packet.
+- **During the downloads the gaming profile keeps p99 under 2x the RTT on `kcp`**
+  (81-98 ms at any loss). Its 64 KiB stream window caps each download at about 64 KiB
+  per round trip, so four of them (about 31 Mbit/s) do not fill the 50 Mbit/s link, and
+  the bottleneck queue that KCP without congestion control fills in phase 4 stays
+  short. The KCP window does not matter at that point, so `fast2` and 1024 stay.
+- **QUIC is the weaker choice for games.** quinn sends datagrams under the same
+  congestion control as the streams, and Cubic collapses under loss (downloads of
+  1.7-4.6 Mbit/s): during the downloads the game's p50 rises to 77-91 ms and its p99 to
+  112-154 ms. After a long loss burst, quinn holds datagrams while it recovers, and the
+  ones queued meanwhile arrive late: with detail on, 37 packets sent in the 0.6 s after a
+  15-packet burst came back 150-560 ms late (seed 33). In the table, with twice the
+  traffic (2 copies), that reached a p99 of 941 ms. Other seeds gave 70-79 ms, so it
+  depends on where the bursts fall. The datagram send buffer (`session_buffer`, 128 KiB
+  in the gaming profile) holds seconds of game traffic, so stale datagrams are sent
+  late rather than dropped. A smaller buffer for QUIC under the gaming profile is a
+  lever for later; the docs recommend `kcp` for games.
+- **The long runs under bursty loss are the loss model.** The emulator counts bursts in
+  packets, and on an idle tunnel the game is almost the only traffic, so one long burst
+  (geometric, mean 3) takes many game packets in a row. With `kcp` and FEC off, the
+  longest runs were 23, 13, 7 and 14 packets under four seeds, and only 3-8 during the
+  downloads, when the same bursts land mostly on download packets.
+
 ## 9. Work breakdown
 
 | Step | Content | Done when |
@@ -341,7 +424,7 @@ loss and with bursty loss (mean burst 3). Rows: `tcpmux` (baseline), `kcp` as in
 | **6.2** KCP datagram path (done) | `PACKET_DATAGRAM`, driver queue and fairness, `KcpStream` datagram half, kmux placement and in-band probe, `kariz check` warning without mux. | Loss on the link does not delay other UDP packets; large ones fall back; without the probe everything stays in the stream; every existing test passes. |
 | **6.3** Duplication (done) | `duplicate` / `duplicate_gap_ms` on UDP rules, both directions; dedup over KCP datagrams and QUIC datagrams (sequence numbers there). | Exactly-once delivery with copies; residual loss about the square of the link's under random loss; config validation. |
 | **6.4** DSCP (done) | `tuning.dscp` on tunnel sockets and the exit's UDP target sockets, v4 and v6. | Option read back on every socket kind; `kariz check` shows it. |
-| **6.5** Benchmark and defaults | Game-traffic pattern and matrix; the gaming profile's KCP mode, window, FEC and duplication decided from it. | Table in this document; targets of section 10 checked. |
+| **6.5** Benchmark and defaults (done) | Game-traffic pattern and matrix; the gaming profile's KCP mode, window, FEC and duplication decided from it. | Table in this document; targets of section 10 checked. |
 | **6.6** Release | Sample configs (`entry-gaming.toml` / `exit-gaming.toml`), README / README_FA (gaming section, DSCP caveats), CHANGELOG, version `0.5.0`, roadmap. | Numbers in the README; release tagged. |
 
 ## 10. Targets
@@ -359,6 +442,56 @@ On the emulated link (60 ms RTT, 50 Mbit/s), game-traffic pattern:
   profile's window for it.
 - **No regression:** bulk throughput of `kcp` and `quic` within 5 % of v0.4 in the
   phase 4 benchmark; v0.5 with v0.4 still works over every transport.
+
+*Results (6.5),* game-traffic numbers from section 8, same machine:
+
+| Target | Result | |
+|---|---|---|
+| Idle, 1 % loss: `kcp` p99 at most 1.1x the RTT (66 ms) | 64 ms (v0.4: 141 ms) | met |
+| Idle, 1 % loss, 2 copies: at least 99.9 % delivered | 100 % | met |
+| 5 % loss, 2 copies: at least 99.5 % delivered, p99 at most 72 ms | FEC off: 99.22 %, 70 ms; with the gaming profile's FEC 10 / 3: 99.53 %, 70 ms | met with FEC; missed by copies alone |
+| During downloads, gaming profile: p99 at most 2x the RTT (120 ms) | `kcp` 81-98 ms at every loss rate (v0.4: 219-347 ms) | met |
+| No regression in the phase 4 benchmark | within 5 % in every cell (below) | met |
+| v0.5 with v0.4 | datagram path negotiated in band (6.2), new open kind only with duplication (6.3); tested with a peer that ignores the path | met |
+
+The regression check ran the phase 4 `lossy_link` benchmark (balanced profile, 4 MiB
+stream window) on this branch and on `main` (v0.4) in turn, twice each, on the rows
+`kcp fast2` (without FEC, with 10 / 3, window 256) and `quic cubic`. Download rates in
+Mbit/s at 0 / 1 / 5 % loss:
+
+| Row | v0.4, runs 1 and 2 | v0.5, run 2 | Change against the v0.4 mean |
+|---|---|---|---|
+| `kcp fast2` | 33.3, 32.6 / 28.0, 29.0 / 25.4, 23.5 | 32.6 / 27.5 / 23.4 | -1 / -4 / -4 % |
+| `kcp fast2`, FEC 10 / 3 | 23.3, 24.8 / 25.4, 25.1 / 23.6, 23.6 | 24.3 / 25.7 / 23.8 | +1 / +2 / +1 % |
+| `kcp fast2`, window 256 | 29.8, 28.7 / 17.2, 16.7 / 12.8, 12.6 | 29.1 / 16.4 / 12.4 | -1 / -3 / -2 % |
+| `quic cubic` | 47.9, 47.9 / 2.3, 2.8 / 0.9, 0.9 | 47.9 / 2.6 / 0.9 | 0 / +2 / 0 % |
+
+The first v0.5 run is left out. It ran right after both release builds and was off in
+every row, `quic` included, whose code this phase does not change (idle p99 93 ms instead
+of 64, downloads up to 26 % lower). The second run, on a quiet machine, matched v0.4.
+
+The same benchmark shows the other side of the datagram path. With the balanced
+profile's 4 MiB window, a download over `kcp` (no congestion control) keeps the
+bottleneck queue overflowing, as in phase 4. The UDP pings next to it used to wait in
+the stream: none lost, p99 204-343 ms. Now they are dropped at that queue: 4.8-12.8 %
+lost (2.2-5.6 % with FEC), p99 112-120 ms. This is UDP's normal behaviour on a full link. The
+gaming profile avoids the full queue altogether (its downloads stay under the link
+rate); for the other profiles `[tunnel.kcp] datagrams = false` restores the v0.4
+behaviour.
+
+Defaults decided from these numbers:
+
+- **The gaming profile turns FEC 10 / 3 on over `kcp`** unless `[tunnel.kcp]` sets
+  `fec_data` or `fec_parity` (0 turns it off), or sets an MTU too large for FEC.
+  `fec_data` / `fec_parity` became optional for that; `Config::kcp` fills them in. The
+  other profiles keep FEC off (phase 4: without loss it costs throughput when windows
+  are large).
+- **KCP mode and window unchanged** (`fast2`, 1024): with the gaming profile's stream
+  window, neither a window of 256 nor `fast3` changed anything measurable.
+- **Duplication stays opt-in per rule**, since it doubles a rule's traffic. The README
+  recommends `duplicate = 2` for game rules over `quic`, and over `kcp` when FEC is off.
+- **DSCP stays off.**
+- **`[tunnel.kcp] datagrams`** (new, default `true`) keeps the v0.4 behaviour available.
 
 ## 11. Risks
 

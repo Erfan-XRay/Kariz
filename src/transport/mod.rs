@@ -46,12 +46,13 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn new(tunnel: &TunnelConfig) -> Self {
+    /// `kcp`: `[tunnel.kcp]` with the profile's defaults (`Config::kcp`).
+    pub fn new(tunnel: &TunnelConfig, kcp: crate::config::KcpConfig) -> Self {
         Self {
             kind: tunnel.transport,
             ws: tunnel.ws.clone(),
             tls: tunnel.tls.clone(),
-            kcp: kcp::KcpParams::new(tunnel),
+            kcp: kcp::KcpParams::new(tunnel, kcp),
         }
     }
 }
@@ -366,7 +367,7 @@ impl TunnelStream {
     /// The datagram side of a KCP connection; other transports have none.
     pub fn datagrams(&self) -> Option<kcp::KcpDatagrams> {
         match self {
-            Self::Kcp(s) => Some(s.datagrams()),
+            Self::Kcp(s) => s.datagrams(),
             Self::Tcp(_) | Self::Ws(_) | Self::Wss(_) => None,
         }
     }

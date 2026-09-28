@@ -118,9 +118,10 @@ impl fmt::Debug for KcpParams {
 }
 
 impl KcpParams {
-    pub fn new(tunnel: &TunnelConfig) -> Self {
+    /// `config`: `[tunnel.kcp]` with the profile's defaults (`Config::kcp`).
+    pub fn new(tunnel: &TunnelConfig, config: KcpConfig) -> Self {
         Self {
-            config: tunnel.kcp.clone().unwrap_or_default(),
+            config,
             key: Psk::new(&tunnel.token).subkey(KEY_CONTEXT),
         }
     }
@@ -137,6 +138,8 @@ struct ConnSettings {
     keepalive: Duration,
     socket_buffer: usize,
     dscp: Option<u8>,
+    /// Whether streams offer their datagram side (`[tunnel.kcp] datagrams`).
+    datagrams: bool,
     protection: Arc<Protection>,
     /// Data and parity shards per FEC group; `None`: FEC off.
     fec: Option<(usize, usize)>,
@@ -152,6 +155,7 @@ impl ConnSettings {
             keepalive: tuning.keepalive,
             socket_buffer: tuning.udp.socket_buffer,
             dscp: tuning.dscp,
+            datagrams: params.config.datagrams,
             protection: Arc::new(Protection::new(&params.key)),
             fec: params.config.fec(),
         }
@@ -459,7 +463,8 @@ impl Link {
 pub struct KcpStream {
     reader: KcpReader,
     writer: KcpWriter,
-    datagrams: KcpDatagrams,
+    /// `None` with `[tunnel.kcp] datagrams = false`.
+    datagrams: Option<KcpDatagrams>,
 }
 
 /// The datagram side of a KCP connection: packets sent beside KCP, unreliably, in the
@@ -521,7 +526,8 @@ impl KcpStream {
         (self.reader, self.writer)
     }
 
-    pub fn datagrams(&self) -> KcpDatagrams {
+    /// The datagram side, unless `[tunnel.kcp] datagrams = false`.
+    pub fn datagrams(&self) -> Option<KcpDatagrams> {
         self.datagrams.clone()
     }
 
@@ -862,11 +868,11 @@ impl Driver {
         let stream = KcpStream {
             reader: KcpReader { link: link.clone() },
             writer: KcpWriter { link: link.clone() },
-            datagrams: KcpDatagrams {
+            datagrams: settings.datagrams.then(|| KcpDatagrams {
                 sender: sender.clone(),
                 link: link.clone(),
                 max_len: settings.mtu - DATAGRAM_HEADER,
-            },
+            }),
         };
         let now = Instant::now();
         let driver = Self {

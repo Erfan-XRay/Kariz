@@ -719,8 +719,8 @@ mod tests {
             let tuning = Tuning::for_profile(Default::default());
             let mut kcp = KcpParams::default();
             if fec {
-                kcp.config.fec_data = 4;
-                kcp.config.fec_parity = 2;
+                kcp.config.fec_data = Some(4);
+                kcp.config.fec_parity = Some(2);
             }
             let settings = Settings {
                 kind: TransportKind::Kcp,

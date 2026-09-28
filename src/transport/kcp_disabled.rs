@@ -23,7 +23,7 @@ fn unsupported() -> io::Error {
 pub struct KcpParams;
 
 impl KcpParams {
-    pub fn new(_: &TunnelConfig) -> Self {
+    pub fn new(_: &TunnelConfig, _: crate::config::KcpConfig) -> Self {
         Self
     }
 }
@@ -83,7 +83,7 @@ impl KcpStream {
         match self {}
     }
 
-    pub fn datagrams(&self) -> KcpDatagrams {
+    pub fn datagrams(&self) -> Option<KcpDatagrams> {
         match *self {}
     }
 

@@ -248,8 +248,8 @@ async fn tampered_packets_are_dropped() {
 
 fn params_fec(key: u8, data: usize, parity: usize) -> KcpParams {
     let mut p = params(key);
-    p.config.fec_data = data;
-    p.config.fec_parity = parity;
+    p.config.fec_data = Some(data);
+    p.config.fec_parity = Some(parity);
     p
 }
 
@@ -483,7 +483,7 @@ async fn datagrams_both_ways_beside_the_stream() {
             mut server,
             _listener,
         } = pair(&p).await;
-        let (c, s) = (client.datagrams(), server.datagrams());
+        let (c, s) = (client.datagrams().unwrap(), server.datagrams().unwrap());
         let max = c.max_len();
         assert_eq!(max, KcpConfig::default().mtu - DATAGRAM_HEADER);
         for len in [0, 1, 100, max] {
@@ -515,7 +515,7 @@ async fn lost_datagrams_are_not_resent() {
         .unwrap();
     client.write_all(b"hi").await.unwrap();
     let mut server = accept(&l).await;
-    let (c, s) = (client.datagrams(), server.datagrams());
+    let (c, s) = (client.datagrams().unwrap(), server.datagrams().unwrap());
     let payload = pattern(256 << 10);
     let stream = async {
         let mut got = vec![0u8; 2 + payload.len()];
@@ -560,7 +560,7 @@ async fn fec_rebuilds_lost_datagrams() {
         .unwrap();
     client.write_all(b"hi").await.unwrap();
     let server = accept(&l).await;
-    let (c, s) = (client.datagrams(), server.datagrams());
+    let (c, s) = (client.datagrams().unwrap(), server.datagrams().unwrap());
     // Received while sent: the receive queue holds 256.
     let send = async {
         for i in 0..400u32 {
@@ -615,4 +615,18 @@ async fn kcp_sockets_are_marked() {
             assert_eq!(mark, tos(dscp), "{addr} {dscp:?}");
         }
     }
+}
+
+/// `[tunnel.kcp] datagrams = false`: streams offer no datagram side, so UDP flows stay
+/// in the reliable stream as in v0.4.
+#[tokio::test]
+async fn datagrams_can_be_turned_off() {
+    let mut p = params(1);
+    p.config.datagrams = false;
+    let Pair {
+        client,
+        server,
+        _listener,
+    } = pair(&p).await;
+    assert!(client.datagrams().is_none() && server.datagrams().is_none());
 }

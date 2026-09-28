@@ -198,11 +198,19 @@ pub struct KcpConfig {
     /// protection, 43 with FEC.
     #[serde(default = "default_kcp_mtu")]
     pub mtu: usize,
-    /// Reed-Solomon FEC: parity packets per group of data packets; both 0 = off.
-    #[serde(default)]
-    pub fec_data: usize,
-    #[serde(default)]
-    pub fec_parity: usize,
+    /// Reed-Solomon FEC: parity packets per group of data packets; both 0 = off. Unset:
+    /// the profile's default (`Config::kcp`).
+    pub fec_data: Option<usize>,
+    pub fec_parity: Option<usize>,
+    /// UDP flows take the datagram path beside KCP (docs/PHASE6.md, section 2). Off:
+    /// they stay in the reliable stream, as in v0.4 (never lost, but a lost segment makes
+    /// them wait for its retransmission).
+    #[serde(default = "default_true")]
+    pub datagrams: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_kcp_window() -> u16 {
@@ -225,8 +233,9 @@ impl Default for KcpConfig {
             send_window: default_kcp_window(),
             recv_window: default_kcp_window(),
             mtu: default_kcp_mtu(),
-            fec_data: 0,
-            fec_parity: 0,
+            fec_data: None,
+            fec_parity: None,
+            datagrams: true,
         }
     }
 }
@@ -272,7 +281,8 @@ pub struct KcpTiming {
 impl KcpConfig {
     /// `(data, parity)` packets per FEC group, or `None` when FEC is off.
     pub fn fec(&self) -> Option<(usize, usize)> {
-        (self.fec_data > 0).then_some((self.fec_data, self.fec_parity))
+        let (data, parity) = (self.fec_data.unwrap_or(0), self.fec_parity.unwrap_or(0));
+        (data > 0).then_some((data, parity))
     }
 
     pub fn timing(&self) -> KcpTiming {
@@ -995,7 +1005,7 @@ impl Config {
                 KCP_MTU.end()
             );
         }
-        match (k.fec_data, k.fec_parity) {
+        match (k.fec_data.unwrap_or(0), k.fec_parity.unwrap_or(0)) {
             (0, 0) => {}
             (data, parity) if KCP_FEC_DATA.contains(&data) && KCP_FEC_PARITY.contains(&parity) => {
                 if k.mtu > KCP_MTU_FEC {
@@ -1012,6 +1022,18 @@ impl Config {
             ),
         }
         Ok(())
+    }
+
+    /// `[tunnel.kcp]` with the profile's defaults filled in: the gaming profile turns FEC
+    /// on (10 data + 3 parity packets per group) unless the table sets `fec_data` or
+    /// `fec_parity`, or an MTU too large for FEC (docs/PHASE6.md, 6.5).
+    pub fn kcp(&self) -> KcpConfig {
+        let mut k = self.tunnel.kcp.clone().unwrap_or_default();
+        let unset = k.fec_data.is_none() && k.fec_parity.is_none();
+        if self.profile == Profile::Gaming && unset && k.mtu <= KCP_MTU_FEC {
+            (k.fec_data, k.fec_parity) = (Some(10), Some(3));
+        }
+        k
     }
 
     fn validate_quic(&self) -> Result<()> {
@@ -1307,6 +1329,26 @@ mod tests {
 
     fn parse_err(text: &str) -> String {
         format!("{:#}", Config::parse(text).unwrap_err())
+    }
+
+    #[test]
+    fn gaming_profile_turns_kcp_fec_on_unless_set() {
+        let kcp = |profile: &str, table: &str| {
+            let text = format!(
+                "profile = \"{profile}\"\n{}",
+                with_transport("entry", "kcp", &format!("[tunnel.kcp]\n{table}"))
+            );
+            Config::parse(&text).unwrap().kcp().fec()
+        };
+        assert_eq!(kcp("gaming", ""), Some((10, 3)));
+        assert_eq!(kcp("balanced", ""), None);
+        assert_eq!(kcp("throughput", ""), None);
+        // Set in the table: the table wins, off included.
+        assert_eq!(kcp("gaming", "fec_data = 0\nfec_parity = 0"), None);
+        assert_eq!(kcp("gaming", "fec_data = 4\nfec_parity = 2"), Some((4, 2)));
+        // An MTU too large for FEC keeps it off rather than making the config invalid.
+        assert_eq!(kcp("gaming", "mtu = 1440"), None);
+        assert_eq!(kcp("gaming", "mtu = 1429"), Some((10, 3)));
     }
 
     /// Parses without validation, for checking effective values on their own.

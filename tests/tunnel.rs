@@ -101,6 +101,8 @@ struct Setup {
     kcp_options: &'static str,
     /// The forward rule's `duplicate` / `duplicate_gap_ms`; 0 copies leaves them out.
     duplicate: (u8, u8),
+    /// `profile`, on both sides; empty keeps the default.
+    profile: &'static str,
 }
 
 impl Setup {
@@ -122,7 +124,12 @@ impl Setup {
             fec: (0, 0),
             kcp_options: "",
             duplicate: (0, 0),
+            profile: "",
         }
+    }
+
+    const fn profile(self, profile: &'static str) -> Self {
+        Self { profile, ..self }
     }
 
     const fn duplicate(self, copies: u8, gap_ms: u8) -> Self {
@@ -474,10 +481,16 @@ async fn start_via(
         (0, _) => String::new(),
         (copies, gap) => format!("duplicate = {copies}\nduplicate_gap_ms = {gap}"),
     };
+    let profile = |setup: Setup| match setup.profile {
+        "" => String::new(),
+        p => format!("profile = \"{p}\""),
+    };
+    let (entry_profile, exit_profile) = (profile(setup), profile(exit_setup));
     let entry = format!(
         r#"
         role = "entry"
         mode = "{mode}"
+        {entry_profile}
         [[forward]]
         listen = "127.0.0.1:{user_port}"
         target = "127.0.0.1:{target_port}"
@@ -493,6 +506,7 @@ async fn start_via(
         r#"
         role = "exit"
         mode = "{mode}"
+        {exit_profile}
         [tunnel]
         {exit_tunnel}
         token = "{exit_token}"
@@ -1603,6 +1617,259 @@ async fn lossy_link() {
                 run.link.lost,
                 run.link.dropped
             );
+        }
+    }
+}
+
+/// Round trips of game-like traffic on one flow.
+struct Game {
+    /// Round trips of the packets that came back, sorted.
+    rtts: Vec<Duration>,
+    sent: usize,
+    /// Longest run of consecutive packets that never came back.
+    longest_loss: usize,
+    /// Round trip of every packet by sequence number; `None`: never came back.
+    by_seq: Vec<Option<Duration>>,
+}
+
+impl Game {
+    /// Where the longest loss run starts, and when packets slower than `slow` were
+    /// sent (seconds into the run), for `KARIZ_BENCH_DETAIL`.
+    fn detail(&self, slow: Duration) -> String {
+        let every = 1.0 / 64.0;
+        let mut longest = (0, 0);
+        let mut run_start = 0;
+        for (seq, rtt) in self.by_seq.iter().enumerate() {
+            if rtt.is_some() {
+                run_start = seq + 1;
+            } else if seq + 1 - run_start > longest.1 {
+                longest = (run_start, seq + 1 - run_start);
+            }
+        }
+        let slow: Vec<f64> = (self.by_seq.iter().enumerate())
+            .filter(|(_, rtt)| rtt.is_some_and(|r| r > slow))
+            .map(|(seq, _)| seq as f64 * every)
+            .collect();
+        let spans = slow
+            .chunk_by(|a, b| b - a < 0.5)
+            .map(|s| format!("{:.1}-{:.1} s ({})", s[0], s[s.len() - 1], s.len()));
+        format!(
+            "longest loss run: {} from {:.1} s; slow packets sent at: {}",
+            longest.1,
+            longest.0 as f64 * every,
+            spans.collect::<Vec<_>>().join(", ")
+        )
+    }
+}
+
+impl std::fmt::Display for Game {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.rtts.is_empty() {
+            return write!(f, "{:>44}", "no answers");
+        }
+        let ms = |p| percentile(&self.rtts, p).as_secs_f64() * 1000.0;
+        let delivered = 100.0 * self.rtts.len() as f64 / self.sent as f64;
+        write!(
+            f,
+            "{:>4.0} {:>4.0} {:>4.0} ms {delivered:>6.2} % {:>3}",
+            ms(0.5),
+            ms(0.99),
+            ms(0.999),
+            self.longest_loss
+        )
+    }
+}
+
+/// Game traffic (PHASE6.md, section 8): 128-byte packets at 64 Hz on one flow for
+/// `duration`, each echoed by the target, without waiting for answers.
+async fn game(port: u16, duration: Duration) -> Game {
+    let every = Duration::from_micros(15_625);
+    let count = (duration.as_secs_f64() / every.as_secs_f64()) as u32;
+    let sock = std::sync::Arc::new(udp_client(port).await);
+    let deadline = Instant::now() + duration + Duration::from_secs(2);
+    let receiver = {
+        let sock = sock.clone();
+        tokio::spawn(async move {
+            let mut got = Vec::new();
+            let mut buf = [0u8; 2048];
+            while let Ok(Ok(4..)) =
+                tokio::time::timeout_at(deadline.into(), sock.recv(&mut buf)).await
+            {
+                got.push((
+                    u32::from_be_bytes(buf[..4].try_into().unwrap()),
+                    Instant::now(),
+                ));
+            }
+            got
+        })
+    };
+    let mut sent = Vec::new();
+    let mut packet = [0u8; 128];
+    let mut interval = tokio::time::interval(every);
+    for seq in 0..count {
+        interval.tick().await;
+        packet[..4].copy_from_slice(&seq.to_be_bytes());
+        sent.push(Instant::now());
+        let _ = sock.send(&packet).await;
+    }
+    let mut by_seq = vec![None; count as usize];
+    for (seq, at) in receiver.await.unwrap() {
+        let seq = seq as usize;
+        if seq < by_seq.len() && by_seq[seq].is_none() {
+            by_seq[seq] = Some(at - sent[seq]);
+        }
+    }
+    let mut rtts: Vec<Duration> = by_seq.iter().flatten().copied().collect();
+    rtts.sort();
+    let longest_loss = by_seq
+        .split(Option::is_some)
+        .map(<[Option<Duration>]>::len)
+        .max()
+        .unwrap_or(0);
+    Game {
+        rtts,
+        sent: count as usize,
+        longest_loss,
+        by_seq,
+    }
+}
+
+/// Download rate in Mbit/s over `connections` parallel downloads, measured over
+/// `window` after `warmup`.
+async fn downloads(port: u16, connections: usize, warmup: Duration, window: Duration) -> f64 {
+    let runs: Vec<_> = (0..connections)
+        .map(|_| tokio::spawn(download(port, warmup, window)))
+        .collect();
+    let mut total = 0.0;
+    for run in runs {
+        total += run.await.unwrap();
+    }
+    total
+}
+
+/// Game traffic over a long, lossy path (PHASE6.md, sections 8 and 10): 60 ms RTT,
+/// 50 Mbit/s each way with a 50 ms queue, random loss of 0, 1 and 5 % and bursty loss
+/// of 2 % (mean burst 3). 128-byte packets at 64 Hz on an idle tunnel, then during four
+/// downloads on the same tunnel. Every row uses the gaming profile.
+/// `cargo test --release --test tunnel game_traffic -- --ignored --nocapture`;
+/// `KARIZ_BENCH_ONLY=kcp` runs the rows whose name contains `kcp`, `KARIZ_BENCH_LOSS=1`
+/// one loss rate (`b` for the bursty one), `KARIZ_BENCH_SECS` sets the length of each
+/// measurement (default 30). `KARIZ_BENCH_ONLY` starting with `=` takes exact row names
+/// separated by `|`; `KARIZ_BENCH_SEED` changes the link's random draws;
+/// `KARIZ_BENCH_DETAIL` prints where the losses and the slow packets were.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn game_traffic() {
+    link::fine_timers();
+    let gaming = |setup: Setup| setup.profile("gaming");
+    // The gaming profile turns FEC 10 / 3 on over kcp; rows without it say so.
+    let kcp = |options: &'static str| gaming(Setup::kcp("direct").kcp_options(options));
+    const NO_FEC: &str = "fec_data = 0\nfec_parity = 0";
+    let setups = [
+        (
+            "tcpmux",
+            gaming(Setup::tcp("direct").transport("tcpmux").mux()),
+        ),
+        (
+            "kcp, datagrams off (v0.4)",
+            kcp("datagrams = false\nfec_data = 0\nfec_parity = 0"),
+        ),
+        ("kcp, fec off", kcp(NO_FEC)),
+        ("kcp (fec 10/3)", gaming(Setup::kcp("direct"))),
+        ("kcp, fec off, 2 copies", kcp(NO_FEC).duplicate(2, 5)),
+        (
+            "kcp (fec 10/3), 2 copies",
+            gaming(Setup::kcp("direct")).duplicate(2, 5),
+        ),
+        (
+            "kcp, fec off, window 256",
+            kcp("fec_data = 0\nfec_parity = 0\nsend_window = 256\nrecv_window = 256"),
+        ),
+        (
+            "kcp fast3, fec off, window 256",
+            kcp("fec_data = 0\nfec_parity = 0\nmode = \"fast3\"\n\
+                 send_window = 256\nrecv_window = 256"),
+        ),
+        ("quic", gaming(Setup::quic("direct"))),
+        (
+            "quic, 2 copies",
+            gaming(Setup::quic("direct").duplicate(2, 5)),
+        ),
+    ];
+    let only = std::env::var("KARIZ_BENCH_ONLY").unwrap_or_default();
+    let selected = |name: &str| match only.strip_prefix('=') {
+        Some(names) => names.split('|').any(|n| n == name),
+        None => name.contains(only.as_str()),
+    };
+    let seed = std::env::var("KARIZ_BENCH_SEED")
+        .ok()
+        .map(|s| s.parse().expect("seed"));
+    let detail = std::env::var_os("KARIZ_BENCH_DETAIL").is_some();
+    let secs = std::env::var("KARIZ_BENCH_SECS").map_or(30, |s| s.parse().expect("seconds"));
+    let measure = Duration::from_secs(secs);
+    let conditions = [
+        ("0", "0 %", 0.0, 1.0),
+        ("1", "1 %", 0.01, 1.0),
+        ("5", "5 %", 0.05, 1.0),
+        ("b", "2 % x3", 0.02, 3.0),
+    ];
+    let loss_filter = std::env::var("KARIZ_BENCH_LOSS").ok();
+    println!(
+        "RTT 60 ms, 50 Mbit/s, 50 ms queue; 128-byte packets at 64 Hz for {secs} s, echoed; \
+         gaming profile"
+    );
+    println!(
+        "{:<8} {:<31} {:<34} {:<34} {:>12}",
+        "loss",
+        "transport",
+        "idle: p50 p99 p99.9, delivered, run",
+        "4 downloads: same",
+        "downloads"
+    );
+    for (key, label, loss, burst) in conditions {
+        if loss_filter.as_deref().is_some_and(|f| f != key) {
+            continue;
+        }
+        for &(name, setup) in &setups {
+            if !selected(name) {
+                continue;
+            }
+            let mut imp = Impairment {
+                delay: Duration::from_millis(30),
+                loss,
+                burst,
+                rate: 50_000_000,
+                queue: Duration::from_millis(50),
+                ..Default::default()
+            };
+            if let Some(seed) = seed {
+                imp.seed = seed;
+            }
+            let target = download_server().await;
+            let tunnel = start_via(setup, setup, TOKEN, TOKEN, target, |upstream| {
+                if is_udp(setup) {
+                    let link = UdpLink::start(upstream, imp);
+                    (link.port, Some(Box::new(link) as Proxy))
+                } else {
+                    let link = TcpLink::start(upstream, imp);
+                    (link.port, Some(Box::new(link) as Proxy))
+                }
+            })
+            .await;
+            // Sessions up and the datagram path's probes across before measuring.
+            let _ = game(tunnel.user_port, Duration::from_secs(2)).await;
+            let idle = game(tunnel.user_port, measure).await;
+            let warmup = Duration::from_secs(3);
+            let load = tokio::spawn(downloads(tunnel.user_port, 4, warmup, measure));
+            tokio::time::sleep(warmup).await;
+            let loaded = game(tunnel.user_port, measure).await;
+            let mbps = load.await.unwrap();
+            println!("{label:<8} {name:<31} {idle}   {loaded}   {mbps:>6.1} Mbit/s");
+            if detail {
+                let slow = Duration::from_millis(150);
+                println!("         idle: {}", idle.detail(slow));
+                println!("         4 downloads: {}", loaded.detail(slow));
+            }
         }
     }
 }
