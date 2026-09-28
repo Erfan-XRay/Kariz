@@ -311,7 +311,7 @@ impl WsDialer {
 /// traffic of a dual-stack socket). The ECN bits stay 0. Failing only costs the mark,
 /// so it is logged rather than returned. Not for QUIC sockets: quinn sets the TOS byte of
 /// every packet itself.
-pub fn mark_dscp(sock: socket2::SockRef<'_>, dscp: Option<u8>) {
+pub fn mark_dscp(sock: &socket2::SockRef<'_>, dscp: Option<u8>) {
     let Some(dscp) = dscp else {
         return;
     };
@@ -320,7 +320,7 @@ pub fn mark_dscp(sock: socket2::SockRef<'_>, dscp: Option<u8>) {
         .local_addr()
         .is_ok_and(|a| a.as_socket().is_some_and(|a| a.is_ipv6()));
     let result = if ipv6 {
-        set_tclass(&sock, tos)
+        set_tclass(sock, tos)
     } else {
         sock.set_tos_v4(tos)
     };
@@ -653,7 +653,7 @@ pub(crate) mod tests {
         for addr in local_addrs() {
             for dscp in [None, Some(46), Some(34)] {
                 let socket = std::net::UdpSocket::bind(addr).unwrap();
-                mark_dscp(SockRef::from(&socket), dscp);
+                mark_dscp(&SockRef::from(&socket), dscp);
                 assert_eq!(
                     mark_of(SockRef::from(&socket)),
                     tos(dscp),

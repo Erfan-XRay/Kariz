@@ -330,7 +330,7 @@ pub async fn connect(target: &str, tuning: &Tuning) -> io::Result<UdpSocket> {
     };
     let socket = UdpSocket::bind(local).await?;
     tune(&socket, &tuning.udp);
-    crate::transport::mark_dscp(SockRef::from(&socket), tuning.dscp);
+    crate::transport::mark_dscp(&SockRef::from(&socket), tuning.dscp);
     socket.connect(addr).await?;
     Ok(socket)
 }

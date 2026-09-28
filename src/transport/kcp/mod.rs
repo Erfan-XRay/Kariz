@@ -171,7 +171,7 @@ fn udp_socket(addr: SocketAddr, buffer: usize, dscp: Option<u8>) -> io::Result<U
     {
         debug!(error = %e, "could not set KCP socket buffers");
     }
-    super::mark_dscp(sock, dscp);
+    super::mark_dscp(&sock, dscp);
     socket.set_nonblocking(true)?;
     UdpSocket::from_std(socket)
 }
