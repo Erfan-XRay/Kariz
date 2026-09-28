@@ -105,6 +105,24 @@ from the X25519 handshake. Datagrams keep that property:
 - `encryption = "none"` sends datagrams unsealed with the packet number only. They are
   still inside the packet protection, as KCP segments are.
 
+*Status after 6.1:* `src/crypto/datagram.rs` holds `DatagramSealer` / `DatagramOpener`
+and the receive window; nothing uses them yet. Where the result differs from the plan
+above, and why:
+
+- **One context, `kariz v2 dgram`**, not one per direction. The record keys already
+  differ per direction, so a second label would add nothing.
+- **Copies are the same sealed bytes sent again**, so they share one packet number and
+  the window drops them without a separate duplicate filter. The sealer has no call to
+  seal with a chosen number, so a number is never used twice for different contents.
+- **The window only moves after authentication**, so a forged packet with a huge number
+  cannot make later genuine packets look old.
+
+Tests: round trip for both ciphers and `none`, sizes 0 to 65,535; every changed byte
+rejected; truncated datagrams, another key and a record sealed with the record key
+itself rejected; replays and copies dropped; a whole window arriving newest first;
+late packets just inside and just outside the window; skipped numbers that share a bit
+with older ones; a jump past the window; a forged number that leaves the window alone.
+
 ## 4. Packet duplication
 
 - **Per forward rule:** `[[forward]] duplicate = 1 | 2 | 3` (UDP rules only, default 1)
@@ -211,8 +229,8 @@ loss and with bursty loss (mean burst 3). Rows: `tcpmux` (baseline), `kcp` as in
 
 | Step | Content | Done when |
 |---|---|---|
-| **6.0** Plan | This document; roadmap updated. | Decisions settled (section 12). |
-| **6.1** Datagram sealing | `src/crypto/datagram.rs`: keys from the record keys, explicit packet numbers, receive window. No transport changes yet. | Unit tests of section 8 pass; no other behaviour change. |
+| **6.0** Plan (done) | This document; roadmap updated. | Decisions settled (section 12). |
+| **6.1** Datagram sealing (done) | `src/crypto/datagram.rs`: keys from the record keys, explicit packet numbers, receive window. No transport changes yet. | Unit tests of section 8 pass; no other behaviour change. |
 | **6.2** KCP datagram path | `PACKET_DATAGRAM`, driver queue and fairness, `KcpStream` datagram half, kmux placement and in-band probe, `kariz check` warning without mux. | Loss on the link does not delay other UDP packets; large ones fall back; without the probe everything stays in the stream; every existing test passes. |
 | **6.3** Duplication | `duplicate` / `duplicate_gap_ms` on UDP rules, both directions; dedup over KCP datagrams and QUIC datagrams (sequence numbers there). | Exactly-once delivery with copies; residual loss about the square of the link's under random loss; config validation. |
 | **6.4** DSCP | `tuning.dscp` on tunnel sockets and the exit's UDP target sockets, v4 and v6. | Option read back on every socket kind; `kariz check` shows it. |
