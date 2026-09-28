@@ -324,6 +324,14 @@ pub enum TunnelStream {
 }
 
 impl TunnelStream {
+    /// The datagram side of a KCP connection; other transports have none.
+    pub fn datagrams(&self) -> Option<kcp::KcpDatagrams> {
+        match self {
+            Self::Kcp(s) => Some(s.datagrams()),
+            Self::Tcp(_) | Self::Ws(_) | Self::Wss(_) => None,
+        }
+    }
+
     /// Sends a held-back `101` now unless early data came with the request, in which
     /// case the caller checks that first (see [`Self::reject_upgrade`]).
     async fn answer_upgrade(&mut self) -> io::Result<()> {

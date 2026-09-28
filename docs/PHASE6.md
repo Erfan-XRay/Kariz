@@ -87,6 +87,47 @@ path is the exception; see decision 4).
   profile keeps mux on; `kariz check` warns about UDP over KCP without mux, as it
   already warns about UDP without mux.
 
+*Status after 6.2:* over `kcp` with mux, UDP flows take the datagram path. The code is in
+`src/transport/kcp/mod.rs` (`PACKET_DATAGRAM`, `KcpDatagrams`), `src/channel.rs`
+(`DatagramPath`: sealing with the 6.1 keys, carried by a KCP `Link` that has mux) and
+`src/mux/session.rs` (placement, probes). Where the result differs from the plan above,
+and why:
+
+- **Datagrams are sent at once from `send_datagram`**, not queued for the driver or the
+  mux writer. There is then no queue to share fairly with KCP segments: a datagram
+  goes straight to the socket, and when the socket buffer is full it is dropped, like
+  any UDP packet on a busy link. This path has the lowest latency, and it needs no lock
+  beyond the sender's.
+- **In an FEC data shard a datagram is marked by `!conv`** (the conversation id with
+  every bit flipped) in front of it, where KCP packets start with `conv`. So the FEC
+  format and the decoder are unchanged, and a rebuilt shard says what it held.
+- **Probes skip FEC.** A v0.4 peer ignores the new packet type, but it would feed a
+  datagram in an FEC shard to KCP. Probes are therefore always sent as plain
+  `PACKET_DATAGRAM`. Real datagrams, which only go to a peer that answered, use FEC when
+  it is on.
+- **Probes are answered** (a probe and an answer are `DGRAM` frames for stream 0 with
+  payload 0 and 1). A side whose probe was lost keeps probing at every keep-alive until
+  it hears the peer, and the answer tells it the path works even when the peer has no
+  datagrams to send.
+- **A stream's datagrams take the path only once the peer knows the stream**: the peer
+  opened it, or sent any frame on it. So the first packets of a flow the entry opens go
+  in the connection, behind the `SYN`, until the exit's first reply.
+- **The mux writer keeps its datagram queue** for what does not take the path: packets
+  that are too large, streams the peer does not know yet, peers without the path, and
+  every transport other than `kcp`.
+- `kariz check` already warned about UDP forwarded without mux (phase 3), which covers
+  KCP.
+
+Tests: over local KCP sockets, datagrams in both directions from 0 bytes to the limit,
+with and without FEC, beside a stream; through a link dropping 20 %, about a fifth of
+200 datagrams are missing (not resent) while a stream beside them arrives whole; with
+FEC 4 / 2 over a link dropping 10 %, at least 385 of 400 arrive, some rebuilt. Mux over
+KCP: after the probes, datagrams in both directions take the path, and a 3,000-byte one
+still arrives through the connection; the opener's first datagram goes in the
+connection until the peer knows the stream; a peer that ignores the path (as v0.4 does)
+gets everything in the connection. The E2E `kcp` rows, whose UDP echoes now take the
+path, pass unchanged.
+
 ## 3. Sealing datagrams
 
 Packet protection (the token key) hides KCP's headers but gives no forward secrecy.
@@ -231,7 +272,7 @@ loss and with bursty loss (mean burst 3). Rows: `tcpmux` (baseline), `kcp` as in
 |---|---|---|
 | **6.0** Plan (done) | This document; roadmap updated. | Decisions settled (section 12). |
 | **6.1** Datagram sealing (done) | `src/crypto/datagram.rs`: keys from the record keys, explicit packet numbers, receive window. No transport changes yet. | Unit tests of section 8 pass; no other behaviour change. |
-| **6.2** KCP datagram path | `PACKET_DATAGRAM`, driver queue and fairness, `KcpStream` datagram half, kmux placement and in-band probe, `kariz check` warning without mux. | Loss on the link does not delay other UDP packets; large ones fall back; without the probe everything stays in the stream; every existing test passes. |
+| **6.2** KCP datagram path (done) | `PACKET_DATAGRAM`, driver queue and fairness, `KcpStream` datagram half, kmux placement and in-band probe, `kariz check` warning without mux. | Loss on the link does not delay other UDP packets; large ones fall back; without the probe everything stays in the stream; every existing test passes. |
 | **6.3** Duplication | `duplicate` / `duplicate_gap_ms` on UDP rules, both directions; dedup over KCP datagrams and QUIC datagrams (sequence numbers there). | Exactly-once delivery with copies; residual loss about the square of the link's under random loss; config validation. |
 | **6.4** DSCP | `tuning.dscp` on tunnel sockets and the exit's UDP target sockets, v4 and v6. | Option read back on every socket kind; `kariz check` shows it. |
 | **6.5** Benchmark and defaults | Game-traffic pattern and matrix; the gaming profile's KCP mode, window, FEC and duplication decided from it. | Table in this document; targets of section 10 checked. |
