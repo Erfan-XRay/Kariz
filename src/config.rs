@@ -39,8 +39,21 @@ pub enum Mode {
 pub enum Profile {
     #[default]
     Balanced,
-    Throughput,
+    /// The most speed: large buffers and windows, more connections. Also accepted under
+    /// its old name, `throughput`.
+    #[serde(alias = "throughput")]
+    Ultraspeed,
     Gaming,
+}
+
+impl Profile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Balanced => "balanced",
+            Self::Ultraspeed => "ultraspeed",
+            Self::Gaming => "gaming",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -606,7 +619,7 @@ impl UdpTuning {
     fn for_profile(profile: Profile) -> Self {
         let (socket_buffer, flow_queue, session_buffer) = match profile {
             Profile::Balanced => (1 << 20, 128, 256 * 1024),
-            Profile::Throughput => (4 << 20, 512, 1 << 20),
+            Profile::Ultraspeed => (4 << 20, 512, 1 << 20),
             Profile::Gaming => (1 << 20, 64, 128 * 1024),
         };
         Self {
@@ -623,7 +636,7 @@ impl Tuning {
     pub fn for_profile(profile: Profile) -> Self {
         let buffer_size = match profile {
             Profile::Balanced => 64 * 1024,
-            Profile::Throughput => 256 * 1024,
+            Profile::Ultraspeed => 256 * 1024,
             Profile::Gaming => 16 * 1024,
         };
         Self {
@@ -700,7 +713,7 @@ impl MuxSettings {
     fn for_profile(profile: Profile, transport: TransportKind, tuning: &Tuning) -> Self {
         let (stream_window, connections) = match profile {
             Profile::Balanced => (256 * 1024, 4),
-            Profile::Throughput => (1024 * 1024, 8),
+            Profile::Ultraspeed => (1024 * 1024, 8),
             Profile::Gaming => (64 * 1024, 2),
         };
         // QUIC streams do not block each other, so more connections only buy more
@@ -1423,6 +1436,18 @@ mod tests {
     }
 
     #[test]
+    fn ultraspeed_profile_also_under_its_old_name() {
+        for name in ["ultraspeed", "throughput"] {
+            let text = format!("profile = \"{name}\"\n{}", entry_reverse());
+            let c = Config::parse(&text).unwrap();
+            assert_eq!(c.profile, Profile::Ultraspeed, "{name}");
+            assert_eq!(c.profile.name(), "ultraspeed");
+            assert_eq!(c.mux().stream_window, 1024 * 1024);
+            assert_eq!(c.tuning().buffer_size, 256 * 1024);
+        }
+    }
+
+    #[test]
     fn gaming_profile_turns_kcp_fec_on_unless_set() {
         let kcp = |profile: &str, table: &str| {
             let text = format!(
@@ -1433,6 +1458,7 @@ mod tests {
         };
         assert_eq!(kcp("gaming", ""), Some((10, 3)));
         assert_eq!(kcp("balanced", ""), None);
+        assert_eq!(kcp("ultraspeed", ""), None);
         assert_eq!(kcp("throughput", ""), None);
         // Set in the table: the table wins, off included.
         assert_eq!(kcp("gaming", "fec_data = 0\nfec_parity = 0"), None);

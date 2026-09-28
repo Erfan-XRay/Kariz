@@ -109,7 +109,7 @@ fn print_summary(config: &Config) {
     println!("config OK");
     println!("  role      : {}", role_name(config.role));
     println!("  mode      : {}", mode_name(config.mode));
-    println!("  profile   : {:?}", config.profile);
+    println!("  profile   : {}", config.profile.name());
     println!("  transport : {}", config.tunnel.transport.name());
     if let Some(listen) = &config.tunnel.listen {
         println!("  listen    : {listen}");
