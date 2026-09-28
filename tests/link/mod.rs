@@ -919,6 +919,7 @@ mod tests {
         gap: Duration,
         wait: Duration,
     ) -> (Vec<Instant>, Vec<(u32, Instant)>, Counts) {
+        fine_timers();
         let (port, mut rx, _recorder) = udp_recorder();
         let link = UdpLink::start(port, imp);
         let client = udp_socket(Some(SocketAddr::from(([127, 0, 0, 1], link.port))));
@@ -930,6 +931,11 @@ mod tests {
             client.send(&packet).await.unwrap();
             if !gap.is_zero() {
                 tokio::time::sleep(gap).await;
+            } else if seq % 100 == 99 {
+                // A short pause per 100 packets: in one long burst, Linux's cap on socket
+                // buffers (net.core.rmem_max) would drop packets on its own, which the
+                // tests would take for the link's doing.
+                tokio::time::sleep(ms(2)).await;
             }
         }
         let mut got = Vec::new();
@@ -947,9 +953,9 @@ mod tests {
             ..Default::default()
         };
         let (_, got, counts) = udp_run(imp, 5000, 100, Duration::ZERO, ms(500)).await;
-        let rate = 1.0 - got.len() as f64 / 5000.0;
+        assert_eq!(counts.lost + counts.passed, 5000, "{counts:?}");
+        let rate = counts.lost as f64 / 5000.0;
         assert!((0.08..0.12).contains(&rate), "lost {rate}");
-        assert_eq!(counts.lost + counts.passed, 5000);
         assert_eq!(counts.passed, got.len() as u64);
     }
 
@@ -1084,6 +1090,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn tcp_round_trip_has_the_link_delay() {
+        fine_timers();
         let listener = TcpListener::bind(localhost()).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -1120,6 +1127,7 @@ mod tests {
         warmup: Duration,
         window: Duration,
     ) -> f64 {
+        fine_timers();
         let listener = TcpListener::bind(localhost()).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let _source = spawn(async move {
