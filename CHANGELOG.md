@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 - 2026-09-29
+
+Works with v0.5 and v0.4 as before; the new settings only change the side they are set on.
 
 ### Added
 

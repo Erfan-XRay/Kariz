@@ -9,7 +9,7 @@ linking servers together. It is written in Rust and built around three goals:
 2. **DPI resistance**: encrypted traffic without fixed bytes, browser-like WebSocket, works through CDNs.
 3. **Maximum speed**: statically dispatched hot path, tuned sockets, per-use-case profiles.
 
-> Status: **v0.5.0**, the gaming release. v0.5 works with v0.4 over every transport; UDP
+> Status: **v0.5.1** (v0.5.0 was the gaming release). v0.5 works with v0.4 over every transport; UDP
 > rules with `duplicate` need both sides at v0.5. See [docs/ROADMAP.md](docs/ROADMAP.md)
 > for what comes next and [CHANGELOG.md](CHANGELOG.md) for what changed.
 
@@ -397,7 +397,7 @@ features `quic` and `kcp`, both on by default):
   content from the CDN.
 - The TLS ClientHello of rustls does not look like a browser's, and a plain HTTP request
   to a `wss` port gets a TLS error rather than an nginx page. The same goes for quinn's
-  QUIC handshake. Shaping these is later work (a stealth profile, not scheduled).
+  QUIC handshake. Changing that is not planned.
 - A `kcp` port answers nothing that was not sealed with the token. The key for this
   packet layer comes from the token and has no forward secrecy of its own; the
   tunnel's handshake and encryption run inside it as over TCP, and UDP packets beside
