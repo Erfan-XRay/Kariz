@@ -91,6 +91,8 @@ struct Setup {
     congestion: &'static str,
     /// `tunnel.mux.stream_window`; 0 keeps the default.
     stream_window: usize,
+    /// `tunnel.kcp.fec_data` / `fec_parity`; 0 keeps FEC off.
+    fec: (usize, usize),
 }
 
 impl Setup {
@@ -109,6 +111,14 @@ impl Setup {
             mux_connections: 0,
             congestion: "",
             stream_window: 0,
+            fec: (0, 0),
+        }
+    }
+
+    const fn fec(self, data: usize, parity: usize) -> Self {
+        Self {
+            fec: (data, parity),
+            ..self
         }
     }
 
@@ -255,6 +265,12 @@ impl Setup {
                 };
                 format!("[tunnel.tls]\nsni = \"tunnel.example\"\npin_sha256 = \"{pin}\"\n")
             };
+        }
+        if self.fec.0 > 0 {
+            options += &format!(
+                "[tunnel.kcp]\nfec_data = {}\nfec_parity = {}\n",
+                self.fec.0, self.fec.1
+            );
         }
         if !self.congestion.is_empty() {
             options += &format!("[tunnel.quic]\ncongestion = \"{}\"\n", self.congestion);
@@ -712,6 +728,7 @@ tunnel_tests! {
     kcp_direct: Setup::kcp("direct");
     kcp_reverse_no_mux: Setup::kcp("reverse").no_mux();
     kcp_direct_no_mux_chacha: Setup::kcp("direct").no_mux().encryption("chacha20-poly1305");
+    kcp_reverse_fec: Setup::kcp("reverse").fec(10, 3);
 }
 
 /// A `wss` dialer that pins another certificate refuses the listener, so nothing passes.
@@ -1496,6 +1513,10 @@ async fn lossy_link() {
                 .stream_window(WINDOW),
         ),
         ("kcp fast2", Setup::kcp("direct").stream_window(WINDOW)),
+        (
+            "kcp fast2, fec 10/3",
+            Setup::kcp("direct").fec(10, 3).stream_window(WINDOW),
+        ),
     ];
     let default_window = [
         ("tcpmux, default window", tcpmux),
@@ -1541,13 +1562,14 @@ async fn lossy_link() {
 }
 
 /// KCP over a link that loses 5 % of the packets each way: everything still arrives, in
-/// both modes, with and without mux.
+/// both modes, with and without mux, with and without FEC.
 #[tokio::test(flavor = "multi_thread")]
 async fn kcp_transfer_survives_loss() {
     let runs = [
         Setup::kcp("direct"),
         Setup::kcp("reverse"),
         Setup::kcp("direct").no_mux(),
+        Setup::kcp("direct").fec(10, 3),
     ]
     .map(|setup| {
         tokio::spawn(async move {

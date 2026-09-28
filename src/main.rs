@@ -163,7 +163,7 @@ fn print_summary(config: &Config) {
         let t = kcp.timing();
         println!(
             "  kcp       : mode={} (nodelay={} interval={}ms resend={} no_congestion={}) \
-             window={}/{} mtu={}, packets sealed with the token",
+             window={}/{} mtu={} fec={}, packets sealed with the token",
             kcp.mode.name(),
             t.nodelay,
             t.interval_ms,
@@ -171,7 +171,11 @@ fn print_summary(config: &Config) {
             t.no_congestion,
             kcp.send_window,
             kcp.recv_window,
-            kcp.mtu
+            kcp.mtu,
+            match kcp.fec() {
+                Some((data, parity)) => format!("{data}+{parity}"),
+                None => "off".into(),
+            }
         );
     }
     if config.tunnel.transport == TransportKind::Wss {

@@ -10,14 +10,16 @@
 //!  UDP socket                      the dialer's own, or the listener's shared one
 //! ```
 //!
-//! Each UDP packet carries one of three things (the first plaintext byte): KCP segments,
-//! a ping, or a close. KCP runs in message mode so a message can say what it is: data, the
+//! Each UDP packet carries one of these (the first plaintext byte): KCP segments, a ping,
+//! a close, or with FEC on (`fec.rs`) KCP segments as a data shard, or a parity shard.
+//! KCP runs in message mode so a message can say what it is: data, the
 //! end of the stream in that direction (FIN), or the dialer's opening message, which makes
 //! sure every conversation starts with a data segment numbered 0. The listener starts a
 //! conversation only for such a packet; any other packet for a conversation it does not
 //! know (after a restart, say) is answered with a close, so the dialer finds out at once.
 //! Packets that were not sealed with the token get no answer at all.
 
+mod fec;
 pub mod protect;
 
 use std::collections::{HashMap, VecDeque};
@@ -25,6 +27,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -41,6 +44,7 @@ use tracing::debug;
 use crate::config::{KcpConfig, KcpTiming, Tuning, TunnelConfig};
 use crate::crypto::handshake::Key;
 use crate::crypto::Psk;
+use fec::{FecDecoder, FecEncoder, Shard};
 use protect::{Nonces, Protection};
 
 const KEY_CONTEXT: &str = "kariz 2026-10 kcp packets v1";
@@ -51,6 +55,14 @@ const PACKET_DATA: u8 = 0;
 const PACKET_PING: u8 = 1;
 /// The conversation is over: `conv (4)`.
 const PACKET_CLOSE: u8 = 2;
+/// KCP segments as an FEC data shard: `conv (4) | group (4) | index (1) | len (2) |
+/// segments`.
+const PACKET_FEC_DATA: u8 = 3;
+/// `conv (4) | group (4) | index (1) | data count (1) | parity count (1) | shard`.
+const PACKET_FEC_PARITY: u8 = 4;
+/// Bytes before the shard in FEC packets.
+const FEC_DATA_HEADER: usize = 1 + 4 + 4 + 1;
+const FEC_PARITY_HEADER: usize = FEC_DATA_HEADER + 2;
 
 /// Message tags, the first byte of every KCP message.
 const MSG_DATA: u8 = 0;
@@ -60,6 +72,10 @@ const MSG_OPEN: u8 = 2;
 /// KCP segment header: conv (4) cmd (1) frg (1) wnd (2) ts (4) sn (4) una (4) len (4).
 const KCP_HEADER: usize = 24;
 const KCP_CMD_PUSH: u8 = 81;
+const KCP_CMD_ACK: u8 = 82;
+/// How far ahead the send time of a rebuilt ack is put, so KCP takes no round trip
+/// sample from it (it only samples send times in the past).
+const REBUILT_ACK_AHEAD_MS: u32 = 1000;
 
 /// Largest KCP message: a tag and up to this much data less one byte.
 const MAX_MESSAGE: usize = 16 * 1024;
@@ -110,6 +126,8 @@ struct ConnSettings {
     keepalive: Duration,
     socket_buffer: usize,
     protection: Arc<Protection>,
+    /// Data and parity shards per FEC group; `None`: FEC off.
+    fec: Option<(usize, usize)>,
 }
 
 impl ConnSettings {
@@ -122,6 +140,7 @@ impl ConnSettings {
             keepalive: tuning.keepalive,
             socket_buffer: tuning.udp.socket_buffer,
             protection: Arc::new(Protection::new(&params.key)),
+            fec: params.config.fec(),
         }
     }
 }
@@ -141,36 +160,48 @@ fn udp_socket(addr: SocketAddr, buffer: usize) -> io::Result<UdpSocket> {
 
 /// Seals packets and sends them without waiting: a full socket buffer drops the packet,
 /// as a congested link would, and KCP sends it again.
-struct Output {
+struct Sender {
     socket: Arc<UdpSocket>,
     /// `None`: the socket is connected.
     peer: Option<SocketAddr>,
+    conv: u32,
     protection: Arc<Protection>,
     nonces: Nonces,
+    fec: Option<FecEncoder>,
+    stats: Arc<ConnStats>,
+    /// The next data segment number never sent: lower ones are resent.
+    next_new_sn: u32,
     plain: Vec<u8>,
     sealed: Vec<u8>,
 }
 
-impl Output {
+impl Sender {
     fn new(
         socket: Arc<UdpSocket>,
         peer: Option<SocketAddr>,
-        protection: Arc<Protection>,
+        conv: u32,
+        settings: &ConnSettings,
+        stats: Arc<ConnStats>,
     ) -> io::Result<Self> {
+        let interval = Duration::from_millis(settings.timing.interval_ms.into());
         Ok(Self {
             socket,
             peer,
-            protection,
+            conv,
+            protection: settings.protection.clone(),
             nonces: Nonces::new()?,
+            fec: settings
+                .fec
+                .map(|(data, parity)| FecEncoder::new(data, parity, interval)),
+            stats,
+            next_new_sn: 0,
             plain: Vec::with_capacity(1500),
             sealed: Vec::with_capacity(1500),
         })
     }
 
-    fn send(&mut self, kind: u8, body: &[u8]) {
-        self.plain.clear();
-        self.plain.push(kind);
-        self.plain.extend_from_slice(body);
+    /// Seals and sends `plain`.
+    fn send_plain(&mut self) {
         self.protection
             .seal(&mut self.nonces, &self.plain, &mut self.sealed);
         let _ = match self.peer {
@@ -179,21 +210,125 @@ impl Output {
         };
     }
 
+    fn send(&mut self, kind: u8, body: &[u8]) {
+        self.plain.clear();
+        self.plain.push(kind);
+        self.plain.extend_from_slice(body);
+        self.send_plain();
+    }
+
     fn control(&mut self, kind: u8, conv: u32) {
         self.send(kind, &conv.to_le_bytes());
     }
+
+    /// A packet of KCP segments, as is or as an FEC data shard (then the group's parity
+    /// follows when the group is full).
+    fn kcp_packet(&mut self, packet: &[u8], now: Instant) {
+        self.stats.kcp_packets.fetch_add(1, Ordering::Relaxed);
+        for segment in segments(packet) {
+            if segment[4] != KCP_CMD_PUSH {
+                continue;
+            }
+            let sn = segment_sn(segment);
+            if sn.wrapping_sub(self.next_new_sn) < 1 << 31 {
+                self.next_new_sn = sn.wrapping_add(1);
+            } else {
+                self.stats.resent.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let segments = packet;
+        let Some(mut fec) = self.fec.take() else {
+            return self.send(PACKET_DATA, segments);
+        };
+        fec.push(segments, now, &mut |shard| self.send_shard(shard));
+        self.fec = Some(fec);
+    }
+
+    /// Closes the FEC group if it has waited long enough.
+    fn close_fec_group(&mut self, now: Instant) {
+        if let Some(mut fec) = self.fec.take() {
+            fec.close_if_due(now, &mut |shard| self.send_shard(shard));
+            self.fec = Some(fec);
+        }
+    }
+
+    fn fec_deadline(&self) -> Option<Instant> {
+        self.fec.as_ref().and_then(FecEncoder::deadline)
+    }
+
+    fn send_shard(&mut self, shard: Shard<'_>) {
+        self.plain.clear();
+        let (group, index, shard) = match shard {
+            Shard::Data {
+                group,
+                index,
+                shard,
+            } => {
+                self.plain.push(PACKET_FEC_DATA);
+                (group, index, shard)
+            }
+            Shard::Parity {
+                group,
+                index,
+                data_count,
+                parity_count,
+                shard,
+            } => {
+                self.stats.parity_packets.fetch_add(1, Ordering::Relaxed);
+                self.plain.push(PACKET_FEC_PARITY);
+                self.plain.extend_from_slice(&self.conv.to_le_bytes());
+                self.plain.extend_from_slice(&group.to_le_bytes());
+                self.plain
+                    .extend_from_slice(&[index, data_count, parity_count]);
+                self.plain.extend_from_slice(shard);
+                return self.send_plain();
+            }
+        };
+        self.plain.extend_from_slice(&self.conv.to_le_bytes());
+        self.plain.extend_from_slice(&group.to_le_bytes());
+        self.plain.push(index);
+        self.plain.extend_from_slice(shard);
+        self.send_plain();
+    }
 }
 
-/// Where KCP's packets go.
+/// KCP's side of the [`Sender`], which the driver shares for pings, closes and FEC.
+struct Output(Arc<Mutex<Sender>>);
+
 impl Write for Output {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        self.send(PACKET_DATA, data);
-        Ok(data.len())
+    fn write(&mut self, segments: &[u8]) -> io::Result<usize> {
+        lock(&self.0).kcp_packet(segments, Instant::now());
+        Ok(segments.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Packet counts of a connection.
+#[derive(Default, Debug)]
+struct ConnStats {
+    /// Packets of KCP segments sent (as FEC data shards or not).
+    kcp_packets: AtomicU64,
+    parity_packets: AtomicU64,
+    /// Data segments sent again (KCP's retransmissions).
+    resent: AtomicU64,
+    /// KCP packets rebuilt from parity.
+    recovered: AtomicU64,
+}
+
+/// A snapshot of a connection's packet counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KcpStats {
+    pub kcp_packets: u64,
+    pub parity_packets: u64,
+    pub resent: u64,
+    pub recovered: u64,
 }
 
 /// The conversation a packet's plaintext belongs to (every type starts with it).
@@ -203,25 +338,39 @@ fn conv_of(plain: &[u8]) -> Option<u32> {
         .map(|c| u32::from_le_bytes(c.try_into().expect("4 bytes")))
 }
 
+/// The KCP segments in a packet's plaintext, if it carries them as they are (FEC or not).
+fn segments_of(plain: &[u8]) -> Option<&[u8]> {
+    match *plain.first()? {
+        PACKET_DATA => Some(&plain[1..]),
+        PACKET_FEC_DATA => {
+            let shard = plain.get(FEC_DATA_HEADER..)?;
+            let len = u16::from_le_bytes(shard.get(..2)?.try_into().ok()?) as usize;
+            shard.get(2..2 + len)
+        }
+        _ => None,
+    }
+}
+
 /// Whether a packet for a conversation the listener does not know comes from one it had
 /// before (it was restarted, or ended the conversation): such a dialer gets a close. A
 /// dialer that has received nothing yet (`una` 0 in its segments) may only have lost its
 /// opening packet, which KCP will resend, so it gets no answer.
 fn from_earlier_conversation(plain: &[u8]) -> bool {
-    match plain[0] {
-        PACKET_PING => true,
-        PACKET_DATA => plain.get(1 + 16..1 + 20).is_some_and(|una| una != [0; 4]),
-        _ => false,
+    if plain[0] == PACKET_PING {
+        return true;
     }
+    segments_of(plain)
+        .and_then(|segments| segments.get(16..20))
+        .is_some_and(|una| una != [0; 4])
 }
 
 /// A packet that may start a conversation: KCP data whose first segment is the first
 /// data segment (the dialer's opening message).
 fn opens_conversation(plain: &[u8]) -> bool {
-    let Some(segment) = plain.get(1..1 + KCP_HEADER) else {
+    let Some(segment) = segments_of(plain).and_then(|s| s.get(..KCP_HEADER)) else {
         return false;
     };
-    plain[0] == PACKET_DATA && segment[4] == KCP_CMD_PUSH && segment[12..16] == [0; 4]
+    segment[4] == KCP_CMD_PUSH && segment[12..16] == [0; 4]
 }
 
 /// State shared by a connection's halves and its driver.
@@ -247,6 +396,7 @@ struct State {
 struct Link {
     state: Mutex<State>,
     wake_driver: Notify,
+    stats: Arc<ConnStats>,
 }
 
 impl Link {
@@ -272,6 +422,20 @@ pub struct KcpWriter {
 impl KcpStream {
     pub fn into_split(self) -> (KcpReader, KcpWriter) {
         (self.reader, self.writer)
+    }
+
+    pub fn stats(&self) -> KcpStats {
+        Self::stats_of(&self.reader.link.stats)
+    }
+
+    fn stats_of(stats: &ConnStats) -> KcpStats {
+        let get = |c: &AtomicU64| c.load(Ordering::Relaxed);
+        KcpStats {
+            kcp_packets: get(&stats.kcp_packets),
+            parity_packets: get(&stats.parity_packets),
+            resent: get(&stats.resent),
+            recovered: get(&stats.recovered),
+        }
     }
 
     /// True while the connection is open and nothing has arrived (see
@@ -466,6 +630,61 @@ fn is_icmp_error(e: &io::Error) -> bool {
     )
 }
 
+/// The KCP segments in a packet, whole (header and data); a truncated one ends the list.
+fn segments(packet: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut rest = packet;
+    std::iter::from_fn(move || {
+        let len = u32::from_le_bytes(rest.get(20..24)?.try_into().ok()?) as usize;
+        let segment = rest.get(..KCP_HEADER.checked_add(len)?)?;
+        rest = &rest[segment.len()..];
+        Some(segment)
+    })
+}
+
+fn segment_sn(segment: &[u8]) -> u32 {
+    u32::from_le_bytes(segment[12..16].try_into().expect("4 bytes"))
+}
+
+/// Sequence numbers of data segments received lately, the oldest forgotten first.
+#[derive(Default)]
+struct SeenSegments {
+    set: std::collections::HashSet<u32>,
+    order: VecDeque<u32>,
+}
+
+impl SeenSegments {
+    /// Well above any receive window, so a rebuilt segment is never mistaken for new.
+    const KEEP: usize = 1 << 16;
+
+    fn record(&mut self, packet: &[u8]) {
+        for segment in segments(packet) {
+            if segment[4] == KCP_CMD_PUSH {
+                self.insert(segment_sn(segment));
+            }
+        }
+    }
+
+    /// Returns true if `sn` was not seen before.
+    fn insert(&mut self, sn: u32) -> bool {
+        if !self.set.insert(sn) {
+            return false;
+        }
+        self.order.push_back(sn);
+        if self.order.len() > Self::KEEP {
+            if let Some(old) = self.order.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+        true
+    }
+}
+
+/// Group and index of an FEC packet (long enough: checked by the caller).
+fn fec_header(plain: &[u8]) -> (u32, u8) {
+    let group = u32::from_le_bytes(plain[5..9].try_into().expect("4 bytes"));
+    (group, plain[9])
+}
+
 fn kcp_error(e: kcp::Error) -> io::Error {
     io::Error::other(e)
 }
@@ -476,7 +695,11 @@ struct Driver {
     kcp: Kcp<Output>,
     conv: u32,
     link: Arc<Link>,
-    control: Output,
+    /// Shared with KCP's output: pings, closes, and closing FEC groups on time.
+    sender: Arc<Mutex<Sender>>,
+    fec: FecDecoder,
+    /// Data segments received, for telling rebuilt ones that already came apart.
+    received: SeenSegments,
     inbound: Inbound,
     keepalive: Duration,
     start: Instant,
@@ -500,9 +723,10 @@ impl Driver {
         settings: &ConnSettings,
         on_exit: Option<(mpsc::UnboundedSender<ConnKey>, ConnKey)>,
     ) -> io::Result<(KcpStream, Self)> {
-        let protection = settings.protection.clone();
-        let output = Output::new(socket.clone(), peer, protection.clone())?;
-        let mut kcp = Kcp::new(conv, output);
+        let stats = Arc::new(ConnStats::default());
+        let sender = Sender::new(socket, peer, conv, settings, stats.clone())?;
+        let sender = Arc::new(Mutex::new(sender));
+        let mut kcp = Kcp::new(conv, Output(sender.clone()));
         let t = settings.timing;
         kcp.set_nodelay(
             t.nodelay,
@@ -515,6 +739,7 @@ impl Driver {
         let link = Arc::new(Link {
             state: Mutex::new(State::default()),
             wake_driver: Notify::new(),
+            stats,
         });
         let stream = KcpStream {
             reader: KcpReader { link: link.clone() },
@@ -525,7 +750,9 @@ impl Driver {
             kcp,
             conv,
             link,
-            control: Output::new(socket, peer, protection)?,
+            sender,
+            fec: FecDecoder::default(),
+            received: SeenSegments::default(),
             inbound,
             keepalive: settings.keepalive,
             start: now,
@@ -544,9 +771,17 @@ impl Driver {
 
     async fn run(mut self, dialer: bool) {
         let result = self.drive(dialer).await;
-        if let Err(e) = &result {
-            debug!(conv = self.conv, error = %e, "kcp connection ended");
-        }
+        let stats = &self.link.stats;
+        let error = result.as_ref().err().map(ToString::to_string);
+        debug!(
+            conv = self.conv,
+            error,
+            packets = stats.kcp_packets.load(Ordering::Relaxed),
+            parity = stats.parity_packets.load(Ordering::Relaxed),
+            resent = stats.resent.load(Ordering::Relaxed),
+            recovered = stats.recovered.load(Ordering::Relaxed),
+            "kcp connection ended"
+        );
         let mut st = self.link.lock();
         st.ended = true;
         if let Err(e) = result {
@@ -583,26 +818,30 @@ impl Driver {
                 ));
             }
             if self.kcp.is_dead_link() {
-                self.control.control(PACKET_CLOSE, self.conv);
+                self.control(PACKET_CLOSE);
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "kcp peer stopped acking",
                 ));
             }
+            lock(&self.sender).close_fec_group(now);
             if now - self.last_ping >= ping_every {
-                self.control.control(PACKET_PING, self.conv);
+                self.control(PACKET_PING);
                 self.last_ping = now;
             }
             if self.finished() {
                 // Ack what came last, then let the peer go.
                 self.kcp.flush_ack().map_err(kcp_error)?;
-                self.control.control(PACKET_CLOSE, self.conv);
+                self.control(PACKET_CLOSE);
                 return Ok(());
             }
             let update = now + Duration::from_millis(self.kcp.check(self.ms(now)).into());
-            let wake = update
+            let mut wake = update
                 .min(self.last_ping + ping_every)
                 .min(self.last_heard + silent_limit);
+            if let Some(deadline) = lock(&self.sender).fec_deadline() {
+                wake = wake.min(deadline);
+            }
             tokio::select! {
                 packet = self.inbound.next(self.conv) => {
                     if self.on_packet(&packet?)? {
@@ -615,13 +854,36 @@ impl Driver {
         }
     }
 
+    fn control(&mut self, kind: u8) {
+        lock(&self.sender).control(kind, self.conv);
+    }
+
     /// Returns true when the peer closed the conversation cleanly.
     fn on_packet(&mut self, plain: &[u8]) -> io::Result<bool> {
         self.last_heard = Instant::now();
+        // A malformed packet from a token holder is its problem: KCP and the FEC decoder
+        // skip what they cannot use.
         match plain[0] {
             PACKET_DATA => {
-                // A malformed packet from a token holder is its problem; KCP skips it.
+                self.received.record(&plain[1..]);
                 let _ = self.kcp.input(&plain[1..]);
+            }
+            PACKET_FEC_DATA => {
+                if let Some(segments) = segments_of(plain) {
+                    self.received.record(segments);
+                    let _ = self.kcp.input(segments);
+                    let (group, index) = fec_header(plain);
+                    let rebuilt = self.fec.data(group, index, &plain[FEC_DATA_HEADER..]);
+                    self.input_rebuilt(rebuilt);
+                }
+            }
+            PACKET_FEC_PARITY => {
+                if let Some(shard) = plain.get(FEC_PARITY_HEADER..) {
+                    let (group, index) = fec_header(plain);
+                    let (k, m) = (plain[FEC_DATA_HEADER], plain[FEC_DATA_HEADER + 1]);
+                    let rebuilt = self.fec.parity(group, index, k, m, shard);
+                    self.input_rebuilt(rebuilt);
+                }
             }
             PACKET_CLOSE => {
                 // No more packets: deliver what KCP holds, whatever the reader's pace.
@@ -637,6 +899,37 @@ impl Driver {
             _ => {}
         }
         Ok(false)
+    }
+
+    /// Hands KCP the packets FEC rebuilt, which arrive late: their data segments that
+    /// came meanwhile (resent) are left out, since KCP would ack them again with their
+    /// old send time and the peer would take that for its round trip time. Their acks
+    /// get a send time in the future, which KCP takes as no round trip sample at all
+    /// (kcp-go skips the sample for FEC packets the same way).
+    fn input_rebuilt(&mut self, packets: Vec<Vec<u8>>) {
+        let future = self.ms(Instant::now()).wrapping_add(REBUILT_ACK_AHEAD_MS);
+        let mut fresh = Vec::new();
+        for packet in &packets {
+            fresh.clear();
+            for segment in segments(packet) {
+                match segment[4] {
+                    KCP_CMD_PUSH if !self.received.insert(segment_sn(segment)) => continue,
+                    KCP_CMD_ACK => {
+                        let start = fresh.len();
+                        fresh.extend_from_slice(segment);
+                        fresh[start + 8..start + 12].copy_from_slice(&future.to_le_bytes());
+                        continue;
+                    }
+                    _ => {}
+                }
+                fresh.extend_from_slice(segment);
+            }
+            if !fresh.is_empty() {
+                let _ = self.kcp.input(&fresh);
+            }
+        }
+        let n = packets.len() as u64;
+        self.link.stats.recovered.fetch_add(n, Ordering::Relaxed);
     }
 
     /// Moves written messages into KCP while it has room, then the FIN.
@@ -815,7 +1108,8 @@ async fn demultiplex(
 ) {
     let mut conns: HashMap<ConnKey, mpsc::Sender<Bytes>> = HashMap::new();
     let (ended_tx, mut ended) = mpsc::unbounded_channel::<ConnKey>();
-    let Ok(mut replies) = Output::new(socket.clone(), None, settings.protection.clone()) else {
+    let stats = Arc::new(ConnStats::default());
+    let Ok(mut replies) = Sender::new(socket.clone(), None, 0, &settings, stats) else {
         return;
     };
     let mut buf = vec![0u8; 65_536];

@@ -274,6 +274,70 @@ with drops that KCP causes itself.
 - Default off (`fec_data = 0`); `10 / 3` is the suggested starting point for lossy links
   (30 % more packets, recovers up to 3 losses per 13).
 
+*Status after 4.5:* `[tunnel.kcp] fec_data` / `fec_parity` turn FEC on. The code is in
+`src/transport/kcp/fec.rs` (encoder and decoder, without sockets) and in `mod.rs`
+(packet types, sending, feeding rebuilt packets to KCP). Where the result differs from
+the plan above, and why:
+
+- **Two packet types of their own** (inside the protection): a data shard
+  (`conv | group | index | len | KCP segments`) and a parity shard
+  (`conv | group | index | data count | parity count | shard`). The conversation id
+  comes first, so the listener routes parity packets like any other; the counts let a
+  group closed early be decoded. Packets say what they are, so only the sender's setting
+  matters: a side without FEC still reads FEC packets. The largest packet (a parity
+  shard) adds 43 bytes, so the MTU limit with FEC is 1429. The limit without FEC is
+  1443, not the plan's 1450, which with the 29 bytes of 4.4 would have gone past 1472.
+- **Groups closed early get proportional parity:** `ceil(parity x k / data)`, at least
+  one, so a lone packet (an ack, a game packet) gets one parity packet after the
+  interval, not three.
+- **Rebuilt packets are cleaned before KCP sees them.** They arrive late, and the `kcp`
+  crate, unlike kcp-go, cannot tell them from regular packets. Their data segments that
+  came meanwhile (resent) are left out, since KCP would ack them again with their old
+  send time, which inflates the peer's round-trip time. Their acks get a send time in the
+  future, which KCP takes as no round-trip sample at all (kcp-go skips that sample for
+  FEC packets in the same way).
+- **What FEC saves, measured:** 2 MiB one way, 5 % loss each way, 20 ms RTT, preset
+  `normal`: without FEC the sender resent 51-175 segments, with 10 / 3 it resent 0 in
+  most runs (57 in one). On the `fast` presets (minimum timeout 30 ms) KCP also resends
+  segments whose acks were merely delayed (51-192 duplicates at the receiver in the same
+  test). FEC cannot save those, so the unit test uses `normal`.
+
+Tests: the encoder and decoder alone (a full group sends data then parity; *every* way
+of losing up to `parity` of the `data + parity` shards rebuilds the group, and more
+losses do not; a slow group is closed after the delay, counted from its first packet;
+parity before data, duplicates, old groups, nonsense parity); over local sockets (fewer
+retransmissions with FEC, as above; FEC on one side only; a lone packet's group closed
+on time). E2E: row `kcp_reverse_fec`, and FEC in the 5 % loss transfer. Config: bounds,
+both-or-neither, MTU with FEC.
+
+Lossy-link benchmark (section 8, same machine and setup), `kcp fast2` with and without
+FEC 10 / 3:
+
+| Loss | FEC | Download | UDP idle p50 / p99 | UDP during download p50 / p99 | Queue drops |
+|---|---|---|---|---|---|
+| 0 % | off | 33.5 Mbit/s | 62 / 64 ms | 92 / 256 ms | 35,163 |
+| 0 % | 10 / 3 | 23.1 Mbit/s | 62 / 64 ms | 83 / 294 ms | 52,134 |
+| 1 % | off | 29.4 Mbit/s | 62 / **142** ms | 94 / 293 ms | 30,217 |
+| 1 % | 10 / 3 | 24.1 Mbit/s | 63 / **65** ms | 88 / 259 ms | 50,278 |
+| 5 % | off | 24.7 Mbit/s | 63 / **262** ms | 118 / 420 ms | 26,127 |
+| 5 % | 10 / 3 | 25.1 Mbit/s | 63 / **142** ms | 87 / 415 ms | 48,318 |
+
+(UDP packets over KCP are never lost: they ride the reliable stream.) What this says:
+
+- **FEC's gain here is latency, not throughput.** A lost packet of a sparse flow is
+  rebuilt from parity within a KCP interval instead of waiting for a retransmission:
+  the idle UDP p99 falls from 142 to 65 ms at 1 % loss (the link RTT is 60) and from 262
+  to 142 ms at 5 %. That is what the gaming profile (phase 6) wants.
+- **Throughput does not improve, and without loss it drops** (33.5 to 23.1 Mbit/s).
+  KCP's 1024-packet window without congestion control already keeps this bottleneck's
+  queue overflowing (4.4), and 30 % more packets overflow it further (about 50,000
+  drops instead of 35,000). Losses KCP causes itself are not what FEC is for.
+  Against `tcpmux`, KCP with FEC is still 10x faster at 1 % loss and 31x at 5 % (the
+  target was 5x), but no faster than KCP without it.
+- For 4.6: a window sized to the path (or KCP's congestion control on) is the first
+  lever for KCP's throughput; FEC stays off by default and is advised for latency-
+  sensitive traffic on lossy links.
+
 ## 6. Configuration
 
 ```toml
@@ -301,8 +365,9 @@ fec_parity = 0
 
 `[tunnel.mux]` keeps its meaning for QUIC (connections, max streams, stream window); its
 default for QUIC is on with 2 connections. Validation: `[tunnel.quic]` / `[tunnel.kcp]`
-only with the matching transport; bounds on windows, MTU (576-1450) and FEC shards
-(data 1-64, parity 1-32, or both 0); QUIC with `encryption` other than `auto` rejected.
+only with the matching transport; bounds on windows, MTU (576-1443, 1429 with FEC) and FEC
+shards (data 1-64, parity 1-32, or both 0); QUIC with `encryption` other than `auto`
+rejected.
 
 ## 7. Code layout
 
@@ -410,7 +475,7 @@ retransmits instead and pays in p99.) What the baseline says, for 4.4-4.6:
 | **4.2** QUIC (done) | quinn endpoints in both modes, token-derived mutual TLS, streams and datagrams (stream fallback for large packets), congestion choice, keep-alive, 0-RTT, config and validation. | E2E matrix rows for `quic` (reverse / direct), TCP and UDP scenarios pass; wrong token fails the TLS handshake; a packet above the datagram limit still arrives; the TLS identity tests (wrong key rejected both ways). |
 | **4.3** Lossy link harness (done) | UDP / TCP link emulator in tests; baseline numbers for `tcpmux` vs `quic`. | Emulator unit tests (loss rate, delay within bounds); benchmark prints the matrix. |
 | **4.4** KCP (done) | Packet protection, KCP driver, listener / dialer, settings and presets. | E2E rows for `kcp` (reverse / direct, mux on / off); probes get no answer; tampered packets are dropped; transfer integrity under 5 % loss. |
-| **4.5** FEC | Reed-Solomon groups, early group close, recovery. | Unit tests: any `data` of `data + parity` rebuild the group; delay bound; E2E under loss with fewer retransmissions than without FEC. |
+| **4.5** FEC (done) | Reed-Solomon groups, early group close, recovery. | Unit tests: any `data` of `data + parity` rebuild the group; delay bound; E2E under loss with fewer retransmissions than without FEC. |
 | **4.6** Release | Lossy-link benchmark table, defaults decided from it (QUIC congestion, KCP mode), sample configs, README / README_FA, CHANGELOG, version `0.4.0`. | Numbers in the README; release tagged. |
 
 ## 10. Targets

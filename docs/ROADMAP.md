@@ -30,7 +30,7 @@ supported for every transport.
 | 1 | Project skeleton, CLI, TOML config, profiles, mutual auth, plain `tcp` transport, reverse + direct modes, tests, CI | **done (v0.1.0)** |
 | 2 | Encryption layer, `tcpmux`, `ws` / `wss` (CDN friendly); plan in [PHASE2.md](PHASE2.md) | **done (v0.2.0)** |
 | 3 | UDP forwarding and UDP-over-stream framing; plan in [PHASE3.md](PHASE3.md) | **done (v0.3.0)** |
-| 4 | `kcp` (full settings + Reed-Solomon FEC) and `quic` (quinn; BBR/Cubic, datagrams, GSO/GRO); plan in [PHASE4.md](PHASE4.md) | in progress (4.1-4.4 done) |
+| 4 | `kcp` (full settings + Reed-Solomon FEC) and `quic` (quinn; BBR/Cubic, datagrams, GSO/GRO); plan in [PHASE4.md](PHASE4.md) | in progress (4.1-4.5 done) |
 | 5 | `icmp` transport (raw sockets, needs `CAP_NET_RAW`) | planned |
 | 6 | Full `gaming` profile (packet duplication, DSCP), `stealth` profile (padding, timing), active-probe fallback | planned |
 | 7 | Release builds (static musl for x86_64 / aarch64 / armv7, mimalloc), integration into XRayMesh as a backend | planned |

@@ -150,45 +150,90 @@ async fn wrong_key_is_ignored() {
     assert!(accepted.is_err(), "a wrong key opened a connection");
 }
 
+/// A UDP proxy in front of `to`. Towards the listener it corrupts one byte in a share
+/// `corrupt` (percent) of the packets; in both directions it drops a share `drop` and
+/// delays the rest by `delay`. Large buffers, so it loses nothing else. Returns its
+/// address and the task, to abort.
+async fn proxy(
+    to: &str,
+    corrupt: u64,
+    drop: u64,
+    delay: Duration,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let front = Arc::new(udp_socket("127.0.0.1:0".parse().unwrap(), 4 << 20).unwrap());
+    let front_addr = front.local_addr().unwrap().to_string();
+    let upstream = Arc::new(udp_socket("127.0.0.1:0".parse().unwrap(), 4 << 20).unwrap());
+    upstream.connect(to).await.unwrap();
+    // Sends after the delay, in order: (due, packet, destination or the connected peer).
+    type Delayed = (Instant, Vec<u8>, Option<SocketAddr>);
+    let delayed = |socket: Arc<UdpSocket>| {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Delayed>();
+        let task = tokio::spawn(async move {
+            while let Some((due, packet, to)) = rx.recv().await {
+                sleep_until(due).await;
+                let _ = match to {
+                    Some(to) => socket.send_to(&packet, to).await,
+                    None => socket.send(&packet).await,
+                };
+            }
+        });
+        (tx, task)
+    };
+    let (to_listener, forward) = delayed(upstream.clone());
+    let (to_dialer, back_task) = delayed(front.clone());
+    let task = tokio::spawn(async move {
+        let _tasks = (AbortOnDrop(forward), AbortOnDrop(back_task));
+        let (mut buf, mut back) = (vec![0u8; 65_536], vec![0u8; 65_536]);
+        let mut client = None;
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        // A percentage and a spare random number, per packet.
+        let mut draw = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng % 100, rng >> 8)
+        };
+        loop {
+            tokio::select! {
+                Ok((n, from)) = front.recv_from(&mut buf) => {
+                    client = Some(from);
+                    let (p, r) = draw();
+                    if p < drop {
+                        continue;
+                    }
+                    if p < drop + corrupt {
+                        buf[r as usize % n] ^= 0x40;
+                    }
+                    let _ = to_listener.send((Instant::now() + delay, buf[..n].to_vec(), None));
+                }
+                Ok(n) = upstream.recv(&mut back) => {
+                    if draw().0 < drop {
+                        continue;
+                    }
+                    if client.is_some() {
+                        let _ = to_dialer.send((Instant::now() + delay, back[..n].to_vec(), client));
+                    }
+                }
+            }
+        }
+    });
+    (front_addr, task)
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// A proxy that corrupts one byte in a fifth of the packets towards the listener: the
 /// protection drops those, KCP resends them, and the data arrives intact.
 #[tokio::test]
 async fn tampered_packets_are_dropped() {
     let (l, addr) = listener(1).await;
-    // Large buffers, so the only packets lost are the corrupted ones.
-    let proxy = udp_socket("127.0.0.1:0".parse().unwrap(), 4 << 20).unwrap();
-    let proxy_addr = proxy.local_addr().unwrap().to_string();
-    let upstream = udp_socket("127.0.0.1:0".parse().unwrap(), 4 << 20).unwrap();
-    upstream.connect(&addr).await.unwrap();
-    let (proxy, upstream) = (Arc::new(proxy), Arc::new(upstream));
-    let forward = {
-        let (proxy, upstream) = (proxy.clone(), upstream.clone());
-        tokio::spawn(async move {
-            let (mut buf, mut back) = (vec![0u8; 65_536], vec![0u8; 65_536]);
-            let mut client = None;
-            let mut rng = 0x2545_f491_4f6c_dd1du64;
-            loop {
-                tokio::select! {
-                    Ok((n, from)) = proxy.recv_from(&mut buf) => {
-                        client = Some(from);
-                        rng ^= rng << 13;
-                        rng ^= rng >> 7;
-                        rng ^= rng << 17;
-                        if rng % 5 == 0 {
-                            let i = (rng >> 8) as usize % n;
-                            buf[i] ^= 0x40;
-                        }
-                        let _ = upstream.send(&buf[..n]).await;
-                    }
-                    Ok(n) = upstream.recv(&mut back) => {
-                        if let Some(c) = client {
-                            let _ = proxy.send_to(&back[..n], c).await;
-                        }
-                    }
-                }
-            }
-        })
-    };
+    let (proxy_addr, forward) = proxy(&addr, 20, 0, Duration::ZERO).await;
     let dialer = KcpDialer::new(&proxy_addr, &params(1), &tuning());
     let client = dialer.dial().await.unwrap();
     echo(accept(&l).await);
@@ -199,6 +244,110 @@ async fn tampered_packets_are_dropped() {
         .unwrap();
     assert!(got == payload, "payload corrupted");
     forward.abort();
+}
+
+fn params_fec(key: u8, data: usize, parity: usize) -> KcpParams {
+    let mut p = params(key);
+    p.config.fec_data = data;
+    p.config.fec_parity = parity;
+    p
+}
+
+/// 2 MiB sent one way through a proxy that drops 5 % of the packets each way, with a
+/// 20 ms round trip, and FEC on both sides or off. Returns the sender's packet counts
+/// and the receiver's.
+async fn transfer_with_loss(fec: Option<(usize, usize)>) -> (KcpStats, KcpStats) {
+    let mut params = match fec {
+        Some((data, parity)) => params_fec(1, data, parity),
+        None => params(1),
+    };
+    // A window near the path's capacity, as it would be configured for it, and the
+    // gentle preset: with a 30 ms minimum timeout (the fast ones) KCP also resends many
+    // segments that only had their acks delayed, which would drown what FEC saves.
+    params.config.send_window = 256;
+    params.config.recv_window = 256;
+    params.config.mode = crate::config::KcpMode::Normal;
+    let l = KcpListener::bind("127.0.0.1:0", &params, &tuning())
+        .await
+        .unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let (proxy_addr, forward) = proxy(&addr, 0, 5, Duration::from_millis(10)).await;
+    let mut client = KcpDialer::new(&proxy_addr, &params, &tuning())
+        .dial()
+        .await
+        .unwrap();
+    let mut server = accept(&l).await;
+    let payload = pattern(2 << 20);
+    let send = async {
+        client.write_all(&payload).await.unwrap();
+        client.shutdown().await.unwrap();
+    };
+    let mut got = Vec::new();
+    let receive = tokio::time::timeout(Duration::from_secs(60), server.read_to_end(&mut got));
+    let ((), received) = tokio::join!(send, receive);
+    received.expect("transfer in time").unwrap();
+    assert!(got == payload, "payload corrupted");
+    forward.abort();
+    (client.stats(), server.stats())
+}
+
+/// With FEC the receiver rebuilds lost packets itself, so the sender resends fewer
+/// segments for the same transfer.
+#[tokio::test(flavor = "multi_thread")]
+async fn fec_saves_retransmissions() {
+    let (plain, _) = transfer_with_loss(None).await;
+    let (fec, receiver) = transfer_with_loss(Some((10, 3))).await;
+    assert_eq!((plain.parity_packets, plain.recovered), (0, 0));
+    assert!(plain.resent > 0, "{plain:?}");
+    assert!(fec.parity_packets > 0, "{fec:?}");
+    assert!(receiver.recovered > 0, "{receiver:?}");
+    assert!(
+        fec.resent < plain.resent,
+        "with FEC {fec:?}, without {plain:?}"
+    );
+}
+
+/// Only the sender's settings decide whether it uses FEC: each side reads what comes.
+#[tokio::test]
+async fn fec_on_one_side_only() {
+    for (listening, dialing) in [
+        (params_fec(1, 4, 2), params(1)),
+        (params(1), params_fec(1, 4, 2)),
+    ] {
+        let l = KcpListener::bind("127.0.0.1:0", &listening, &tuning())
+            .await
+            .unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let client = KcpDialer::new(&addr, &dialing, &tuning())
+            .dial()
+            .await
+            .unwrap();
+        echo(accept(&l).await);
+        let payload = pattern(300_000);
+        let got = round_trip(client, &payload).await.unwrap();
+        assert!(got == payload);
+    }
+}
+
+/// A lone small write with FEC: its group is closed after the KCP interval, so parity
+/// follows without waiting for more traffic.
+#[tokio::test]
+async fn fec_closes_a_lone_packet_group() {
+    let params = params_fec(1, 10, 3);
+    let l = KcpListener::bind("127.0.0.1:0", &params, &tuning())
+        .await
+        .unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let mut client = KcpDialer::new(&addr, &params, &tuning())
+        .dial()
+        .await
+        .unwrap();
+    let mut server = accept(&l).await;
+    client.write_all(b"one").await.unwrap();
+    let mut buf = [0u8; 3];
+    server.read_exact(&mut buf).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(client.stats().parity_packets > 0, "{:?}", client.stats());
 }
 
 /// A listener restarted on the same port answers the old conversation with a close, so

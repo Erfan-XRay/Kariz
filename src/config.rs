@@ -193,9 +193,14 @@ pub struct KcpConfig {
     #[serde(default = "default_kcp_window")]
     pub recv_window: u16,
     /// KCP packet size (its 24-byte header included); the UDP packet adds 29 bytes of
-    /// protection.
+    /// protection, 43 with FEC.
     #[serde(default = "default_kcp_mtu")]
     pub mtu: usize,
+    /// Reed-Solomon FEC: parity packets per group of data packets; both 0 = off.
+    #[serde(default)]
+    pub fec_data: usize,
+    #[serde(default)]
+    pub fec_parity: usize,
 }
 
 fn default_kcp_window() -> u16 {
@@ -218,6 +223,8 @@ impl Default for KcpConfig {
             send_window: default_kcp_window(),
             recv_window: default_kcp_window(),
             mtu: default_kcp_mtu(),
+            fec_data: 0,
+            fec_parity: 0,
         }
     }
 }
@@ -261,6 +268,11 @@ pub struct KcpTiming {
 }
 
 impl KcpConfig {
+    /// `(data, parity)` packets per FEC group, or `None` when FEC is off.
+    pub fn fec(&self) -> Option<(usize, usize)> {
+        (self.fec_data > 0).then_some((self.fec_data, self.fec_parity))
+    }
+
     pub fn timing(&self) -> KcpTiming {
         let preset = |nodelay, interval_ms, resend, no_congestion| KcpTiming {
             nodelay,
@@ -608,9 +620,13 @@ const KCP_MAX_RESEND: u32 = 10;
 const KCP_SEND_WINDOW: std::ops::RangeInclusive<u16> = 16..=32768;
 /// KCP needs 128 to receive its largest messages.
 const KCP_RECV_WINDOW: std::ops::RangeInclusive<u16> = 128..=32768;
-/// The upper bound keeps the UDP packet (with protection) under 1472 bytes, the most a
-/// 1500-byte path carries unfragmented.
-const KCP_MTU: std::ops::RangeInclusive<usize> = 576..=1450;
+/// The upper bound keeps the UDP packet (29 bytes of protection added) within 1472 bytes,
+/// the most a 1500-byte path carries unfragmented.
+const KCP_MTU: std::ops::RangeInclusive<usize> = 576..=1443;
+/// With FEC the largest packet is a parity shard: 43 bytes added.
+const KCP_MTU_FEC: usize = 1429;
+const KCP_FEC_DATA: std::ops::RangeInclusive<usize> = 1..=64;
+const KCP_FEC_PARITY: std::ops::RangeInclusive<usize> = 1..=32;
 const MUX_MIN_LIFETIME_SECS: u64 = 60;
 /// See [`Tuning::notsent_lowat`]. Over a throttled 20 Mbit/s link with four bulk
 /// transfers next to UDP pings (`udp_latency_under_load`), it cut the UDP round trip
@@ -831,6 +847,22 @@ impl Config {
                 KCP_MTU.start(),
                 KCP_MTU.end()
             );
+        }
+        match (k.fec_data, k.fec_parity) {
+            (0, 0) => {}
+            (data, parity) if KCP_FEC_DATA.contains(&data) && KCP_FEC_PARITY.contains(&parity) => {
+                if k.mtu > KCP_MTU_FEC {
+                    bail!("tunnel.kcp.mtu must be at most {KCP_MTU_FEC} bytes with FEC");
+                }
+            }
+            _ => bail!(
+                "tunnel.kcp.fec_data must be between {} and {} and fec_parity between {} and \
+                 {}, or both 0 (FEC off)",
+                KCP_FEC_DATA.start(),
+                KCP_FEC_DATA.end(),
+                KCP_FEC_PARITY.start(),
+                KCP_FEC_PARITY.end()
+            ),
         }
         Ok(())
     }
@@ -1519,8 +1551,17 @@ mod tests {
         );
         let k = Config::parse(&text).unwrap().tunnel.kcp.unwrap();
         assert_eq!((k.send_window, k.recv_window, k.mtu), (256, 512, 1200));
+        assert_eq!(k.fec(), None);
         assert_eq!(k.timing().interval_ms, 40);
         assert!(!k.timing().nodelay);
+
+        let text = with_transport(
+            "entry",
+            "kcp",
+            "[tunnel.kcp]\nfec_data = 10\nfec_parity = 3\nmtu = 1429",
+        );
+        let k = Config::parse(&text).unwrap().tunnel.kcp.unwrap();
+        assert_eq!(k.fec(), Some((10, 3)));
 
         // Manual: what is set, and fast2 for the rest.
         let text = with_transport(
@@ -1561,8 +1602,13 @@ mod tests {
             ("recv_window = 64", "tunnel.kcp.recv_window"),
             ("recv_window = 40000", "tunnel.kcp.recv_window"),
             ("mtu = 500", "tunnel.kcp.mtu"),
-            ("mtu = 1451", "tunnel.kcp.mtu"),
+            ("mtu = 1444", "tunnel.kcp.mtu"),
             ("fec = 1", "unknown field"),
+            ("fec_data = 10", "fec_parity between"),
+            ("fec_parity = 3", "fec_parity between"),
+            ("fec_data = 65\nfec_parity = 3", "fec_parity between"),
+            ("fec_data = 10\nfec_parity = 33", "fec_parity between"),
+            ("fec_data = 10\nfec_parity = 3\nmtu = 1430", "with FEC"),
         ] {
             let err = parse_err(&with_transport(
                 "entry",
