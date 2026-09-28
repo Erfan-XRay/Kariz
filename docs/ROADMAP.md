@@ -33,8 +33,8 @@ supported for every transport.
 | 4 | `kcp` (full settings + Reed-Solomon FEC) and `quic` (quinn; BBR/Cubic, datagrams, GSO/GRO); plan in [PHASE4.md](PHASE4.md) | **done (v0.4.0)** |
 | 5 | (`icmp` transport) | dropped |
 | 6 | Full `gaming` profile: unreliable datagram path over KCP, packet duplication, DSCP, measured defaults; plan in [PHASE6.md](PHASE6.md) | **done (v0.5.0)** |
-| 7 | Release builds (static musl for x86_64 / aarch64 / armv7, mimalloc), integration into XRayMesh as a backend | planned |
-| later | `stealth` profile (padding, timing), active-probe fallback | not scheduled |
+| 7 | `stealth` profile (record padding, timing), active-probe fallback, user-settable mux settings; plan in [PHASE7.md](PHASE7.md) | in progress (v0.6.0) |
+| 8 | Release builds (static musl for x86_64 / aarch64 / armv7, mimalloc) | planned |
 
 ## Protocol (v2)
 
@@ -63,7 +63,6 @@ once per session and opening a stream adds no round trip.
 
 A connection that fails the handshake is not closed at once but drained for a random
 5-30 s. Wire format v2 is not compatible with v0.1: upgrade both sides together.
-Camouflage beyond that (padding and timing shaping, active-probe fallback) is later
-work, not scheduled.
+Camouflage beyond that (padding and timing shaping, active-probe fallback) is phase 7.
 
 Full design: [PHASE2.md](PHASE2.md).
