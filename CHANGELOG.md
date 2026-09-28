@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **More mux settings in `[tunnel.mux]`**, each defaulting to what it was before (the
+  profile's value): `coalesce`, `ping_interval_secs` (default `tuning.keepalive_secs`;
+  also QUIC's keep-alive), `datagram_buffer`, `datagram_queue` and `notsent_lowat` (0
+  turns it off). `kariz check` shows the values in effect.
+
 ## 0.5.0 - 2026-09-28
 
 The gaming release. Works with v0.4 over every transport: the new datagram path over

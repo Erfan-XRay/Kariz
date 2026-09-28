@@ -148,6 +148,12 @@ journalctl -u kariz -f
 | `tunnel.token` | در هر دو سمت یکی و دست‌کم ۱۶ کاراکتر |
 | `tunnel.encryption` | `auto`، `chacha20-poly1305`، `aes-256-gcm` یا `none` (در هر دو سمت؛ برای `quic` همیشه TLS 1.3 است و باید `auto` بماند) |
 | `[tunnel.mux]` | باید در هر دو سمت روشن یا خاموش باشد؛ پیش‌فرض برای `tcpmux`، `ws`، `wss` و `kcp` روشن است و برای `quic` همیشه روشن |
+| `tunnel.mux.connections` / `max_streams` / `stream_window` | تعداد اتصال‌های بلندمدت، حداکثر stream روی هر اتصال، و پنجره‌ی هر stream به بایت؛ پیش‌فرض از پروفایل |
+| `tunnel.mux.coalesce` | یکی کردن فریم‌ها در نوشتن‌های بزرگ‌تر (سرعت) یا نوشتن فوری هر فریم (تأخیر)؛ پیش‌فرض روشن و در gaming خاموش |
+| `tunnel.mux.ping_interval_secs` | فاصله‌ی ping؛ طرف مقابل بعد از دو برابر این مدت سکوت مرده حساب می‌شود؛ پیش‌فرض `tuning.keepalive_secs` |
+| `tunnel.mux.datagram_buffer` / `datagram_queue` | بایت‌های UDP در صف ارسال هر session، و تعداد بسته‌های UDP در صف دریافت هر flow؛ پیش‌فرض از پروفایل |
+| `tunnel.mux.notsent_lowat` | مقدار `TCP_NOTSENT_LOWAT` روی اتصال‌های mux به بایت (پیش‌فرض ۱۶۳۸۴)؛ ۰ یعنی خاموش |
+| `tunnel.mux.max_lifetime_secs` | عوض کردن دوره‌ای اتصال‌ها (دست‌کم ۶۰ ثانیه) |
 | `tunnel.ws.path` | مسیر WebSocket، در هر دو سمت یکی |
 | `tunnel.ws.host` | در سمت dial، هدر Host (و SNI)؛ در سمت listen، درخواست‌های hostهای دیگر رد می‌شوند |
 | `tunnel.ws.early_data` | در سمت dial: hello داخل درخواست upgrade |

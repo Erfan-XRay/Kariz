@@ -51,7 +51,7 @@ pub async fn run(config: Config) -> Result<()> {
     let mux = config.mux();
     let transport = Settings::new(&config.tunnel, config.kcp());
     let crypto = Crypto::new(&config.tunnel.token, config.tunnel.encryption).with_mux(mux.enabled);
-    let sessions = SessionConfig::new(&mux, &tuning);
+    let sessions = SessionConfig::new(&mux);
     let mut tasks = JoinSet::new();
 
     let source = if transport.kind == TransportKind::Quic {

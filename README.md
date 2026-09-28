@@ -156,6 +156,11 @@ connections = 4                 # long-lived connections (dialing side; quic def
 max_streams = 512               # user connections per connection
 stream_window = 262144          # per-stream window in bytes
 # max_lifetime_secs = 3600      # rotate connections (at least 60)
+# coalesce = true               # gather frames into larger writes; default off in gaming
+# ping_interval_secs = 30       # peer dead after twice this; default tuning.keepalive_secs
+# datagram_buffer = 262144      # UDP bytes a session queues to send; default: profile
+# datagram_queue = 128          # UDP packets a flow queues on receive; default: profile
+# notsent_lowat = 16384         # TCP_NOTSENT_LOWAT on mux connections; 0 = off
 
 [tunnel.ws]                     # ws / wss
 path = "/api/v1/stream"         # same on both sides
