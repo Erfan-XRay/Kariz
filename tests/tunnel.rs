@@ -11,6 +11,11 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 const TOKEN: &str = "test-token-0123456789abcdef";
 
+/// The tunnel runs inside this process, so the benchmarks use the binary's allocator.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// A port free for both TCP and UDP: tunnel ports of UDP transports and `tcp+udp`
 /// forward ports need both.
 fn free_port() -> u16 {

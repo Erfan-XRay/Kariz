@@ -25,6 +25,45 @@ jobs:
       - run: cargo clippy --lib --bins --no-default-features --features kcp -- -D warnings
       - run: cargo test
 
+  # TEMPORARY (phase 8.1), removed before merge: mimalloc against musl's own allocator,
+  # static musl builds, alternating runs.
+  bench-musl:
+    runs-on: ubuntu-latest
+    env:
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build both binaries
+        run: |
+          cargo build --release --locked --target "$TARGET"
+          cp "target/$TARGET/release/kariz" kariz-mimalloc
+          cargo build --release --locked --target "$TARGET" --no-default-features --features quic,kcp
+          cp "target/$TARGET/release/kariz" kariz-musl
+          ls -l kariz-mimalloc kariz-musl
+      - name: Throughput and UDP rate, alternating
+        run: |
+          for round in 1 2; do
+            for alloc in mimalloc musl; do
+              if [ "$alloc" = mimalloc ]; then feats=""; else feats="--no-default-features --features quic,kcp"; fi
+              echo "== $alloc, round $round"
+              for bench in throughput udp_throughput; do
+                cargo test --release --locked --target "$TARGET" $feats --test tunnel "$bench" \
+                  -- --ignored --nocapture --exact 2>&1 | grep "each way" || true
+              done
+            done
+          done
+      - name: Memory
+        run: |
+          for alloc in mimalloc musl; do
+            echo "== $alloc"
+            scripts/rss.sh tcpmux 100 "./kariz-$alloc"
+            scripts/rss.sh tcpmux 1000 "./kariz-$alloc" udp
+          done
+
   # nginx in front of the tunnel as a stand-in for a CDN: WebSocket proxying, TLS
   # termination and an idle timeout (tests/tunnel.rs, module `nginx`).
   cdn:

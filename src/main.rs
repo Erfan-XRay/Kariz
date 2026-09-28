@@ -7,6 +7,12 @@ use tracing_subscriber::EnvFilter;
 use kariz::config::{mode_name, role_name, Config, Dscp, Encryption, TransportKind};
 use kariz::crypto::Cipher;
 
+/// musl's allocator is built for size, not speed; mimalloc is much faster on the
+/// many small allocations of the packet path (docs/PHASE8.md).
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 #[command(name = "kariz", version, about = "High-performance tunnel core")]
 struct Cli {
