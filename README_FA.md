@@ -1,271 +1,204 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="Kariz: a fast, light tunnel core in Rust" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/Erfan-XRay/Kariz/actions/workflows/ci.yml"><img src="https://github.com/Erfan-XRay/Kariz/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Erfan-XRay/Kariz/releases"><img src="https://img.shields.io/badge/version-0.5.1-34d0c3" alt="Version 0.5.1"></a>
+  <img src="https://img.shields.io/badge/rust-1.80%2B-e9c46a?logo=rust" alt="Rust 1.80+">
+  <img src="https://img.shields.io/badge/platform-linux-12365e?logo=linux&logoColor=white" alt="Linux">
+</p>
+
+<p align="center">
+  <a href="README.md">English</a> · <b>فارسی</b> · <a href="docs/README.md">مستندات (انگلیسی)</a> · <a href="CHANGELOG.md">تغییرات</a>
+</p>
+
 <div dir="rtl">
 
-# کاریز
+---
 
-[English](README.md) | **فارسی**
-
-کاریز یک هسته‌ی تانل برای اتصال سرورها به هم است که با Rust نوشته شده و سه هدف اصلی دارد:
-
-1. **مصرف کم منابع**: بدون Garbage Collector، حدود ۵ مگابایت RAM برای هر سمت، مناسب VPSهای ارزان.
-2. **عبور از DPI**: ترافیک رمزشده بدون هیچ بایت ثابت، WebSocket شبیه مرورگر، و کار کردن از پشت CDN.
-3. **بیشترین سرعت**: مسیر داده بدون dispatch پویا، سوکت‌های تنظیم‌شده و پروفایل‌های مخصوص هر کاربرد.
-
-> وضعیت: **نسخه‌ی 0.5.0**، نسخه‌ی مخصوص بازی. نسخه‌ی 0.5 روی همه‌ی transportها با 0.4 کار می‌کند؛ فقط قانون‌های UDP که `duplicate` دارند هر دو سمت را 0.5 می‌خواهند.
-> کارهای بعدی در [docs/ROADMAP.md](docs/ROADMAP.md) و فهرست تغییرات در [CHANGELOG.md](CHANGELOG.md) است.
-
-## امکانات
-
-- **transportها:**
-
-  | transport | چه چیزی روی شبکه می‌رود | کِی استفاده کنیم |
-  |---|---|---|
-  | `tcp` | یک اتصال TCP برای هر اتصال کاربر | راه‌اندازی ساده، بیشترین سرعت روی یک اتصال |
-  | `tcpmux` | چند اتصال TCP بلندمدت که همه‌ی اتصال‌های کاربر از داخلشان رد می‌شوند | اتصال‌های کاربر زیاد؛ اتصال کمتر بین دو سرور |
-  | `ws` | WebSocket روی TCP (HTTP) | پشت CDN یا reverse proxy که با سرور مبدأ HTTP حرف می‌زند |
-  | `wss` | WebSocket روی TLS (HTTPS) | پشت CDN، یا بدون CDN برای اینکه شبیه یک سایت HTTPS باشد |
-  | `quic` | QUIC روی UDP: stream و datagram، با TLS 1.3 | flowهای UDP بدون معطل شدن پشت بسته‌ی گم‌شده؛ مسیرهایی که UDP خوب کار می‌کند |
-  | `kcp` | KCP روی UDP، هر بسته رمزشده، با FEC اختیاری | لینک‌های پرتلفات که TCP در آن‌ها از سرعت می‌افتد |
-
-  `quic` و `kcp` روی UDP کار می‌کنند و بعضی شبکه‌ها UDP را محدود یا مسدود می‌کنند (به‌خصوص UDP روی پورت 443). این‌ها گزینه‌ای برای مسیرهایی‌اند که UDP در آن‌ها کار می‌کند، نه جایگزین بقیه؛ عوض کردن transport فقط یک خط کانفیگ است.
-
-- **رمزنگاری** (`tunnel.encryption`، پیش‌فرض `auto`):
-  - دو سرور با یک توکن مشترک همدیگر را احراز هویت می‌کنند و خود توکن هیچ‌وقت روی شبکه نمی‌رود.
-  - تبادل کلید X25519 امنیت پیشرو (forward secrecy) می‌دهد.
-  - داده‌ها در بسته‌های AES-256-GCM یا ChaCha20-Poly1305 فرستاده می‌شوند.
-  - پیام شروع (hello) نه بایت ثابت دارد نه طول ثابت، و hello تکراری (replay) رد می‌شود.
-  - اتصالی که handshake را رد کند فوراً بسته نمی‌شود، پس probe از زمان بسته‌شدن چیزی نمی‌فهمد.
-- **mux** (`[tunnel.mux]`):
-  - اتصال‌های کاربر به‌صورت stream روی چند اتصال بلندمدت می‌روند.
-  - هر stream کنترل جریان خودش را دارد، پس stream کُند بقیه را معطل نمی‌کند.
-  - باز کردن stream رفت‌وبرگشت اضافه ندارد.
-  - pingها اتصال مرده را تشخیص می‌دهند و نمی‌گذارند CDN اتصال بیکار را قطع کند.
-  - اتصال‌ها را می‌شود به‌صورت دوره‌ای عوض کرد.
-- **WebSocket:**
-  - درخواست upgrade شبیه مرورگر است.
-  - با early data، handshake داخل خود درخواست upgrade می‌رود و پشت CDN یک رفت‌وبرگشت صرفه‌جویی می‌شود.
-  - هر درخواستی که upgrade معتبر روی مسیر تنظیم‌شده نباشد، همان صفحه‌ی 404 پیش‌فرض nginx را می‌گیرد.
-- **TLS** (`wss`):
-  - با rustls پیاده شده.
-  - سمت dial گواهی سرور را با root certificateهای Mozilla بررسی می‌کند، یا فقط یک گواهی self-signed مشخص را می‌پذیرد (`kariz pin`).
-  - سمت listen با تغییر فایل‌های گواهی آن را دوباره بارگذاری می‌کند، پس تمدید Let's Encrypt ری‌استارت لازم ندارد.
-- **forward کردن UDP** (با `protocol = "udp"` یا `"tcp+udp"` در قانون `[[forward]]`):
-  - روی همه‌ی transportها کار می‌کند، پس UDP (WireGuard، بازی، DNS، QUIC) جایی که خود UDP بسته است هم کار می‌کند.
-  - هر آدرس کلاینت یک flow است و در سمت exit سوکت جدای خودش را دارد.
-  - مرز بسته‌ها حفظ می‌شود، بسته‌ها جلوتر از داده‌ی حجیم TCP روی همان اتصال فرستاده می‌شوند، و اگر تانل عقب بماند بسته دور ریخته می‌شود به‌جای اینکه صف بکشد.
-  - روی transportهای مبتنی بر TCP، گم شدن یک بسته روی لینک همچنان بسته‌های پشت سرش را معطل می‌کند. روی `quic` و `kcp` هر بسته یک datagram جداست و گم شدنش چیز دیگری را معطل نمی‌کند.
-- **QUIC** (`quic`):
-  - هر اتصال کاربر یک stream جدای QUIC است و اتصال‌ها همدیگر را معطل نمی‌کنند.
-  - دو سمت با کلیدهایی که از توکن ساخته می‌شوند همدیگر را احراز هویت می‌کنند (TLS 1.3 دوطرفه، بدون فایل گواهی).
-  - کنترل ازدحام: Cubic (پیش‌فرض)، BBR یا NewReno.
-  - handshake شبیه HTTP/3 است (ALPN `h3` و SNI قابل تنظیم).
-- **KCP** (`kcp`):
-  - بسته‌های گم‌شده را سریع دوباره می‌فرستد و زیر loss سرعتش را حفظ می‌کند؛ presetها از ملایم تا تهاجمی.
-  - هر بسته‌ی UDP با کلیدی از توکن رمز می‌شود، پس پورت به هیچ چیز دیگری جواب نمی‌دهد و هدرهای KCP هم پنهان‌اند.
-  - FEC اختیاری با Reed-Solomon بسته‌ی گم‌شده را بدون ارسال دوباره بازسازی می‌کند.
-  - flowهای UDP کنار stream قابل‌اطمینان KCP می‌روند، نه داخل آن.
-- **بازی و UDP بلادرنگ** ([بخش بازی](#بازی)): پروفایل `gaming` (روی `kcp` با FEC روشن و بافرهای کوچک)، تکثیر بسته برای هر قانون forward (`duplicate = 2`)، و علامت DSCP اختیاری.
-- **حالت‌های reverse و direct** برای همه‌ی transportها، با اتصال دوباره‌ی خودکار.
-
-## مفاهیم
-
-| اصطلاح | معنی |
-|---|---|
-| **entry** | سروری که کاربرها به آن وصل می‌شوند (مثلاً سرور ایران). قوانین `[[forward]]` روی این سمت تعریف می‌شوند. |
-| **exit** | سروری که به مقصد واقعی وصل می‌شود (مثلاً سرور خارج). |
-| حالت **reverse** | سمت exit به entry وصل می‌شود و اتصال‌ها را آماده نگه می‌دارد. |
-| حالت **direct** | سمت entry به exit وصل می‌شود. |
-
-سمتی که وصل می‌شود (dial می‌کند) به `tunnel.remote` نیاز دارد و سمت دیگر به `tunnel.listen`.
-
-## شروع سریع
-
-فایل اجرایی لینوکس (x86_64، بدون وابستگی) را از بخش [Releases](https://github.com/Erfan-XRay/Kariz/releases) دانلود کنید، یا خودتان build کنید:
-
-<div dir="ltr">
-
-```bash
-cargo build --release
-sudo cp target/release/kariz /usr/local/bin/
-kariz token                               # generate a shared token
-```
+**کاریز** (به یاد کاریزهای کهن ایرانی، کانال‌های آب زیرزمینی) دو سرور را با یک تانل سریع و رمزشده به هم وصل می‌کند. کاربرها به سرور **entry** وصل می‌شوند و کاریز ترافیک TCP و UDP آن‌ها را به سرور **exit** می‌رساند که به مقصدهای واقعی وصل می‌شود.
 
 </div>
 
-یک جفت از نمونه کانفیگ‌ها را انتخاب کنید، توکن را در هر دو بگذارید و آدرس‌ها را تنظیم کنید:
+```mermaid
+flowchart LR
+    U([Users]) -->|TCP / UDP| E[Entry]
+    E <==>|"Kariz tunnel<br/>tcp · tcpmux · ws · wss · quic · kcp"| X[Exit]
+    X --> T([Targets])
+```
 
-| نمونه‌ها (پوشه‌ی `configs/`) | کاربرد |
+<div dir="rtl">
+
+- 🪶 **سبک:** بدون Garbage Collector و با حدود ۵ مگابایت RAM برای هر سمت؛ روی ارزان‌ترین VPSها هم اجرا می‌شود.
+- 🔒 **امن:** احراز هویت دوطرفه با توکن مشترک، امنیت پیشرو با X25519، و رکوردهای رمزشده بدون هیچ بایت ثابت. از پشت CDN هم کار می‌کند.
+- ⚡ **سریع:** مسیر داده بدون dispatch پویا و سوکت‌های تنظیم‌شده؛ روی localhost حدود ۴ گیگابیت بر ثانیه رمزشده روی یک اتصال، و transportهایی که روی لینک پرتلفات هم سرعتشان را حفظ می‌کنند.
+
+## ✨ امکانات
+
+| امکان | چه چیزی می‌دهد |
 |---|---|
-| `entry-reverse.toml` و `exit-reverse.toml` | حالت reverse روی `tcp`: سرور exit به entry وصل می‌شود |
-| `entry-direct.toml` و `exit-direct.toml` | حالت direct روی `tcp`: سرور entry به exit وصل می‌شود |
+| **شش transport** | `tcp` ساده، `tcpmux` با mux، `ws` / `wss` شبیه مرورگر برای CDN، و `quic` و `kcp` روی UDP برای مسیرهای پرتلفات |
+| **هر دو جهت** | حالت `reverse` (سرور exit به entry وصل می‌شود) یا `direct`، برای همه‌ی transportها و با اتصال دوباره‌ی خودکار |
+| **mux** | اتصال‌های زیاد کاربر روی چند اتصال بلندمدت؛ هر stream کنترل جریان خودش را دارد و باز کردنش رفت‌وبرگشت اضافه ندارد. همه‌ی تنظیمات mux قابل تغییرند |
+| **forward کردن UDP** | WireGuard، بازی، DNS و QUIC روی هر transportی؛ روی `quic` و `kcp` بسته‌ی گم‌شده چیز دیگری را معطل نمی‌کند |
+| **پروفایل‌ها** | `balanced`، `ultraspeed` برای بیشترین سرعت، و `gaming` برای تأخیر کم و پایدار |
+| **بازی** | FEC برای بازسازی بسته‌های گم‌شده، تکثیر بسته برای هر قانون، و علامت DSCP اختیاری |
+| **آماده برای CDN** | early data یک رفت‌وبرگشت صرفه‌جویی می‌کند، pingها اتصال بیکار را زنده نگه می‌دارند، و هر درخواست دیگری صفحه‌ی 404 شبیه nginx می‌گیرد |
+| **اجرای آسان** | یک فایل اجرایی، یک فایل TOML برای هر سمت، `kariz check` برای بررسی، و سرویس systemd |
+
+## 🧭 کدام transport؟
+
+| مسیر شما | پیشنهاد |
+|---|---|
+| مسیر تمیز و مستقیم، بیشترین سرعت | `tcp` یا `tcpmux` |
+| از پشت CDN یا reverse proxy | `ws` / `wss` ([راهنما](docs/CDN.md)) |
+| باید شبیه یک سایت HTTPS باشد | `wss` |
+| مسیر طولانی یا پرتلفات (بین‌المللی، محدودشده) و UDP کار می‌کند | `kcp`، یا `quic` با BBR |
+| بازی و صدا | `kcp` با `profile = "gaming"` |
+
+## 🚀 شروع سریع
+
+۱. روی هر دو سرور نصب کنید (یا فایل اجرایی را از Releases بگیرید) و یک توکن بسازید که در هر دو سمت یکی باشد:
+
+</div>
+
+```bash
+cargo build --release && sudo cp target/release/kariz /usr/local/bin/
+kariz token
+```
+
+<div dir="rtl">
+
+۲. کانفیگ سمت entry (کاربرها به پورت 443 وصل می‌شوند) و سمت exit (که به entry وصل می‌شود):
+
+</div>
+
+```toml
+# Entry: /etc/kariz/config.toml
+role = "entry"
+mode = "reverse"
+
+[tunnel]
+transport = "tcpmux"
+listen = "0.0.0.0:3080"
+token = "PASTE-THE-TOKEN"
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"          # dialed on the exit
+```
+
+```toml
+# Exit: /etc/kariz/config.toml
+role = "exit"
+mode = "reverse"
+
+[tunnel]
+transport = "tcpmux"
+remote = "ENTRY_IP:3080"
+token = "PASTE-THE-TOKEN"
+```
+
+<div dir="rtl">
+
+۳. بررسی و اجرا به‌صورت سرویس:
+
+</div>
+
+```bash
+kariz check -c /etc/kariz/config.toml
+sudo cp systemd/kariz.service /etc/systemd/system/ && sudo systemctl enable --now kariz
+```
+
+<div dir="rtl">
+
+کانفیگ‌های آماده برای همه‌ی transportها در پوشه‌ی [`configs/`](configs) هستند:
+
+| نمونه‌ها | کاربرد |
+|---|---|
+| `entry-reverse.toml` و `exit-reverse.toml` | حالت reverse روی `tcp` |
+| `entry-direct.toml` و `exit-direct.toml` | حالت direct روی `tcp` |
 | `entry-tcpmux-reverse.toml` و `exit-tcpmux-reverse.toml` | حالت reverse با mux |
-| `entry-udp-reverse.toml` و `exit-udp-reverse.toml` | forward کردن UDP (سرور WireGuard و یک سرور بازی روی TCP+UDP) با mux |
-| `entry-wss-direct.toml` و `exit-wss-direct.toml` | `wss` مستقیم به سرور خودتان، با گواهی self-signed که pin شده |
-| `entry-wss-cdn.toml` و `exit-wss-cdn.toml` | `wss` از پشت CDN مثل Cloudflare (راهنما: [docs/CDN.md](docs/CDN.md)) |
+| `entry-udp-reverse.toml` و `exit-udp-reverse.toml` | forward کردن UDP (WireGuard و سرور بازی) |
+| `entry-wss-direct.toml` و `exit-wss-direct.toml` | `wss` مستقیم با گواهی self-signed که pin شده |
+| `entry-wss-cdn.toml` و `exit-wss-cdn.toml` | `wss` از پشت CDN مثل Cloudflare |
 | `entry-quic-direct.toml` و `exit-quic-direct.toml` | `quic`، با WireGuard روی datagramهای QUIC |
-| `entry-kcp-reverse.toml` و `exit-kcp-reverse.toml` | `kcp` برای لینک پرتلفات (FEC در توضیحات) |
-| `entry-gaming.toml` و `exit-gaming.toml` | سرور بازی روی `kcp` با پروفایل gaming و تکثیر بسته |
+| `entry-kcp-reverse.toml` و `exit-kcp-reverse.toml` | `kcp` برای لینک پرتلفات |
+| `entry-gaming.toml` و `exit-gaming.toml` | سرور بازی روی `kcp` با پروفایل gaming |
 
-<div dir="ltr">
+## ⚙️ پروفایل‌ها
 
-```bash
-kariz check -c /etc/kariz/config.toml     # validate, print a summary and warnings
-kariz run -c /etc/kariz/config.toml       # run (or use systemd, below)
-```
+| | `balanced` (پیش‌فرض) | `ultraspeed` | `gaming` |
+|---|---|---|---|
+| مناسب برای | بیشتر کاربردها | انتقال حجیم، بیشترین سرعت | بازی و صدا |
+| پنجره‌ی هر stream در mux | 256 KiB | 1 MiB | 64 KiB |
+| تعداد اتصال‌های mux | 4 | 8 | 2 |
+| بافر relay | 64 KiB | 256 KiB | 16 KiB |
+| یکی کردن نوشتن‌ها | روشن | روشن | خاموش |
+| keepalive / ping | 30 ثانیه | 30 ثانیه | 10 ثانیه |
+| FEC در KCP | خاموش | خاموش | ۱۰ / ۳ |
 
-</div>
+هر مقداری را می‌توان در `[tunnel.mux]`، `[tunnel.kcp]` یا `[tuning]` تغییر داد. `throughput` (اسم قبلی `ultraspeed`) هنوز پذیرفته می‌شود.
 
-فایل سرویس systemd در [`systemd/kariz.service`](systemd/kariz.service) است و کانفیگ را از `/etc/kariz/config.toml` می‌خواند:
+**برای بیشترین سرعت:** `profile = "ultraspeed"` را با transport مناسب مسیر ترکیب کنید: روی مسیر تمیز `tcp` یا `tcpmux`، و روی مسیر پرتلفات `kcp` یا `quic` با `congestion = "bbr"`. هر stream در هر رفت‌وبرگشت حداکثر به اندازه‌ی پنجره‌اش داده می‌برد، پس برای سرعت بیشتر `tunnel.mux.stream_window` را (تا ۱۶ مگابایت) بالا ببرید.
 
-<div dir="ltr">
-
-```bash
-sudo cp systemd/kariz.service /etc/systemd/system/
-sudo systemctl enable --now kariz
-journalctl -u kariz -f
-```
-
-</div>
-
-## دستورها
-
-| دستور | کار |
-|---|---|
-| `kariz run -c <file>` | اجرای یک سمت تانل |
-| `kariz check -c <file>` | بررسی کانفیگ و چاپ خلاصه و هشدارها |
-| `kariz token` | ساخت توکن تصادفی برای `tunnel.token` |
-| `kariz pin <cert.pem>` | چاپ مقدار `tunnel.tls.pin_sha256` یک گواهی |
-
-برای لاگ کامل‌تر `RUST_LOG=kariz=debug` را تنظیم کنید؛ این مقدار بر `[log] level` اولویت دارد.
-
-## کانفیگ
-
-همه‌ی جدول‌ها به‌جز `[tunnel]` اختیاری‌اند و هر فیلد در نمونه کانفیگ‌ها هم با توضیح آمده است. کانفیگ‌های نسخه‌ی 0.1 همچنان کار می‌کنند. توضیح فیلدها در [README انگلیسی](README.md#configuration) است؛ خلاصه‌ی مهم‌ترین‌ها:
+## 🔧 تنظیمات mux
 
 | فیلد | توضیح |
 |---|---|
-| `tunnel.transport` | `tcp`، `tcpmux`، `ws`، `wss`، `quic` یا `kcp` |
-| `tunnel.remote` / `tunnel.listen` | آدرس سمت مقابل (یا لبه‌ی CDN) برای سمت dial، و آدرس گوش دادن برای سمت دیگر |
-| `tunnel.token` | در هر دو سمت یکی و دست‌کم ۱۶ کاراکتر |
-| `tunnel.encryption` | `auto`، `chacha20-poly1305`، `aes-256-gcm` یا `none` (در هر دو سمت؛ برای `quic` همیشه TLS 1.3 است و باید `auto` بماند) |
-| `[tunnel.mux]` | باید در هر دو سمت روشن یا خاموش باشد؛ پیش‌فرض برای `tcpmux`، `ws`، `wss` و `kcp` روشن است و برای `quic` همیشه روشن |
-| `tunnel.ws.path` | مسیر WebSocket، در هر دو سمت یکی |
-| `tunnel.ws.host` | در سمت dial، هدر Host (و SNI)؛ در سمت listen، درخواست‌های hostهای دیگر رد می‌شوند |
-| `tunnel.ws.early_data` | در سمت dial: hello داخل درخواست upgrade |
-| `tunnel.tls.pin_sha256` | در سمت dial: فقط همین گواهی پذیرفته می‌شود (با `kariz pin`) |
-| `tunnel.tls.cert` / `key` | در سمت listen: گواهی و کلید؛ با تغییر فایل‌ها دوباره بارگذاری می‌شوند |
-| `tunnel.quic.congestion` | `cubic` (پیش‌فرض)، `bbr` یا `newreno` |
-| `tunnel.quic.sni` / `alpn` | نام سرور در handshake (سمت dial؛ پیش‌فرض host سمت مقابل) و ALPN (پیش‌فرض `h3`) |
-| `tunnel.kcp.mode` | `normal`، `fast`، `fast2` (پیش‌فرض)، `fast3` یا `manual` |
-| `tunnel.kcp.send_window` / `recv_window` | پنجره به تعداد بسته (پیش‌فرض ۱۰۲۴)؛ کوچک‌تر یعنی صف کمتر ولی سرعت کمتر زیر loss |
-| `tunnel.kcp.mtu` | اندازه‌ی بسته‌ی KCP (پیش‌فرض ۱۳۵۰، حداکثر ۱۴۴۳ و با FEC ۱۴۲۹) |
-| `tunnel.kcp.fec_data` / `fec_parity` | FEC برای سمت فرستنده، مثلاً ۱۰ و ۳؛ هر دو صفر یعنی خاموش. پیش‌فرض: خاموش، و در پروفایل gaming روشن با ۱۰ و ۳ |
-| `tunnel.kcp.datagrams` | پیش‌فرض `true`: flowهای UDP کنار KCP می‌روند؛ `false` یعنی داخل stream آن، مثل نسخه‌ی 0.4 |
-| `tuning.keepalive_secs` | فاصله‌ی keepalive و ping در mux؛ پشت CDN حداکثر ۹۰ |
-| `forward.protocol` | `tcp` (پیش‌فرض)، `udp` یا `tcp+udp`؛ برای UDP از mux استفاده کنید |
-| `forward.duplicate` / `duplicate_gap_ms` | برای UDP: هر بسته ۲ یا ۳ بار در هر دو جهت فرستاده می‌شود (روی `kcp` و `quic`)، با این فاصله بین نسخه‌ها (پیش‌فرض ۵ میلی‌ثانیه) |
-| `tuning.dscp` | علامت DSCP (نام مثل `"ef"` یا عدد ۰ تا ۶۳) روی سوکت‌های تانل و سوکت‌های UDP به مقصد؛ پیش‌فرض خاموش |
-| `tuning.udp_timeout_secs` | flow بیکار UDP بعد از این مدت بسته می‌شود (پیش‌فرض ۶۰) |
-| `tuning.udp_max_flows` | حداکثر flowهای UDP (آدرس‌های کلاینت) برای هر قانون (پیش‌فرض ۱۰۲۴) |
+| `connections` / `max_streams` / `stream_window` | تعداد اتصال‌های بلندمدت، حداکثر stream روی هر اتصال، و پنجره‌ی هر stream؛ پیش‌فرض از پروفایل |
+| `coalesce` | یکی کردن فریم‌ها برای سرعت یا نوشتن فوری برای تأخیر کمتر |
+| `ping_interval_secs` | فاصله‌ی ping؛ پشت CDN حداکثر ۹۰ |
+| `datagram_buffer` / `datagram_queue` | اندازه‌ی صف‌های UDP |
+| `notsent_lowat` | حد داده‌ی ارسال‌نشده در کرنل روی اتصال‌های mux؛ ۰ یعنی خاموش |
+| `max_lifetime_secs` | عوض کردن دوره‌ای اتصال‌ها |
 
-### پروفایل‌ها
+## 🎮 بازی
 
-| | `balanced` (پیش‌فرض) | `throughput` | `gaming` |
-|---|---|---|---|
-| بافر relay | 64 KiB | 256 KiB | 16 KiB |
-| keepalive / ping در mux | 30 ثانیه | 30 ثانیه | 10 ثانیه |
-| پنجره‌ی هر stream در mux | 256 KiB | 1 MiB | 64 KiB |
-| تعداد اتصال‌های mux | 4 | 8 | 2 |
-| یکی کردن نوشتن‌ها در mux | روشن | روشن | خاموش |
-| FEC در KCP | خاموش | خاموش | ۱۰ / ۳ |
+با `kcp` و پروفایل gaming، بسته‌های بازی هیچ‌وقت منتظر بسته‌ی گم‌شده نمی‌مانند و FEC بیشتر بسته‌های گم‌شده را در حدود ۲۰ میلی‌ثانیه بازسازی می‌کند. روی مسیر شبیه‌سازی‌شده‌ی ۶۰ میلی‌ثانیه‌ای با ۱٪ loss، p99 رفت‌وبرگشت **۶۹ میلی‌ثانیه** است، در مقابل ۱۶۹ روی `tcpmux`؛ با ۵٪ loss هم ۹۹٪ بسته‌ها می‌رسند. با `duplicate = 2` روی قانون forward بازی، هر بسته دو بار فرستاده می‌شود (فقط روی قانون‌های بازی یا صدا، نه WireGuard).
 
-هر مقداری را می‌توان در بخش `[tuning]` تغییر داد.
+## 📊 کارایی
 
-## کارایی
+| اندازه‌گیری | نتیجه |
+|---|---|
+| `tcp` با AES-256-GCM روی localhost | ۳٫۸ تا ۴ گیگابیت بر ثانیه در هر جهت |
+| `tcpmux` با AES-256-GCM روی localhost | ۳٫۲ تا ۳٫۳ گیگابیت بر ثانیه |
+| UDP از داخل تانل | حدود ۱۴۰ هزار بسته در ثانیه در هر جهت |
+| حافظه در حالت بیکار | حدود ۵ تا ۶ مگابایت برای هر سمت |
+| مسیر ۶۰ میلی‌ثانیه با ۱٪ loss: `tcpmux` / `kcp` / `quic` (BBR) | ۲٫۳ / ۲۸٫۵ / ۴۷٫۴ مگابیت بر ثانیه |
 
-اندازه‌گیری روی localhost: کاربر ← entry ← exit ← سرور echo، با ۲۵۶ مگابایت داده. هر دو سمت و سرور echo روی یک ماشین مجازی ۴ هسته‌ای Xeon با فرکانس 2.1 GHz اجرا شدند و CPU مشترک بود. پس این اعداد برای مقایسه‌ی حالت‌ها با هم است؛ در لینک واقعی بین دو سرور معمولاً اول شبکه محدودیت ایجاد می‌کند. جدول سرعت و حافظه در [README انگلیسی](README.md#performance) است. به‌طور خلاصه:
+## 📚 مستندات
 
-- `tcp` با AES: حدود 3.8 تا 4.0 گیگابیت بر ثانیه
-- `ws` با mux: حدود 2.8 تا 3.1 گیگابیت بر ثانیه
-- `wss` با mux: حدود 2.3 تا 2.5 گیگابیت بر ثانیه
-- مصرف حافظه در حالت بیکار: حدود ۵ تا ۶ مگابایت برای هر سمت
-- ۱۰۰ اتصال بیکار روی mux: کمتر از ۱ مگابایت حافظه‌ی اضافه
-- UDP: حدود ۱۴۰ هزار بسته در ثانیه در هر جهت، در همه‌ی حالت‌ها
-- تأخیر UDP: تانل بیکار حدود ۹۰ میکروثانیه به رفت‌وبرگشت اضافه می‌کند
-- UDP زیر بار: با چهار انتقال حجیم TCP روی همان اتصال و لینک محدودشده به ۲۰ مگابیت، رفت‌وبرگشت UDP حدود ۶۰ میلی‌ثانیه می‌ماند (بدون تنظیم `TCP_NOTSENT_LOWAT` که کاریز روی اتصال‌های mux می‌گذارد، حدود ۳۴۰ میلی‌ثانیه بود)
-- ۱۰۰۰ flow بیکار UDP: حدود ۳ تا ۳.۵ مگابایت حافظه‌ی اضافه برای هر سمت
+مستندات کامل (به انگلیسی) در پوشه‌ی [`docs/`](docs/README.md) است:
 
-### روی لینک پرتلفات
+| صفحه | موضوع |
+|---|---|
+| [شروع](docs/getting-started.md) | نصب، توکن، اولین تانل، systemd |
+| [مرجع کانفیگ](docs/configuration.md) | همه‌ی تنظیمات با مقدار پیش‌فرض و محدوده |
+| [transportها](docs/transports.md) · [پروفایل‌ها](docs/profiles.md) | انتخاب و تنظیم |
+| [UDP و بازی](docs/udp-and-games.md) · [CDN](docs/CDN.md) | راه‌اندازی‌های خاص |
+| [کارایی](docs/performance.md) · [امنیت](docs/security.md) · [رفع مشکل](docs/troubleshooting.md) | اجرای درست |
 
-تست‌ها یک شبیه‌ساز لینک دارند (تأخیر، loss تصادفی، گلوگاه ۵۰ مگابیتی با صف ۵۰ میلی‌ثانیه‌ای). سمت TCP آن رفتار TCP فرستنده را مدل می‌کند، پس loss روی `tcpmux` همان اثری را دارد که روی مسیر واقعی. اندازه‌گیری روی runner‌ی GitHub Actions (۲ هسته‌ی AMD EPYC 7763)، با رفت‌وبرگشت ۶۰ میلی‌ثانیه و loss در هر دو جهت:
+## 🔒 نکته‌های امنیتی
 
-| transport | دانلود با loss صفر / ۱٪ / ۵٪ | p99 بسته‌های UDP روی تانل بیکار، loss ۱٪ / ۵٪ |
-|---|---|---|
-| `tcpmux` | 48.1 / 2.3 / 0.9 Mbit/s | 164 / 243 ms |
-| `quic` (Cubic) | 47.9 / 2.7 / 1.0 Mbit/s | 64 / 64 ms (بسته‌ی گم‌شده دور ریخته می‌شود) |
-| `quic` (BBR) | 47.5 / 47.4 / 45.7 Mbit/s | 64 / 64 ms |
-| `kcp` | 31.4 / 28.5 / 22.5 Mbit/s | 64 / 64 ms (۱٫۴ / ۹٫۸ درصد گم‌شده)\* |
-| `kcp` با FEC 10/3 | 25.4 / 26.1 / 26.6 Mbit/s | 64 / 84 ms (۰ / ۰٫۶ درصد گم‌شده)\* |
+- توکن تنها راز است و هر کسی آن را داشته باشد می‌تواند از تانل استفاده کند. آن را با `kariz token` بسازید و فایل کانفیگ را فقط برای root قابل خواندن کنید (`chmod 600`).
+- `encryption = "none"` فقط احراز هویت می‌کند و ترافیک روی شبکه خواناست.
+- پشت CDN، اتصال TLS در خود CDN تمام می‌شود، اما رمزنگاری خود تانل محتوا را از CDN هم پنهان نگه می‌دارد.
 
-\* در نسخه‌ی 0.5 که UDP کنار KCP می‌رود (در 0.4: 141 / 202 و 64 / 143 ms، بدون بسته‌ی گم‌شده)؛ روی ماشین توسعه اندازه‌گیری شده و سرعت دانلود آن تا ۵٪ با 0.4 برابر بود.
+## 🛠️ توسعه
 
-- کنترل ازدحام مبتنی بر loss (مثل Cubic) زیر loss تصادفی از سرعت می‌افتد، چه TCP چه QUIC. `quic` با BBR و `kcp` سرعتشان را حفظ می‌کنند.
-- BBR (در quinn آزمایشی است) صف گلوگاه را سرریز می‌کند و هنگام دانلود حدود نیمی از بسته‌های UDP همان اتصال گم شد، برای همین پیش‌فرض Cubic است.
-- پنجره‌ی پیش‌فرض KCP (۱۰۲۴ بسته) مسیرهای کوچک را سرریز می‌کند؛ پنجره‌ی نزدیک به «پهنای باند × RTT ÷ ۱۳۰۰» صف کمتری می‌سازد ولی زیر loss سرعت کمتری نگه می‌دارد.
-- FEC روی این لینک سرعت را بیشتر نمی‌کند، ولی تأخیر بسته‌های پراکنده را زیر loss تقریباً نصف می‌کند.
-- وقتی یک دانلود لینک را پر نگه می‌دارد، بسته‌های UDP روی `kcp` حالا در صف لینک دور ریخته می‌شوند به‌جای اینکه پشت آن منتظر بمانند: با پنجره‌ی ۴ مگابایتی این بنچمارک ۵ تا ۱۳ درصد گم شدند و p99 حدود ۱۱۵ میلی‌ثانیه شد به‌جای ۲۰۰ تا ۳۴۰. پروفایل gaming لینک را پر نمی‌کند ([بخش بازی](#بازی))؛ `[tunnel.kcp] datagrams = false` رفتار قبلی را برمی‌گرداند.
-- جزئیات و جدول کامل در [README انگلیسی](README.md#over-a-lossy-link) و [docs/PHASE4.md](docs/PHASE4.md) است.
-
-روی localhost (همان runner)، `quic` حدود ۸۱۰ تا ۹۵۰ و `kcp` حدود ۶۰۰ تا ۶۷۰ مگابیت بر ثانیه می‌رسند، در مقابل ۲۹۶۰ تا ۳۴۲۰ برای `tcpmux`. QUIC و KCP پروتکلشان را در فضای کاربر و بسته به بسته اجرا می‌کنند؛ بین دو سرور این فقط بالای چند صد مگابیت اهمیت دارد. حافظه: در حالت بیکار حدود ۶٫۵ تا ۷٫۵ مگابایت برای هر سمت، و ۱۰۰ اتصال بیکار حدود ۱ مگابایت اضافه.
-
-### بازی
-
-ترافیک بازی روی همان لینک شبیه‌سازی‌شده (رفت‌وبرگشت ۶۰ میلی‌ثانیه، ۵۰ مگابیت): بسته‌های ۱۲۸ بایتی با نرخ ۶۴ بسته در ثانیه که سرور هر کدام را برمی‌گرداند، به مدت ۳۰ ثانیه، با پروفایل `gaming` در هر دو سمت. اعداد p50 / p99 رفت‌وبرگشت به میلی‌ثانیه و سهم بسته‌هایی است که برگشتند، یک بار روی تانل بیکار و یک بار کنار چهار دانلود روی همان تانل. اندازه‌گیری روی ماشین توسعه؛ جدول کامل در [README انگلیسی](README.md#games) و [docs/PHASE6.md](docs/PHASE6.md) است.
-
-| loss | transport | تانل بیکار | کنار ۴ دانلود | دانلودها |
-|---|---|---|---|---|
-| ۱٪ | `tcpmux` | 62 / 169، ۱۰۰٪ | 395 / 734، ۱۰۰٪ | 4.6 Mbit/s |
-| ۱٪ | `kcp` مثل نسخه‌ی 0.4 | 63 / 141، ۱۰۰٪ | 86 / 219، ۱۰۰٪ | 18.0 Mbit/s |
-| ۱٪ | `kcp` (gaming: FEC 10/3) | 63 / 69، ۱۰۰٪ | 66 / 82، ۱۰۰٪ | 29.2 Mbit/s |
-| ۵٪ | `kcp` مثل نسخه‌ی 0.4 | 63 / 236، ۱۰۰٪ | 144 / 347، ۱۰۰٪ | 11.5 Mbit/s |
-| ۵٪ | `kcp` (gaming: FEC 10/3) | 63 / 84، ۹۹٪ | 68 / 94، ۹۹٫۴٪ | 26.5 Mbit/s |
-| ۵٪ | `kcp` (gaming)، ۲ نسخه | 63 / 70، ۹۹٫۵٪ | 67 / 91، ۱۰۰٪ | 26.5 Mbit/s |
-| ۵٪ | `quic`، ۲ نسخه | 63 / 78، ۹۹٫۲٪ | 91 / 154، ۹۴٫۴٪ | 1.7 Mbit/s |
-
-- **برای بازی `kcp` را با پروفایل `gaming` در هر دو سمت به کار ببرید** (`entry-gaming.toml`). بسته‌های بازی هیچ‌وقت منتظر بسته‌ی گم‌شده نمی‌مانند، FEC بیشتر بسته‌های گم‌شده را در حدود ۲۰ میلی‌ثانیه بازسازی می‌کند، و دانلودهای کنار بازی سرعتشان را حفظ می‌کنند.
-- **`duplicate = 2`** روی قانون forward بازی هر بسته را در هر دو جهت دو بار می‌فرستد. بیشترین فایده‌اش روی `quic` است که FEC ندارد، و ترافیک همان قانون را دو برابر می‌کند (برای یک بازی معمولی حدود ۱۰۰ کیلوبیت)، پس فقط روی قانون‌های بازی یا صدا بگذارید، نه روی WireGuard.
-- **`quic` زیر loss برای بازی انتخاب ضعیف‌تری است:** quinn datagramها را زیر همان کنترل ازدحام streamها می‌فرستد که زیر loss تصادفی از سرعت می‌افتد، و بعد از یک loss طولانی چند صد میلی‌ثانیه datagramها را نگه می‌دارد.
-- **transportهای مبتنی بر TCP** (`tcp`، `tcpmux`، `ws`، `wss`) با هر پروفایلی هر بسته را منتظر بسته‌ی گم‌شده نگه می‌دارند.
-- **DSCP** (`[tuning] dscp = "ef"`) فقط جایی کمک می‌کند که شبکه به آن احترام بگذارد: لینک‌هایی که خودتان اداره می‌کنید، یا qdiscی مثل `fq` یا `cake` روی خود سرور. روی اینترنت عمومی این علامت معمولاً پاک می‌شود و بعضی شبکه‌ها با ترافیک علامت‌دار بدتر رفتار می‌کنند.
-
-حجم فایل اجرایی (musl، x86_64): با همه‌ی امکانات 6.0 مگابایت؛ بدون `quic` و `kcp` (با `--no-default-features`) 4.5 مگابایت.
-
-## نکته‌های امنیتی
-
-- توکن تنها راز است و هر کسی آن را داشته باشد می‌تواند از تانل استفاده کند. آن را با `kariz token` بسازید و جایی به اشتراک نگذارید.
-- `encryption = "none"` فقط احراز هویت می‌کند و ترافیک روی شبکه خواناست. فقط داخل یک لایه‌ی رمزشده‌ی دیگر از آن استفاده کنید.
-- پشت CDN، اتصال TLS در خود CDN تمام می‌شود، اما رمزنگاری خود تانل همچنان محتوا را از CDN هم پنهان نگه می‌دارد.
-- ClientHello کتابخانه‌ی rustls شبیه مرورگر نیست، و درخواست HTTP ساده به پورت `wss` به‌جای صفحه‌ی nginx خطای TLS می‌گیرد. handshake‌ی QUIC کتابخانه‌ی quinn هم همین‌طور است. شکل دادن به این‌ها کار بعدی است (پروفایل استتار، هنوز زمان‌بندی نشده).
-- پورت `kcp` به هیچ بسته‌ای که با توکن مهر نشده باشد جواب نمی‌دهد. کلید این لایه از توکن ساخته می‌شود و امنیت پیشرو ندارد؛ handshake و رمزنگاری خود تانل مثل روی TCP داخل آن اجرا می‌شوند، و بسته‌های UDP کنار KCP هم با کلیدهای همان handshake مهر می‌شوند.
-
-## توسعه
-
-<div dir="ltr">
+</div>
 
 ```bash
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
-cargo test                          # nginx tests run too when nginx is installed
-cargo build --release --no-default-features   # without quic and kcp (features `quic`, `kcp`)
-cargo test --release --test tunnel throughput -- --ignored --nocapture
-cargo test --release --test tunnel lossy_link -- --ignored --nocapture   # KARIZ_BENCH_ONLY=kcp
-cargo test --release --test tunnel game_traffic -- --ignored --nocapture # about 45 min
-scripts/rss.sh tcpmux 100           # memory, after cargo build --release
-scripts/rss.sh tcpmux 1000 target/release/kariz udp   # memory per UDP flow
-KARIZ_TEST_LOG=1 cargo test --test tunnel <name>        # with the tunnel's debug logs
+cargo test                                    # nginx tests run too when nginx is installed
+cargo build --release --no-default-features   # without quic and kcp
 ```
 
-</div>
+<div dir="rtl">
 
-مستندات طراحی: [docs/ROADMAP.md](docs/ROADMAP.md)، [docs/PHASE2.md](docs/PHASE2.md)، [docs/PHASE3.md](docs/PHASE3.md)، [docs/PHASE4.md](docs/PHASE4.md) و [docs/PHASE6.md](docs/PHASE6.md).
+مستندات طراحی: [roadmap](docs/ROADMAP.md) و طرح فازها در [`docs/`](docs). فهرست تغییرات هر نسخه: [CHANGELOG.md](CHANGELOG.md).
 
 </div>

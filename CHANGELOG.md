@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.1 - 2026-09-29
+
+Works with v0.5 and v0.4 as before; the new settings only change the side they are set on.
+
+### Added
+
+- **More mux settings in `[tunnel.mux]`**, each defaulting to what it was before (the
+  profile's value): `coalesce`, `ping_interval_secs` (default `tuning.keepalive_secs`;
+  also QUIC's keep-alive), `datagram_buffer`, `datagram_queue` and `notsent_lowat` (0
+  turns it off). `kariz check` shows the values in effect.
+- **Documentation** in [`docs/`](docs/README.md): getting started, a configuration
+  reference with every setting, transports, profiles, UDP and games, performance,
+  security and troubleshooting.
+- **A logo and a new README** (English and Persian).
+
+### Changed
+
+- **The `throughput` profile is now `ultraspeed`.** `profile = "throughput"` is still
+  accepted.
+- The stealth profile (planned for later) is dropped from the roadmap.
+
 ## 0.5.0 - 2026-09-28
 
 The gaming release. Works with v0.4 over every transport: the new datagram path over

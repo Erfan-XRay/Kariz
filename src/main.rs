@@ -109,7 +109,7 @@ fn print_summary(config: &Config) {
     println!("config OK");
     println!("  role      : {}", role_name(config.role));
     println!("  mode      : {}", mode_name(config.mode));
-    println!("  profile   : {:?}", config.profile);
+    println!("  profile   : {}", config.profile.name());
     println!("  transport : {}", config.tunnel.transport.name());
     if let Some(listen) = &config.tunnel.listen {
         println!("  listen    : {listen}");
@@ -131,8 +131,19 @@ fn print_summary(config: &Config) {
     let mux = config.mux();
     if mux.enabled {
         println!(
-            "  mux       : connections={} max_streams={} window={}B",
-            mux.connections, mux.max_streams, mux.stream_window
+            "  mux       : connections={} max_streams={} window={}B ping={}s coalesce={}",
+            mux.connections,
+            mux.max_streams,
+            mux.stream_window,
+            mux.ping_interval.as_secs(),
+            if mux.coalesce { "on" } else { "off" }
+        );
+        let lowat = mux
+            .notsent_lowat
+            .map_or("off".to_string(), |v| format!("{v}B"));
+        println!(
+            "              datagram_buffer={}B datagram_queue={} notsent_lowat={lowat}",
+            mux.datagram_buffer, mux.datagram_queue
         );
     } else {
         println!("  mux       : off");

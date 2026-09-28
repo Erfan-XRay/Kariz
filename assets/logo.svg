@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t">
+  <title id="t">Kariz</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#12365e"/>
+      <stop offset="1" stop-color="#081a2e"/>
+    </linearGradient>
+    <linearGradient id="water" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#1fb5a8"/>
+      <stop offset="0.6" stop-color="#34d0c3"/>
+      <stop offset="1" stop-color="#7ef0e4"/>
+    </linearGradient>
+    <linearGradient id="earth" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a3f57"/>
+      <stop offset="1" stop-color="#0d2238"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#7ef0e4" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#7ef0e4" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="badge">
+      <rect width="256" height="256" rx="56"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#badge)">
+    <rect width="256" height="256" fill="url(#bg)"/>
+    <!-- stars -->
+    <circle cx="44" cy="44" r="2" fill="#e9c46a" opacity="0.8"/>
+    <circle cx="198" cy="34" r="1.6" fill="#e9c46a" opacity="0.6"/>
+    <circle cx="150" cy="58" r="1.2" fill="#e9c46a" opacity="0.5"/>
+    <!-- earth below the surface -->
+    <path d="M0 96 H256 V256 H0 Z" fill="url(#earth)"/>
+    <!-- surface -->
+    <path d="M0 96 H256" stroke="#e9c46a" stroke-width="4"/>
+    <!-- shafts (the qanat wells) with their spoil mounds -->
+    <g stroke="#e9c46a" stroke-linecap="round">
+      <path d="M58 96 V146" stroke-width="5" opacity="0.55"/>
+      <path d="M104 96 V154" stroke-width="5" opacity="0.55"/>
+      <path d="M150 96 V162" stroke-width="5" opacity="0.55"/>
+    </g>
+    <g fill="#e9c46a">
+      <path d="M46 96 a12 9 0 0 1 24 0 Z"/>
+      <path d="M92 96 a12 9 0 0 1 24 0 Z"/>
+      <path d="M138 96 a12 9 0 0 1 24 0 Z"/>
+    </g>
+    <!-- the channel, sloping towards the outlet -->
+    <path d="M26 142 L186 172" stroke="#06121f" stroke-width="26" stroke-linecap="round"/>
+    <path d="M26 142 L186 172" stroke="url(#water)" stroke-width="16" stroke-linecap="round"/>
+    <path d="M40 144 L176 170" stroke="#e8fffc" stroke-width="3" stroke-linecap="round"
+          stroke-dasharray="14 18" opacity="0.8"/>
+    <!-- outlet: the water comes out as an arrow -->
+    <circle cx="206" cy="176" r="34" fill="url(#glow)"/>
+    <path d="M190 154 L226 176 L190 198 Z" fill="#7ef0e4" stroke="#7ef0e4" stroke-width="6"
+          stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -1,0 +1,23 @@
+# Kariz documentation
+
+For Kariz **v0.5.1**. Start with [Getting started](getting-started.md); come back to the
+reference pages when you need a specific setting.
+
+| Page | What it covers |
+|---|---|
+| [Getting started](getting-started.md) | Install, a token, a first tunnel in reverse or direct mode, systemd |
+| [Configuration reference](configuration.md) | Every setting, its default and its limits |
+| [Transports](transports.md) | `tcp`, `tcpmux`, `ws`, `wss`, `quic`, `kcp`: how each works and when to pick it |
+| [Profiles](profiles.md) | `balanced`, `ultraspeed`, `gaming`, and overriding their values |
+| [UDP forwarding and games](udp-and-games.md) | UDP rules, the datagram path, packet duplication, DSCP |
+| [Performance](performance.md) | Measurements, tuning for speed, running the benchmarks |
+| [Running behind a CDN](CDN.md) | `ws` / `wss` through Cloudflare or ArvanCloud |
+| [Security](security.md) | What the token protects, encryption, what is visible on the wire |
+| [Troubleshooting](troubleshooting.md) | `kariz check` warnings, common errors, logs |
+
+Design documents, for how and why things were built:
+[ROADMAP](ROADMAP.md), [phase 2](PHASE2.md) (encryption, mux, WebSocket),
+[phase 3](PHASE3.md) (UDP), [phase 4](PHASE4.md) (QUIC, KCP),
+[phase 6](PHASE6.md) (gaming).
+
+In Persian: [README_FA.md](../README_FA.md) covers the same ground in short.

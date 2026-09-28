@@ -40,7 +40,7 @@ pub async fn run(config: Config) -> Result<()> {
         crypto: Crypto::new(&config.tunnel.token, config.tunnel.encryption).with_mux(mux.enabled),
         tuning: tuning.clone(),
     });
-    let sessions = SessionConfig::new(&mux, &tuning);
+    let sessions = SessionConfig::new(&mux);
     let mut tasks = JoinSet::new();
 
     if transport.kind == TransportKind::Quic {
