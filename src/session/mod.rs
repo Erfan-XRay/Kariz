@@ -7,6 +7,10 @@
 //! `docs/PHASE4.md`). Enums rather than trait objects keep dispatch static.
 
 mod manager;
+#[cfg(feature = "quic")]
+pub mod quic;
+#[cfg(not(feature = "quic"))]
+#[path = "quic_disabled.rs"]
 pub mod quic;
 
 use std::io;

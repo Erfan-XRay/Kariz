@@ -109,6 +109,7 @@ impl Psk {
 
     /// A key for another use of the token (e.g. the QUIC identity), independent of the
     /// handshake's keys thanks to its own `context`.
+    #[cfg_attr(not(any(feature = "quic", feature = "kcp")), allow(dead_code))]
     pub(crate) fn subkey(&self, context: &str) -> Key {
         self.derive(context, &[])
     }

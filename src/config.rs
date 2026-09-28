@@ -722,6 +722,17 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        let built_without = match self.tunnel.transport {
+            TransportKind::Quic if !cfg!(feature = "quic") => Some("quic"),
+            TransportKind::Kcp if !cfg!(feature = "kcp") => Some("kcp"),
+            _ => None,
+        };
+        if let Some(feature) = built_without {
+            bail!(
+                "transport = \"{feature}\" is not in this build (built without the \
+                 `{feature}` cargo feature)"
+            );
+        }
         if self.tunnel.token.trim().len() < 16 {
             bail!("tunnel.token must be at least 16 characters (generate one with `kariz token`)");
         }
@@ -1457,6 +1468,7 @@ mod tests {
         assert_eq!(insecure.warnings().len(), 1);
     }
 
+    #[cfg(feature = "quic")]
     #[test]
     fn quic_configs_parse() {
         let c = Config::parse(&with_transport("entry", "quic", "")).unwrap();
@@ -1489,6 +1501,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "quic")]
     #[test]
     fn quic_validation() {
         let err = parse_err(&with_transport("entry", "tcp", "[tunnel.quic]"));
@@ -1518,6 +1531,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "kcp")]
     #[test]
     fn kcp_configs_parse() {
         let c = Config::parse(&with_transport("entry", "kcp", "")).unwrap();
@@ -1581,6 +1595,22 @@ mod tests {
         );
     }
 
+    /// Only in builds without the transports: their configs are rejected up front.
+    #[cfg(not(all(feature = "quic", feature = "kcp")))]
+    #[test]
+    fn transports_not_built_in_are_rejected() {
+        for (transport, built) in [
+            ("quic", cfg!(feature = "quic")),
+            ("kcp", cfg!(feature = "kcp")),
+        ] {
+            if !built {
+                let err = parse_err(&with_transport("entry", transport, ""));
+                assert!(err.contains("not in this build"), "{err}");
+            }
+        }
+    }
+
+    #[cfg(feature = "kcp")]
     #[test]
     fn kcp_validation() {
         let err = parse_err(&with_transport("entry", "quic", "[tunnel.kcp]"));

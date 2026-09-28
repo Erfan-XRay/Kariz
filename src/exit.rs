@@ -16,8 +16,10 @@ use crate::crypto::{Crypto, ReplayFilter};
 use crate::mux::{MuxSession, SessionConfig, Side};
 use crate::proto::{self, Open, KIND_UDP, STATUS_DIAL_FAILED, STATUS_OK};
 use crate::relay::{relay, relay_stream};
+#[cfg(feature = "quic")]
 use crate::session::quic::{accept_sessions, QuicSession};
 use crate::session::{maintain, ResetReason, Session, SessionStream};
+#[cfg(feature = "quic")]
 use crate::transport::quic::{QuicDialer, QuicListener, QuicSettings};
 use crate::transport::{tcp, Dialer, Listener, Settings};
 use crate::udp;
@@ -117,8 +119,20 @@ pub async fn run(config: Config) -> Result<()> {
     }
 }
 
+/// Config validation rejects `transport = "quic"` in a build without it.
+#[cfg(not(feature = "quic"))]
+async fn run_quic(
+    _: &Config,
+    _: &Arc<Exit>,
+    _: &SessionConfig,
+    _: &mut JoinSet<Result<()>>,
+) -> Result<()> {
+    anyhow::bail!("this build has no QUIC support (the `quic` feature is off)")
+}
+
 /// QUIC, either mode: sessions with the entry side, each served by `run_session`.
 /// Reverse mode keeps `mux.connections` of them up; direct mode accepts them.
+#[cfg(feature = "quic")]
 async fn run_quic(
     config: &Config,
     exit: &Arc<Exit>,

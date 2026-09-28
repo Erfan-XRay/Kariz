@@ -6,7 +6,12 @@
 //! variants. `tcpmux` is the `tcp` transport with mux on top, so it has no variant;
 //! `ws` and `wss` share the WebSocket code and differ only in the TLS layer.
 
+#[cfg(feature = "kcp")]
 pub mod kcp;
+#[cfg(not(feature = "kcp"))]
+#[path = "kcp_disabled.rs"]
+pub mod kcp;
+#[cfg(feature = "quic")]
 pub mod quic;
 pub mod tcp;
 pub mod tls;
@@ -449,6 +454,8 @@ impl AsyncWrite for TunnelStream {
 
 impl TunnelStream {
     /// Splits into independently usable halves (no lock between them).
+    // Without the `kcp` feature its stream type has no values, so its arm cannot run.
+    #[cfg_attr(not(feature = "kcp"), allow(unreachable_code))]
     pub fn into_split(self) -> (TunnelReader, TunnelWriter) {
         match self {
             Self::Tcp(s) => {

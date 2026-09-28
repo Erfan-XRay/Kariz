@@ -4,7 +4,7 @@
 # tunnel.
 #
 # Usage: scripts/rss.sh [transport] [connections] [kariz binary] [tcp|udp]
-#   transport: tcp | tcpmux (default) | ws
+#   transport: tcp | tcpmux (default) | ws | quic | kcp
 # Needs python3 (it plays the target server, which accepts and holds connections, and
 # takes UDP packets).
 set -euo pipefail

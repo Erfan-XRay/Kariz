@@ -93,6 +93,8 @@ struct Setup {
     stream_window: usize,
     /// `tunnel.kcp.fec_data` / `fec_parity`; 0 keeps FEC off.
     fec: (usize, usize),
+    /// More `[tunnel.kcp]` lines.
+    kcp_options: &'static str,
 }
 
 impl Setup {
@@ -112,6 +114,14 @@ impl Setup {
             congestion: "",
             stream_window: 0,
             fec: (0, 0),
+            kcp_options: "",
+        }
+    }
+
+    const fn kcp_options(self, kcp_options: &'static str) -> Self {
+        Self {
+            kcp_options,
+            ..self
         }
     }
 
@@ -266,11 +276,13 @@ impl Setup {
                 format!("[tunnel.tls]\nsni = \"tunnel.example\"\npin_sha256 = \"{pin}\"\n")
             };
         }
-        if self.fec.0 > 0 {
-            options += &format!(
-                "[tunnel.kcp]\nfec_data = {}\nfec_parity = {}\n",
-                self.fec.0, self.fec.1
-            );
+        if self.fec.0 > 0 || !self.kcp_options.is_empty() {
+            options += "[tunnel.kcp]\n";
+            if self.fec.0 > 0 {
+                options += &format!("fec_data = {}\nfec_parity = {}\n", self.fec.0, self.fec.1);
+            }
+            options += self.kcp_options;
+            options += "\n";
         }
         if !self.congestion.is_empty() {
             options += &format!("[tunnel.quic]\ncongestion = \"{}\"\n", self.congestion);
@@ -1246,6 +1258,8 @@ async fn udp_throughput() {
         ("tcp, no mux", Setup::tcp("direct")),
         ("ws + mux", Setup::ws("direct")),
         ("wss + mux", Setup::wss("direct")),
+        ("quic", Setup::quic("direct")),
+        ("kcp + mux", Setup::kcp("direct")),
     ] {
         for size in [100usize, 1400] {
             let target = echo_server().await;
@@ -1324,6 +1338,8 @@ async fn udp_idle_latency() {
         ("tcpmux", Setup::tcp("direct").transport("tcpmux").mux()),
         ("tcp, no mux", Setup::tcp("direct")),
         ("wss + mux", Setup::wss("direct")),
+        ("quic", Setup::quic("direct")),
+        ("kcp + mux", Setup::kcp("direct")),
     ] {
         let tunnel = start(setup, TOKEN, TOKEN, target).await;
         let t = rtts(tunnel.user_port).await;
@@ -1491,7 +1507,8 @@ async fn over_link(setup: Setup, imp: Impairment) -> LinkRun {
 /// Transports over a long, lossy path (PHASE4.md, section 8): 60 ms RTT, 50 Mbit/s each
 /// way with a 50 ms queue, random loss of 0, 1 and 5 % in both directions:
 /// `cargo test --release --test tunnel lossy_link -- --ignored --nocapture`.
-/// `KARIZ_BENCH_LOSS=1` (in percent) runs one loss rate only.
+/// `KARIZ_BENCH_LOSS=1` (in percent) runs one loss rate only, `KARIZ_BENCH_ONLY=kcp` the
+/// rows whose name contains `kcp`.
 ///
 /// Streams get a 4 MiB window, above the path's bandwidth-delay product plus its queue
 /// (about 690 KB), so congestion control sets the rate. With the default 256 KiB a
@@ -1517,7 +1534,14 @@ async fn lossy_link() {
             "kcp fast2, fec 10/3",
             Setup::kcp("direct").fec(10, 3).stream_window(WINDOW),
         ),
+        (
+            "kcp fast2, window 256",
+            Setup::kcp("direct")
+                .kcp_options("send_window = 256\nrecv_window = 256")
+                .stream_window(WINDOW),
+        ),
     ];
+    let only = std::env::var("KARIZ_BENCH_ONLY").unwrap_or_default();
     let default_window = [
         ("tcpmux, default window", tcpmux),
         ("quic cubic, default window", Setup::quic("direct")),
@@ -1540,6 +1564,9 @@ async fn lossy_link() {
             &[]
         };
         for &(name, setup) in setups.iter().chain(extra) {
+            if !name.contains(only.as_str()) {
+                continue;
+            }
             let imp = Impairment {
                 delay: Duration::from_millis(30),
                 loss,

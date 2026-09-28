@@ -19,6 +19,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
+      # Builds without the optional transports (cargo features quic and kcp).
+      - run: cargo clippy --lib --bins --no-default-features -- -D warnings
+      - run: cargo clippy --lib --bins --no-default-features --features quic -- -D warnings
+      - run: cargo clippy --lib --bins --no-default-features --features kcp -- -D warnings
       - run: cargo test
 
   # nginx in front of the tunnel as a stand-in for a CDN: WebSocket proxying, TLS
@@ -34,3 +38,36 @@ jobs:
         env:
           KARIZ_REQUIRE_NGINX: "1"
           KARIZ_NGINX: /usr/sbin/nginx
+
+  # TEMPORARY (phase 4.6): Linux numbers for the README. Removed before merging.
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: CPU
+        run: nproc && lscpu | grep -E "Model name|^CPU\(s\)"
+      - name: Binary sizes (static musl release) and dependency counts
+        run: |
+          for f in "" "--no-default-features" "--no-default-features --features quic" "--no-default-features --features kcp"; do
+            cargo build -q --release --target x86_64-unknown-linux-musl $f
+            size=$(stat -c %s target/x86_64-unknown-linux-musl/release/kariz)
+            deps=$(cargo tree -e normal --prefix none $f | sort -u | wc -l)
+            echo "features [${f:-default}]: $size bytes, $deps crates"
+          done
+      - name: Memory (RSS)
+        run: |
+          cargo build -q --release
+          for t in tcpmux quic kcp; do scripts/rss.sh $t 100; done
+          for t in quic kcp; do scripts/rss.sh $t 1000 target/release/kariz udp; done
+      - name: Lossy link
+        run: cargo test -q --release --test tunnel lossy_link -- --ignored --nocapture
+      - name: Localhost throughput
+        run: cargo test -q --release --test tunnel throughput -- --ignored --nocapture
+      - name: UDP
+        run: |
+          cargo test -q --release --test tunnel udp_throughput -- --ignored --nocapture
+          cargo test -q --release --test tunnel udp_idle_latency -- --ignored --nocapture

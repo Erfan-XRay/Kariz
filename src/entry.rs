@@ -20,8 +20,10 @@ use crate::crypto::{Crypto, ReplayFilter};
 use crate::mux::{MuxSession, SessionConfig, Side};
 use crate::proto::{self, Open};
 use crate::relay::{relay, relay_stream};
+#[cfg(feature = "quic")]
 use crate::session::quic::{accept_sessions, QuicSession};
 use crate::session::{maintain, Session, SessionPool};
+#[cfg(feature = "quic")]
 use crate::transport::quic::{QuicDialer, QuicListener, QuicSettings};
 use crate::transport::{Dialer, Listener, Settings};
 use crate::udp;
@@ -190,6 +192,7 @@ pub async fn run(config: Config) -> Result<()> {
 
 /// QUIC, either mode: the pool of QUIC sessions to the exit side. Direct mode keeps
 /// `mux.connections` of them up; reverse mode takes the ones the exit side opens.
+#[cfg(feature = "quic")]
 async fn quic_pool(
     config: &Config,
     crypto: &Crypto,
@@ -253,6 +256,17 @@ async fn quic_pool(
         }
     }
     Ok(pool)
+}
+
+/// Config validation rejects `transport = "quic"` in a build without it.
+#[cfg(not(feature = "quic"))]
+async fn quic_pool(
+    _: &Config,
+    _: &Crypto,
+    _: &SessionConfig,
+    _: &mut JoinSet<Result<()>>,
+) -> Result<Arc<SessionPool>> {
+    anyhow::bail!("this build has no QUIC support (the `quic` feature is off)")
 }
 
 /// Reverse mode: authenticates incoming tunnel connections and hands them to
