@@ -41,16 +41,47 @@
 
 ## ۲. نصب روی هر دو سرور
 
-این دستورها را **روی هر دو سرور** اجرا کنید:
+### ۲.۱ دانلود
+
+دانلود از GitHub روی سرورهای ایران اغلب قطع یا فیلتر است. در این حالت `curl` به‌جای فایل واقعی یک صفحه‌ی خطا یا فایل ناقص ذخیره می‌کند، و بعد `sha256sum` خطای `no properly formatted SHA256 checksum lines found` می‌دهد. پس فایل را **روی سرور خارج** دانلود کنید و از آنجا به سرور ایران بفرستید:
+
+<div dir="ltr">
+
+```bash
+# on the abroad server
+VERSION=v0.4.0
+cd /tmp
+curl -fLO https://github.com/Erfan-XRay/Kariz/releases/download/$VERSION/kariz-$VERSION-x86_64-linux.tar.gz
+curl -fLO https://github.com/Erfan-XRay/Kariz/releases/download/$VERSION/kariz-$VERSION-x86_64-linux.tar.gz.sha256
+sha256sum -c kariz-$VERSION-x86_64-linux.tar.gz.sha256      # must print: OK
+scp kariz-$VERSION-x86_64-linux.tar.gz root@IRAN_SERVER_IP:/tmp/
+```
+
+</div>
+
+روی سرور ایران، فایل رسیده را با هش درست مقایسه کنید. برای v0.4.0، اندازه‌ی فایل ۲٬۷۵۹٬۴۶۴ بایت است و هش آن:
+
+<div dir="ltr">
+
+```bash
+# on the Iran server
+sha256sum /tmp/kariz-v0.4.0-x86_64-linux.tar.gz
+# must be: 9d77bfa7eb2b6cc3be8f021f9eba4d1baacdc973216ce2e7e5964f5b6888deee
+```
+
+</div>
+
+(اگر سرور ایران به GitHub دسترسی دارد، همان سه دستور `curl` و `sha256sum` بالا را روی خودش هم می‌توانید اجرا کنید. `-f` باعث می‌شود دانلود خراب به‌جای ذخیره‌ی صفحه‌ی خطا، با پیام خطا متوقف شود.)
+
+### ۲.۲ نصب
+
+روی **هر دو سرور**، در پوشه‌ای که فایل در آن است (`/tmp`):
 
 <div dir="ltr">
 
 ```bash
 VERSION=v0.4.0
 cd /tmp
-curl -LO https://github.com/Erfan-XRay/Kariz/releases/download/$VERSION/kariz-$VERSION-x86_64-linux.tar.gz
-curl -LO https://github.com/Erfan-XRay/Kariz/releases/download/$VERSION/kariz-$VERSION-x86_64-linux.tar.gz.sha256
-sha256sum -c kariz-$VERSION-x86_64-linux.tar.gz.sha256      # must print: OK
 tar xzf kariz-$VERSION-x86_64-linux.tar.gz
 cd kariz-$VERSION-x86_64-linux
 
@@ -64,9 +95,6 @@ kariz --version                                            # kariz 0.4.0
 ```
 
 </div>
-
-> اگر سرور ایران به GitHub دسترسی ندارد، فایل را روی سرور خارج دانلود کنید و با `scp` بفرستید:
-> `scp kariz-v0.4.0-x86_64-linux.tar.gz root@IRAN_IP:/tmp/`
 
 سرویس systemd برنامه را از `/usr/local/bin/kariz` و کانفیگ را از `/etc/kariz/config.toml` می‌خواند، بعد از هر قطعی دوباره اجرایش می‌کند و محدودیت فایل‌های باز را بالا می‌برد.
 
@@ -517,6 +545,7 @@ sudo systemctl restart kariz
 
 | نشانه (در لاگ) | علت محتمل | راه‌حل |
 |---|---|---|
+| نصب: `sha256sum: ... no properly formatted SHA256 checksum lines found` یا `tar: not in gzip format` | دانلود از GitHub خراب شده (معمولاً روی سرور ایران) و به‌جای فایل، صفحه‌ی خطا ذخیره شده | `ls -l` و `cat` روی فایل‌ها؛ از سرور خارج دانلود و با `scp` منتقل کنید (بخش ۲.۱) |
 | سرور خارج: `could not connect to the entry side` با `Connection refused` یا `timed out` | پورت تانل بسته است، IP یا پورت اشتباه است، یا سرور ایران اجرا نمی‌شود | `ss -tlnp \| grep 3080` روی سرور ایران؛ فایروال سرور و پنل ارائه‌دهنده؛ از سرور خارج: `nc -vz IRAN_SERVER_IP 3080` |
 | سرور ایران: `tunnel handshake failed` همراه با `hello timestamp out of range` | اختلاف ساعت بیش از ۲ دقیقه | بخش ۳ |
 | سرور خارج: `could not connect to the entry side` با `handshake timed out`، و در ایران `tunnel handshake failed` | توکن دو سمت یکی نیست، یا mux یک طرف روشن و طرف دیگر خاموش است. سمت گوش‌دهنده به اتصالی که احراز هویت نشود جواب نمی‌دهد، پس سمت دیگر فقط timeout می‌بیند | توکن را دوباره در هر دو کپی کنید؛ `transport` و `[tunnel.mux]` را دو طرف یکی کنید. پیام روشن‌تر در لاگ سمت گوش‌دهنده است |
