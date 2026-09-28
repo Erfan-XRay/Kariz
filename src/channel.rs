@@ -117,16 +117,6 @@ impl From<Link> for Channel {
     }
 }
 
-impl Channel {
-    /// See [`Link::is_alive`]. Sessions watch their connection themselves (pings).
-    pub fn is_alive(&mut self) -> bool {
-        match self {
-            Self::Link(l) => l.is_alive(),
-            Self::Stream(_) => true,
-        }
-    }
-}
-
 /// Dialing side: opens a tunnel connection with `dialer` and runs the handshake on it.
 /// `early` (possibly empty) goes out in the same write as the hello (0-RTT), so the
 /// other side can act on it before the handshake round trip completes. With WebSocket
@@ -282,64 +272,6 @@ impl AsyncWrite for Link {
         match self.get_mut() {
             Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
             Self::Secure(s) => Pin::new(&mut **s).poll_shutdown(cx),
-        }
-    }
-}
-
-impl AsyncRead for Channel {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Link(s) => Pin::new(s).poll_read(cx, buf),
-            Self::Stream(s) => Pin::new(s).poll_read(cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for Channel {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Link(s) => Pin::new(s).poll_write(cx, buf),
-            Self::Stream(s) => Pin::new(s).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[io::IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Link(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-            Self::Stream(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-        }
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        match self {
-            Self::Link(s) => s.is_write_vectored(),
-            Self::Stream(s) => s.is_write_vectored(),
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Link(s) => Pin::new(s).poll_flush(cx),
-            Self::Stream(s) => Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Link(s) => Pin::new(s).poll_shutdown(cx),
-            Self::Stream(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }

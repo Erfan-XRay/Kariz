@@ -7,12 +7,14 @@
 //! `docs/PHASE4.md`). Enums rather than trait objects keep dispatch static.
 
 mod manager;
+pub mod quic;
 
 use std::io;
 
 use bytes::Bytes;
 
 use crate::mux::{MuxSession, MuxStream};
+use quic::{QuicSession, QuicStream};
 
 pub use crate::mux::ResetReason;
 pub use manager::{maintain, SessionPool};
@@ -20,6 +22,7 @@ pub use manager::{maintain, SessionPool};
 /// One tunnel connection carrying streams and datagrams.
 pub enum Session {
     Kmux(MuxSession),
+    Quic(QuicSession),
 }
 
 impl Session {
@@ -27,6 +30,7 @@ impl Session {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Kmux(_) => "mux",
+            Self::Quic(_) => "quic",
         }
     }
 
@@ -35,6 +39,7 @@ impl Session {
     pub fn open(&self, syn: Bytes) -> io::Result<SessionStream> {
         match self {
             Self::Kmux(s) => s.open(syn).map(SessionStream::Kmux),
+            Self::Quic(s) => s.open(syn).map(SessionStream::Quic),
         }
     }
 
@@ -46,6 +51,10 @@ impl Session {
                 .accept()
                 .await
                 .map(|(stream, syn)| (SessionStream::Kmux(stream), syn)),
+            Self::Quic(s) => s
+                .accept()
+                .await
+                .map(|(stream, syn)| (SessionStream::Quic(stream), syn)),
         }
     }
 
@@ -53,12 +62,14 @@ impl Session {
     pub fn goaway(&self) {
         match self {
             Self::Kmux(s) => s.goaway(),
+            Self::Quic(s) => s.goaway(),
         }
     }
 
     pub fn is_closed(&self) -> bool {
         match self {
             Self::Kmux(s) => s.is_closed(),
+            Self::Quic(s) => s.is_closed(),
         }
     }
 
@@ -66,12 +77,14 @@ impl Session {
     pub fn is_draining(&self) -> bool {
         match self {
             Self::Kmux(s) => s.is_draining(),
+            Self::Quic(s) => s.is_draining(),
         }
     }
 
     pub fn stream_count(&self) -> usize {
         match self {
             Self::Kmux(s) => s.stream_count(),
+            Self::Quic(s) => s.stream_count(),
         }
     }
 
@@ -79,6 +92,7 @@ impl Session {
     pub fn close_reason(&self) -> Option<String> {
         match self {
             Self::Kmux(s) => s.close_reason(),
+            Self::Quic(s) => s.close_reason(),
         }
     }
 
@@ -86,12 +100,14 @@ impl Session {
     pub async fn closed(&self) {
         match self {
             Self::Kmux(s) => s.closed().await,
+            Self::Quic(s) => s.closed().await,
         }
     }
 
     pub fn close(&self) {
         match self {
             Self::Kmux(s) => s.close(),
+            Self::Quic(s) => s.close(),
         }
     }
 
@@ -99,6 +115,7 @@ impl Session {
     pub async fn drain(&self) {
         match self {
             Self::Kmux(s) => s.drain().await,
+            Self::Quic(s) => s.drain().await,
         }
     }
 }
@@ -108,6 +125,7 @@ impl Session {
 #[derive(Debug)]
 pub enum SessionStream {
     Kmux(MuxStream),
+    Quic(QuicStream),
 }
 
 impl SessionStream {
@@ -115,6 +133,7 @@ impl SessionStream {
     pub async fn send(&self, data: Bytes) -> io::Result<()> {
         match self {
             Self::Kmux(s) => s.send(data).await,
+            Self::Quic(s) => s.send(data).await,
         }
     }
 
@@ -122,6 +141,7 @@ impl SessionStream {
     pub async fn recv(&self) -> io::Result<Option<Bytes>> {
         match self {
             Self::Kmux(s) => s.recv().await,
+            Self::Quic(s) => s.recv().await,
         }
     }
 
@@ -129,6 +149,7 @@ impl SessionStream {
     pub fn finish(&self) -> io::Result<()> {
         match self {
             Self::Kmux(s) => s.finish(),
+            Self::Quic(s) => s.finish(),
         }
     }
 
@@ -136,6 +157,7 @@ impl SessionStream {
     pub fn reset(self, reason: ResetReason) {
         match self {
             Self::Kmux(s) => s.reset(reason),
+            Self::Quic(s) => s.reset(reason),
         }
     }
 
@@ -143,6 +165,7 @@ impl SessionStream {
     pub fn reset_reason(&self) -> Option<ResetReason> {
         match self {
             Self::Kmux(s) => s.reset_reason(),
+            Self::Quic(s) => s.reset_reason(),
         }
     }
 
@@ -150,6 +173,7 @@ impl SessionStream {
     pub fn send_datagram(&self, packet: Bytes) -> bool {
         match self {
             Self::Kmux(s) => s.send_datagram(packet),
+            Self::Quic(s) => s.send_datagram(packet),
         }
     }
 
@@ -157,64 +181,7 @@ impl SessionStream {
     pub async fn recv_datagram(&self) -> io::Result<Option<Bytes>> {
         match self {
             Self::Kmux(s) => s.recv_datagram().await,
-        }
-    }
-}
-
-impl tokio::io::AsyncRead for SessionStream {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Kmux(s) => std::pin::Pin::new(s).poll_read(cx, buf),
-        }
-    }
-}
-
-impl tokio::io::AsyncWrite for SessionStream {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Kmux(s) => std::pin::Pin::new(s).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_write_vectored(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        bufs: &[io::IoSlice<'_>],
-    ) -> std::task::Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Kmux(s) => std::pin::Pin::new(s).poll_write_vectored(cx, bufs),
-        }
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        match self {
-            Self::Kmux(s) => s.is_write_vectored(),
-        }
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Kmux(s) => std::pin::Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Kmux(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            Self::Quic(s) => s.recv_datagram().await,
         }
     }
 }

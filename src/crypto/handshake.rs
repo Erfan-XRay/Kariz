@@ -107,6 +107,12 @@ impl Psk {
         h.finalize()
     }
 
+    /// A key for another use of the token (e.g. the QUIC identity), independent of the
+    /// handshake's keys thanks to its own `context`.
+    pub(crate) fn subkey(&self, context: &str) -> Key {
+        self.derive(context, &[])
+    }
+
     fn derive(&self, context: &str, parts: &[&[u8]]) -> Key {
         let mut h = blake3::Hasher::new_derive_key(context);
         h.update(&self.psk);

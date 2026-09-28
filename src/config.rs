@@ -52,6 +52,8 @@ pub enum TransportKind {
     Ws,
     /// WebSocket over TLS.
     Wss,
+    /// QUIC: its own streams, datagrams and TLS 1.3 (see docs/PHASE4.md).
+    Quic,
 }
 
 impl TransportKind {
@@ -61,6 +63,7 @@ impl TransportKind {
             Self::Tcpmux => "tcpmux",
             Self::Ws => "ws",
             Self::Wss => "wss",
+            Self::Quic => "quic",
         }
     }
 
@@ -163,6 +166,58 @@ pub struct TunnelConfig {
     pub ws: Option<WsConfig>,
     /// Only for `wss`.
     pub tls: Option<TlsConfig>,
+    /// Only for `quic`.
+    pub quic: Option<QuicConfig>,
+}
+
+/// `[tunnel.quic]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuicConfig {
+    #[serde(default)]
+    pub congestion: Congestion,
+    /// Dialing side: server name in the handshake. Default: the host of `remote` when it
+    /// is a name, none when it is an IP address (as browsers do).
+    pub sni: Option<String>,
+    /// Application protocol announced in the handshake (both sides must agree).
+    #[serde(default = "default_alpn")]
+    pub alpn: String,
+}
+
+fn default_alpn() -> String {
+    "h3".into()
+}
+
+/// Same values as a `[tunnel.quic]` table with nothing in it.
+impl Default for QuicConfig {
+    fn default() -> Self {
+        Self {
+            congestion: Congestion::default(),
+            sni: None,
+            alpn: default_alpn(),
+        }
+    }
+}
+
+/// QUIC congestion controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Congestion {
+    #[default]
+    Cubic,
+    /// Copes much better with random loss; experimental in quinn.
+    Bbr,
+    NewReno,
+}
+
+impl Congestion {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cubic => "cubic",
+            Self::Bbr => "bbr",
+            Self::NewReno => "newreno",
+        }
+    }
 }
 
 /// `[tunnel.mux]`: many user connections over a few long-lived tunnel connections.
@@ -392,6 +447,13 @@ impl MuxSettings {
             Profile::Throughput => (1024 * 1024, 8),
             Profile::Gaming => (64 * 1024, 2),
         };
+        // QUIC streams do not block each other, so more connections only buy more
+        // congestion windows; two keep a spare while one reconnects.
+        let connections = if transport == TransportKind::Quic {
+            2
+        } else {
+            connections
+        };
         Self {
             enabled: transport != TransportKind::Tcp,
             connections,
@@ -502,6 +564,14 @@ impl Config {
                  enable tunnel.mux (or use tcpmux, ws, wss) for UDP",
             );
         }
+        if self
+            .tunnel
+            .quic
+            .as_ref()
+            .is_some_and(|q| q.congestion == Congestion::Bbr)
+        {
+            warnings.push("tunnel.quic.congestion = \"bbr\": quinn marks its BBR as experimental");
+        }
         if self.tunnel.tls.as_ref().is_some_and(|t| t.insecure) {
             warnings.push(
                 "tunnel.tls.insecure = true: the server certificate is not verified; \
@@ -583,7 +653,43 @@ impl Config {
 
         self.validate_mux()?;
         self.validate_ws()?;
-        self.validate_tls()
+        self.validate_tls()?;
+        self.validate_quic()
+    }
+
+    fn validate_quic(&self) -> Result<()> {
+        let quic = self.tunnel.transport == TransportKind::Quic;
+        if self.tunnel.quic.is_some() && !quic {
+            bail!("[tunnel.quic] is only used with transport = \"quic\"");
+        }
+        if !quic {
+            return Ok(());
+        }
+        if self.tunnel.encryption != Encryption::Auto {
+            bail!(
+                "transport = \"quic\" always encrypts with TLS 1.3; leave tunnel.encryption \
+                 at \"auto\""
+            );
+        }
+        if !self.mux().enabled {
+            bail!("transport = \"quic\" always multiplexes; tunnel.mux cannot be disabled");
+        }
+        let Some(q) = &self.tunnel.quic else {
+            return Ok(());
+        };
+        if q.alpn.is_empty() || q.alpn.len() > 255 || !is_visible_ascii(&q.alpn) {
+            bail!("tunnel.quic.alpn must be 1 to 255 visible ASCII characters");
+        }
+        if self.is_acceptor() && q.sni.is_some() {
+            bail!("tunnel.quic.sni is only used by the dialing side");
+        }
+        if q.sni
+            .as_deref()
+            .is_some_and(|s| s.is_empty() || !is_visible_ascii(s) || s.contains('/'))
+        {
+            bail!("tunnel.quic.sni must be a host name");
+        }
+        Ok(())
     }
 
     fn validate_mux(&self) -> Result<()> {
@@ -1139,5 +1245,66 @@ mod tests {
         ));
         assert!(insecure.validate_tls().is_ok());
         assert_eq!(insecure.warnings().len(), 1);
+    }
+
+    #[test]
+    fn quic_configs_parse() {
+        let c = Config::parse(&with_transport("entry", "quic", "")).unwrap();
+        assert!(c.mux().enabled);
+        assert_eq!(c.mux().connections, 2);
+        assert!(c.tunnel.quic.is_none());
+        assert!(c.warnings().is_empty());
+        let q = QuicConfig::default();
+        assert_eq!(
+            (q.alpn.as_str(), q.congestion, q.sni),
+            ("h3", Congestion::Cubic, None)
+        );
+
+        let text = with_transport(
+            "entry",
+            "quic",
+            "[tunnel.quic]\ncongestion = \"bbr\"\nsni = \"a.example\"\nalpn = \"hq-29\"",
+        );
+        let q = Config::parse(&text).unwrap().tunnel.quic.unwrap();
+        assert_eq!(q.congestion, Congestion::Bbr);
+        assert_eq!(q.sni.as_deref(), Some("a.example"));
+        assert_eq!(q.alpn, "hq-29");
+        let text = with_transport("entry", "quic", "[tunnel.quic]\ncongestion = \"bbr\"");
+        assert_eq!(Config::parse(&text).unwrap().warnings().len(), 1);
+        // An empty table means the defaults, as no table does.
+        let text = with_transport("exit", "quic", "[tunnel.quic]");
+        assert_eq!(
+            Config::parse(&text).unwrap().tunnel.quic.unwrap().alpn,
+            "h3"
+        );
+    }
+
+    #[test]
+    fn quic_validation() {
+        let err = parse_err(&with_transport("entry", "tcp", "[tunnel.quic]"));
+        assert!(err.contains("[tunnel.quic]"), "{err}");
+        let err = parse_err(&with_transport("entry", "quic", "encryption = \"none\""));
+        assert!(err.contains("TLS 1.3"), "{err}");
+        let err = parse_err(&with_transport(
+            "entry",
+            "quic",
+            "[tunnel.mux]\nenabled = false",
+        ));
+        assert!(err.contains("multiplexes"), "{err}");
+        for (role, extra, expect) in [
+            ("entry", "alpn = \"\"", "tunnel.quic.alpn"),
+            ("entry", "alpn = \"a b\"", "tunnel.quic.alpn"),
+            ("entry", "sni = \"\"", "tunnel.quic.sni"),
+            ("entry", "sni = \"a.example/x\"", "tunnel.quic.sni"),
+            ("exit", "sni = \"a.example\"", "dialing side"),
+            ("entry", "congestion = \"vegas\"", "congestion"),
+        ] {
+            let err = parse_err(&with_transport(
+                role,
+                "quic",
+                &format!("[tunnel.quic]\n{extra}"),
+            ));
+            assert!(err.contains(expect), "{extra}: {err}");
+        }
     }
 }

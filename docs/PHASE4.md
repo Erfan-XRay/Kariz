@@ -1,7 +1,7 @@
 # Phase 4 plan: QUIC and KCP
 
 Target release: **v0.4.0**. Scope from [ROADMAP.md](ROADMAP.md): `kcp` (full settings +
-Reed-Solomon FEC) and `quic` (quinn; BBR/Cubic, 0-RTT, datagrams, GSO/GRO).
+Reed-Solomon FEC) and `quic` (quinn; BBR/Cubic, datagrams, GSO/GRO).
 
 This document fixes the design and the order of work, so each step can land as its own
 PR with CI green. As in phase 3, the decisions are settled here with their reasoning
@@ -102,18 +102,59 @@ middle layers with its own.
   token is what makes a valid peer, as everywhere else in Kariz; TLS 1.3 gives forward
   secrecy; no certificate files to manage. Certificates are encrypted in TLS 1.3, so they
   are not visible on the wire.
-- **Camouflage (basic):** configurable SNI (default: a common host name) and ALPN `h3`,
+- **Camouflage (basic):** configurable SNI (default: the remote's host name, see
+  decision 10) and ALPN `h3`,
   so the handshake reads as HTTP/3. Shaping the ClientHello further is phase 6.
 - **Congestion control:** `cubic` (default), `bbr`, `newreno`. quinn's BBR is marked
   experimental upstream; it is offered because it copes with random loss much better
   than Cubic, and the release benchmarks (4.6) decide whether it should be the default.
-- **0-RTT:** session tickets are kept per dialer; a reconnect resumes with 0-RTT so the
-  first stream's data leaves in the first flight. 0-RTT data can be replayed by an
-  attacker; the only thing sent in it is stream opens, which a replay can only repeat
-  (like re-sending a SYN), never forge. Kept, and documented.
+- **0-RTT** (dropped in 4.2, see decision 9): session tickets are kept per dialer; a
+  reconnect resumes with 0-RTT so the first stream's data leaves in the first flight.
+  0-RTT data can be replayed by an attacker; the only thing sent in it is stream opens,
+  which a replay can only repeat (like re-sending a SYN), never forge. Kept, and
+  documented.
 - **Liveness:** QUIC keep-alive at `tuning.keepalive`, idle timeout at 3x that.
 - `tunnel.encryption` must stay `auto` with QUIC (TLS always encrypts); `none` or an
   explicit cipher is a config error there.
+
+*Status after 4.2:* `transport = "quic"` works in both modes, for TCP and UDP. The code
+is in `src/transport/quic.rs` (identity, TLS configs, endpoints, dialer / listener) and
+`src/session/quic.rs` (`QuicSession` / `QuicStream`: open requests, reset codes,
+datagrams with stream fallback, `GOAWAY`), with `Session::Quic` / `SessionStream::Quic`
+beside the kmux variants. Entry and exit reuse the pool, `maintain` and the relay
+unchanged. Where the result differs from the plan above, and why:
+
+- **Liveness:** pings every `keepalive / 3`, peer dead after `2 x keepalive` of silence.
+  The dead-peer time matches kmux (silent for two periods); pings go out more often
+  than kmux's because UDP NAT mappings often expire after 30 s, the default keepalive.
+- **No 0-RTT** (decision 9). TLS session resumption is on (rustls defaults), which
+  skips the certificate exchange on reconnects; early data is not.
+- **SNI defaults to the host in `tunnel.remote`** (decision 10); with an IP address
+  there, no SNI is sent, as with any client dialing an address.
+- **A wrong token fails with a `bad_certificate` alert** on whichever side checks first
+  (the client, for the server's certificate). A client that accepts any server but
+  presents another key completes its side (TLS 1.3 clients finish before the server
+  checks them) and is closed by the server's alert; the server opens nothing on a
+  connection before its handshake is complete.
+- **Stateless resets survive a restart** (not in the plan): the reset key and the key
+  that marks our connection IDs are derived from the token. An endpoint restarted on
+  the same port then answers packets of the old connections with a stateless reset,
+  and the peer reconnects at once instead of after the idle timeout (quinn's defaults
+  are random per process: the new endpoint would drop those packets unanswered).
+  Unit-tested by killing a listener's runtime and binding a new one on its port.
+- **Cargo features** (decision 8) are left to 4.6: quinn and rcgen add 24 crates
+  (82 to 106), well short of the "doubles" expected, and gating `quic` and `kcp` at
+  once, with the binary sizes measured, is less churn than twice.
+- `SessionStream` no longer implements `AsyncRead` / `AsyncWrite` (added in 4.1): a
+  QUIC stream would have needed a second buffering layer for it, and only the relay
+  used them, which now calls `send` / `recv` directly.
+
+Tests: the `quic_reverse` / `quic_direct` rows of the E2E matrix (concurrent echoes,
+an 8 MiB transfer, wrong token, unreachable target, exit restart, UDP echo with packets
+from 1 byte to 60 KB, the larger ones on the stream fallback); unit tests for the
+identity, the token check in both directions, every congestion controller, the
+stateless reset after a restart, streams and reset codes, datagram sizes from 0 to
+65,535 bytes (across the datagram limit), early datagrams and `GOAWAY` / drain.
 
 ## 4. KCP (`transport = "kcp"`)
 
@@ -280,3 +321,14 @@ On the emulated link (60 ms RTT, 50 Mbit/s):
 7. **Datagram-or-stream for QUIC UDP flows**: packets that fit go as datagrams, larger
    ones on the flow's stream, so nothing is silently dropped because of path MTU.
 8. **Cargo features** `quic` and `kcp`, on by default.
+9. **No QUIC 0-RTT** (reversed in 4.2). Sessions are pooled and dialed before users
+   arrive, so 0-RTT would only shorten reconnects that no user is waiting on. What it
+   would put in the first flight is a stream's open request *and the user's first
+   bytes* (streams are opened optimistically), and 0-RTT data can be replayed: a
+   repeated non-idempotent request to the target is too high a price for a round trip
+   nobody waits for. The acceptor also never sends before the handshake completes (no
+   0.5-RTT), so nothing reaches a peer before its certificate is checked.
+10. **QUIC SNI defaults to the `tunnel.remote` host**, not to a well-known name. A
+    borrowed name is easy to check against the server's address and says something
+    false about the connection; the dialer's own host name is what an ordinary client
+    sends. `tunnel.quic.sni` sets any other.

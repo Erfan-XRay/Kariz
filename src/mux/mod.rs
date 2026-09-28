@@ -74,7 +74,7 @@ pub enum ResetReason {
 }
 
 impl ResetReason {
-    fn id(self) -> u8 {
+    pub(crate) fn id(self) -> u8 {
         match self {
             Self::Cancel => 0,
             Self::DialFailed => 1,
@@ -84,7 +84,7 @@ impl ResetReason {
         }
     }
 
-    fn from_id(id: u8) -> Self {
+    pub(crate) fn from_id(id: u8) -> Self {
         match id {
             1 => Self::DialFailed,
             2 => Self::Refused,

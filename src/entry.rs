@@ -15,12 +15,14 @@ use tokio::time::{sleep, timeout, timeout_at, Instant};
 use tracing::{debug, info, warn};
 
 use crate::channel::{self, Channel, Link};
-use crate::config::{Config, Forward, Mode, Tuning};
+use crate::config::{Config, Forward, Mode, TransportKind, Tuning};
 use crate::crypto::{Crypto, ReplayFilter};
 use crate::mux::{MuxSession, SessionConfig, Side};
 use crate::proto::{self, Open};
 use crate::relay::{relay, relay_stream};
+use crate::session::quic::{accept_sessions, QuicSession};
 use crate::session::{maintain, Session, SessionPool};
+use crate::transport::quic::{QuicDialer, QuicListener, QuicSettings};
 use crate::transport::{Dialer, Listener, Settings};
 use crate::udp;
 
@@ -37,7 +39,7 @@ enum Source {
     /// Direct mode: dial the exit side for every user connection.
     Direct(Dialer),
     /// Reverse mode: take an idle channel the exit side opened in advance.
-    Reverse(Mutex<mpsc::Receiver<Channel>>),
+    Reverse(Mutex<mpsc::Receiver<Link>>),
     /// Mux, either mode: open a stream on one of the sessions to the exit side.
     Mux(Arc<SessionPool>),
 }
@@ -50,83 +52,89 @@ pub async fn run(config: Config) -> Result<()> {
     let sessions = SessionConfig::new(&mux, &tuning);
     let mut tasks = JoinSet::new();
 
-    let source = match config.mode {
-        Mode::Direct if mux.enabled => {
-            let remote = config.tunnel.remote.as_deref().expect("validated");
-            info!(
-                remote,
-                connections = mux.connections,
-                "entry: direct mode with mux, keeping sessions to the exit side"
-            );
-            let dialer = Arc::new(Dialer::new(&transport, remote, &tuning)?);
-            let pool = Arc::new(SessionPool::default());
-            for _ in 0..mux.connections {
-                let (dialer, crypto, pool) = (dialer.clone(), crypto.clone(), pool.clone());
-                let wait = tuning.dial_timeout + tuning.handshake_timeout;
-                let sessions = sessions.clone();
-                let connect = move || {
-                    let (dialer, crypto, sessions) =
-                        (dialer.clone(), crypto.clone(), sessions.clone());
-                    async move {
-                        let link = timeout(wait, channel::connect(&dialer, &crypto, &[]))
-                            .await
-                            .map_err(|_| {
-                                io::Error::new(io::ErrorKind::TimedOut, "handshake timed out")
-                            })??;
-                        Ok(Session::Kmux(MuxSession::over(
-                            link,
-                            Side::Client,
-                            sessions,
-                        )))
-                    }
-                };
-                let lifetime = mux.max_lifetime;
-                tasks.spawn(async move {
-                    maintain("the exit side", connect, lifetime, move |s| pool.add(s)).await;
-                    Ok(())
-                });
-            }
-            Source::Mux(pool)
-        }
-        Mode::Direct => {
-            let remote = config.tunnel.remote.as_deref().expect("validated");
-            info!(
-                remote,
-                "entry: direct mode, dialing the exit side per connection"
-            );
-            Source::Direct(Dialer::new(&transport, remote, &tuning)?)
-        }
-        Mode::Reverse => {
-            let addr = config.tunnel.listen.as_deref().expect("validated");
-            let listener = Listener::bind(&transport, addr, &tuning)
-                .await
-                .with_context(|| format!("failed to listen for tunnel connections on {addr}"))?;
-            info!(
-                addr = %listener.local_addr()?,
-                mux = mux.enabled,
-                "entry: reverse mode, waiting for the exit side"
-            );
-            let hs = tuning.handshake_timeout;
-            if mux.enabled {
+    let source = if transport.kind == TransportKind::Quic {
+        Source::Mux(quic_pool(&config, &crypto, &sessions, &mut tasks).await?)
+    } else {
+        match config.mode {
+            Mode::Direct if mux.enabled => {
+                let remote = config.tunnel.remote.as_deref().expect("validated");
+                info!(
+                    remote,
+                    connections = mux.connections,
+                    "entry: direct mode with mux, keeping sessions to the exit side"
+                );
+                let dialer = Arc::new(Dialer::new(&transport, remote, &tuning)?);
                 let pool = Arc::new(SessionPool::default());
-                let p = pool.clone();
-                let on_link = move |link: Link, peer: SocketAddr| {
-                    let session = MuxSession::over(link, Side::Client, sessions.clone());
-                    p.add(Arc::new(Session::Kmux(session)));
-                    info!(%peer, "mux session from the exit side established");
-                };
-                tasks.spawn(accept_reverse(listener, crypto.clone(), hs, on_link));
+                for _ in 0..mux.connections {
+                    let (dialer, crypto, pool) = (dialer.clone(), crypto.clone(), pool.clone());
+                    let wait = tuning.dial_timeout + tuning.handshake_timeout;
+                    let sessions = sessions.clone();
+                    let connect = move || {
+                        let (dialer, crypto, sessions) =
+                            (dialer.clone(), crypto.clone(), sessions.clone());
+                        async move {
+                            let link = timeout(wait, channel::connect(&dialer, &crypto, &[]))
+                                .await
+                                .map_err(|_| {
+                                    io::Error::new(io::ErrorKind::TimedOut, "handshake timed out")
+                                })??;
+                            Ok(Session::Kmux(MuxSession::over(
+                                link,
+                                Side::Client,
+                                sessions,
+                            )))
+                        }
+                    };
+                    let lifetime = mux.max_lifetime;
+                    tasks.spawn(async move {
+                        maintain("the exit side", connect, lifetime, move |s| pool.add(s)).await;
+                        Ok(())
+                    });
+                }
                 Source::Mux(pool)
-            } else {
-                let (tx, rx) = mpsc::channel(POOL_CAPACITY);
-                let on_link = move |link: Link, peer: SocketAddr| {
-                    debug!(%peer, "tunnel connection added to pool");
-                    if tx.try_send(Channel::from(link)).is_err() {
-                        warn!(%peer, "tunnel pool is full, dropping connection");
-                    }
-                };
-                tasks.spawn(accept_reverse(listener, crypto.clone(), hs, on_link));
-                Source::Reverse(Mutex::new(rx))
+            }
+            Mode::Direct => {
+                let remote = config.tunnel.remote.as_deref().expect("validated");
+                info!(
+                    remote,
+                    "entry: direct mode, dialing the exit side per connection"
+                );
+                Source::Direct(Dialer::new(&transport, remote, &tuning)?)
+            }
+            Mode::Reverse => {
+                let addr = config.tunnel.listen.as_deref().expect("validated");
+                let listener = Listener::bind(&transport, addr, &tuning)
+                    .await
+                    .with_context(|| {
+                        format!("failed to listen for tunnel connections on {addr}")
+                    })?;
+                info!(
+                    addr = %listener.local_addr()?,
+                    mux = mux.enabled,
+                    "entry: reverse mode, waiting for the exit side"
+                );
+                let hs = tuning.handshake_timeout;
+                if mux.enabled {
+                    let pool = Arc::new(SessionPool::default());
+                    let p = pool.clone();
+                    let on_link = move |link: Link, peer: SocketAddr| {
+                        let session = MuxSession::over(link, Side::Client, sessions.clone());
+                        p.add(Arc::new(Session::Kmux(session)));
+                        info!(%peer, "mux session from the exit side established");
+                    };
+                    tasks.spawn(accept_reverse(listener, crypto.clone(), hs, on_link));
+                    Source::Mux(pool)
+                } else {
+                    let (tx, rx) = mpsc::channel(POOL_CAPACITY);
+                    let on_link = move |link: Link, peer: SocketAddr| {
+                        debug!(%peer, "tunnel connection added to pool");
+                        if tx.try_send(link).is_err() {
+                            warn!(%peer, "tunnel pool is full, dropping connection");
+                        }
+                    };
+                    tasks.spawn(accept_reverse(listener, crypto.clone(), hs, on_link));
+                    Source::Reverse(Mutex::new(rx))
+                }
             }
         }
     };
@@ -178,6 +186,73 @@ pub async fn run(config: Config) -> Result<()> {
         Some(Err(e)) => Err(e.into()),
         None => Ok(()),
     }
+}
+
+/// QUIC, either mode: the pool of QUIC sessions to the exit side. Direct mode keeps
+/// `mux.connections` of them up; reverse mode takes the ones the exit side opens.
+async fn quic_pool(
+    config: &Config,
+    crypto: &Crypto,
+    sessions: &SessionConfig,
+    tasks: &mut JoinSet<Result<()>>,
+) -> Result<Arc<SessionPool>> {
+    let (tuning, mux) = (config.tuning(), config.mux());
+    let quic_config = config.tunnel.quic.clone().unwrap_or_default();
+    let quic = QuicSettings::new(crypto.psk(), &quic_config, &mux, &tuning)?;
+    let pool = Arc::new(SessionPool::default());
+    let open_timeout = tuning.handshake_timeout;
+    match config.mode {
+        Mode::Direct => {
+            let remote = config.tunnel.remote.as_deref().expect("validated");
+            let dialer = Arc::new(QuicDialer::new(remote, quic_config.sni.as_deref(), &quic)?);
+            info!(
+                remote,
+                connections = mux.connections,
+                congestion = quic_config.congestion.name(),
+                "entry: direct mode over QUIC, keeping sessions to the exit side"
+            );
+            for _ in 0..mux.connections {
+                let (dialer, pool, sessions) = (dialer.clone(), pool.clone(), sessions.clone());
+                let connect = move || {
+                    let (dialer, sessions) = (dialer.clone(), sessions.clone());
+                    async move {
+                        let conn = dialer.connect().await?;
+                        Ok(Session::Quic(QuicSession::new(
+                            conn,
+                            &sessions,
+                            open_timeout,
+                        )))
+                    }
+                };
+                let lifetime = mux.max_lifetime;
+                tasks.spawn(async move {
+                    maintain("the exit side", connect, lifetime, move |s| pool.add(s)).await;
+                    Ok(())
+                });
+            }
+        }
+        Mode::Reverse => {
+            let addr = config.tunnel.listen.as_deref().expect("validated");
+            let listener = QuicListener::bind(addr, &quic)
+                .await
+                .with_context(|| format!("failed to listen for QUIC on {addr}"))?;
+            info!(
+                addr = %listener.local_addr()?,
+                "entry: reverse mode over QUIC, waiting for the exit side"
+            );
+            let p = pool.clone();
+            let on_session = move |session: QuicSession, peer: SocketAddr| {
+                p.add(Arc::new(Session::Quic(session)));
+                info!(%peer, "quic session from the exit side established");
+            };
+            let sessions = sessions.clone();
+            tasks.spawn(async move {
+                accept_sessions(listener, sessions, open_timeout, on_session).await;
+                Ok(())
+            });
+        }
+    }
+    Ok(pool)
 }
 
 /// Reverse mode: authenticates incoming tunnel connections and hands them to
@@ -241,7 +316,7 @@ async fn handle_user(entry: &Entry, mut user: TcpStream, open: &Bytes) -> io::Re
     let size = entry.tuning.buffer_size;
     match entry.open_channel(open).await? {
         Channel::Stream(stream) => relay_stream(&mut user, &stream, size).await?,
-        mut channel => relay(&mut user, &mut channel, size).await?,
+        Channel::Link(mut link) => relay(&mut user, &mut link, size).await?,
     };
     Ok(())
 }
@@ -251,8 +326,8 @@ impl Entry {
     /// described by the encoded `open` request.
     async fn open_channel(&self, open: &Bytes) -> io::Result<Channel> {
         match &self.source {
-            Source::Direct(dialer) => self.open_direct(dialer, open).await,
-            Source::Reverse(pool) => self.open_reverse(pool, open).await,
+            Source::Direct(dialer) => self.open_direct(dialer, open).await.map(Channel::Link),
+            Source::Reverse(pool) => self.open_reverse(pool, open).await.map(Channel::Link),
             // Optimistic: the stream is used right away; if the exit cannot reach the
             // target it resets the stream, which ends the relay.
             Source::Mux(pool) => {
@@ -264,24 +339,24 @@ impl Entry {
     }
 
     /// Dials the exit side and sends the open request along with the hello.
-    async fn open_direct(&self, dialer: &Dialer, open: &[u8]) -> io::Result<Channel> {
+    async fn open_direct(&self, dialer: &Dialer, open: &[u8]) -> io::Result<Link> {
         let wait = self.tuning.handshake_timeout + self.tuning.dial_timeout;
         timeout(wait, async {
-            let mut channel = Channel::from(channel::connect(dialer, &self.crypto, open).await?);
-            proto::read_status(&mut channel).await?;
-            Ok(channel)
+            let mut link = channel::connect(dialer, &self.crypto, open).await?;
+            proto::read_status(&mut link).await?;
+            Ok(link)
         })
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "exit side did not answer in time"))?
     }
 
-    /// Takes pooled channels until one accepts the open request. Pooled channels may
-    /// have died while idle, so failures other than "target unreachable" are retried.
+    /// Takes pooled links until one accepts the open request. Pooled links may have
+    /// died while idle, so failures other than "target unreachable" are retried.
     async fn open_reverse(
         &self,
-        pool: &Mutex<mpsc::Receiver<Channel>>,
+        pool: &Mutex<mpsc::Receiver<Link>>,
         open: &[u8],
-    ) -> io::Result<Channel> {
+    ) -> io::Result<Link> {
         let deadline = Instant::now() + self.tuning.handshake_timeout + self.tuning.dial_timeout;
         loop {
             let mut channel = timeout_at(deadline, async { pool.lock().await.recv().await })

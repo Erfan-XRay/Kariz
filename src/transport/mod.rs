@@ -6,6 +6,7 @@
 //! variants. `tcpmux` is the `tcp` transport with mux on top, so it has no variant;
 //! `ws` and `wss` share the WebSocket code and differ only in the TLS layer.
 
+pub mod quic;
 pub mod tcp;
 pub mod tls;
 pub mod ws;
@@ -76,8 +77,12 @@ impl Listener {
             }
             _ => None,
         };
+        if settings.kind == TransportKind::Quic {
+            return Err(not_a_stream_transport());
+        }
         let tcp = tcp::TcpTransportListener::bind(addr, tuning).await?;
         match settings.kind {
+            TransportKind::Quic => Err(not_a_stream_transport()),
             TransportKind::Tcp | TransportKind::Tcpmux => Ok(Self::Tcp(tcp)),
             TransportKind::Ws | TransportKind::Wss => Ok(Self::Ws(
                 tcp,
@@ -186,6 +191,7 @@ impl Dialer {
         let ws = settings.ws.as_ref();
         let (config, tls) = match settings.kind {
             TransportKind::Tcp | TransportKind::Tcpmux => return Ok(Self::Tcp(tcp)),
+            TransportKind::Quic => return Err(not_a_stream_transport()),
             TransportKind::Ws => (ws::ClientConfig::new(ws, addr, "http", 80), None),
             TransportKind::Wss => {
                 // SNI: tls.sni, else the Host we send, else the host we dial.
@@ -264,6 +270,14 @@ impl WsDialer {
         }
         Ok(stream)
     }
+}
+
+/// QUIC is not a byte stream: it has its own endpoints ([`quic`]) and sessions.
+fn not_a_stream_transport() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "quic is not a stream transport; use transport::quic",
+    )
 }
 
 /// A single tunnel connection, whatever transport carries it.

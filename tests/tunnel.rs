@@ -158,6 +158,17 @@ impl Setup {
         }
     }
 
+    /// QUIC: its own streams, datagrams and TLS. A short keepalive, since a QUIC peer
+    /// that dies is only noticed by its silence (idle timeout = keepalive).
+    const fn quic(mode: &'static str) -> Self {
+        Self {
+            transport: "quic",
+            mux: true,
+            keepalive_secs: 5,
+            ..Self::tcp(mode)
+        }
+    }
+
     const fn no_mux(self) -> Self {
         Self { mux: false, ..self }
     }
@@ -263,7 +274,12 @@ impl Side {
     fn start(text: &str) -> Self {
         if std::env::var_os("KARIZ_TEST_LOG").is_some() {
             let _ = tracing_subscriber::fmt()
-                .with_env_filter("kariz=debug")
+                .with_env_filter(
+                    std::env::var("KARIZ_TEST_LOG")
+                        .ok()
+                        .filter(|f| f.contains('='))
+                        .unwrap_or_else(|| "kariz=debug".into()),
+                )
                 .with_thread_names(true)
                 .try_init();
         }
@@ -648,6 +664,8 @@ tunnel_tests! {
     ws_direct_no_mux_early: Setup::ws("direct").no_mux().early_data();
     ws_reverse_early: Setup::ws("reverse").early_data();
     wss_direct_early: Setup::wss("direct").early_data();
+    quic_reverse: Setup::quic("reverse");
+    quic_direct: Setup::quic("direct");
 }
 
 /// A `wss` dialer that pins another certificate refuses the listener, so nothing passes.
