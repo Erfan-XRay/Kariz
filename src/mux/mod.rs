@@ -10,7 +10,7 @@ use std::time::Duration;
 
 pub use session::{DatagramStats, MuxSession, MuxStream, INITIAL_WINDOW, MAX_DATA_FRAME};
 
-use crate::config::{MuxSettings, Tuning};
+use crate::config::MuxSettings;
 
 /// A connection a session can run over. It is split into halves that work
 /// independently, so reading (and decrypting) and writing (and encrypting) run in
@@ -53,14 +53,14 @@ pub struct SessionConfig {
 }
 
 impl SessionConfig {
-    pub fn new(mux: &MuxSettings, tuning: &Tuning) -> Self {
+    pub fn new(mux: &MuxSettings) -> Self {
         Self {
             stream_window: mux.stream_window.min(u32::MAX as usize) as u32,
             max_streams: mux.max_streams,
-            keepalive: tuning.keepalive,
+            keepalive: mux.ping_interval,
             coalesce: mux.coalesce,
-            datagram_buffer: tuning.udp.session_buffer,
-            datagram_queue: tuning.udp.flow_queue,
+            datagram_buffer: mux.datagram_buffer,
+            datagram_queue: mux.datagram_queue,
         }
     }
 }

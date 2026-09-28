@@ -209,14 +209,14 @@ impl QuicSettings {
             .max_concurrent_bidi_streams(VarInt::from_u32(mux.max_streams as u32))
             .max_concurrent_uni_streams(VarInt::from_u32(MAX_UNI_STREAMS))
             .stream_receive_window(VarInt::from_u32(mux.stream_window as u32))
-            // As with kmux, a peer silent for two keep-alive periods is dead. Pings go
-            // out more often than kmux's: UDP NAT mappings often expire after 30 s.
-            .keep_alive_interval(Some(tuning.keepalive / 3))
+            // As with kmux, a peer silent for two ping intervals is dead. Pings go out
+            // more often than kmux's: UDP NAT mappings often expire after 30 s.
+            .keep_alive_interval(Some(mux.ping_interval / 3))
             .max_idle_timeout(Some(
-                IdleTimeout::try_from(tuning.keepalive * 2).map_err(io::Error::other)?,
+                IdleTimeout::try_from(mux.ping_interval * 2).map_err(io::Error::other)?,
             ))
-            .datagram_receive_buffer_size(Some(tuning.udp.session_buffer))
-            .datagram_send_buffer_size(tuning.udp.session_buffer);
+            .datagram_receive_buffer_size(Some(mux.datagram_buffer))
+            .datagram_send_buffer_size(mux.datagram_buffer);
         match quic.congestion {
             Congestion::Cubic => transport
                 .congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default())),
@@ -449,6 +449,10 @@ pub(crate) mod tests {
             stream_window: 256 * 1024,
             max_lifetime: None,
             coalesce: true,
+            ping_interval: Duration::from_secs(30),
+            datagram_buffer: 256 * 1024,
+            datagram_queue: 128,
+            notsent_lowat: None,
         };
         let mut tuning = Tuning::for_profile(Profile::Balanced);
         tuning.handshake_timeout = Duration::from_secs(3);

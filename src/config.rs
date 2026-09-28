@@ -39,8 +39,21 @@ pub enum Mode {
 pub enum Profile {
     #[default]
     Balanced,
-    Throughput,
+    /// The most speed: large buffers and windows, more connections. Also accepted under
+    /// its old name, `throughput`.
+    #[serde(alias = "throughput")]
+    Ultraspeed,
     Gaming,
+}
+
+impl Profile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Balanced => "balanced",
+            Self::Ultraspeed => "ultraspeed",
+            Self::Gaming => "gaming",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -375,6 +388,21 @@ pub struct MuxConfig {
     pub stream_window: Option<usize>,
     /// Replace each tunnel connection after this many seconds.
     pub max_lifetime_secs: Option<u64>,
+    /// Gather queued frames into larger writes (throughput) or write each at once
+    /// (latency). Default: on, off in the gaming profile.
+    pub coalesce: Option<bool>,
+    /// Seconds between pings; a peer silent for twice as long is dead. Default:
+    /// `tuning.keepalive_secs`.
+    pub ping_interval_secs: Option<u64>,
+    /// Bytes of UDP datagrams a session queues for sending before dropping. Default: the
+    /// profile's.
+    pub datagram_buffer: Option<usize>,
+    /// UDP datagrams each flow queues on the receiving side before dropping the oldest.
+    /// Default: the profile's.
+    pub datagram_queue: Option<usize>,
+    /// `TCP_NOTSENT_LOWAT` in bytes on TCP connections that carry mux; 0 turns it off.
+    /// Default: 16384.
+    pub notsent_lowat: Option<u32>,
 }
 
 /// `[tunnel.ws]`: WebSocket upgrade request.
@@ -591,7 +619,7 @@ impl UdpTuning {
     fn for_profile(profile: Profile) -> Self {
         let (socket_buffer, flow_queue, session_buffer) = match profile {
             Profile::Balanced => (1 << 20, 128, 256 * 1024),
-            Profile::Throughput => (4 << 20, 512, 1 << 20),
+            Profile::Ultraspeed => (4 << 20, 512, 1 << 20),
             Profile::Gaming => (1 << 20, 64, 128 * 1024),
         };
         Self {
@@ -608,7 +636,7 @@ impl Tuning {
     pub fn for_profile(profile: Profile) -> Self {
         let buffer_size = match profile {
             Profile::Balanced => 64 * 1024,
-            Profile::Throughput => 256 * 1024,
+            Profile::Ultraspeed => 256 * 1024,
             Profile::Gaming => 16 * 1024,
         };
         Self {
@@ -667,13 +695,25 @@ pub struct MuxSettings {
     pub max_lifetime: Option<Duration>,
     /// Coalesce queued frames into one record before writing; off means flush every frame.
     pub coalesce: bool,
+    /// Ping interval (kmux pings, QUIC keep-alives); a peer silent for twice as long is
+    /// dead.
+    pub ping_interval: Duration,
+    /// UDP datagram bytes a session queues for sending.
+    pub datagram_buffer: usize,
+    /// UDP datagrams each flow queues on the receiving side.
+    pub datagram_queue: usize,
+    /// `TCP_NOTSENT_LOWAT` for TCP connections carrying mux (see
+    /// [`Tuning::notsent_lowat`]); `None`: off.
+    pub notsent_lowat: Option<u32>,
 }
 
 impl MuxSettings {
-    fn for_profile(profile: Profile, transport: TransportKind) -> Self {
+    /// `tuning`: the profile's tuning with `[tuning]` applied, for the values mux takes
+    /// from it by default.
+    fn for_profile(profile: Profile, transport: TransportKind, tuning: &Tuning) -> Self {
         let (stream_window, connections) = match profile {
             Profile::Balanced => (256 * 1024, 4),
-            Profile::Throughput => (1024 * 1024, 8),
+            Profile::Ultraspeed => (1024 * 1024, 8),
             Profile::Gaming => (64 * 1024, 2),
         };
         // QUIC streams do not block each other, so more connections only buy more
@@ -690,6 +730,10 @@ impl MuxSettings {
             stream_window,
             max_lifetime: None,
             coalesce: profile != Profile::Gaming,
+            ping_interval: tuning.keepalive,
+            datagram_buffer: tuning.udp.session_buffer,
+            datagram_queue: tuning.udp.flow_queue,
+            notsent_lowat: Some(NOTSENT_LOWAT),
         }
     }
 
@@ -708,6 +752,21 @@ impl MuxSettings {
         }
         if let Some(v) = o.max_lifetime_secs {
             self.max_lifetime = Some(Duration::from_secs(v));
+        }
+        if let Some(v) = o.coalesce {
+            self.coalesce = v;
+        }
+        if let Some(v) = o.ping_interval_secs {
+            self.ping_interval = Duration::from_secs(v);
+        }
+        if let Some(v) = o.datagram_buffer {
+            self.datagram_buffer = v;
+        }
+        if let Some(v) = o.datagram_queue {
+            self.datagram_queue = v;
+        }
+        if let Some(v) = o.notsent_lowat {
+            self.notsent_lowat = (v > 0).then_some(v);
         }
         self
     }
@@ -729,6 +788,10 @@ const KCP_MTU_FEC: usize = 1429;
 const KCP_FEC_DATA: std::ops::RangeInclusive<usize> = 1..=64;
 const KCP_FEC_PARITY: std::ops::RangeInclusive<usize> = 1..=32;
 const MUX_MIN_LIFETIME_SECS: u64 = 60;
+const MUX_PING_INTERVAL_SECS: std::ops::RangeInclusive<u64> = 1..=600;
+const MUX_DATAGRAM_BUFFER: std::ops::RangeInclusive<usize> = 16 * 1024..=64 * 1024 * 1024;
+const MUX_DATAGRAM_QUEUE: std::ops::RangeInclusive<usize> = 8..=65536;
+const MUX_NOTSENT_LOWAT: std::ops::RangeInclusive<u32> = 4 * 1024..=16 * 1024 * 1024;
 /// See [`Tuning::notsent_lowat`]. Over a throttled 20 Mbit/s link with four bulk
 /// transfers next to UDP pings (`udp_latency_under_load`), it cut the UDP round trip
 /// from about 340 ms to about 60 ms (the rest is the link's own buffer), with no
@@ -776,14 +839,17 @@ impl Config {
 
     pub fn tuning(&self) -> Tuning {
         let mut tuning = Tuning::for_profile(self.profile).apply(&self.tuning);
-        if self.mux().enabled {
-            tuning.notsent_lowat = Some(NOTSENT_LOWAT);
+        let mux = self.mux();
+        if mux.enabled {
+            tuning.notsent_lowat = mux.notsent_lowat;
         }
         tuning
     }
 
     pub fn mux(&self) -> MuxSettings {
-        MuxSettings::for_profile(self.profile, self.tunnel.transport).apply(&self.tunnel.mux)
+        let tuning = Tuning::for_profile(self.profile).apply(&self.tuning);
+        MuxSettings::for_profile(self.profile, self.tunnel.transport, &tuning)
+            .apply(&self.tunnel.mux)
     }
 
     /// Settings that are valid but weaken the tunnel; shown by `kariz check` and at startup.
@@ -793,10 +859,17 @@ impl Config {
             warnings
                 .push("tunnel.encryption = \"none\": traffic between the servers is not encrypted");
         }
-        if self.tunnel.transport.is_websocket() && self.tuning().keepalive > CDN_IDLE_SAFE {
+        let mux = self.mux();
+        let ping = if mux.enabled {
+            mux.ping_interval
+        } else {
+            self.tuning().keepalive
+        };
+        if self.tunnel.transport.is_websocket() && ping > CDN_IDLE_SAFE {
             warnings.push(
-                "tuning.keepalive_secs is above 90: CDNs close WebSocket connections that \
-                 are idle for about 100 s (Cloudflare)",
+                "the ping interval (tunnel.mux.ping_interval_secs, or tuning.keepalive_secs) \
+                 is above 90 s: CDNs close WebSocket connections that are idle for about \
+                 100 s (Cloudflare)",
             );
         }
         if self.forward.iter().any(|f| f.protocol.has_udp()) && !self.mux().enabled {
@@ -1104,6 +1177,37 @@ impl Config {
         {
             bail!("tunnel.mux.max_lifetime_secs must be at least {MUX_MIN_LIFETIME_SECS}");
         }
+        if !MUX_PING_INTERVAL_SECS.contains(&mux.ping_interval.as_secs()) {
+            bail!(
+                "tunnel.mux.ping_interval_secs must be between {} and {}",
+                MUX_PING_INTERVAL_SECS.start(),
+                MUX_PING_INTERVAL_SECS.end()
+            );
+        }
+        if !MUX_DATAGRAM_BUFFER.contains(&mux.datagram_buffer) {
+            bail!(
+                "tunnel.mux.datagram_buffer must be between {} and {} bytes",
+                MUX_DATAGRAM_BUFFER.start(),
+                MUX_DATAGRAM_BUFFER.end()
+            );
+        }
+        if !MUX_DATAGRAM_QUEUE.contains(&mux.datagram_queue) {
+            bail!(
+                "tunnel.mux.datagram_queue must be between {} and {} packets",
+                MUX_DATAGRAM_QUEUE.start(),
+                MUX_DATAGRAM_QUEUE.end()
+            );
+        }
+        if mux
+            .notsent_lowat
+            .is_some_and(|v| !MUX_NOTSENT_LOWAT.contains(&v))
+        {
+            bail!(
+                "tunnel.mux.notsent_lowat must be 0 (off) or between {} and {} bytes",
+                MUX_NOTSENT_LOWAT.start(),
+                MUX_NOTSENT_LOWAT.end()
+            );
+        }
         Ok(())
     }
 
@@ -1332,6 +1436,18 @@ mod tests {
     }
 
     #[test]
+    fn ultraspeed_profile_also_under_its_old_name() {
+        for name in ["ultraspeed", "throughput"] {
+            let text = format!("profile = \"{name}\"\n{}", entry_reverse());
+            let c = Config::parse(&text).unwrap();
+            assert_eq!(c.profile, Profile::Ultraspeed, "{name}");
+            assert_eq!(c.profile.name(), "ultraspeed");
+            assert_eq!(c.mux().stream_window, 1024 * 1024);
+            assert_eq!(c.tuning().buffer_size, 256 * 1024);
+        }
+    }
+
+    #[test]
     fn gaming_profile_turns_kcp_fec_on_unless_set() {
         let kcp = |profile: &str, table: &str| {
             let text = format!(
@@ -1342,6 +1458,7 @@ mod tests {
         };
         assert_eq!(kcp("gaming", ""), Some((10, 3)));
         assert_eq!(kcp("balanced", ""), None);
+        assert_eq!(kcp("ultraspeed", ""), None);
         assert_eq!(kcp("throughput", ""), None);
         // Set in the table: the table wins, off included.
         assert_eq!(kcp("gaming", "fec_data = 0\nfec_parity = 0"), None);
@@ -1558,6 +1675,71 @@ mod tests {
             let c = parse_unchecked(&with_transport("entry", transport, ""));
             assert_eq!(c.tuning().notsent_lowat, Some(NOTSENT_LOWAT), "{transport}");
         }
+    }
+
+    #[test]
+    fn mux_settings_default_to_the_profile_and_can_be_set() {
+        let mux_of = |top: &str, table: &str| {
+            let text = format!(
+                "{top}\n{}",
+                with_transport("entry", "tcpmux", &format!("[tunnel.mux]\n{table}"))
+            );
+            let c = Config::parse(&text).unwrap();
+            (c.mux(), c.tuning())
+        };
+        // Defaults: the profile's values, and the keepalive for pings.
+        let (mux, tuning) = mux_of("", "");
+        assert!(mux.coalesce);
+        assert_eq!(mux.ping_interval, tuning.keepalive);
+        assert_eq!(mux.datagram_buffer, tuning.udp.session_buffer);
+        assert_eq!(mux.datagram_queue, tuning.udp.flow_queue);
+        assert_eq!(tuning.notsent_lowat, Some(NOTSENT_LOWAT));
+        let (gaming, _) = mux_of("profile = \"gaming\"", "");
+        assert!(!gaming.coalesce);
+        assert_eq!(gaming.ping_interval, Duration::from_secs(10));
+        // [tuning] keepalive_secs still sets the ping when the mux table does not.
+        let text = format!(
+            "{}[tuning]\nkeepalive_secs = 20\n",
+            with_transport("entry", "tcpmux", "")
+        );
+        let c = Config::parse(&text).unwrap();
+        assert_eq!(c.mux().ping_interval, Duration::from_secs(20));
+        // A 1 s keepalive, valid before the mux setting existed, stays valid.
+        let text = format!(
+            "{}[tuning]
+keepalive_secs = 1
+",
+            with_transport("entry", "ws", "")
+        );
+        assert!(Config::parse(&text).is_ok());
+
+        // Set by hand.
+        let (mux, tuning) = mux_of(
+            "",
+            "coalesce = false\nping_interval_secs = 15\ndatagram_buffer = 65536\n\
+             datagram_queue = 32\nnotsent_lowat = 65536",
+        );
+        assert!(!mux.coalesce);
+        assert_eq!(mux.ping_interval, Duration::from_secs(15));
+        assert_eq!((mux.datagram_buffer, mux.datagram_queue), (65536, 32));
+        assert_eq!(tuning.notsent_lowat, Some(65536));
+        let (mux, tuning) = mux_of("", "notsent_lowat = 0");
+        assert_eq!((mux.notsent_lowat, tuning.notsent_lowat), (None, None));
+
+        for (table, needle) in [
+            ("ping_interval_secs = 0", "ping_interval_secs"),
+            ("ping_interval_secs = 601", "ping_interval_secs"),
+            ("datagram_buffer = 1024", "datagram_buffer"),
+            ("datagram_queue = 4", "datagram_queue"),
+            ("notsent_lowat = 100", "notsent_lowat"),
+        ] {
+            let text = with_transport("entry", "tcpmux", &format!("[tunnel.mux]\n{table}"));
+            let err = parse_err(&text);
+            assert!(err.contains(needle), "{table}: {err}");
+        }
+        // A CDN cuts idle WebSockets after about 100 s: warned for the mux ping too.
+        let ws = with_transport("entry", "ws", "[tunnel.mux]\nping_interval_secs = 120");
+        assert!(Config::parse(&ws).unwrap().warnings()[0].contains("90"));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 # the exit side connects to us on tunnel.listen.
 role = "entry"
 mode = "reverse"
-profile = "balanced"   # balanced | throughput | gaming
+profile = "balanced"   # balanced | ultraspeed | gaming
 
 [tunnel]
 transport = "tcp"      # tcp | tcpmux | ws | wss; see the other samples
