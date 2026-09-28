@@ -18,7 +18,8 @@ use crate::crypto::record::{
     Opener, Sealer, SecureReader, SecureStream, SecureWriter, MAX_PAYLOAD,
 };
 use crate::crypto::{random_below, Cipher, Crypto, ReplayFilter};
-use crate::mux::{MuxStream, Transport};
+use crate::mux::Transport;
+use crate::session::SessionStream;
 use crate::transport::{Dialer, Incoming, TunnelReader, TunnelStream, TunnelWriter};
 
 /// A failed handshake is drained for a random time in this range (seconds).
@@ -106,23 +107,13 @@ impl Transport for Link {
 pub enum Channel {
     /// A whole link used for this connection alone.
     Link(Link),
-    /// One stream of a mux session.
-    Mux(MuxStream),
+    /// One stream of a session (kmux).
+    Stream(SessionStream),
 }
 
 impl From<Link> for Channel {
     fn from(link: Link) -> Self {
         Self::Link(link)
-    }
-}
-
-impl Channel {
-    /// See [`Link::is_alive`]. Mux sessions watch their connection themselves (pings).
-    pub fn is_alive(&mut self) -> bool {
-        match self {
-            Self::Link(l) => l.is_alive(),
-            Self::Mux(_) => true,
-        }
     }
 }
 
@@ -281,64 +272,6 @@ impl AsyncWrite for Link {
         match self.get_mut() {
             Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
             Self::Secure(s) => Pin::new(&mut **s).poll_shutdown(cx),
-        }
-    }
-}
-
-impl AsyncRead for Channel {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Link(s) => Pin::new(s).poll_read(cx, buf),
-            Self::Mux(s) => Pin::new(s).poll_read(cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for Channel {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Link(s) => Pin::new(s).poll_write(cx, buf),
-            Self::Mux(s) => Pin::new(s).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[io::IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Link(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-            Self::Mux(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-        }
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        match self {
-            Self::Link(s) => s.is_write_vectored(),
-            Self::Mux(s) => s.is_write_vectored(),
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Link(s) => Pin::new(s).poll_flush(cx),
-            Self::Mux(s) => Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Link(s) => Pin::new(s).poll_shutdown(cx),
-            Self::Mux(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }

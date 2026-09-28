@@ -30,16 +30,17 @@ supported for every transport.
 | 1 | Project skeleton, CLI, TOML config, profiles, mutual auth, plain `tcp` transport, reverse + direct modes, tests, CI | **done (v0.1.0)** |
 | 2 | Encryption layer, `tcpmux`, `ws` / `wss` (CDN friendly); plan in [PHASE2.md](PHASE2.md) | **done (v0.2.0)** |
 | 3 | UDP forwarding and UDP-over-stream framing; plan in [PHASE3.md](PHASE3.md) | **done (v0.3.0)** |
-| 4 | `kcp` (full settings + Reed-Solomon FEC) and `quic` (quinn; BBR/Cubic, 0-RTT, datagrams, GSO/GRO) | planned |
+| 4 | `kcp` (full settings + Reed-Solomon FEC) and `quic` (quinn; BBR/Cubic, datagrams, GSO/GRO); plan in [PHASE4.md](PHASE4.md) | **done (v0.4.0)** |
 | 5 | `icmp` transport (raw sockets, needs `CAP_NET_RAW`) | planned |
 | 6 | Full `gaming` profile (packet duplication, DSCP), `stealth` profile (padding, timing), active-probe fallback | planned |
 | 7 | Release builds (static musl for x86_64 / aarch64 / armv7, mimalloc), integration into XRayMesh as a backend | planned |
 
 ## Protocol (v2)
 
-0. **Transport**: a TCP connection (`tcp`, `tcpmux`), or a WebSocket over TCP (`ws`) or
-   TLS (`wss`) that looks like a browser's (see `src/transport/`). Everything below
-   travels inside it.
+0. **Transport**: a TCP connection (`tcp`, `tcpmux`), a WebSocket over TCP (`ws`) or
+   TLS (`wss`) that looks like a browser's, or KCP over UDP with every packet sealed by
+   a key from the token (`kcp`) (see `src/transport/`). Everything below travels inside
+   it. (`quic` replaces the layers below with its own; see PHASE4.md.)
 1. **Handshake** (see `src/crypto/handshake.rs`): mutual authentication with the shared
    token plus an X25519 exchange for forward secrecy. The hello is masked and padded to a
    random length, so it has no fixed bytes and no fixed size; replays are rejected.

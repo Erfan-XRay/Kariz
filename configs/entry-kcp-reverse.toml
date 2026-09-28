@@ -1,0 +1,29 @@
+# Entry side (Iran), reverse mode over KCP, for a lossy link where TCP collapses: KCP
+# resends aggressively and keeps its rate under loss. Pair: exit-kcp-reverse.toml.
+#
+# Every UDP packet is encrypted with a key from the token, so the port answers nothing
+# else. KCP spends bandwidth for speed and runs over UDP, which some networks throttle;
+# where UDP is unreliable, use tcpmux or wss.
+role = "entry"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "kcp"                  # handshake, encryption and mux run on top, as over tcp
+listen = "0.0.0.0:4000"            # UDP port
+token = "CHANGE-ME-run-kariz-token"
+
+[tunnel.kcp]
+mode = "fast2"                     # normal | fast | fast2 | fast3 | manual
+# send_window = 1024               # packets; about bandwidth x RTT / 1300 fills the path.
+# recv_window = 1024               #   Smaller: less queueing, less speed under loss.
+# mtu = 1350
+# fec_data = 10                    # FEC: 3 parity packets per 10 rebuild lost ones without
+# fec_parity = 3                   #   a resend (lower latency, 30 % more packets)
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"
+
+[log]
+level = "info"

@@ -3,13 +3,11 @@
 //! See `docs/PHASE2.md`, section 5, for the design and the frame format.
 
 pub mod frame;
-mod manager;
 mod session;
 
 use std::io;
 use std::time::Duration;
 
-pub use manager::{maintain, SessionPool};
 pub use session::{DatagramStats, MuxSession, MuxStream, INITIAL_WINDOW, MAX_DATA_FRAME};
 
 use crate::config::{MuxSettings, Tuning};
@@ -76,7 +74,7 @@ pub enum ResetReason {
 }
 
 impl ResetReason {
-    fn id(self) -> u8 {
+    pub(crate) fn id(self) -> u8 {
         match self {
             Self::Cancel => 0,
             Self::DialFailed => 1,
@@ -86,7 +84,7 @@ impl ResetReason {
         }
     }
 
-    fn from_id(id: u8) -> Self {
+    pub(crate) fn from_id(id: u8) -> Self {
         match id {
             1 => Self::DialFailed,
             2 => Self::Refused,
@@ -123,4 +121,4 @@ impl ResetReason {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

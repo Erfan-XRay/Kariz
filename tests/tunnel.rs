@@ -1,19 +1,26 @@
 //! End-to-end tests: user -> entry -> tunnel -> exit -> echo server, on localhost.
 
+mod link;
+
 use std::time::{Duration, Instant};
 
 use kariz::config::Config;
+use link::{Counts, Impairment, TcpLink, UdpLink};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 const TOKEN: &str = "test-token-0123456789abcdef";
 
+/// A port free for both TCP and UDP: tunnel ports of UDP transports and `tcp+udp`
+/// forward ports need both.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    loop {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// Echoes TCP and UDP on the same port.
@@ -25,9 +32,6 @@ async fn echo_server() -> u16 {
         let Ok(udp) = UdpSocket::bind(("127.0.0.1", port)).await else {
             continue;
         };
-        // Several clients send 60 KB packets at once: with the kernel's default buffer
-        // (about 208 KB) the target itself would drop some, and the tests are strict.
-        let _ = socket2::SockRef::from(&udp).set_recv_buffer_size(4 << 20);
         tokio::spawn(async move {
             loop {
                 let (mut s, _) = listener.accept().await.unwrap();
@@ -37,13 +41,18 @@ async fn echo_server() -> u16 {
                 });
             }
         });
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 65_536];
-            while let Ok((n, from)) = udp.recv_from(&mut buf).await {
-                let _ = udp.send_to(&buf[..n], from).await;
-            }
-        });
+        tokio::spawn(udp_echo(udp));
         return port;
+    }
+}
+
+async fn udp_echo(udp: UdpSocket) {
+    // Several clients send 60 KB packets at once: with the kernel's default buffer
+    // (about 208 KB) the target itself would drop some, and the tests are strict.
+    let _ = socket2::SockRef::from(&udp).set_recv_buffer_size(4 << 20);
+    let mut buf = vec![0u8; 65_536];
+    while let Ok((n, from)) = udp.recv_from(&mut buf).await {
+        let _ = udp.send_to(&buf[..n], from).await;
     }
 }
 
@@ -82,6 +91,14 @@ struct Setup {
     udp_max_flows: usize,
     /// `tunnel.mux.connections`; 0 keeps the default.
     mux_connections: usize,
+    /// `tunnel.quic.congestion`; empty keeps the default.
+    congestion: &'static str,
+    /// `tunnel.mux.stream_window`; 0 keeps the default.
+    stream_window: usize,
+    /// `tunnel.kcp.fec_data` / `fec_parity`; 0 keeps FEC off.
+    fec: (usize, usize),
+    /// More `[tunnel.kcp]` lines.
+    kcp_options: &'static str,
 }
 
 impl Setup {
@@ -98,6 +115,35 @@ impl Setup {
             udp_timeout_secs: 0,
             udp_max_flows: 0,
             mux_connections: 0,
+            congestion: "",
+            stream_window: 0,
+            fec: (0, 0),
+            kcp_options: "",
+        }
+    }
+
+    const fn kcp_options(self, kcp_options: &'static str) -> Self {
+        Self {
+            kcp_options,
+            ..self
+        }
+    }
+
+    const fn fec(self, data: usize, parity: usize) -> Self {
+        Self {
+            fec: (data, parity),
+            ..self
+        }
+    }
+
+    const fn congestion(self, congestion: &'static str) -> Self {
+        Self { congestion, ..self }
+    }
+
+    const fn stream_window(self, stream_window: usize) -> Self {
+        Self {
+            stream_window,
+            ..self
         }
     }
 
@@ -158,6 +204,28 @@ impl Setup {
         }
     }
 
+    /// QUIC: its own streams, datagrams and TLS. A short keepalive, since a QUIC peer
+    /// that dies is only noticed by its silence (idle timeout = keepalive).
+    const fn quic(mode: &'static str) -> Self {
+        Self {
+            transport: "quic",
+            mux: true,
+            keepalive_secs: 5,
+            ..Self::tcp(mode)
+        }
+    }
+
+    /// KCP: a stream transport over UDP. The same short keepalive as QUIC, since a KCP
+    /// peer that dies is also only noticed by its silence.
+    const fn kcp(mode: &'static str) -> Self {
+        Self {
+            transport: "kcp",
+            mux: true,
+            keepalive_secs: 5,
+            ..Self::tcp(mode)
+        }
+    }
+
     const fn no_mux(self) -> Self {
         Self { mux: false, ..self }
     }
@@ -187,6 +255,9 @@ impl Setup {
         if self.mux_connections > 0 {
             options += &format!("connections = {}\n", self.mux_connections);
         }
+        if self.stream_window > 0 {
+            options += &format!("stream_window = {}\n", self.stream_window);
+        }
         if self.transport.starts_with("ws") {
             options += &format!("[tunnel.ws]\npath = \"{}\"\n", self.ws_path);
             if self.early_data && !listening {
@@ -208,6 +279,17 @@ impl Setup {
                 };
                 format!("[tunnel.tls]\nsni = \"tunnel.example\"\npin_sha256 = \"{pin}\"\n")
             };
+        }
+        if self.fec.0 > 0 || !self.kcp_options.is_empty() {
+            options += "[tunnel.kcp]\n";
+            if self.fec.0 > 0 {
+                options += &format!("fec_data = {}\nfec_parity = {}\n", self.fec.0, self.fec.1);
+            }
+            options += self.kcp_options;
+            options += "\n";
+        }
+        if !self.congestion.is_empty() {
+            options += &format!("[tunnel.quic]\ncongestion = \"{}\"\n", self.congestion);
         }
         options += "[tuning]\n";
         if self.keepalive_secs > 0 {
@@ -263,7 +345,12 @@ impl Side {
     fn start(text: &str) -> Self {
         if std::env::var_os("KARIZ_TEST_LOG").is_some() {
             let _ = tracing_subscriber::fmt()
-                .with_env_filter("kariz=debug")
+                .with_env_filter(
+                    std::env::var("KARIZ_TEST_LOG")
+                        .ok()
+                        .filter(|f| f.contains('='))
+                        .unwrap_or_else(|| "kariz=debug".into()),
+                )
                 .with_thread_names(true)
                 .try_init();
         }
@@ -299,10 +386,13 @@ impl Drop for Side {
     }
 }
 
+/// Something between the two sides (nginx, a link emulator) that runs while it is held.
+type Proxy = Box<dyn Send + Sync>;
+
 struct Tunnel {
     user_port: u16,
     /// Held only to keep a proxy between the two sides running.
-    _proxy: Option<Nginx>,
+    _proxy: Option<Proxy>,
     /// Held only to keep the entry side running.
     _entry: Side,
     exit: Option<Side>,
@@ -351,7 +441,7 @@ async fn start_via(
     entry_token: &str,
     exit_token: &str,
     target_port: u16,
-    proxy: impl FnOnce(u16) -> (u16, Option<Nginx>),
+    proxy: impl FnOnce(u16) -> (u16, Option<Proxy>),
 ) -> Tunnel {
     let tunnel_port = free_port();
     let (dial_port, proxy) = proxy(tunnel_port);
@@ -648,6 +738,13 @@ tunnel_tests! {
     ws_direct_no_mux_early: Setup::ws("direct").no_mux().early_data();
     ws_reverse_early: Setup::ws("reverse").early_data();
     wss_direct_early: Setup::wss("direct").early_data();
+    quic_reverse: Setup::quic("reverse");
+    quic_direct: Setup::quic("direct");
+    kcp_reverse: Setup::kcp("reverse");
+    kcp_direct: Setup::kcp("direct");
+    kcp_reverse_no_mux: Setup::kcp("reverse").no_mux();
+    kcp_direct_no_mux_chacha: Setup::kcp("direct").no_mux().encryption("chacha20-poly1305");
+    kcp_reverse_fec: Setup::kcp("reverse").fec(10, 3);
 }
 
 /// A `wss` dialer that pins another certificate refuses the listener, so nothing passes.
@@ -854,7 +951,7 @@ async fn check_through_nginx(entry: Setup, exit: Setup, survives: bool) {
     let target = echo_server().await;
     let tunnel = start_via(entry, exit, TOKEN, TOKEN, target, |upstream| {
         let nginx = Nginx::start(&bin, upstream, path, tls, NGINX_IDLE_SECS);
-        (nginx.port, Some(nginx))
+        (nginx.port, Some(Box::new(nginx)))
     })
     .await;
 
@@ -1165,6 +1262,8 @@ async fn udp_throughput() {
         ("tcp, no mux", Setup::tcp("direct")),
         ("ws + mux", Setup::ws("direct")),
         ("wss + mux", Setup::wss("direct")),
+        ("quic", Setup::quic("direct")),
+        ("kcp + mux", Setup::kcp("direct")),
     ] {
         for size in [100usize, 1400] {
             let target = echo_server().await;
@@ -1243,6 +1342,8 @@ async fn udp_idle_latency() {
         ("tcpmux", Setup::tcp("direct").transport("tcpmux").mux()),
         ("tcp, no mux", Setup::tcp("direct")),
         ("wss + mux", Setup::wss("direct")),
+        ("quic", Setup::quic("direct")),
+        ("kcp + mux", Setup::kcp("direct")),
     ] {
         let tunnel = start(setup, TOKEN, TOKEN, target).await;
         let t = rtts(tunnel.user_port).await;
@@ -1252,5 +1353,280 @@ async fn udp_idle_latency() {
             us(percentile(&t, 0.5)) - us(percentile(&direct, 0.5)),
             us(percentile(&t, 0.99))
         );
+    }
+}
+
+/// A target for the lossy-link benchmark: each TCP connection gets an endless download,
+/// UDP packets on the same port are echoed.
+async fn download_server() -> u16 {
+    loop {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let Ok(udp) = UdpSocket::bind(("127.0.0.1", port)).await else {
+            continue;
+        };
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let chunk = pattern(64 * 1024);
+                    while s.write_all(&chunk).await.is_ok() {}
+                });
+            }
+        });
+        tokio::spawn(udp_echo(udp));
+        return port;
+    }
+}
+
+/// Download rate in Mbit/s, measured over `window` after `warmup`.
+async fn download(port: u16, warmup: Duration, window: Duration) -> f64 {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut buf = vec![0u8; 256 * 1024];
+    let from = Instant::now() + warmup;
+    let until = from + window;
+    let mut total = 0;
+    while let Ok(read) = tokio::time::timeout_at(until.into(), s.read(&mut buf)).await {
+        let n = read.expect("download failed");
+        assert!(n > 0, "download ended early");
+        if Instant::now() >= from {
+            total += n;
+        }
+    }
+    total as f64 * 8.0 / window.as_secs_f64() / 1e6
+}
+
+/// UDP round trips of a flow, sorted, and how many packets were sent.
+struct Pings {
+    rtts: Vec<Duration>,
+    sent: usize,
+}
+
+impl std::fmt::Display for Pings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ms = |p| percentile(&self.rtts, p).as_secs_f64() * 1000.0;
+        let lost = 100.0 * (1.0 - self.rtts.len() as f64 / self.sent as f64);
+        if self.rtts.is_empty() {
+            return write!(f, "{:>34}", "no answers");
+        }
+        write!(
+            f,
+            "p50 {:>4.0} p99 {:>4.0} ms, {lost:>4.1} % lost",
+            ms(0.5),
+            ms(0.99)
+        )
+    }
+}
+
+/// Sends `count` 100-byte packets on one flow, one every `every` without waiting for
+/// answers (a lost packet is lost, not waited for), like a game or a voice call.
+async fn pings(port: u16, count: u32, every: Duration) -> Pings {
+    let sock = std::sync::Arc::new(udp_client(port).await);
+    let deadline = Instant::now() + every * count + Duration::from_secs(2);
+    let receiver = {
+        let sock = sock.clone();
+        tokio::spawn(async move {
+            let mut got = Vec::new();
+            let mut buf = [0u8; 2048];
+            while let Ok(Ok(4..)) =
+                tokio::time::timeout_at(deadline.into(), sock.recv(&mut buf)).await
+            {
+                got.push((
+                    u32::from_be_bytes(buf[..4].try_into().unwrap()),
+                    Instant::now(),
+                ));
+            }
+            got
+        })
+    };
+    let mut sent = Vec::new();
+    let mut packet = [0u8; 100];
+    let mut interval = tokio::time::interval(every);
+    for seq in 0..count {
+        interval.tick().await;
+        packet[..4].copy_from_slice(&seq.to_be_bytes());
+        sent.push(Instant::now());
+        let _ = sock.send(&packet).await;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut rtts: Vec<_> = receiver
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|&(seq, _)| seen.insert(seq))
+        .map(|(seq, at)| at - sent[seq as usize])
+        .collect();
+    rtts.sort();
+    Pings {
+        rtts,
+        sent: count as usize,
+    }
+}
+
+/// One cell of the lossy-link benchmark.
+struct LinkRun {
+    mbps: f64,
+    idle: Pings,
+    loaded: Pings,
+    link: Counts,
+}
+
+fn is_udp(setup: Setup) -> bool {
+    matches!(setup.transport, "quic" | "kcp")
+}
+
+/// Runs the tunnel over an emulated link (UDP for `quic` and `kcp`, TCP otherwise): UDP pings on
+/// the idle tunnel, then a download with pings next to it.
+async fn over_link(setup: Setup, imp: Impairment) -> LinkRun {
+    const WARMUP: Duration = Duration::from_secs(3);
+    const EVERY: Duration = Duration::from_millis(20);
+    const PINGS: u32 = 500;
+    let target = download_server().await;
+    let mut stats = None;
+    let tunnel = start_via(setup, setup, TOKEN, TOKEN, target, |upstream| {
+        let (port, link_stats, proxy): (_, _, Proxy) = if is_udp(setup) {
+            let link = UdpLink::start(upstream, imp);
+            (link.port, link.stats(), Box::new(link))
+        } else {
+            let link = TcpLink::start(upstream, imp);
+            (link.port, link.stats(), Box::new(link))
+        };
+        stats = Some(link_stats);
+        (port, Some(proxy))
+    })
+    .await;
+    let idle = pings(tunnel.user_port, PINGS, EVERY).await;
+    let window = EVERY * PINGS;
+    let download = tokio::spawn(download(tunnel.user_port, WARMUP, window));
+    tokio::time::sleep(WARMUP).await;
+    let loaded = pings(tunnel.user_port, PINGS, EVERY).await;
+    let mbps = download.await.unwrap();
+    LinkRun {
+        mbps,
+        idle,
+        loaded,
+        link: stats.unwrap().counts(),
+    }
+}
+
+/// Transports over a long, lossy path (PHASE4.md, section 8): 60 ms RTT, 50 Mbit/s each
+/// way with a 50 ms queue, random loss of 0, 1 and 5 % in both directions:
+/// `cargo test --release --test tunnel lossy_link -- --ignored --nocapture`.
+/// `KARIZ_BENCH_LOSS=1` (in percent) runs one loss rate only, `KARIZ_BENCH_ONLY=kcp` the
+/// rows whose name contains `kcp`.
+///
+/// Streams get a 4 MiB window, above the path's bandwidth-delay product plus its queue
+/// (about 690 KB), so congestion control sets the rate. With the default 256 KiB a
+/// stream cannot go faster than 256 KiB per round trip, about 30 Mbit/s here; the
+/// `default window` rows show that cap.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn lossy_link() {
+    link::fine_timers();
+    const WINDOW: usize = 4 << 20;
+    let tcpmux = Setup::tcp("direct").transport("tcpmux").mux();
+    let setups = [
+        ("tcpmux", tcpmux.stream_window(WINDOW)),
+        ("quic cubic", Setup::quic("direct").stream_window(WINDOW)),
+        (
+            "quic bbr",
+            Setup::quic("direct")
+                .congestion("bbr")
+                .stream_window(WINDOW),
+        ),
+        ("kcp fast2", Setup::kcp("direct").stream_window(WINDOW)),
+        (
+            "kcp fast2, fec 10/3",
+            Setup::kcp("direct").fec(10, 3).stream_window(WINDOW),
+        ),
+        (
+            "kcp fast2, window 256",
+            Setup::kcp("direct")
+                .kcp_options("send_window = 256\nrecv_window = 256")
+                .stream_window(WINDOW),
+        ),
+    ];
+    let only = std::env::var("KARIZ_BENCH_ONLY").unwrap_or_default();
+    let default_window = [
+        ("tcpmux, default window", tcpmux),
+        ("quic cubic, default window", Setup::quic("direct")),
+    ];
+    let losses: Vec<f64> = match std::env::var("KARIZ_BENCH_LOSS") {
+        Ok(percent) => vec![percent.parse::<f64>().expect("KARIZ_BENCH_LOSS") / 100.0],
+        Err(_) => vec![0.0, 0.01, 0.05],
+    };
+    println!(
+        "RTT 60 ms, 50 Mbit/s, 50 ms queue. Download over 10 s; UDP: 100-byte packets every 20 ms"
+    );
+    println!(
+        "{:<5} {:<26} {:>13}   {:<33}   {:<33}   link (lost / queue drops)",
+        "loss", "transport", "download", "UDP, idle tunnel", "UDP, during the download"
+    );
+    for loss in losses {
+        let extra = if loss == 0.0 {
+            &default_window[..]
+        } else {
+            &[]
+        };
+        for &(name, setup) in setups.iter().chain(extra) {
+            if !name.contains(only.as_str()) {
+                continue;
+            }
+            let imp = Impairment {
+                delay: Duration::from_millis(30),
+                loss,
+                rate: 50_000_000,
+                queue: Duration::from_millis(50),
+                ..Default::default()
+            };
+            let run = over_link(setup, imp).await;
+            println!(
+                "{:<5} {name:<26} {:>7.1} Mbit/s   {}   {}   {} / {}",
+                format!("{} %", loss * 100.0),
+                run.mbps,
+                run.idle,
+                run.loaded,
+                run.link.lost,
+                run.link.dropped
+            );
+        }
+    }
+}
+
+/// KCP over a link that loses 5 % of the packets each way: everything still arrives, in
+/// both modes, with and without mux, with and without FEC.
+#[tokio::test(flavor = "multi_thread")]
+async fn kcp_transfer_survives_loss() {
+    let runs = [
+        Setup::kcp("direct"),
+        Setup::kcp("reverse"),
+        Setup::kcp("direct").no_mux(),
+        Setup::kcp("direct").fec(10, 3),
+    ]
+    .map(|setup| {
+        tokio::spawn(async move {
+            let target = echo_server().await;
+            let imp = Impairment {
+                delay: Duration::from_millis(5),
+                loss: 0.05,
+                ..Default::default()
+            };
+            let tunnel = start_via(setup, setup, TOKEN, TOKEN, target, |upstream| {
+                let link = UdpLink::start(upstream, imp);
+                (link.port, Some(Box::new(link)))
+            })
+            .await;
+            let payload = pattern(4 << 20);
+            let got = tokio::time::timeout(
+                Duration::from_secs(60),
+                echo_roundtrip(tunnel.user_port, &payload),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{setup:?}: transfer did not finish"))
+            .unwrap();
+            assert!(got == payload, "{setup:?}: payload corrupted");
+        })
+    });
+    for run in runs {
+        run.await.unwrap();
     }
 }

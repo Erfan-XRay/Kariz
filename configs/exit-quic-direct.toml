@@ -1,0 +1,14 @@
+# Exit side (abroad), direct mode over QUIC. Pair: entry-quic-direct.toml.
+# Both sides authenticate each other with keys derived from the token: no certificate
+# files are needed.
+role = "exit"
+mode = "direct"
+profile = "balanced"
+
+[tunnel]
+transport = "quic"
+listen = "0.0.0.0:443"             # UDP port
+token = "CHANGE-ME-run-kariz-token"
+
+[log]
+level = "info"

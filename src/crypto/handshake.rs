@@ -107,6 +107,13 @@ impl Psk {
         h.finalize()
     }
 
+    /// A key for another use of the token (e.g. the QUIC identity), independent of the
+    /// handshake's keys thanks to its own `context`.
+    #[cfg_attr(not(any(feature = "quic", feature = "kcp")), allow(dead_code))]
+    pub(crate) fn subkey(&self, context: &str) -> Key {
+        self.derive(context, &[])
+    }
+
     fn derive(&self, context: &str, parts: &[&[u8]]) -> Key {
         let mut h = blake3::Hasher::new_derive_key(context);
         h.update(&self.psk);
@@ -453,24 +460,41 @@ mod tests {
         assert_ne!(seen[0], seen[1]);
     }
 
+    /// With the wrong key, the padding length unmasks to a random value. Mostly that
+    /// fails the tag (`PermissionDenied`), but a value up to `MAX_PAD` and beyond what was
+    /// sent makes the read run into the end of the stream (`UnexpectedEof`). Both are a
+    /// rejection.
+    fn is_rejection(e: &io::Error) -> bool {
+        matches!(
+            e.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::UnexpectedEof
+        )
+    }
+
     #[tokio::test]
     async fn wrong_token_is_rejected_both_ways() {
         let a = Psk::new("token-a-token-a-token-a");
         let b = Psk::new("token-b-token-b-token-b");
-        let (hello, state) = client_hello(&a, Cipher::Aes256Gcm, false, false).unwrap();
-        let (acc, _) = run(&hello, state, &b, &ReplayFilter::default(), any_cipher).await;
-        assert_eq!(acc.err().unwrap().kind(), io::ErrorKind::PermissionDenied);
+        // Many hellos, so the rare unmasked lengths are covered too.
+        for _ in 0..200 {
+            let (hello, state) = client_hello(&a, Cipher::Aes256Gcm, false, false).unwrap();
+            let (acc, _) = run(&hello, state, &b, &ReplayFilter::default(), any_cipher).await;
+            let err = acc.err().expect("wrong token accepted");
+            assert!(is_rejection(&err), "{err:?}");
 
-        // A fake acceptor that does not know the token cannot produce a valid reply.
-        let (_, state) = client_hello(&a, Cipher::Aes256Gcm, false, false).unwrap();
-        let (fake_hello, _) = client_hello(&b, Cipher::Aes256Gcm, false, false).unwrap();
-        let (mut client, mut server) = tokio::io::duplex(4096);
-        client.write_all(&fake_hello).await.unwrap();
-        accept(&mut server, &b, &ReplayFilter::default(), any_cipher, false)
-            .await
-            .unwrap();
-        let err = state.read_reply(&mut client).await.err().unwrap();
-        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+            // A fake acceptor that does not know the token cannot produce a valid reply.
+            let (_, state) = client_hello(&a, Cipher::Aes256Gcm, false, false).unwrap();
+            let (fake_hello, _) = client_hello(&b, Cipher::Aes256Gcm, false, false).unwrap();
+            let (mut client, mut server) = tokio::io::duplex(4096);
+            client.write_all(&fake_hello).await.unwrap();
+            accept(&mut server, &b, &ReplayFilter::default(), any_cipher, false)
+                .await
+                .unwrap();
+            // Nothing more comes, so a long unmasked padding ends in EOF, not a wait.
+            server.shutdown().await.unwrap();
+            let err = state.read_reply(&mut client).await.err().unwrap();
+            assert!(is_rejection(&err), "{err:?}");
+        }
     }
 
     #[tokio::test]

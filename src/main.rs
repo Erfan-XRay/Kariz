@@ -119,6 +119,9 @@ fn print_summary(config: &Config) {
     }
     let cipher = Cipher::for_config(config.tunnel.encryption);
     match config.tunnel.encryption {
+        _ if config.tunnel.transport == TransportKind::Quic => {
+            println!("  encryption: TLS 1.3 (QUIC), both sides authenticated by the token")
+        }
         Encryption::Auto if config.is_acceptor() => {
             println!("  encryption: auto (accepts chacha20-poly1305 and aes-256-gcm)")
         }
@@ -142,6 +145,38 @@ fn print_summary(config: &Config) {
         let path = ws.map_or("/", |w| w.path.as_str());
         let host = ws.and_then(|w| w.host.as_deref()).unwrap_or("-");
         println!("  ws        : path={path} host={host}");
+    }
+    if config.tunnel.transport == TransportKind::Quic {
+        let quic = config.tunnel.quic.clone().unwrap_or_default();
+        let sni = match &quic.sni {
+            Some(sni) => format!(" sni={sni}"),
+            None => String::new(),
+        };
+        println!(
+            "  quic      : congestion={} alpn={}{sni}",
+            quic.congestion.name(),
+            quic.alpn
+        );
+    }
+    if config.tunnel.transport == TransportKind::Kcp {
+        let kcp = config.tunnel.kcp.clone().unwrap_or_default();
+        let t = kcp.timing();
+        println!(
+            "  kcp       : mode={} (nodelay={} interval={}ms resend={} no_congestion={}) \
+             window={}/{} mtu={} fec={}, packets sealed with the token",
+            kcp.mode.name(),
+            t.nodelay,
+            t.interval_ms,
+            t.resend,
+            t.no_congestion,
+            kcp.send_window,
+            kcp.recv_window,
+            kcp.mtu,
+            match kcp.fec() {
+                Some((data, parity)) => format!("{data}+{parity}"),
+                None => "off".into(),
+            }
+        );
     }
     if config.tunnel.transport == TransportKind::Wss {
         let tls = config.tunnel.tls.clone().unwrap_or_default();
