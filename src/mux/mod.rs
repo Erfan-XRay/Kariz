@@ -10,7 +10,7 @@ use std::io;
 use std::time::Duration;
 
 pub use manager::{maintain, SessionPool};
-pub use session::{MuxSession, MuxStream, INITIAL_WINDOW, MAX_DATA_FRAME};
+pub use session::{DatagramStats, MuxSession, MuxStream, INITIAL_WINDOW, MAX_DATA_FRAME};
 
 use crate::config::{MuxSettings, Tuning};
 
@@ -41,6 +41,11 @@ pub struct SessionConfig {
     pub keepalive: Duration,
     /// Gather queued frames into larger writes (off: one frame per write).
     pub coalesce: bool,
+    /// Datagram bytes (with frame headers) the session queues for sending; more are
+    /// dropped.
+    pub datagram_buffer: usize,
+    /// Datagrams each stream queues on the receive side; the oldest are dropped.
+    pub datagram_queue: usize,
 }
 
 impl SessionConfig {
@@ -50,6 +55,8 @@ impl SessionConfig {
             max_streams: mux.max_streams,
             keepalive: tuning.keepalive,
             coalesce: mux.coalesce,
+            datagram_buffer: tuning.udp.session_buffer,
+            datagram_queue: tuning.udp.flow_queue,
         }
     }
 }

@@ -68,8 +68,10 @@ A flow is a mux stream opened with `SYN(Open{kind: UDP})`. Its packets travel as
 type = 8 (DGRAM) | stream_id (4, BE) | length (2, BE) | packet
 ```
 
-- `DATA` is not used on UDP streams (it is a protocol error there). `FIN` / `RST` end
-  the flow as for TCP streams; a failed target lookup is `RST(dial_failed)`.
+- `DATA` is not used on UDP streams. The session does not look inside the `SYN`, so it
+  does not police this: `DATA` sent there only fills that stream's own window, which
+  nobody reads, and harms no other stream. `FIN` / `RST` end the flow as for TCP
+  streams; a failed target lookup is `RST(dial_failed)`.
 - `DGRAM` frames are **not** counted against the stream's flow-control window: a
   datagram that cannot be queued is dropped, never waited for.
 - A `DGRAM` for an unknown or closed stream is dropped silently (it can race with a
@@ -110,7 +112,24 @@ whatever else is queued. Received datagrams go into a per-flow queue of at most
 the oldest packets are dropped, since for real-time traffic a fresh packet is worth more
 than a stale one.
 
-API (sketch):
+*Status after 3.2:* implemented as described, with two details settled on the way:
+
+- **Fairness.** Strict priority would let a UDP flood starve TCP streams on the same
+  session. While streams have data queued, datagrams get at most half of each 64 KiB
+  write; without coalescing (the `gaming` profile, one frame per write) datagrams and
+  streams take turns.
+- **`SYN` before the first datagram.** Datagrams leave before stream data, but a new
+  stream's `SYN` is queued with stream data; the writer therefore emits a pending `SYN`
+  right before that stream's first datagram, so optimistic opens never lose packets.
+- Drops are counted per session (`MuxSession::datagram_stats`).
+- Tests (over a writer the test holds shut, so frame order is deterministic):
+  boundaries and order for 0 to 65,535-byte packets with and without coalescing;
+  datagrams leave before stream data queued earlier; floods do not starve streams;
+  a full send queue drops new packets; a full receive queue drops the oldest; eight
+  windows' worth of datagrams pass while stream data keeps its own credit; datagrams
+  for unknown or reset streams are ignored.
+
+API:
 
 ```rust
 impl MuxStream {
@@ -200,7 +219,7 @@ Each step is one PR, keeps CI green, and keeps TCP working in every setup.
 |---|---|---|
 | **3.0** Plan (done) | This document. | Decisions below settled. |
 | **3.1** Config and wire (done) | `KIND_UDP`, `protocol = "udp" \| "tcp+udp"`, UDP tuning fields and validation, non-mux datagram framing in `proto.rs`, "unsupported" status / reset. UDP rules are rejected as "not implemented yet" until 3.3. | Unit tests: open request round trip for both kinds, framing round trip (0-byte and 65,507-byte packets, split reads), config validation. No behaviour change for TCP. |
-| **3.2** Mux datagrams | `DGRAM` queue with priority over stream data, drop policies, `send_datagram` / `recv_datagram`, `DATA` on UDP streams rejected. Tested over `duplex`. | Tests: datagrams keep packet boundaries; they overtake queued bulk data; a full queue drops instead of blocking; unknown ids are ignored; credit is untouched. |
+| **3.2** Mux datagrams (done) | `DGRAM` queue with priority over stream data, drop policies, `send_datagram` / `recv_datagram`, `DATA` on UDP streams rejected. Tested over `duplex`. | Tests: datagrams keep packet boundaries; they overtake queued bulk data; a full queue drops instead of blocking; unknown ids are ignored; credit is untouched. |
 | **3.3** UDP end to end | Entry flow table and listener, exit per-flow sockets, both over mux and whole channels, idle timeouts, max flows, failed-open backoff, clean failure against a v0.2 exit. | E2E UDP echo for every setup row (`tcp`, `tcpmux`, `ws`, `wss` × reverse / direct, mux on / off); many concurrent flows; idle flows closed on both sides; unreachable target; `tcp+udp` on one port. |
 | **3.4** Hardening and release | Latency test (UDP round trips during a bulk TCP transfer on the same session), packets-per-second and latency benchmarks, memory per flow, sample config (e.g. WireGuard / game server), README / README_FA, CHANGELOG, version `0.3.0`. | UDP p99 round trip under bulk load stays within a few ms of idle on localhost; numbers in the README; release tagged. |
 
