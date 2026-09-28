@@ -160,9 +160,9 @@ async fn proxy(
     drop: u64,
     delay: Duration,
 ) -> (String, tokio::task::JoinHandle<()>) {
-    let front = Arc::new(udp_socket("127.0.0.1:0".parse().unwrap(), 4 << 20).unwrap());
+    let front = Arc::new(udp_socket("127.0.0.1:0".parse().unwrap(), 4 << 20, None).unwrap());
     let front_addr = front.local_addr().unwrap().to_string();
-    let upstream = Arc::new(udp_socket("127.0.0.1:0".parse().unwrap(), 4 << 20).unwrap());
+    let upstream = Arc::new(udp_socket("127.0.0.1:0".parse().unwrap(), 4 << 20, None).unwrap());
     upstream.connect(to).await.unwrap();
     // Sends after the delay, in order: (due, packet, destination or the connected peer).
     type Delayed = (Instant, Vec<u8>, Option<SocketAddr>);
@@ -248,8 +248,8 @@ async fn tampered_packets_are_dropped() {
 
 fn params_fec(key: u8, data: usize, parity: usize) -> KcpParams {
     let mut p = params(key);
-    p.config.fec_data = data;
-    p.config.fec_parity = parity;
+    p.config.fec_data = Some(data);
+    p.config.fec_parity = Some(parity);
     p
 }
 
@@ -440,6 +440,149 @@ async fn silent_peer_times_out() {
     assert!(!server.is_alive());
 }
 
+/// A dialed connection and the listener's side of it, with the listener kept alive.
+async fn pair(p: &KcpParams) -> Pair {
+    let l = KcpListener::bind("127.0.0.1:0", p, &tuning())
+        .await
+        .unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let mut client = KcpDialer::new(&addr, p, &tuning()).dial().await.unwrap();
+    // The listener hears of the conversation with the first data.
+    client.write_all(b"hi").await.unwrap();
+    let mut server = accept(&l).await;
+    let mut buf = [0u8; 2];
+    server.read_exact(&mut buf).await.unwrap();
+    Pair {
+        client,
+        server,
+        _listener: l,
+    }
+}
+
+struct Pair {
+    client: KcpStream,
+    server: KcpStream,
+    _listener: KcpListener,
+}
+
+/// Receives datagrams until `quiet` passes without one.
+async fn drain_datagrams(d: &KcpDatagrams, quiet: Duration) -> Vec<Bytes> {
+    let mut got = Vec::new();
+    while let Ok(Some(datagram)) = tokio::time::timeout(quiet, d.recv()).await {
+        got.push(datagram);
+    }
+    got
+}
+
+#[tokio::test]
+async fn datagrams_both_ways_beside_the_stream() {
+    for fec in [false, true] {
+        let p = if fec { params_fec(1, 4, 2) } else { params(1) };
+        let Pair {
+            mut client,
+            mut server,
+            _listener,
+        } = pair(&p).await;
+        let (c, s) = (client.datagrams().unwrap(), server.datagrams().unwrap());
+        let max = c.max_len();
+        assert_eq!(max, KcpConfig::default().mtu - DATAGRAM_HEADER);
+        for len in [0, 1, 100, max] {
+            assert!(c.send(&pattern(len), fec));
+            assert_eq!(s.recv().await.unwrap(), pattern(len), "fec {fec}, {len}");
+            assert!(s.send(&pattern(len), fec));
+            assert_eq!(c.recv().await.unwrap(), pattern(len), "fec {fec}, {len}");
+        }
+        assert!(!c.send(&pattern(max + 1), fec), "too large");
+        // The stream is unaffected.
+        client.write_all(b"stream").await.unwrap();
+        let mut buf = [0u8; 6];
+        server.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"stream");
+        assert_eq!(client.stats().datagrams_sent, 4);
+        assert_eq!(server.stats().datagrams_received, 4);
+    }
+}
+
+/// Datagrams are never resent: through a link that drops a fifth of the packets, about
+/// a fifth of them are missing, while the stream beside them still arrives whole.
+#[tokio::test]
+async fn lost_datagrams_are_not_resent() {
+    let (l, addr) = listener(1).await;
+    let (proxy_addr, forward) = proxy(&addr, 0, 20, Duration::from_millis(5)).await;
+    let mut client = KcpDialer::new(&proxy_addr, &params(1), &tuning())
+        .dial()
+        .await
+        .unwrap();
+    client.write_all(b"hi").await.unwrap();
+    let mut server = accept(&l).await;
+    let (c, s) = (client.datagrams().unwrap(), server.datagrams().unwrap());
+    let payload = pattern(256 << 10);
+    let stream = async {
+        let mut got = vec![0u8; 2 + payload.len()];
+        server.read_exact(&mut got).await.unwrap();
+        got
+    };
+    let datagrams = async {
+        for i in 0..200u32 {
+            c.send(&i.to_le_bytes(), false);
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    };
+    let ((), (), got) = tokio::join!(
+        async { client.write_all(&payload).await.unwrap() },
+        datagrams,
+        stream
+    );
+    assert!(got[2..] == payload[..], "stream corrupted");
+    let received = drain_datagrams(&s, Duration::from_millis(300)).await;
+    // 20 % loss of 200: well inside 100-190 for any seed.
+    assert!(
+        (100..190).contains(&received.len()),
+        "{} of 200 datagrams arrived",
+        received.len()
+    );
+    forward.abort();
+}
+
+/// With FEC, lost datagrams are rebuilt from parity: through a link that drops a tenth
+/// of the packets, nearly all arrive, some of them rebuilt.
+#[tokio::test]
+async fn fec_rebuilds_lost_datagrams() {
+    let p = params_fec(1, 4, 2);
+    let l = KcpListener::bind("127.0.0.1:0", &p, &tuning())
+        .await
+        .unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let (proxy_addr, forward) = proxy(&addr, 0, 10, Duration::ZERO).await;
+    let mut client = KcpDialer::new(&proxy_addr, &p, &tuning())
+        .dial()
+        .await
+        .unwrap();
+    client.write_all(b"hi").await.unwrap();
+    let server = accept(&l).await;
+    let (c, s) = (client.datagrams().unwrap(), server.datagrams().unwrap());
+    // Received while sent: the receive queue holds 256.
+    let send = async {
+        for i in 0..400u32 {
+            c.send(&i.to_le_bytes(), true);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    let ((), received) = tokio::join!(send, drain_datagrams(&s, Duration::from_millis(300)));
+    let mut unique: Vec<&[u8]> = received.iter().map(|d| &d[..]).collect();
+    unique.sort();
+    unique.dedup();
+    // Without FEC about 360 would arrive; with 4 + 2 a group loses packets only when
+    // three of its six are lost.
+    assert!(
+        unique.len() >= 385,
+        "{} of 400 datagrams arrived",
+        unique.len()
+    );
+    assert!(server.stats().recovered > 0, "{:?}", server.stats());
+    forward.abort();
+}
+
 #[test]
 fn only_a_first_data_segment_opens_a_conversation() {
     let mut first = vec![PACKET_DATA];
@@ -456,4 +599,34 @@ fn only_a_first_data_segment_opens_a_conversation() {
     ping[0] = PACKET_PING;
     assert!(!opens_conversation(&ping));
     assert!(!opens_conversation(&first[..10]));
+}
+
+/// `tuning.dscp` reaches the sockets of dialers and listeners.
+#[tokio::test]
+async fn kcp_sockets_are_marked() {
+    use crate::transport::tests::{local_addrs, mark_of, tos};
+    for dscp in [None, Some(46)] {
+        let mut t = tuning();
+        t.dscp = dscp;
+        let settings = ConnSettings::new(&params(1), &t);
+        for addr in local_addrs() {
+            let socket = udp_socket(addr.parse().unwrap(), 1 << 20, settings.dscp).unwrap();
+            let mark = mark_of(socket2::SockRef::from(&socket));
+            assert_eq!(mark, tos(dscp), "{addr} {dscp:?}");
+        }
+    }
+}
+
+/// `[tunnel.kcp] datagrams = false`: streams offer no datagram side, so UDP flows stay
+/// in the reliable stream as in v0.4.
+#[tokio::test]
+async fn datagrams_can_be_turned_off() {
+    let mut p = params(1);
+    p.config.datagrams = false;
+    let Pair {
+        client,
+        server,
+        _listener,
+    } = pair(&p).await;
+    assert!(client.datagrams().is_none() && server.datagrams().is_none());
 }

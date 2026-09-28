@@ -16,6 +16,13 @@
 //! of them, which the writer serves before stream data, and each stream a bounded
 //! receive queue. When a queue is full a packet is dropped, never waited for: new ones on
 //! the send side, the oldest on the receive side.
+//!
+//! **The datagram path** (a KCP link, docs/PHASE6.md section 2): `DGRAM` frames that fit
+//! are sent beside the connection instead, unreliably, straight from `send_datagram`.
+//! Both ends probe for it when the session starts (a `DGRAM` frame for stream 0, which
+//! older versions ignore) and use it once anything came over it from the peer, and for a
+//! stream only once the peer knows the stream (it opened it, or sent a frame on it), so
+//! a datagram never arrives before its stream's `SYN`.
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -32,6 +39,7 @@ use tokio::time::{interval, Instant, MissedTickBehavior};
 
 use super::frame::{self, FrameType, Header, HEADER_LEN};
 use super::{ResetReason, SessionConfig, Side};
+use crate::channel::DatagramPath;
 
 /// Credit every stream starts with in both directions, before any `WINDOW` frame.
 pub const INITIAL_WINDOW: u64 = 64 * 1024;
@@ -53,6 +61,10 @@ const COPY_BELOW: usize = 4 * 1024;
 const MAX_CONTROL_BACKLOG: usize = 64 * 1024;
 /// Upper bound on a stream's send credit; more means the peer is broken.
 const MAX_SEND_CREDIT: u64 = 1 << 32;
+/// Payloads of the probe frames (`DGRAM` for stream 0) on the datagram path: a probe is
+/// answered, an answer is not.
+const PROBE: u8 = 0;
+const PROBE_ANSWER: u8 = 1;
 
 struct Stream {
     // Receive side.
@@ -81,6 +93,9 @@ struct Stream {
 
     /// Datagrams received and not yet taken, oldest first.
     datagrams: VecDeque<Bytes>,
+    /// The peer knows the stream (it opened it, or sent a frame on it), so datagrams for
+    /// it may take the datagram path.
+    peer_knows: bool,
 
     /// Set once the stream is reset by either side.
     reset: Option<ResetReason>,
@@ -106,6 +121,7 @@ impl Stream {
             write_waker: None,
             queued: false,
             datagrams: VecDeque::new(),
+            peer_knows: false,
             reset: None,
             detached: false,
         }
@@ -162,6 +178,8 @@ struct State {
     /// Without coalescing, whether the last write carried a datagram (so streams get
     /// the next turn).
     dgram_turn: bool,
+    /// Something came over the datagram path: the peer has one too.
+    peer_path: bool,
     stats: DatagramStats,
 }
 
@@ -172,6 +190,10 @@ pub struct DatagramStats {
     pub dropped_send: u64,
     /// Received but discarded: the stream's receive queue was full (oldest dropped).
     pub dropped_recv: u64,
+    /// Sent over the datagram path (the rest went in the connection).
+    pub path_sent: u64,
+    /// Received over the datagram path, probes included.
+    pub path_received: u64,
 }
 
 struct Shared {
@@ -181,6 +203,7 @@ struct Shared {
     closed: watch::Sender<bool>,
     config: SessionConfig,
     side: Side,
+    path: Option<DatagramPath>,
 }
 
 impl Shared {
@@ -247,6 +270,7 @@ impl Shared {
                         notify = true;
                     } else {
                         let mut stream = Stream::new();
+                        stream.peer_knows = true;
                         if let Some(inc) = stream.window_update(window) {
                             frame::put(control, FrameType::Window, h.stream, &inc.to_be_bytes());
                             notify = true;
@@ -265,6 +289,7 @@ impl Shared {
                 }
                 FrameType::Data => {
                     if let Some(s) = streams.get_mut(&h.stream) {
+                        s.peer_knows = true;
                         if s.reset.is_none() {
                             if s.recv_fin {
                                 return Err(protocol_error("peer sent data after FIN"));
@@ -286,6 +311,7 @@ impl Shared {
                 }
                 FrameType::Fin => {
                     if let Some(s) = streams.get_mut(&h.stream) {
+                        s.peer_knows = true;
                         s.recv_fin = true;
                         if let Some(w) = s.read_waker.take() {
                             w.wake();
@@ -308,6 +334,7 @@ impl Shared {
                 }
                 FrameType::Window => {
                     if let Some(s) = streams.get_mut(&h.stream) {
+                        s.peer_knows = true;
                         let inc = u32::from_be_bytes(payload[..4].try_into().unwrap()) as u64;
                         s.send_credit += inc;
                         if s.send_credit > MAX_SEND_CREDIT {
@@ -327,6 +354,7 @@ impl Shared {
                 FrameType::Dgram => {
                     // Unknown, closed or abandoned streams: dropped, it may race a close.
                     if let Some(s) = streams.get_mut(&h.stream) {
+                        s.peer_knows = true;
                         if s.reset.is_none() && !s.detached && !s.recv_fin {
                             if s.datagrams.len() >= self.config.datagram_queue {
                                 s.datagrams.pop_front();
@@ -569,16 +597,32 @@ impl MuxSession {
         Self::from_halves(reader, writer, side, config)
     }
 
-    /// Starts a session over `transport`, reading and writing in parallel.
-    pub fn over<T: super::Transport>(transport: T, side: Side, config: SessionConfig) -> Self {
+    /// Starts a session over `transport`, reading and writing in parallel, with the
+    /// transport's datagram path if it has one.
+    pub fn over<T: super::Transport>(mut transport: T, side: Side, config: SessionConfig) -> Self {
+        let path = transport.take_datagram_path();
         let (reader, writer) = transport.into_halves();
-        Self::from_halves(reader, writer, side, config)
+        Self::start(reader, writer, path, side, config)
     }
 
     /// Starts a session over a connection split into a read and a write half. Reading
     /// (and decrypting) and writing (and encrypting) then run in separate tasks, in
     /// parallel.
     pub fn from_halves<R, W>(reader: R, writer: W, side: Side, config: SessionConfig) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::start(reader, writer, None, side, config)
+    }
+
+    fn start<R, W>(
+        reader: R,
+        writer: W,
+        path: Option<DatagramPath>,
+        side: Side,
+        config: SessionConfig,
+    ) -> Self
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
@@ -603,13 +647,16 @@ impl MuxSession {
                 dgrams: VecDeque::new(),
                 dgram_bytes: 0,
                 dgram_turn: false,
+                peer_path: false,
                 stats: DatagramStats::default(),
             }),
             writer: Notify::new(),
             closed: watch::channel(false).0,
             config,
             side,
+            path,
         });
+        shared.probe(PROBE);
 
         // Whichever task ends first closes the session, which stops the other one.
         let s = shared.clone();
@@ -617,6 +664,7 @@ impl MuxSession {
             let mut closed = s.closed.subscribe();
             let result = tokio::select! {
                 r = read_loop(&s, reader) => r,
+                r = datagram_loop(&s) => r,
                 _ = closed.wait_for(|c| *c) => Ok(()),
             };
             s.close(end_reason(result));
@@ -756,6 +804,51 @@ impl Drop for MuxSession {
     }
 }
 
+impl Shared {
+    /// Sends a probe frame over the datagram path, without FEC: an older peer ignores
+    /// the packet type, but would take an FEC shard for KCP data.
+    fn probe(&self, kind: u8) {
+        if let Some(path) = &self.path {
+            let mut probe = frame::header(FrameType::Dgram, 0, 1).to_vec();
+            probe.push(kind);
+            path.send(&probe, false);
+        }
+    }
+}
+
+/// Receives frames over the datagram path (`DGRAM` only; anything else is dropped). Never
+/// ends on its own: when the link goes, the read loop ends the session.
+async fn datagram_loop(shared: &Arc<Shared>) -> io::Result<()> {
+    let Some(path) = &shared.path else {
+        return std::future::pending().await;
+    };
+    while let Some(mut frame) = path.recv().await {
+        let Some(header) = frame.get(..HEADER_LEN) else {
+            continue;
+        };
+        let Ok(h) = Header::decode(header.try_into().unwrap()) else {
+            continue;
+        };
+        if h.kind != FrameType::Dgram || h.len as usize != frame.len() - HEADER_LEN {
+            continue;
+        }
+        frame.advance(HEADER_LEN);
+        {
+            let mut st = shared.lock();
+            st.peer_path = true;
+            st.stats.path_received += 1;
+        }
+        if h.stream == 0 {
+            if frame.first() == Some(&PROBE) {
+                shared.probe(PROBE_ANSWER);
+            }
+            continue;
+        }
+        shared.handle_frame(h, frame)?;
+    }
+    std::future::pending().await
+}
+
 /// Reads straight into one buffer and cuts frames out of it.
 async fn read_loop<R: AsyncRead + Unpin>(shared: &Arc<Shared>, mut reader: R) -> io::Result<()> {
     let mut buf = BytesMut::with_capacity(READ_CHUNK);
@@ -808,7 +901,7 @@ async fn keepalive_loop(shared: &Shared) -> io::Result<()> {
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        {
+        let peer_path = {
             let mut st = shared.lock();
             if st.last_recv.elapsed() > period * 2 {
                 return Err(io::Error::new(
@@ -819,8 +912,13 @@ async fn keepalive_loop(shared: &Shared) -> io::Result<()> {
             st.ping_seq += 1;
             let seq = st.ping_seq.to_be_bytes();
             frame::put(&mut st.control, FrameType::Ping, 0, &seq);
-        }
+            st.peer_path
+        };
         shared.writer.notify_one();
+        // Until the peer is heard on the datagram path: our probe may have been lost.
+        if !peer_path {
+            shared.probe(PROBE);
+        }
     }
 }
 
@@ -1039,14 +1137,23 @@ impl MuxStream {
         if packet.len() > u16::MAX as usize {
             return false;
         }
+        let path = self
+            .shared
+            .path
+            .as_ref()
+            .filter(|p| HEADER_LEN + packet.len() <= p.max_frame());
         {
             let mut st = self.shared.lock();
             if st.closed.is_some() {
                 return false;
             }
-            match st.streams.get(&self.id) {
-                Some(s) if s.reset.is_none() && !s.fin_queued => {}
+            let peer_knows = match st.streams.get(&self.id) {
+                Some(s) if s.reset.is_none() && !s.fin_queued => s.peer_knows,
                 _ => return false,
+            };
+            if let Some(path) = path.filter(|_| peer_knows && st.peer_path) {
+                drop(st);
+                return self.send_on_path(path, &packet);
             }
             let size = HEADER_LEN + packet.len();
             if st.dgram_bytes + size > self.shared.config.datagram_buffer {
@@ -1058,6 +1165,33 @@ impl MuxStream {
         }
         self.shared.writer.notify_one();
         true
+    }
+
+    /// Whether a datagram of `len` bytes would take the datagram path now, where it may
+    /// be lost, rather than the connection.
+    pub fn sends_unreliably(&self, len: usize) -> bool {
+        let Some(path) = &self.shared.path else {
+            return false;
+        };
+        if HEADER_LEN + len > path.max_frame() {
+            return false;
+        }
+        let st = self.shared.lock();
+        st.peer_path && st.streams.get(&self.id).is_some_and(|s| s.peer_knows)
+    }
+
+    fn send_on_path(&self, path: &DatagramPath, packet: &[u8]) -> bool {
+        let mut frame = Vec::with_capacity(HEADER_LEN + packet.len());
+        frame.extend_from_slice(&frame::header(FrameType::Dgram, self.id, packet.len()));
+        frame.extend_from_slice(packet);
+        let sent = path.send(&frame, true);
+        let mut st = self.shared.lock();
+        if sent {
+            st.stats.path_sent += 1;
+        } else {
+            st.stats.dropped_send += 1;
+        }
+        sent
     }
 
     fn poll_recv_datagram(&self, cx: &mut Context<'_>) -> Poll<io::Result<Option<Bytes>>> {

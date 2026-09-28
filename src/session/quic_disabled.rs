@@ -80,6 +80,10 @@ impl QuicStream {
         match *self {}
     }
 
+    pub fn sends_unreliably(&self, _: usize) -> bool {
+        match *self {}
+    }
+
     pub async fn recv_datagram(&self) -> io::Result<Option<Bytes>> {
         match *self {}
     }

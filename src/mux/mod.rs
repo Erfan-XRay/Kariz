@@ -19,6 +19,12 @@ pub trait Transport: Send + 'static {
     type Reader: tokio::io::AsyncRead + Unpin + Send + 'static;
     type Writer: tokio::io::AsyncWrite + Unpin + Send + 'static;
 
+    /// The datagram path beside the connection, if it has one (a KCP link); the session
+    /// takes it before splitting the connection.
+    fn take_datagram_path(&mut self) -> Option<crate::channel::DatagramPath> {
+        None
+    }
+
     fn into_halves(self) -> (Self::Reader, Self::Writer);
 }
 

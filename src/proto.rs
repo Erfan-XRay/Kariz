@@ -2,12 +2,16 @@
 //!
 //! ```text
 //! entry -> exit : kind (1) | target_len (2, big-endian) | target      kind: 1 TCP, 2 UDP
+//!                 [ | copies (1) | gap_ms (1) ]                        kind 3: UDP with
+//!                                                                      duplication
 //! exit  -> entry: status (1)                                           (not with mux)
 //! ```
 //!
 //! After that, a TCP channel carries raw bytes. A UDP channel without mux carries
 //! packets as `len (2, BE) | packet` in both directions (with mux, packets travel as
-//! `DGRAM` frames instead, see `src/mux/`).
+//! `DGRAM` frames instead, see `src/mux/`). With duplication (v0.5, docs/PHASE6.md
+//! section 4), every packet starts with a 4-byte sequence number (see `src/udp.rs`);
+//! older exits reject kind 3 as unknown.
 
 use std::io;
 
@@ -17,6 +21,17 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub const KIND_TCP: u8 = 1;
 /// A UDP flow (v0.3). v0.2 peers reject it as an unknown kind.
 pub const KIND_UDP: u8 = 2;
+/// A UDP flow with packet duplication (v0.5); decoded as [`KIND_UDP`] with
+/// [`Open::duplicate`] set.
+const KIND_UDP_DUPLICATED: u8 = 3;
+
+/// Packet duplication of a UDP flow: each packet is sent `copies` times in all,
+/// `gap_ms` apart, in both directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Duplicate {
+    pub copies: u8,
+    pub gap_ms: u8,
+}
 
 pub const STATUS_OK: u8 = 0;
 pub const STATUS_DIAL_FAILED: u8 = 1;
@@ -30,6 +45,8 @@ pub const MAX_DATAGRAM: usize = 65_507;
 pub struct Open {
     pub kind: u8,
     pub target: String,
+    /// UDP only: the flow's packet duplication.
+    pub duplicate: Option<Duplicate>,
 }
 
 impl Open {
@@ -37,21 +54,31 @@ impl Open {
         Self {
             kind: KIND_TCP,
             target: target.into(),
+            duplicate: None,
         }
     }
 
-    pub fn udp(target: impl Into<String>) -> Self {
+    pub fn udp(target: impl Into<String>, duplicate: Option<Duplicate>) -> Self {
         Self {
             kind: KIND_UDP,
             target: target.into(),
+            duplicate,
         }
     }
 
     pub fn encode(&self, out: &mut Vec<u8>) {
         let target = self.target.as_bytes();
-        out.push(self.kind);
+        let kind = match self.duplicate {
+            Some(_) if self.kind == KIND_UDP => KIND_UDP_DUPLICATED,
+            _ => self.kind,
+        };
+        out.push(kind);
         out.extend_from_slice(&(target.len() as u16).to_be_bytes());
         out.extend_from_slice(target);
+        if kind == KIND_UDP_DUPLICATED {
+            let d = self.duplicate.expect("kind 3 has duplication");
+            out.extend_from_slice(&[d.copies, d.gap_ms]);
+        }
     }
 
     pub async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<Self> {
@@ -59,31 +86,57 @@ impl Open {
         stream.read_exact(&mut head).await?;
         check_kind(head[0])?;
         let len = u16::from_be_bytes([head[1], head[2]]) as usize;
-        let mut target = vec![0u8; len];
-        stream.read_exact(&mut target).await?;
-        Self::with_target(head[0], target)
+        let mut rest = vec![0u8; len + options_len(head[0])];
+        stream.read_exact(&mut rest).await?;
+        Self::with_rest(head[0], rest)
     }
 
     /// Decodes a complete open request, as carried in a mux `SYN`.
     pub fn decode(bytes: &[u8]) -> io::Result<Self> {
         let bad = || io::Error::new(io::ErrorKind::InvalidData, "malformed open request");
-        let (head, target) = bytes.split_at_checked(3).ok_or_else(bad)?;
+        let (head, rest) = bytes.split_at_checked(3).ok_or_else(bad)?;
         check_kind(head[0])?;
-        if target.len() != u16::from_be_bytes([head[1], head[2]]) as usize {
+        let len = u16::from_be_bytes([head[1], head[2]]) as usize;
+        if rest.len() != len + options_len(head[0]) {
             return Err(bad());
         }
-        Self::with_target(head[0], target.to_vec())
+        Self::with_rest(head[0], rest.to_vec())
     }
 
-    fn with_target(kind: u8, target: Vec<u8>) -> io::Result<Self> {
-        let target = String::from_utf8(target)
+    /// `rest`: the target, then the options of `kind`.
+    fn with_rest(kind: u8, mut rest: Vec<u8>) -> io::Result<Self> {
+        let options = rest.split_off(rest.len() - options_len(kind));
+        let target = String::from_utf8(rest)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "target is not valid UTF-8"))?;
-        Ok(Self { kind, target })
+        if kind != KIND_UDP_DUPLICATED {
+            return Ok(Self {
+                kind,
+                target,
+                duplicate: None,
+            });
+        }
+        let (copies, gap_ms) = (options[0], options[1]);
+        if !(2..=3).contains(&copies) || gap_ms > 50 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bad duplication in open request",
+            ));
+        }
+        Ok(Self::udp(target, Some(Duplicate { copies, gap_ms })))
+    }
+}
+
+/// Bytes after the target in an open request of `kind`.
+fn options_len(kind: u8) -> usize {
+    if kind == KIND_UDP_DUPLICATED {
+        2
+    } else {
+        0
     }
 }
 
 fn check_kind(kind: u8) -> io::Result<()> {
-    if kind == KIND_TCP || kind == KIND_UDP {
+    if matches!(kind, KIND_TCP | KIND_UDP | KIND_UDP_DUPLICATED) {
         Ok(())
     } else {
         Err(io::Error::new(
@@ -177,13 +230,39 @@ mod tests {
 
     #[tokio::test]
     async fn udp_open_roundtrip() {
-        let open = Open::udp("[2001:db8::1]:53");
+        let open = Open::udp("[2001:db8::1]:53", None);
         let mut buf = Vec::new();
         open.encode(&mut buf);
         assert_eq!(buf[0], KIND_UDP);
         assert_eq!(Open::decode(&buf).unwrap(), open);
-        buf[0] = 3;
+        buf[0] = 9;
         assert!(Open::decode(&buf).is_err());
+    }
+
+    #[tokio::test]
+    async fn duplicated_udp_open_roundtrip() {
+        let open = Open::udp(
+            "10.0.0.2:27015",
+            Some(Duplicate {
+                copies: 2,
+                gap_ms: 5,
+            }),
+        );
+        let mut buf = Vec::new();
+        open.encode(&mut buf);
+        assert_eq!(buf[0], KIND_UDP_DUPLICATED);
+        assert_eq!(&buf[buf.len() - 2..], [2, 5]);
+        let decoded = Open::decode(&buf).unwrap();
+        assert_eq!((decoded.kind, &decoded), (KIND_UDP, &open));
+        assert_eq!(Open::read(&mut &buf[..]).await.unwrap(), open);
+        // Without its options, or with out-of-range ones, it is malformed.
+        assert!(Open::decode(&buf[..buf.len() - 2]).is_err());
+        for (copies, gap) in [(1, 5), (4, 5), (2, 51)] {
+            let n = buf.len();
+            let mut bad = buf.clone();
+            bad[n - 2..].copy_from_slice(&[copies, gap]);
+            assert!(Open::decode(&bad).is_err(), "{copies} {gap}");
+        }
     }
 
     #[tokio::test]

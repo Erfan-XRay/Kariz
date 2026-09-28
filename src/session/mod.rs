@@ -181,6 +181,15 @@ impl SessionStream {
         }
     }
 
+    /// Whether a datagram of `len` bytes would be sent where it may be lost (KCP's
+    /// datagram path, a QUIC datagram), rather than reliably in the connection.
+    pub fn sends_unreliably(&self, len: usize) -> bool {
+        match self {
+            Self::Kmux(s) => s.sends_unreliably(len),
+            Self::Quic(s) => s.sends_unreliably(len),
+        }
+    }
+
     /// Receives the next datagram, whole; `None` once the peer finished the stream.
     pub async fn recv_datagram(&self) -> io::Result<Option<Bytes>> {
         match self {

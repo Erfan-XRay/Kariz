@@ -11,7 +11,9 @@
 //! ```
 //!
 //! Each UDP packet carries one of these (the first plaintext byte): KCP segments, a ping,
-//! a close, or with FEC on (`fec.rs`) KCP segments as a data shard, or a parity shard.
+//! a close, a datagram, or with FEC on (`fec.rs`) KCP segments or a datagram as a data
+//! shard, or a parity shard. Datagrams (docs/PHASE6.md, section 2) travel beside KCP,
+//! not through it: they are never resent and never wait for a lost segment.
 //! KCP runs in message mode so a message can say what it is: data, the
 //! end of the stream in that direction (FIN), or the dialer's opening message, which makes
 //! sure every conversation starts with a data segment numbered 0. The listener starts a
@@ -63,6 +65,10 @@ const PACKET_FEC_PARITY: u8 = 4;
 /// Bytes before the shard in FEC packets.
 const FEC_DATA_HEADER: usize = 1 + 4 + 4 + 1;
 const FEC_PARITY_HEADER: usize = FEC_DATA_HEADER + 2;
+/// A datagram beside KCP: `conv (4) | datagram`. Older versions ignore the type. In an
+/// FEC data shard, a datagram is `!conv (4) | datagram`, which no KCP packet of the
+/// conversation starts with (they start with `conv`).
+const PACKET_DATAGRAM: u8 = 5;
 
 /// Message tags, the first byte of every KCP message.
 const MSG_DATA: u8 = 0;
@@ -90,6 +96,11 @@ const CONN_QUEUE: usize = 1024;
 /// New conversations waiting to be accepted; more are dropped (the dialer retries).
 const ACCEPT_QUEUE: usize = 128;
 const MAX_CONVERSATIONS: usize = 4096;
+/// Datagrams received and not yet taken; the oldest are dropped.
+const DATAGRAM_QUEUE: usize = 256;
+/// Bytes before a datagram in a packet, beyond what a KCP packet has: the conversation
+/// id (`PACKET_DATAGRAM`) or its marker (FEC).
+const DATAGRAM_HEADER: usize = 4;
 
 /// What listeners and dialers need from `[tunnel]`: `[tunnel.kcp]` and the packet key.
 #[derive(Clone, Default)]
@@ -107,9 +118,10 @@ impl fmt::Debug for KcpParams {
 }
 
 impl KcpParams {
-    pub fn new(tunnel: &TunnelConfig) -> Self {
+    /// `config`: `[tunnel.kcp]` with the profile's defaults (`Config::kcp`).
+    pub fn new(tunnel: &TunnelConfig, config: KcpConfig) -> Self {
         Self {
-            config: tunnel.kcp.clone().unwrap_or_default(),
+            config,
             key: Psk::new(&tunnel.token).subkey(KEY_CONTEXT),
         }
     }
@@ -125,6 +137,9 @@ struct ConnSettings {
     /// A ping goes out every third of it; a peer silent for twice as long is dead.
     keepalive: Duration,
     socket_buffer: usize,
+    dscp: Option<u8>,
+    /// Whether streams offer their datagram side (`[tunnel.kcp] datagrams`).
+    datagrams: bool,
     protection: Arc<Protection>,
     /// Data and parity shards per FEC group; `None`: FEC off.
     fec: Option<(usize, usize)>,
@@ -139,13 +154,15 @@ impl ConnSettings {
             mtu: params.config.mtu,
             keepalive: tuning.keepalive,
             socket_buffer: tuning.udp.socket_buffer,
+            dscp: tuning.dscp,
+            datagrams: params.config.datagrams,
             protection: Arc::new(Protection::new(&params.key)),
             fec: params.config.fec(),
         }
     }
 }
 
-fn udp_socket(addr: SocketAddr, buffer: usize) -> io::Result<UdpSocket> {
+fn udp_socket(addr: SocketAddr, buffer: usize, dscp: Option<u8>) -> io::Result<UdpSocket> {
     let socket = std::net::UdpSocket::bind(addr)?;
     let sock = socket2::SockRef::from(&socket);
     if let Err(e) = sock
@@ -154,6 +171,7 @@ fn udp_socket(addr: SocketAddr, buffer: usize) -> io::Result<UdpSocket> {
     {
         debug!(error = %e, "could not set KCP socket buffers");
     }
+    super::mark_dscp(&sock, dscp);
     socket.set_nonblocking(true)?;
     UdpSocket::from_std(socket)
 }
@@ -219,6 +237,31 @@ impl Sender {
 
     fn control(&mut self, kind: u8, conv: u32) {
         self.send(kind, &conv.to_le_bytes());
+    }
+
+    /// Sends a datagram beside KCP. With `fec` and FEC on, it goes into the open group
+    /// (true: the driver has a group to close on time).
+    fn datagram(&mut self, datagram: &[u8], fec: bool, now: Instant) -> bool {
+        self.stats.datagrams_sent.fetch_add(1, Ordering::Relaxed);
+        match self.fec.take() {
+            Some(mut encoder) if fec => {
+                let mut content = Vec::with_capacity(DATAGRAM_HEADER + datagram.len());
+                content.extend_from_slice(&(!self.conv).to_le_bytes());
+                content.extend_from_slice(datagram);
+                encoder.push(&content, now, &mut |shard| self.send_shard(shard));
+                self.fec = Some(encoder);
+                true
+            }
+            encoder => {
+                self.fec = encoder;
+                self.plain.clear();
+                self.plain.push(PACKET_DATAGRAM);
+                self.plain.extend_from_slice(&self.conv.to_le_bytes());
+                self.plain.extend_from_slice(datagram);
+                self.send_plain();
+                false
+            }
+        }
     }
 
     /// A packet of KCP segments, as is or as an FEC data shard (then the group's parity
@@ -323,6 +366,8 @@ struct ConnStats {
     /// Data segments received that filled a gap: the resends a loss really needed
     /// (resends of segments that had arrived, or had been rebuilt, are not counted).
     gaps_filled: AtomicU64,
+    datagrams_sent: AtomicU64,
+    datagrams_received: AtomicU64,
 }
 
 /// A snapshot of a connection's packet counts.
@@ -333,6 +378,8 @@ pub struct KcpStats {
     pub resent: u64,
     pub recovered: u64,
     pub gaps_filled: u64,
+    pub datagrams_sent: u64,
+    pub datagrams_received: u64,
 }
 
 /// The conversation a packet's plaintext belongs to (every type starts with it).
@@ -392,6 +439,9 @@ struct State {
     read_waker: Option<Waker>,
     /// The peer's FIN came: reads return end of stream once `incoming` is empty.
     eof: bool,
+    /// Datagrams received, oldest first.
+    datagrams: VecDeque<Bytes>,
+    datagram_waker: Option<Waker>,
     /// The driver has stopped; with `error`, the connection failed.
     ended: bool,
     error: Option<io::ErrorKind>,
@@ -413,6 +463,54 @@ impl Link {
 pub struct KcpStream {
     reader: KcpReader,
     writer: KcpWriter,
+    /// `None` with `[tunnel.kcp] datagrams = false`.
+    datagrams: Option<KcpDatagrams>,
+}
+
+/// The datagram side of a KCP connection: packets sent beside KCP, unreliably, in the
+/// same conversation (same socket, protection and FEC).
+#[derive(Clone)]
+pub struct KcpDatagrams {
+    sender: Arc<Mutex<Sender>>,
+    link: Arc<Link>,
+    max_len: usize,
+}
+
+impl KcpDatagrams {
+    /// Largest datagram that fits in one packet.
+    pub fn max_len(&self) -> usize {
+        self.max_len
+    }
+
+    /// Sends `datagram` at once, or drops it (too large, connection over, socket buffer
+    /// full). `fec`: protect it with FEC when FEC is on. Off for datagrams an older peer
+    /// must be able to ignore: it would take one in an FEC shard for KCP data.
+    pub fn send(&self, datagram: &[u8], fec: bool) -> bool {
+        if datagram.len() > self.max_len || self.link.lock().ended {
+            return false;
+        }
+        if lock(&self.sender).datagram(datagram, fec, Instant::now()) {
+            // An FEC group may have opened: the driver closes it on time.
+            self.link.wake_driver.notify_one();
+        }
+        true
+    }
+
+    /// The next datagram received; `None` once the connection is over.
+    pub async fn recv(&self) -> Option<Bytes> {
+        std::future::poll_fn(|cx| {
+            let mut st = self.link.lock();
+            if let Some(datagram) = st.datagrams.pop_front() {
+                return Poll::Ready(Some(datagram));
+            }
+            if st.ended {
+                return Poll::Ready(None);
+            }
+            st.datagram_waker = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await
+    }
 }
 
 pub struct KcpReader {
@@ -428,6 +526,11 @@ impl KcpStream {
         (self.reader, self.writer)
     }
 
+    /// The datagram side, unless `[tunnel.kcp] datagrams = false`.
+    pub fn datagrams(&self) -> Option<KcpDatagrams> {
+        self.datagrams.clone()
+    }
+
     pub fn stats(&self) -> KcpStats {
         Self::stats_of(&self.reader.link.stats)
     }
@@ -440,6 +543,8 @@ impl KcpStream {
             resent: get(&stats.resent),
             recovered: get(&stats.recovered),
             gaps_filled: get(&stats.gaps_filled),
+            datagrams_sent: get(&stats.datagrams_sent),
+            datagrams_received: get(&stats.datagrams_received),
         }
     }
 
@@ -763,6 +868,11 @@ impl Driver {
         let stream = KcpStream {
             reader: KcpReader { link: link.clone() },
             writer: KcpWriter { link: link.clone() },
+            datagrams: settings.datagrams.then(|| KcpDatagrams {
+                sender: sender.clone(),
+                link: link.clone(),
+                max_len: settings.mtu - DATAGRAM_HEADER,
+            }),
         };
         let now = Instant::now();
         let driver = Self {
@@ -807,7 +917,11 @@ impl Driver {
         if let Err(e) = result {
             st.error = Some(e.kind());
         }
-        let wakers = [st.read_waker.take(), st.write_waker.take()];
+        let wakers = [
+            st.read_waker.take(),
+            st.write_waker.take(),
+            st.datagram_waker.take(),
+        ];
         drop(st);
         wakers.into_iter().flatten().for_each(Waker::wake);
         if let Some((tx, key)) = self.on_exit.take() {
@@ -892,14 +1006,19 @@ impl Driver {
                     .fetch_add(filled, Ordering::Relaxed);
                 let _ = self.kcp.input(&plain[1..]);
             }
+            PACKET_DATAGRAM => self.deliver_datagram(&plain[5..]),
             PACKET_FEC_DATA => {
-                if let Some(segments) = segments_of(plain) {
-                    let filled = self.received.record(segments);
-                    self.link
-                        .stats
-                        .gaps_filled
-                        .fetch_add(filled, Ordering::Relaxed);
-                    let _ = self.kcp.input(segments);
+                if let Some(content) = segments_of(plain) {
+                    if let Some(datagram) = self.datagram_in(content) {
+                        self.deliver_datagram(datagram);
+                    } else {
+                        let filled = self.received.record(content);
+                        self.link
+                            .stats
+                            .gaps_filled
+                            .fetch_add(filled, Ordering::Relaxed);
+                        let _ = self.kcp.input(content);
+                    }
                     let (group, index) = fec_header(plain);
                     let rebuilt = self.fec.data(group, index, &plain[FEC_DATA_HEADER..]);
                     self.input_rebuilt(rebuilt);
@@ -938,6 +1057,10 @@ impl Driver {
         let future = self.ms(Instant::now()).wrapping_add(REBUILT_ACK_AHEAD_MS);
         let mut fresh = Vec::new();
         for packet in &packets {
+            if let Some(datagram) = self.datagram_in(packet) {
+                self.deliver_datagram(datagram);
+                continue;
+            }
             fresh.clear();
             for segment in segments(packet) {
                 match segment[4] {
@@ -958,6 +1081,28 @@ impl Driver {
         }
         let n = packets.len() as u64;
         self.link.stats.recovered.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// The datagram in the content of an FEC data shard, if it holds one.
+    fn datagram_in<'a>(&self, content: &'a [u8]) -> Option<&'a [u8]> {
+        content.strip_prefix(&(!self.conv).to_le_bytes()[..])
+    }
+
+    fn deliver_datagram(&self, datagram: &[u8]) {
+        self.link
+            .stats
+            .datagrams_received
+            .fetch_add(1, Ordering::Relaxed);
+        let mut st = self.link.lock();
+        if st.datagrams.len() >= DATAGRAM_QUEUE {
+            st.datagrams.pop_front();
+        }
+        st.datagrams.push_back(Bytes::copy_from_slice(datagram));
+        let waker = st.datagram_waker.take();
+        drop(st);
+        if let Some(w) = waker {
+            w.wake();
+        }
     }
 
     /// Moves written messages into KCP while it has room, then the FIN.
@@ -1069,7 +1214,7 @@ impl KcpDialer {
             SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
             SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
         };
-        let socket = udp_socket(local, self.settings.socket_buffer)?;
+        let socket = udp_socket(local, self.settings.socket_buffer, self.settings.dscp)?;
         socket.connect(peer).await?;
         let socket = Arc::new(socket);
         let conv = Nonces::new()?.next_u32();
@@ -1104,7 +1249,7 @@ impl KcpListener {
             io::Error::new(io::ErrorKind::NotFound, "listen address did not resolve")
         })?;
         let settings = ConnSettings::new(params, tuning);
-        let socket = Arc::new(udp_socket(addr, settings.socket_buffer)?);
+        let socket = Arc::new(udp_socket(addr, settings.socket_buffer, settings.dscp)?);
         let local = socket.local_addr()?;
         let (tx, rx) = mpsc::channel(ACCEPT_QUEUE);
         let task = tokio::spawn(demultiplex(socket, settings, tx));

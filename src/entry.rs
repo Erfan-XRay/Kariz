@@ -49,7 +49,7 @@ enum Source {
 pub async fn run(config: Config) -> Result<()> {
     let tuning = config.tuning();
     let mux = config.mux();
-    let transport = Settings::new(&config.tunnel);
+    let transport = Settings::new(&config.tunnel, config.kcp());
     let crypto = Crypto::new(&config.tunnel.token, config.tunnel.encryption).with_mux(mux.enabled);
     let sessions = SessionConfig::new(&mux, &tuning);
     let mut tasks = JoinSet::new();
@@ -158,7 +158,7 @@ pub async fn run(config: Config) -> Result<()> {
             let socket = udp::bind(&forward.listen, &entry.tuning.udp)
                 .await
                 .with_context(|| format!("failed to bind UDP forward port {}", forward.listen))?;
-            let open = encode_open(Open::udp(forward.target.clone()));
+            let open = encode_open(Open::udp(forward.target.clone(), forward.duplication()));
             let opener = {
                 let entry = entry.clone();
                 move || {
@@ -167,9 +167,9 @@ pub async fn run(config: Config) -> Result<()> {
                 }
             };
             let (udp_tuning, target) = (entry.tuning.udp.clone(), forward.target.clone());
-            let listen = forward.listen.clone();
+            let (listen, duplicate) = (forward.listen.clone(), forward.duplication());
             tasks.spawn(async move {
-                udp::serve(socket, udp_tuning, target, opener)
+                udp::serve(socket, udp_tuning, target, duplicate, opener)
                     .await
                     .with_context(|| format!("UDP forward port {listen} failed"))
             });
