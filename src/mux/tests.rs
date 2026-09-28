@@ -613,3 +613,20 @@ async fn mux_throughput() {
         }
     }
 }
+
+#[test]
+fn reset_reasons_roundtrip() {
+    use super::ResetReason as R;
+    for r in [
+        R::Cancel,
+        R::DialFailed,
+        R::Refused,
+        R::Protocol,
+        R::Unsupported,
+    ] {
+        assert_eq!(R::from_id(r.id()), r);
+    }
+    // Unknown reasons from newer peers read as a plain reset.
+    assert_eq!(R::from_id(200), R::Cancel);
+    assert_eq!(R::Unsupported.to_error().kind(), io::ErrorKind::Unsupported);
+}

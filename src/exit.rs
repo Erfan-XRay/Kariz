@@ -14,7 +14,7 @@ use crate::channel::{self, Channel, Link};
 use crate::config::{Config, Mode, Tuning};
 use crate::crypto::{Crypto, ReplayFilter};
 use crate::mux::{maintain, MuxSession, MuxStream, ResetReason, SessionConfig, Side};
-use crate::proto::{self, Open, STATUS_DIAL_FAILED, STATUS_OK};
+use crate::proto::{self, Open, KIND_TCP, STATUS_DIAL_FAILED, STATUS_OK, STATUS_UNSUPPORTED};
 use crate::relay::{relay, relay_mux};
 use crate::transport::{tcp, Dialer, Listener, Settings};
 
@@ -191,6 +191,11 @@ async fn accept_direct(
 }
 
 async fn serve(exit: &Exit, mut tunnel: Channel, open: Open) {
+    if open.kind != KIND_TCP {
+        warn!(target = %open.target, "UDP flows are not supported yet");
+        let _ = proto::write_status(&mut tunnel, STATUS_UNSUPPORTED).await;
+        return;
+    }
     let mut target = match tcp::connect(&open.target, &exit.tuning).await {
         Ok(t) => t,
         Err(e) => {
@@ -229,6 +234,10 @@ async fn serve_stream(exit: &Exit, stream: MuxStream, syn: Bytes) {
             return stream.reset(ResetReason::Protocol);
         }
     };
+    if open.kind != KIND_TCP {
+        warn!(target = %open.target, "UDP flows are not supported yet");
+        return stream.reset(ResetReason::Unsupported);
+    }
     let mut target = match tcp::connect(&open.target, &exit.tuning).await {
         Ok(t) => t,
         Err(e) => {
