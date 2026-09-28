@@ -80,6 +80,9 @@ The side that dials needs `tunnel.remote`, the other side `tunnel.listen`.
 
 ## Quick start
 
+> A step-by-step server setup guide (in Persian), from install to iperf3 tests, every
+> transport, system tuning and troubleshooting: [docs/SETUP_FA.md](docs/SETUP_FA.md).
+
 Download the static Linux binary (x86_64) from
 [Releases](https://github.com/Erfan-XRay/Kariz/releases), or build it:
 
