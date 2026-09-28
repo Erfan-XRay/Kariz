@@ -98,7 +98,7 @@ impl ResetReason {
 
     /// The error a reset stream reports. `DialFailed` maps to `ConnectionRefused`, like
     /// the status byte of non-mux channels.
-    fn to_error(self) -> io::Error {
+    pub fn to_error(self) -> io::Error {
         match self {
             Self::DialFailed => io::Error::new(
                 io::ErrorKind::ConnectionRefused,

@@ -29,7 +29,7 @@ supported for every transport.
 |---|---|---|
 | 1 | Project skeleton, CLI, TOML config, profiles, mutual auth, plain `tcp` transport, reverse + direct modes, tests, CI | **done (v0.1.0)** |
 | 2 | Encryption layer, `tcpmux`, `ws` / `wss` (CDN friendly); plan in [PHASE2.md](PHASE2.md) | **done (v0.2.0)** |
-| 3 | UDP forwarding and UDP-over-stream framing; plan in [PHASE3.md](PHASE3.md) | in progress (3.1-3.2 done) |
+| 3 | UDP forwarding and UDP-over-stream framing; plan in [PHASE3.md](PHASE3.md) | in progress (3.1-3.3 done) |
 | 4 | `kcp` (full settings + Reed-Solomon FEC) and `quic` (quinn; BBR/Cubic, 0-RTT, datagrams, GSO/GRO) | planned |
 | 5 | `icmp` transport (raw sockets, needs `CAP_NET_RAW`) | planned |
 | 6 | Full `gaming` profile (packet duplication, DSCP), `stealth` profile (padding, timing), active-probe fallback | planned |

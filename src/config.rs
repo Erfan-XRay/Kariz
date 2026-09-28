@@ -567,20 +567,7 @@ impl Config {
 
         self.validate_mux()?;
         self.validate_ws()?;
-        self.validate_tls()?;
-        self.check_implemented()
-    }
-
-    /// Rejects settings that parse and validate but are not implemented yet.
-    /// Each phase 3 step removes the part it implements.
-    fn check_implemented(&self) -> Result<()> {
-        if self.forward.iter().any(|f| f.protocol.has_udp()) {
-            bail!(
-                "UDP forwarding (protocol = \"udp\" / \"tcp+udp\") is not implemented yet \
-                 (planned for v0.3, see docs/PHASE3.md)"
-            );
-        }
-        Ok(())
+        self.validate_tls()
     }
 
     fn validate_mux(&self) -> Result<()> {
@@ -940,12 +927,14 @@ mod tests {
     }
 
     #[test]
-    fn udp_forwarding_is_not_implemented_yet() {
+    fn udp_forward_rules_are_valid() {
         for protocol in ["udp", "tcp+udp"] {
-            let err = parse_err(&with_forward(protocol, "tcpmux", ""));
-            assert!(err.contains("not implemented yet"), "{protocol}: {err}");
+            let c = Config::parse(&with_forward(protocol, "tcpmux", "")).unwrap();
+            assert!(c.forward[0].protocol.has_udp());
         }
-        assert!(Config::parse(&with_forward("tcp", "tcpmux", "")).is_ok());
+        // UDP rules belong to the entry side like TCP ones.
+        let exit = with_transport("exit", "tcpmux", "");
+        assert!(Config::parse(&exit).is_ok());
     }
 
     #[test]

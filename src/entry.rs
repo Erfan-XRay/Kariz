@@ -21,6 +21,7 @@ use crate::mux::{maintain, MuxSession, SessionConfig, SessionPool, Side};
 use crate::proto::{self, Open};
 use crate::relay::{relay, relay_mux};
 use crate::transport::{Dialer, Listener, Settings};
+use crate::udp;
 
 /// How many idle reverse connections the entry may queue before it starts dropping them.
 const POOL_CAPACITY: usize = 1024;
@@ -140,11 +141,38 @@ pub async fn run(config: Config) -> Result<()> {
     });
 
     for forward in &config.forward {
-        let listener = TcpListener::bind(&forward.listen)
-            .await
-            .with_context(|| format!("failed to listen on forward port {}", forward.listen))?;
-        info!(listen = %forward.listen, target = %forward.target, "forward ready");
-        tasks.spawn(accept_users(entry.clone(), listener, forward.clone()));
+        if forward.protocol.has_tcp() {
+            let listener = TcpListener::bind(&forward.listen)
+                .await
+                .with_context(|| format!("failed to listen on forward port {}", forward.listen))?;
+            tasks.spawn(accept_users(entry.clone(), listener, forward.clone()));
+        }
+        if forward.protocol.has_udp() {
+            let socket = udp::bind(&forward.listen, &entry.tuning.udp)
+                .await
+                .with_context(|| format!("failed to bind UDP forward port {}", forward.listen))?;
+            let open = encode_open(Open::udp(forward.target.clone()));
+            let opener = {
+                let entry = entry.clone();
+                move || {
+                    let (entry, open) = (entry.clone(), open.clone());
+                    async move { entry.open_channel(&open).await }
+                }
+            };
+            let (udp_tuning, target) = (entry.tuning.udp.clone(), forward.target.clone());
+            let listen = forward.listen.clone();
+            tasks.spawn(async move {
+                udp::serve(socket, udp_tuning, target, opener)
+                    .await
+                    .with_context(|| format!("UDP forward port {listen} failed"))
+            });
+        }
+        info!(
+            listen = %forward.listen,
+            target = %forward.target,
+            protocol = forward.protocol.name(),
+            "forward ready"
+        );
     }
 
     // Accept loops only return on fatal errors.
@@ -185,7 +213,7 @@ async fn accept_reverse(
 }
 
 async fn accept_users(entry: Arc<Entry>, listener: TcpListener, forward: Forward) -> Result<()> {
-    let open = encode_open(&forward);
+    let open = encode_open(Open::tcp(forward.target.clone()));
     loop {
         let (user, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -205,9 +233,9 @@ async fn accept_users(entry: Arc<Entry>, listener: TcpListener, forward: Forward
     }
 }
 
-fn encode_open(forward: &Forward) -> Bytes {
+fn encode_open(open: Open) -> Bytes {
     let mut frame = Vec::new();
-    Open::tcp(forward.target.clone()).encode(&mut frame);
+    open.encode(&mut frame);
     frame.into()
 }
 
