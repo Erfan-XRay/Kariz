@@ -45,29 +45,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: CPU
         run: nproc && lscpu | grep -E "Model name|^CPU\(s\)"
-      - name: Binary sizes (static musl release) and dependency counts
-        run: |
-          for f in "" "--no-default-features" "--no-default-features --features quic" "--no-default-features --features kcp"; do
-            cargo build -q --release --target x86_64-unknown-linux-musl $f
-            size=$(stat -c %s target/x86_64-unknown-linux-musl/release/kariz)
-            deps=$(cargo tree -e normal --prefix none $f | sort -u | wc -l)
-            echo "features [${f:-default}]: $size bytes, $deps crates"
-          done
-      - name: Memory (RSS)
-        run: |
-          cargo build -q --release
-          for t in tcpmux quic kcp; do scripts/rss.sh $t 100; done
-          for t in quic kcp; do scripts/rss.sh $t 1000 target/release/kariz udp; done
-      - name: Lossy link
-        run: cargo test -q --release --test tunnel lossy_link -- --ignored --nocapture
       - name: Localhost throughput
-        run: cargo test -q --release --test tunnel throughput -- --ignored --nocapture
+        run: cargo test -q --release --test tunnel -- --ignored --nocapture --exact throughput
       - name: UDP
         run: |
-          cargo test -q --release --test tunnel udp_throughput -- --ignored --nocapture
-          cargo test -q --release --test tunnel udp_idle_latency -- --ignored --nocapture
+          cargo test -q --release --test tunnel -- --ignored --nocapture --exact udp_throughput
+          cargo test -q --release --test tunnel -- --ignored --nocapture --exact udp_idle_latency

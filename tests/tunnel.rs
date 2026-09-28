@@ -11,12 +11,16 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 const TOKEN: &str = "test-token-0123456789abcdef";
 
+/// A port free for both TCP and UDP: tunnel ports of UDP transports and `tcp+udp`
+/// forward ports need both.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    loop {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// Echoes TCP and UDP on the same port.

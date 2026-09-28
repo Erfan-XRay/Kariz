@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.4.0 - 2026-09-28
+
+Works with v0.3 over `tcp`, `tcpmux`, `ws` and `wss` (their wire format is unchanged);
+the new transports need both sides at v0.4.
+
+### Added
+
+- **`transport = "quic"`** (quinn), in both modes:
+  - Each user connection is a QUIC stream. UDP flows travel as QUIC datagrams, so a lost
+    packet delays nothing else. Packets above the datagram limit (about 1,200 bytes,
+    depending on the path) go on the flow's stream instead: they still arrive, just
+    reliably.
+  - Mutual TLS 1.3 with an identity derived from the token. There are no certificate
+    files, and a wrong token fails the handshake in both directions.
+  - `[tunnel.quic]`: `congestion` (`cubic`, the default, `bbr` or `newreno`), `sni`
+    (dialer; default: the remote host), `alpn` (default `h3`).
+  - A restarted endpoint resets the old connections at once (stateless resets with a key
+    from the token).
+  - No 0-RTT: sessions are pooled before users arrive, and early data could be replayed.
+- **`transport = "kcp"`**, in both modes, with or without mux:
+  - KCP (an ARQ protocol over UDP that keeps its rate under loss) as a stream under the
+    usual handshake, encryption and mux.
+  - Every UDP packet is sealed with a key from the token. The port answers nothing else
+    (probes, other tokens, tampered packets), and KCP's headers are hidden.
+  - Conversations have an explicit open, half-close and close, and keep-alive with a
+    silence timeout. A restarted listener closes old conversations at once.
+  - `[tunnel.kcp]`: `mode` (`normal`, `fast`, `fast2` (default), `fast3` or `manual` with
+    `nodelay`, `interval_ms`, `resend`, `no_congestion`), `send_window`, `recv_window`,
+    `mtu`.
+  - **FEC**: `fec_data` / `fec_parity` (off by default; `10` / `3` to start). A lost
+    packet is rebuilt from Reed-Solomon parity instead of resent. On a lossy link this
+    halves the p99 latency of sparse traffic; bulk throughput does not improve.
+- **Cargo features** `quic` and `kcp` (both on by default), to build without them.
+- **Samples:** `entry-quic-direct.toml` / `exit-quic-direct.toml` (with WireGuard over
+  datagrams), `entry-kcp-reverse.toml` / `exit-kcp-reverse.toml`.
+- **Lossy-link benchmark:** the tests carry a UDP and a TCP link emulator (delay,
+  jitter, random or bursty loss, reordering, a rate-limited bottleneck with a queue).
+  The TCP one models the sender's TCP, so loss slows `tcpmux` as it would on a real
+  path. See the Performance section of the README and docs/PHASE4.md.
+
+### Changed
+
+- A session layer between entry / exit and the multiplexers (kmux, QUIC). No behaviour
+  change for the existing transports.
+
 ## 0.3.0 - 2026-09-28
 
 Works with v0.2 for TCP; UDP forwarding needs both sides at v0.3 (a v0.2 exit rejects
