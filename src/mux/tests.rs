@@ -25,6 +25,8 @@ pub(super) fn config() -> SessionConfig {
         max_streams: 2048,
         keepalive: Duration::from_secs(5),
         coalesce: true,
+        datagram_buffer: 256 * 1024,
+        datagram_queue: 128,
     }
 }
 
@@ -612,4 +614,343 @@ async fn mux_throughput() {
             );
         }
     }
+}
+
+#[test]
+fn reset_reasons_roundtrip() {
+    use super::ResetReason as R;
+    for r in [
+        R::Cancel,
+        R::DialFailed,
+        R::Refused,
+        R::Protocol,
+        R::Unsupported,
+    ] {
+        assert_eq!(R::from_id(r.id()), r);
+    }
+    // Unknown reasons from newer peers read as a plain reset.
+    assert_eq!(R::from_id(200), R::Cancel);
+    assert_eq!(R::Unsupported.to_error().kind(), io::ErrorKind::Unsupported);
+}
+
+// ---- Datagrams (phase 3) ----
+
+/// Records what the session writes, but accepts nothing until [`Gate::open`], so a test
+/// can queue frames while the writer is stuck and then check the order they leave in.
+#[derive(Clone, Default)]
+struct Gate(std::sync::Arc<std::sync::Mutex<GateState>>);
+
+#[derive(Default)]
+struct GateState {
+    open: bool,
+    waiting: Option<std::task::Waker>,
+    written: Vec<u8>,
+}
+
+impl Gate {
+    fn open(&self) {
+        let mut g = self.0.lock().unwrap();
+        g.open = true;
+        if let Some(w) = g.waiting.take() {
+            w.wake();
+        }
+    }
+
+    /// The writer is blocked on the closed gate.
+    fn blocked(&self) -> bool {
+        self.0.lock().unwrap().waiting.is_some()
+    }
+
+    fn frames(&self) -> Vec<(FrameType, u32, usize)> {
+        let g = self.0.lock().unwrap();
+        let mut out = Vec::new();
+        let mut rest = &g.written[..];
+        while rest.len() >= frame::HEADER_LEN {
+            let h = frame::Header::decode(rest[..frame::HEADER_LEN].try_into().unwrap()).unwrap();
+            out.push((h.kind, h.stream, h.len as usize));
+            rest = &rest[frame::HEADER_LEN + h.len as usize..];
+        }
+        out
+    }
+}
+
+impl tokio::io::AsyncWrite for Gate {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let mut g = self.0.lock().unwrap();
+        if !g.open {
+            g.waiting = Some(cx.waker().clone());
+            return std::task::Poll::Pending;
+        }
+        g.written.extend_from_slice(buf);
+        std::task::Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+/// A client session writing into a closed [`Gate`], with a stream `a` already opened
+/// (its `SYN` is the batch stuck at the gate). The duplex end keeps the reader open.
+async fn gated(cfg: SessionConfig) -> (Gate, MuxSession, MuxStream, DuplexStream) {
+    let gate = Gate::default();
+    let (read_side, keep) = tokio::io::duplex(1024);
+    let session = MuxSession::from_halves(read_side, gate.clone(), Side::Client, cfg);
+    let a = session.open(Bytes::from_static(b"a")).unwrap();
+    eventually(|| gate.blocked()).await;
+    (gate, session, a, keep)
+}
+
+/// Kinds of the `DATA` / `DGRAM` frames, in wire order, after the first write.
+fn payload_kinds(frames: &[(FrameType, u32, usize)]) -> Vec<FrameType> {
+    frames
+        .iter()
+        .map(|f| f.0)
+        .filter(|k| matches!(k, FrameType::Data | FrameType::Dgram))
+        .collect()
+}
+
+#[tokio::test]
+async fn datagrams_keep_boundaries_and_order() {
+    for coalesce in [true, false] {
+        let cfg = SessionConfig {
+            coalesce,
+            ..config()
+        };
+        let (client, server) = pair_with(cfg.clone(), cfg);
+        let echo = tokio::spawn(async move {
+            let (stream, syn) = server.accept().await.unwrap();
+            assert_eq!(&syn[..], b"udp");
+            while let Some(p) = stream.recv_datagram().await.unwrap() {
+                assert!(stream.send_datagram(p));
+            }
+            stream.finish().unwrap();
+            server
+        });
+        // Sent right after the open: the SYN must still arrive first.
+        let stream = client.open(Bytes::from_static(b"udp")).unwrap();
+        let packets: Vec<Vec<u8>> = [0, 1, 1400, 9000, 65_535]
+            .iter()
+            .enumerate()
+            .map(|(i, &len)| pattern(len, i))
+            .collect();
+        for p in &packets {
+            assert!(stream.send_datagram(Bytes::from(p.clone())));
+        }
+        for p in &packets {
+            let got = within(5, stream.recv_datagram()).await.unwrap().unwrap();
+            assert_eq!(&got[..], &p[..], "coalesce {coalesce}");
+        }
+        stream.finish().unwrap();
+        assert!(within(5, stream.recv_datagram()).await.unwrap().is_none());
+        assert!(!stream.send_datagram(Bytes::from_static(b"late")));
+        let server = within(5, echo).await.unwrap();
+        assert_eq!(server.datagram_stats(), DatagramStats::default());
+    }
+}
+
+#[tokio::test]
+async fn datagrams_overtake_queued_stream_data() {
+    let (gate, session, a, _keep) = gated(config()).await;
+    // Stream data queued first (within the initial credit), then a datagram.
+    within(5, a.send(Bytes::from(vec![1u8; 64_000])))
+        .await
+        .unwrap();
+    let b = session.open(Bytes::from_static(b"b")).unwrap();
+    assert!(b.send_datagram(Bytes::from_static(b"ping")));
+    gate.open();
+    eventually(|| payload_kinds(&gate.frames()).len() >= 5).await;
+    let frames = gate.frames();
+    let kinds = payload_kinds(&frames);
+    assert_eq!(kinds[0], FrameType::Dgram, "{frames:?}");
+    // b's SYN went out before its datagram.
+    let syn_b = frames
+        .iter()
+        .position(|f| f.0 == FrameType::Syn && f.1 == b.id());
+    let dgram = frames.iter().position(|f| f.0 == FrameType::Dgram);
+    assert!(syn_b.unwrap() < dgram.unwrap());
+}
+
+#[tokio::test]
+async fn datagram_floods_do_not_starve_streams() {
+    for coalesce in [true, false] {
+        let cfg = SessionConfig {
+            coalesce,
+            ..config()
+        };
+        let (gate, session, a, _keep) = gated(cfg).await;
+        within(5, a.send(Bytes::from(vec![1u8; 64_000])))
+            .await
+            .unwrap();
+        let b = session.open(Bytes::from_static(b"b")).unwrap();
+        // More datagrams than one batch holds.
+        for _ in 0..100 {
+            assert!(b.send_datagram(Bytes::from(vec![2u8; 1400])));
+        }
+        gate.open();
+        eventually(|| payload_kinds(&gate.frames()).len() >= 104).await;
+        let kinds = payload_kinds(&gate.frames());
+        let first_data = kinds.iter().position(|k| *k == FrameType::Data).unwrap();
+        let last_dgram = kinds.iter().rposition(|k| *k == FrameType::Dgram).unwrap();
+        assert!(first_data < last_dgram, "coalesce {coalesce}: {kinds:?}");
+        if !coalesce {
+            // One frame per write, taking turns.
+            assert_eq!(
+                &kinds[..4],
+                &[
+                    FrameType::Dgram,
+                    FrameType::Data,
+                    FrameType::Dgram,
+                    FrameType::Data
+                ]
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn full_send_queue_drops_instead_of_blocking() {
+    let cfg = SessionConfig {
+        datagram_buffer: 10_000,
+        ..config()
+    };
+    let (_gate, session, a, _keep) = gated(cfg).await;
+    let accepted = (0..20)
+        .filter(|_| a.send_datagram(Bytes::from(vec![0u8; 1400])))
+        .count();
+    // 1,407 bytes each with the frame header.
+    assert_eq!(accepted, 10_000 / 1407);
+    assert_eq!(
+        session.datagram_stats().dropped_send,
+        (20 - accepted) as u64
+    );
+}
+
+#[tokio::test]
+async fn full_receive_queue_drops_the_oldest() {
+    let (client, server) = pair();
+    let stream = client.open(Bytes::from_static(b"udp")).unwrap();
+    for i in 0..200u32 {
+        assert!(stream.send_datagram(Bytes::from(i.to_be_bytes().to_vec())));
+    }
+    let (peer, _) = within(5, server.accept()).await.unwrap();
+    eventually(|| server.datagram_stats().dropped_recv == 72).await;
+    // The newest 128 are left, in order.
+    for i in 72..200u32 {
+        let p = within(5, peer.recv_datagram()).await.unwrap().unwrap();
+        assert_eq!(&p[..], &i.to_be_bytes());
+    }
+}
+
+#[tokio::test]
+async fn datagrams_use_no_stream_credit() {
+    let (client, server) = pair();
+    let stream = client.open(Bytes::from_static(b"udp")).unwrap();
+    let (peer, _) = within(5, server.accept()).await.unwrap();
+    // Far more than the stream window, with nobody reading stream data.
+    let total = WINDOW as usize * 8;
+    let sender = tokio::spawn(async move {
+        let mut sent = 0;
+        while sent < total {
+            if stream.send_datagram(Bytes::from(vec![3u8; 60_000])) {
+                sent += 60_000;
+            } else {
+                tokio::task::yield_now().await;
+            }
+        }
+        stream
+    });
+    let mut received = 0;
+    while received < total {
+        received += within(5, peer.recv_datagram())
+            .await
+            .unwrap()
+            .unwrap()
+            .len();
+    }
+    let stream = sender.await.unwrap();
+    // Stream data still flows with its own, untouched credit.
+    within(5, stream.send(Bytes::from(vec![4u8; 1000])))
+        .await
+        .unwrap();
+    let got = within(5, peer.recv()).await.unwrap().unwrap();
+    assert_eq!(got.len(), 1000);
+}
+
+#[tokio::test]
+async fn stray_datagrams_are_ignored() {
+    let mut frames = Vec::new();
+    frame::put(&mut frames, FrameType::Dgram, 7, b"unknown stream");
+    frame::put(&mut frames, FrameType::Syn, 1, b"udp");
+    frame::put(&mut frames, FrameType::Dgram, 1, b"hello");
+    frame::put(&mut frames, FrameType::Rst, 1, &[0]);
+    frame::put(&mut frames, FrameType::Dgram, 1, b"after reset");
+    let server = raw_peer(frames).await;
+    let (stream, _) = within(2, server.accept()).await.unwrap();
+    assert_eq!(
+        &within(2, stream.recv_datagram()).await.unwrap().unwrap()[..],
+        b"hello"
+    );
+    assert!(within(2, stream.recv_datagram()).await.is_err(), "reset");
+    assert!(!server.is_closed());
+}
+
+/// Regression: a stream's first datagram once pulled its `SYN` ahead of the `SYN`s of
+/// streams opened earlier, and the peer (rightly) closed the session over the id order.
+#[tokio::test]
+async fn syns_keep_id_order_when_datagrams_come_first() {
+    let (gate, session, _a, _keep) = gated(config()).await;
+    let c = session.open(Bytes::from_static(b"c")).unwrap();
+    let d = session.open(Bytes::from_static(b"d")).unwrap();
+    assert!(d.send_datagram(Bytes::from_static(b"first")));
+    gate.open();
+    eventually(|| gate.frames().iter().any(|f| f.0 == FrameType::Dgram)).await;
+    let frames = gate.frames();
+    let pos = |kind, id| {
+        frames
+            .iter()
+            .position(|f| f.0 == kind && f.1 == id)
+            .unwrap()
+    };
+    assert!(
+        pos(FrameType::Syn, c.id()) < pos(FrameType::Syn, d.id()),
+        "{frames:?}"
+    );
+    assert!(
+        pos(FrameType::Syn, d.id()) < pos(FrameType::Dgram, d.id()),
+        "{frames:?}"
+    );
+}
+
+/// The same with a real peer: many streams, some sending a datagram right away and some
+/// not, must all be accepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn mixed_opens_are_all_accepted() {
+    let (client, server) = pair();
+    let mut streams = Vec::new();
+    for i in 0..200u32 {
+        let s = client.open(Bytes::from(i.to_be_bytes().to_vec())).unwrap();
+        if i % 3 == 0 {
+            assert!(s.send_datagram(Bytes::from_static(b"x")));
+        }
+        streams.push(s);
+    }
+    for _ in 0..200 {
+        within(5, server.accept()).await.expect("stream accepted");
+    }
+    assert!(!client.is_closed() && !server.is_closed());
 }

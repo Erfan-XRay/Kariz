@@ -1,0 +1,33 @@
+# Entry side (Iran), reverse mode with mux, forwarding UDP: a WireGuard server and a
+# game server that uses TCP and UDP on the same port. Pair: exit-udp-reverse.toml.
+#
+# UDP travels inside the tunnel's TCP (or WebSocket) connections, so it works where UDP
+# itself is blocked. Packets keep their boundaries, are sent ahead of bulk TCP data on
+# the same connection, and are dropped (not queued) when the tunnel cannot keep up. On
+# a lossy link a lost TCP segment still delays the packets behind it: that is the price
+# of carrying UDP over TCP.
+role = "entry"
+mode = "reverse"
+profile = "gaming"                 # smaller buffers and queues, lowest latency
+
+[tunnel]
+transport = "tcpmux"               # use mux for UDP: without it every flow needs its own connection
+listen = "0.0.0.0:3080"
+token = "CHANGE-ME-run-kariz-token"
+
+[[forward]]
+listen = "0.0.0.0:51820"           # WireGuard clients connect here
+target = "127.0.0.1:51820"         # the WireGuard server, as seen from the exit side
+protocol = "udp"
+
+[[forward]]
+listen = "0.0.0.0:27015"
+target = "127.0.0.1:27015"
+protocol = "tcp+udp"               # both on one port
+
+[tuning]
+# udp_timeout_secs = 60            # a flow (one client address) ends after this long without packets
+# udp_max_flows = 1024             # per UDP rule; packets from further clients are dropped
+
+[log]
+level = "info"

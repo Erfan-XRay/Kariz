@@ -170,10 +170,19 @@ fn print_summary(config: &Config) {
         tuning.buffer_size,
         tuning.keepalive.as_secs()
     );
+    if config.forward.iter().any(|f| f.protocol.has_udp()) {
+        println!(
+            "  udp       : timeout={}s max_flows={} per rule",
+            tuning.udp.timeout.as_secs(),
+            tuning.udp.max_flows
+        );
+    }
     for f in &config.forward {
         println!(
-            "  forward   : {} -> {} ({:?})",
-            f.listen, f.target, f.protocol
+            "  forward   : {} -> {} ({})",
+            f.listen,
+            f.target,
+            f.protocol.name()
         );
     }
     for warning in config.warnings() {

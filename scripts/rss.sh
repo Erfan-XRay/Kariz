@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Memory of a Kariz pair on localhost (direct mode): resident set size (RSS) of each side
-# when idle, and with N idle user connections open through the tunnel.
+# when idle, and with N idle user connections (TCP) or flows (UDP) open through the
+# tunnel.
 #
-# Usage: scripts/rss.sh [transport] [connections] [kariz binary]
+# Usage: scripts/rss.sh [transport] [connections] [kariz binary] [tcp|udp]
 #   transport: tcp | tcpmux (default) | ws
-# Needs python3 (it plays the target server, which accepts and holds connections).
+# Needs python3 (it plays the target server, which accepts and holds connections, and
+# takes UDP packets).
 set -euo pipefail
 
 transport=${1:-tcpmux}
 n=${2:-100}
 kariz=${3:-target/release/kariz}
+proto=${4:-tcp}
 dir=$(mktemp -d)
 pids=()
 cleanup() {
@@ -28,10 +31,14 @@ for s in socks:
 print(*ports)')
 
 python3 -c '
-import socket, sys
+import socket, sys, threading
+port = int(sys.argv[1])
+u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+u.bind(("127.0.0.1", port))
+threading.Thread(target=lambda: [u.recvfrom(65536) for _ in iter(int, 1)], daemon=True).start()
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("127.0.0.1", int(sys.argv[1])))
+s.bind(("127.0.0.1", port))
 s.listen(4096)
 held = []
 while True:
@@ -59,6 +66,7 @@ token = "$token"
 [[forward]]
 listen = "127.0.0.1:$p_user"
 target = "127.0.0.1:$p_target"
+protocol = "$proto"
 [log]
 level = "warn"
 CONF
@@ -77,14 +85,15 @@ kib() { awk -v k="$1" 'BEGIN { printf "%.1f MiB", k / 1024 }'; }
 
 entry_idle=$(rss "$entry_pid")
 exit_idle=$(rss "$exit_pid")
-echo "transport $transport, idle:          entry $(kib "$entry_idle"), exit $(kib "$exit_idle")"
+echo "transport $transport ($proto), idle:          entry $(kib "$entry_idle"), exit $(kib "$exit_idle")"
 
 for _ in $(seq "$n"); do
-    exec {fd}<>"/dev/tcp/127.0.0.1/$p_user"
+    # Each /dev/udp open is a new client port, so a new flow.
+    exec {fd}<>"/dev/$proto/127.0.0.1/$p_user"
     printf 'x' >&"$fd"
 done
 sleep 2
 
 entry_busy=$(rss "$entry_pid")
 exit_busy=$(rss "$exit_pid")
-echo "transport $transport, $n idle conns: entry $(kib "$entry_busy") (+$(kib $((entry_busy - entry_idle)))), exit $(kib "$exit_busy") (+$(kib $((exit_busy - exit_idle))))"
+echo "transport $transport ($proto), $n idle conns: entry $(kib "$entry_busy") (+$(kib $((entry_busy - entry_idle)))), exit $(kib "$exit_busy") (+$(kib $((exit_busy - exit_idle))))"

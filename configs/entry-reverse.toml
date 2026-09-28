@@ -15,6 +15,7 @@ token = "CHANGE-ME-run-kariz-token"
 [[forward]]
 listen = "0.0.0.0:443"
 target = "127.0.0.1:443"   # resolved and dialed on the exit side
+# protocol = "tcp"          # tcp | udp | tcp+udp (see entry-udp-reverse.toml)
 
 [[forward]]
 listen = "0.0.0.0:8080"

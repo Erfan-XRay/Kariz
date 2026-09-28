@@ -10,6 +10,12 @@
 //! Streams never touch the connection. They move bytes in and out of their buffers in
 //! the shared state and wake the writer; the per-stream credit window bounds every
 //! buffer, so a stream whose reader is slow only ever stalls itself.
+//!
+//! **Datagrams** (UDP flows, phase 3) ride on a stream as `DGRAM` frames, one packet per
+//! frame. They are not flow controlled: the session keeps one bounded send queue for all
+//! of them, which the writer serves before stream data, and each stream a bounded
+//! receive queue. When a queue is full a packet is dropped, never waited for: new ones on
+//! the send side, the oldest on the receive side.
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -73,6 +79,9 @@ struct Stream {
     /// In the writer's ready queue.
     queued: bool,
 
+    /// Datagrams received and not yet taken, oldest first.
+    datagrams: VecDeque<Bytes>,
+
     /// Set once the stream is reset by either side.
     reset: Option<ResetReason>,
     /// The `MuxStream` handle is gone; remove the stream once nothing is pending.
@@ -96,6 +105,7 @@ impl Stream {
             fin_sent: false,
             write_waker: None,
             queued: false,
+            datagrams: VecDeque::new(),
             reset: None,
             detached: false,
         }
@@ -133,6 +143,10 @@ struct State {
     ready: VecDeque<u32>,
     /// Encoded control frames, sent before any stream data.
     control: Vec<u8>,
+    /// Streams whose `SYN` is not sent yet, in id order. They go out right after the
+    /// control frames: the peer requires increasing ids, and a stream's `SYN` must
+    /// precede its first `DATA` or `DGRAM`.
+    syns: VecDeque<u32>,
     next_id: u32,
     last_peer_id: u32,
     goaway: bool,
@@ -141,6 +155,23 @@ struct State {
     incoming: Option<mpsc::UnboundedSender<(MuxStream, Bytes)>>,
     last_recv: Instant,
     ping_seq: u64,
+    /// Datagrams to send, all streams, oldest first; `dgram_bytes` counts them with
+    /// their frame headers.
+    dgrams: VecDeque<(u32, Bytes)>,
+    dgram_bytes: usize,
+    /// Without coalescing, whether the last write carried a datagram (so streams get
+    /// the next turn).
+    dgram_turn: bool,
+    stats: DatagramStats,
+}
+
+/// Datagrams a session dropped because a queue was full.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DatagramStats {
+    /// Not sent: the session's send queue was full.
+    pub dropped_send: u64,
+    /// Received but discarded: the stream's receive queue was full (oldest dropped).
+    pub dropped_recv: u64,
 }
 
 struct Shared {
@@ -187,6 +218,7 @@ impl Shared {
         let window = self.config.stream_window as u64;
         let mut rejected = None;
         let mut notify = false;
+        let mut dropped_recv = 0;
         {
             let mut st = self.lock();
             st.last_recv = Instant::now();
@@ -292,13 +324,29 @@ impl Shared {
                         notify = true;
                     }
                 }
-                FrameType::Pong | FrameType::Dgram => {}
+                FrameType::Dgram => {
+                    // Unknown, closed or abandoned streams: dropped, it may race a close.
+                    if let Some(s) = streams.get_mut(&h.stream) {
+                        if s.reset.is_none() && !s.detached && !s.recv_fin {
+                            if s.datagrams.len() >= self.config.datagram_queue {
+                                s.datagrams.pop_front();
+                                dropped_recv += 1;
+                            }
+                            s.datagrams.push_back(payload);
+                            if let Some(w) = s.read_waker.take() {
+                                w.wake();
+                            }
+                        }
+                    }
+                }
+                FrameType::Pong => {}
                 FrameType::GoAway => {
                     *goaway = true;
                     // No more streams will arrive.
                     drop(incoming.take());
                 }
             }
+            st.stats.dropped_recv += dropped_recv;
         }
         drop(rejected);
         if notify {
@@ -315,14 +363,63 @@ impl Shared {
         }
         out.put_inline(&st.control);
         st.control.clear();
-        let State { streams, ready, .. } = &mut *st;
-        loop {
-            let room = if self.config.coalesce {
+        let coalesce = self.config.coalesce;
+        let room = |out: &Batch| {
+            if coalesce {
                 out.len < BATCH
             } else {
                 out.len == 0
+            }
+        };
+        let State {
+            streams,
+            ready,
+            syns,
+            dgrams,
+            dgram_bytes,
+            dgram_turn,
+            ..
+        } = &mut *st;
+
+        for id in syns.drain(..) {
+            let Some(s) = streams.get_mut(&id) else {
+                continue;
             };
-            if !room {
+            if s.reset.is_some() {
+                continue;
+            }
+            if let Some(syn) = s.syn.take() {
+                out.put_frame(FrameType::Syn, id, &syn);
+                if let Some(inc) = s.syn_window.take() {
+                    out.put_frame(FrameType::Window, id, &inc.to_be_bytes());
+                }
+            }
+        }
+
+        // Datagrams first, so real-time packets do not wait behind bulk stream data. They
+        // get at most half of a batch while streams have data too, and without
+        // coalescing they alternate with streams, so a flood cannot starve TCP.
+        let budget = if ready.is_empty() { BATCH } else { BATCH / 2 };
+        let datagrams_turn = coalesce || !*dgram_turn || ready.is_empty();
+        let mut used = 0;
+        while datagrams_turn && room(out) && used < budget {
+            let Some((id, packet)) = dgrams.pop_front() else {
+                break;
+            };
+            *dgram_bytes -= HEADER_LEN + packet.len();
+            let Some(s) = streams.get_mut(&id) else {
+                continue;
+            };
+            if s.reset.is_some() {
+                continue;
+            }
+            used += HEADER_LEN + packet.len();
+            out.put_payload(FrameType::Dgram, id, packet);
+        }
+        *dgram_turn = used > 0;
+
+        loop {
+            if !room(out) {
                 break;
             }
             let Some(id) = ready.pop_front() else {
@@ -334,12 +431,6 @@ impl Shared {
             s.queued = false;
             if s.reset.is_some() {
                 continue;
-            }
-            if let Some(syn) = s.syn.take() {
-                out.put_frame(FrameType::Syn, id, &syn);
-                if let Some(inc) = s.syn_window.take() {
-                    out.put_frame(FrameType::Window, id, &inc.to_be_bytes());
-                }
             }
             if let Some(front) = s.send_queue.front_mut() {
                 let data = if front.len() <= MAX_DATA_FRAME {
@@ -409,9 +500,18 @@ impl Batch {
     }
 
     fn put_data(&mut self, stream: u32, data: Bytes) {
-        self.put_inline(&frame::header(FrameType::Data, stream, data.len()));
-        self.len += data.len();
-        self.segments.push(Segment::Data(data));
+        self.put_payload(FrameType::Data, stream, data);
+    }
+
+    /// A frame whose payload goes out from its own `Bytes`, uncopied.
+    fn put_payload(&mut self, kind: FrameType, stream: u32, payload: Bytes) {
+        self.put_inline(&frame::header(kind, stream, payload.len()));
+        // An empty segment could end up alone in a vectored write, which then writes
+        // nothing and looks like a dead connection.
+        if !payload.is_empty() {
+            self.len += payload.len();
+            self.segments.push(Segment::Data(payload));
+        }
     }
 
     fn segment(&self, i: usize) -> &[u8] {
@@ -489,6 +589,7 @@ impl MuxSession {
                 streams: HashMap::new(),
                 ready: VecDeque::new(),
                 control: Vec::new(),
+                syns: VecDeque::new(),
                 next_id: match side {
                     Side::Client => 1,
                     Side::Server => 2,
@@ -499,6 +600,10 @@ impl MuxSession {
                 incoming: Some(tx),
                 last_recv: Instant::now(),
                 ping_seq: 0,
+                dgrams: VecDeque::new(),
+                dgram_bytes: 0,
+                dgram_turn: false,
+                stats: DatagramStats::default(),
             }),
             writer: Notify::new(),
             closed: watch::channel(false).0,
@@ -565,9 +670,8 @@ impl MuxSession {
             let mut stream = Stream::new();
             stream.syn = Some(syn);
             stream.syn_window = stream.window_update(window);
-            stream.queued = true;
             st.streams.insert(id, stream);
-            st.ready.push_back(id);
+            st.syns.push_back(id);
             id
         };
         self.shared.writer.notify_one();
@@ -611,6 +715,11 @@ impl MuxSession {
     pub fn is_draining(&self) -> bool {
         let st = self.shared.lock();
         st.goaway || st.closed.is_some()
+    }
+
+    /// Datagrams dropped so far because a queue was full.
+    pub fn datagram_stats(&self) -> DatagramStats {
+        self.shared.lock().stats
     }
 
     pub fn stream_count(&self) -> usize {
@@ -733,6 +842,15 @@ impl MuxStream {
         self.id
     }
 
+    /// Why the stream was reset, once it has been (by either side).
+    pub fn reset_reason(&self) -> Option<ResetReason> {
+        self.shared
+            .lock()
+            .streams
+            .get(&self.id)
+            .and_then(|s| s.reset)
+    }
+
     /// Aborts the stream and tells the peer why.
     pub fn reset(self, reason: ResetReason) {
         {
@@ -766,6 +884,7 @@ impl Drop for MuxStream {
             s.detached = true;
             s.recv.clear();
             s.recv_buffered = 0;
+            s.datagrams.clear();
             if s.reset.is_some() || (s.fin_sent && s.recv_fin) {
                 streams.remove(&self.id);
             } else if s.fin_queued && s.recv_fin {
@@ -911,6 +1030,63 @@ impl MuxStream {
             .await?;
         }
         Ok(())
+    }
+
+    /// Queues one datagram (at most 65,535 bytes) for sending. Never waits: returns false
+    /// if it was dropped because the session's datagram queue is full, or cannot be sent
+    /// at all (stream finished or reset, session closed).
+    pub fn send_datagram(&self, packet: Bytes) -> bool {
+        if packet.len() > u16::MAX as usize {
+            return false;
+        }
+        {
+            let mut st = self.shared.lock();
+            if st.closed.is_some() {
+                return false;
+            }
+            match st.streams.get(&self.id) {
+                Some(s) if s.reset.is_none() && !s.fin_queued => {}
+                _ => return false,
+            }
+            let size = HEADER_LEN + packet.len();
+            if st.dgram_bytes + size > self.shared.config.datagram_buffer {
+                st.stats.dropped_send += 1;
+                return false;
+            }
+            st.dgram_bytes += size;
+            st.dgrams.push_back((self.id, packet));
+        }
+        self.shared.writer.notify_one();
+        true
+    }
+
+    fn poll_recv_datagram(&self, cx: &mut Context<'_>) -> Poll<io::Result<Option<Bytes>>> {
+        let mut st = self.shared.lock();
+        let State {
+            streams, closed, ..
+        } = &mut *st;
+        let Some(s) = streams.get_mut(&self.id) else {
+            return Poll::Ready(Err(stream_gone()));
+        };
+        if let Some(packet) = s.datagrams.pop_front() {
+            return Poll::Ready(Ok(Some(packet)));
+        }
+        if let Some(reason) = s.reset {
+            return Poll::Ready(Err(reason.to_error()));
+        }
+        if s.recv_fin {
+            return Poll::Ready(Ok(None));
+        }
+        if let Some(reason) = closed {
+            return Poll::Ready(Err(closed_error(reason)));
+        }
+        s.read_waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
+
+    /// Receives the next datagram, whole. `None` once the peer finished the stream.
+    pub async fn recv_datagram(&self) -> io::Result<Option<Bytes>> {
+        std::future::poll_fn(|cx| self.poll_recv_datagram(cx)).await
     }
 
     /// Half close: no more data from this side. Queued data is still sent first.

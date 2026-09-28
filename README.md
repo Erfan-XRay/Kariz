@@ -9,9 +9,10 @@ linking servers together. It is written in Rust and built around three goals:
 2. **DPI resistance**: encrypted traffic without fixed bytes, browser-like WebSocket, works through CDNs.
 3. **Maximum speed**: statically dispatched hot path, tuned sockets, per-use-case profiles.
 
-> Status: **v0.2.0.** The wire format changed after v0.1.0: upgrade both servers
-> together. See [docs/ROADMAP.md](docs/ROADMAP.md) for what comes next (UDP, KCP, QUIC,
-> ICMP, stealth profile) and [CHANGELOG.md](CHANGELOG.md) for what changed.
+> Status: **v0.3.0.** v0.3 works with v0.2 for TCP; UDP forwarding needs both sides at
+> v0.3. (v0.2 changed the wire format of v0.1.) See [docs/ROADMAP.md](docs/ROADMAP.md)
+> for what comes next (KCP, QUIC, ICMP, stealth profile) and
+> [CHANGELOG.md](CHANGELOG.md) for what changed.
 
 ## Features
 
@@ -43,6 +44,13 @@ linking servers together. It is written in Rust and built around three goals:
   Mozilla roots, or accepts one pinned self-signed certificate (`kariz pin`). The
   listener reloads its certificate when the files change, so Let's Encrypt renewals
   need no restart.
+- **UDP forwarding** (`protocol = "udp"` or `"tcp+udp"` on a `[[forward]]` rule) over
+  every transport, so UDP (WireGuard, games, DNS, QUIC) keeps working where UDP itself
+  is blocked. Each client address is a flow with its own socket on the exit side.
+  Packets keep their boundaries, go out ahead of bulk TCP data sharing the connection,
+  and are dropped rather than queued when the tunnel cannot keep up. Inside a TCP-based
+  transport a lost segment still delays the packets behind it; datagram transports that
+  avoid this are the next phase.
 - **Reverse and direct modes** for every transport, with automatic reconnects.
 
 ## Concepts
@@ -74,6 +82,7 @@ Pick a pair of sample configs, put the token in both, and adjust addresses:
 | `entry-reverse.toml`, `exit-reverse.toml` | Reverse mode over `tcp`: the exit connects to the entry |
 | `entry-direct.toml`, `exit-direct.toml` | Direct mode over `tcp`: the entry connects to the exit |
 | `entry-tcpmux-reverse.toml`, `exit-tcpmux-reverse.toml` | Reverse mode with mux |
+| `entry-udp-reverse.toml`, `exit-udp-reverse.toml` | UDP forwarding (WireGuard, a game server on TCP+UDP) with mux |
 | `entry-wss-direct.toml`, `exit-wss-direct.toml` | `wss` straight to your own server, self-signed certificate pinned |
 | `entry-wss-cdn.toml`, `exit-wss-cdn.toml` | `wss` through a CDN such as Cloudflare (guide: [docs/CDN.md](docs/CDN.md)) |
 
@@ -144,6 +153,7 @@ early_data = true               # dialer: hello inside the upgrade request
 [[forward]]                     # entry only; as many as needed
 listen = "0.0.0.0:443"          # where users connect
 target = "127.0.0.1:443"        # dialed by the exit side
+protocol = "tcp"                # tcp | udp | tcp+udp (use mux for UDP)
 
 [tuning]                        # overrides of the profile values
 # nodelay = true
@@ -152,6 +162,8 @@ target = "127.0.0.1:443"        # dialed by the exit side
 # dial_timeout_secs = 10
 # handshake_timeout_secs = 10
 # threads = 2                   # default: one per CPU core
+# udp_timeout_secs = 60         # a UDP flow ends after this long without packets
+# udp_max_flows = 1024          # UDP flows (client addresses) per rule
 
 [log]
 level = "info"                  # error | warn | info | debug | trace
@@ -187,6 +199,22 @@ network first. Reproduce with
 | `wss`, no mux, AES-256-GCM + TLS | 2,800-3,200 |
 | `wss` + mux, AES-256-GCM + TLS | 2,300-2,500 |
 
+UDP through the tunnel (8 clients, each with 32 packets in flight;
+`cargo test --release --test tunnel udp_ -- --ignored --nocapture`):
+
+| Setup | 100-byte packets | 1,400-byte packets |
+|---|---|---|
+| `tcpmux` | 143,000 packets/s | 126,000 packets/s (1.4 Gbit/s) |
+| `tcp`, no mux | 141,000 packets/s | 123,000 packets/s |
+| `ws` + mux | 140,000 packets/s | 125,000 packets/s |
+| `wss` + mux | 147,000 packets/s | 120,000 packets/s |
+
+UDP round trip: an idle tunnel adds about 90 µs (125 µs through the tunnel versus
+37 µs straight to the target). With four bulk TCP transfers sharing the same mux
+connection over a throttled 20 Mbit/s link, UDP round trips stay around 60 ms (p50) /
+100 ms (p99), most of which is the emulated link's own buffer; without the unsent-data
+limit Kariz sets on mux connections (`TCP_NOTSENT_LOWAT`) they were about 340 ms.
+
 Memory (RSS, release build, `scripts/rss.sh`):
 
 | Transport | Idle, per side | 100 idle user connections |
@@ -194,6 +222,9 @@ Memory (RSS, release build, `scripts/rss.sh`):
 | `tcp` | 4.8-5.0 MiB | +4.1 MiB |
 | `tcpmux` | 5.7-5.8 MiB | +0.6 to +1.0 MiB |
 | `ws` | 5.7 MiB | +0.6 to +1.0 MiB |
+
+1,000 idle UDP flows over `tcpmux` (`scripts/rss.sh tcpmux 1000 target/release/kariz udp`):
++3.1 to 3.5 MiB per side.
 
 ## Security notes
 
@@ -215,6 +246,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test                          # nginx tests run too when nginx is installed
 cargo test --release --test tunnel throughput -- --ignored --nocapture
 scripts/rss.sh tcpmux 100           # memory, after cargo build --release
+scripts/rss.sh tcpmux 1000 target/release/kariz udp   # memory per UDP flow
+KARIZ_TEST_LOG=1 cargo test --test tunnel <name>        # with the tunnel's debug logs
 ```
 
-Design documents: [docs/ROADMAP.md](docs/ROADMAP.md), [docs/PHASE2.md](docs/PHASE2.md).
+Design documents: [docs/ROADMAP.md](docs/ROADMAP.md), [docs/PHASE2.md](docs/PHASE2.md),
+[docs/PHASE3.md](docs/PHASE3.md).
