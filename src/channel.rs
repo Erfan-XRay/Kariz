@@ -10,9 +10,11 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::time::{timeout_at, Instant};
 
+use crate::crypto::datagram::{self, DatagramOpener, DatagramSealer};
 use crate::crypto::handshake::{self, SessionKeys};
 use crate::crypto::record::{
     Opener, Sealer, SecureReader, SecureStream, SecureWriter, MAX_PAYLOAD,
@@ -20,6 +22,7 @@ use crate::crypto::record::{
 use crate::crypto::{random_below, Cipher, Crypto, ReplayFilter};
 use crate::mux::Transport;
 use crate::session::SessionStream;
+use crate::transport::kcp::KcpDatagrams;
 use crate::transport::{Dialer, Incoming, TunnelReader, TunnelStream, TunnelWriter};
 
 /// A failed handshake is drained for a random time in this range (seconds).
@@ -28,7 +31,14 @@ const DRAIN_SECS: (u64, u64) = (5, 30);
 const DRAIN_MAX_BYTES: usize = 1 << 20;
 
 /// An authenticated tunnel connection, the result of a handshake.
-pub enum Link {
+pub struct Link {
+    io: LinkIo,
+    /// Beside a KCP connection that carries mux: the datagram path, which the mux session
+    /// takes. Boxed for the same reason as `LinkIo::Secure`.
+    datagrams: Option<Box<DatagramPath>>,
+}
+
+enum LinkIo {
     /// `encryption = "none"`: authenticated, but the bytes are sent as they are.
     Plain(TunnelStream),
     /// Boxed: the cipher key schedules make it large, and it is one allocation per
@@ -37,14 +47,23 @@ pub enum Link {
 }
 
 impl Link {
+    /// `mux`: the link will carry a mux session, which may then use a datagram path.
     fn new(
         stream: TunnelStream,
         keys: SessionKeys,
         dialer: bool,
         early: Option<&handshake::Key>,
+        mux: bool,
     ) -> io::Result<Self> {
+        let datagrams = match stream.datagrams() {
+            Some(kcp) if mux => Some(Box::new(DatagramPath::new(kcp, &keys, dialer)?)),
+            _ => None,
+        };
         if keys.cipher == Cipher::None {
-            return Ok(Self::Plain(stream));
+            return Ok(Self {
+                io: LinkIo::Plain(stream),
+                datagrams,
+            });
         }
         let (send, recv) = if dialer {
             (&keys.c2s, &keys.s2c)
@@ -52,20 +71,80 @@ impl Link {
             (&keys.s2c, &keys.c2s)
         };
         let early = early.map(|k| Opener::new(keys.cipher, k)).transpose()?;
-        Ok(Self::Secure(Box::new(SecureStream::new(
+        let secure = SecureStream::new(
             stream,
             Sealer::new(keys.cipher, send)?,
             Opener::new(keys.cipher, recv)?,
             early,
-        ))))
+        );
+        Ok(Self {
+            io: LinkIo::Secure(Box::new(secure)),
+            datagrams,
+        })
     }
 
     /// Cheap, non-blocking check that an idle link has not been closed by the peer.
     /// Only meaningful while the peer is not expected to send anything.
     pub fn is_alive(&mut self) -> bool {
-        match self {
-            Self::Plain(s) => s.is_alive(),
-            Self::Secure(s) => s.get_mut().is_alive(),
+        match &mut self.io {
+            LinkIo::Plain(s) => s.is_alive(),
+            LinkIo::Secure(s) => s.get_mut().is_alive(),
+        }
+    }
+}
+
+/// The datagram path beside a KCP link (docs/PHASE6.md, sections 2 and 3): mux frames
+/// sealed with keys from the handshake and sent as KCP datagrams, unreliably.
+pub struct DatagramPath {
+    kcp: KcpDatagrams,
+    sealer: std::sync::Mutex<DatagramSealer>,
+    opener: std::sync::Mutex<DatagramOpener>,
+    max_frame: usize,
+}
+
+impl DatagramPath {
+    fn new(kcp: KcpDatagrams, keys: &SessionKeys, dialer: bool) -> io::Result<Self> {
+        // The record keys of each direction, from which the datagram keys derive.
+        let (send, recv) = if dialer {
+            (&keys.c2s, &keys.s2c)
+        } else {
+            (&keys.s2c, &keys.c2s)
+        };
+        let max_frame = kcp
+            .max_len()
+            .saturating_sub(datagram::overhead(keys.cipher));
+        Ok(Self {
+            kcp,
+            sealer: std::sync::Mutex::new(DatagramSealer::new(keys.cipher, send)?),
+            opener: std::sync::Mutex::new(DatagramOpener::new(keys.cipher, recv)?),
+            max_frame,
+        })
+    }
+
+    /// Largest frame (mux header and payload) that fits in one datagram.
+    pub fn max_frame(&self) -> usize {
+        self.max_frame
+    }
+
+    /// Seals and sends `frame` at once; false if it was dropped. `fec`: see
+    /// [`KcpDatagrams::send`].
+    pub fn send(&self, frame: &[u8], fec: bool) -> bool {
+        let mut sealed = Vec::with_capacity(frame.len() + datagram::overhead(Cipher::Aes256Gcm));
+        let sealer = &mut *self.sealer.lock().unwrap_or_else(|e| e.into_inner());
+        if sealer.seal(frame, &mut sealed).is_err() {
+            return false;
+        }
+        self.kcp.send(&sealed, fec)
+    }
+
+    /// The next frame that opens (others are dropped); `None` once the link is over.
+    pub async fn recv(&self) -> Option<Bytes> {
+        loop {
+            let mut datagram = self.kcp.recv().await?.to_vec();
+            let opener = &mut *self.opener.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(frame) = opener.open(&mut datagram) {
+                return Some(Bytes::copy_from_slice(frame));
+            }
         }
     }
 }
@@ -86,13 +165,17 @@ impl Transport for Link {
     type Reader = LinkReader;
     type Writer = LinkWriter;
 
+    fn take_datagram_path(&mut self) -> Option<DatagramPath> {
+        self.datagrams.take().map(|path| *path)
+    }
+
     fn into_halves(self) -> (LinkReader, LinkWriter) {
-        match self {
-            Self::Plain(s) => {
+        match self.io {
+            LinkIo::Plain(s) => {
                 let (r, w) = s.into_split();
                 (LinkReader::Plain(r), LinkWriter::Plain(w))
             }
-            Self::Secure(s) => {
+            LinkIo::Secure(s) => {
                 let (r, w) = s.split(TunnelStream::into_split);
                 (
                     LinkReader::Secure(Box::new(r)),
@@ -138,7 +221,7 @@ pub async fn connect(dialer: &Dialer, crypto: &Crypto, early: &[u8]) -> io::Resu
     }
     let mut stream = dialer.dial_with(&msg).await?;
     let keys = state.read_reply(&mut stream).await?;
-    let mut link = Link::new(stream, keys, true, None)?;
+    let mut link = Link::new(stream, keys, true, None, crypto.mux())?;
     if !late.is_empty() {
         link.write_all(late).await?;
         link.flush().await?;
@@ -183,7 +266,13 @@ pub async fn accept(
         ))
     });
     match result {
-        Ok(accepted) => Link::new(stream, accepted.keys, false, accepted.early_key.as_ref()),
+        Ok(accepted) => Link::new(
+            stream,
+            accepted.keys,
+            false,
+            accepted.early_key.as_ref(),
+            crypto.mux(),
+        ),
         // The peer proved it knows the token; it is misconfigured, not probing.
         Err(e) if e.kind() == io::ErrorKind::Unsupported => {
             let _ = timeout_at(deadline, stream.shutdown()).await;
@@ -224,9 +313,9 @@ impl AsyncRead for Link {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Plain(s) => Pin::new(s).poll_read(cx, buf),
-            Self::Secure(s) => Pin::new(&mut **s).poll_read(cx, buf),
+        match &mut self.get_mut().io {
+            LinkIo::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            LinkIo::Secure(s) => Pin::new(&mut **s).poll_read(cx, buf),
         }
     }
 }
@@ -237,9 +326,9 @@ impl AsyncWrite for Link {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Plain(s) => Pin::new(s).poll_write(cx, buf),
-            Self::Secure(s) => Pin::new(&mut **s).poll_write(cx, buf),
+        match &mut self.get_mut().io {
+            LinkIo::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            LinkIo::Secure(s) => Pin::new(&mut **s).poll_write(cx, buf),
         }
     }
 
@@ -248,30 +337,30 @@ impl AsyncWrite for Link {
         cx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Plain(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-            Self::Secure(s) => Pin::new(&mut **s).poll_write_vectored(cx, bufs),
+        match &mut self.get_mut().io {
+            LinkIo::Plain(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            LinkIo::Secure(s) => Pin::new(&mut **s).poll_write_vectored(cx, bufs),
         }
     }
 
     fn is_write_vectored(&self) -> bool {
-        match self {
-            Self::Plain(s) => s.is_write_vectored(),
-            Self::Secure(s) => s.is_write_vectored(),
+        match &self.io {
+            LinkIo::Plain(s) => s.is_write_vectored(),
+            LinkIo::Secure(s) => s.is_write_vectored(),
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Plain(s) => Pin::new(s).poll_flush(cx),
-            Self::Secure(s) => Pin::new(&mut **s).poll_flush(cx),
+        match &mut self.get_mut().io {
+            LinkIo::Plain(s) => Pin::new(s).poll_flush(cx),
+            LinkIo::Secure(s) => Pin::new(&mut **s).poll_flush(cx),
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
-            Self::Secure(s) => Pin::new(&mut **s).poll_shutdown(cx),
+        match &mut self.get_mut().io {
+            LinkIo::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            LinkIo::Secure(s) => Pin::new(&mut **s).poll_shutdown(cx),
         }
     }
 }
@@ -377,7 +466,7 @@ mod tests {
                 got
             });
             let mut ch = connect(&d, &crypto, &early).await.unwrap();
-            assert_eq!(matches!(ch, Link::Plain(_)), enc == Encryption::None);
+            assert_eq!(matches!(ch.io, LinkIo::Plain(_)), enc == Encryption::None);
             ch.write_all(b"hello").await.unwrap();
             ch.flush().await.unwrap();
             let mut pong = [0u8; 4];
@@ -602,5 +691,142 @@ mod tests {
             .unwrap();
         let answer = String::from_utf8(answer).unwrap();
         assert!(answer.starts_with("HTTP/1.1 404 Not Found\r\n"), "{answer}");
+    }
+
+    /// Mux sessions over a KCP link and its datagram path (docs/PHASE6.md, section 2).
+    #[cfg(feature = "kcp")]
+    mod datagram_path {
+        use super::*;
+        use crate::config::TransportKind;
+        use crate::mux::{MuxSession, MuxStream, SessionConfig, Side};
+        use crate::transport::kcp::KcpParams;
+
+        fn config() -> SessionConfig {
+            SessionConfig {
+                stream_window: 256 * 1024,
+                max_streams: 64,
+                keepalive: Duration::from_secs(2),
+                coalesce: true,
+                datagram_buffer: 256 * 1024,
+                datagram_queue: 1024,
+            }
+        }
+
+        /// A client and a server session over one KCP link. `client_path`: whether the
+        /// client uses the datagram path; without it, it ignores the path as v0.4 does.
+        /// The listener is returned too, since dropping it ends the link.
+        async fn sessions(client_path: bool, fec: bool) -> (MuxSession, MuxSession, Listener) {
+            let tuning = Tuning::for_profile(Default::default());
+            let mut kcp = KcpParams::default();
+            if fec {
+                kcp.config.fec_data = Some(4);
+                kcp.config.fec_parity = Some(2);
+            }
+            let settings = Settings {
+                kind: TransportKind::Kcp,
+                kcp,
+                ..Default::default()
+            };
+            let l = Listener::bind(&settings, "127.0.0.1:0", &tuning)
+                .await
+                .unwrap();
+            let d = Dialer::new(&settings, &l.local_addr().unwrap().to_string(), &tuning).unwrap();
+            let crypto = Crypto::new(TOKEN, Encryption::Auto).with_mux(true);
+            let (link, accepted) = tokio::join!(connect(&d, &crypto, &[]), async {
+                let (s, _) = l.accept().await.unwrap();
+                accept(s, &crypto, &ReplayFilter::default(), Duration::from_secs(5)).await
+            });
+            let (link, accepted) = (link.unwrap(), accepted.unwrap());
+            assert!(link.datagrams.is_some() && accepted.datagrams.is_some());
+            let client = if client_path {
+                MuxSession::over(link, Side::Client, config())
+            } else {
+                let (r, w) = link.into_halves();
+                MuxSession::from_halves(r, w, Side::Client, config())
+            };
+            let server = MuxSession::over(accepted, Side::Server, config());
+            (client, server, l)
+        }
+
+        async fn eventually(mut f: impl FnMut() -> bool) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !f() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("in time");
+        }
+
+        /// Sends `count` datagrams of `len` bytes and returns how many of them arrived,
+        /// intact, on `to`.
+        async fn exchange(from: &MuxStream, to: &MuxStream, count: u8, len: usize) -> usize {
+            for i in 0..count {
+                assert!(from.send_datagram(Bytes::from(vec![i; len])));
+            }
+            let mut got = 0;
+            while let Ok(Ok(Some(d))) =
+                tokio::time::timeout(Duration::from_millis(300), to.recv_datagram()).await
+            {
+                assert_eq!(d.len(), len);
+                got += 1;
+            }
+            got
+        }
+
+        #[tokio::test]
+        async fn datagrams_take_the_path_once_the_peer_is_heard() {
+            for fec in [false, true] {
+                let (client, server, _l) = sessions(true, fec).await;
+                let a = client.open(Bytes::from_static(b"flow")).unwrap();
+                let (b, _) = server.accept().await.unwrap();
+                // Both probes answered: each side has heard the other on the path.
+                eventually(|| {
+                    client.datagram_stats().path_received > 0
+                        && server.datagram_stats().path_received > 0
+                })
+                .await;
+                // The server knows the stream (the client opened it): the path at once.
+                assert_eq!(exchange(&b, &a, 50, 100).await, 50, "fec {fec}");
+                assert_eq!(server.datagram_stats().path_sent, 50);
+                // The client has now heard from the server on the stream: the path too.
+                assert_eq!(exchange(&a, &b, 50, 100).await, 50, "fec {fec}");
+                assert_eq!(client.datagram_stats().path_sent, 50);
+                // Too large for one packet: in the connection, and it still arrives.
+                assert_eq!(exchange(&b, &a, 1, 3000).await, 1);
+                assert_eq!(server.datagram_stats().path_sent, 50);
+                // The streams themselves still work beside the path.
+                a.send(Bytes::from_static(b"data")).await.unwrap();
+                assert_eq!(&b.recv().await.unwrap().unwrap()[..], b"data");
+            }
+        }
+
+        /// A datagram never overtakes its stream's `SYN`: until the peer shows it knows
+        /// the stream, the opener sends in the connection.
+        #[tokio::test]
+        async fn the_opener_waits_until_the_peer_knows_the_stream() {
+            let (client, server, _l) = sessions(true, false).await;
+            eventually(|| client.datagram_stats().path_received > 0).await;
+            let a = client.open(Bytes::from_static(b"flow")).unwrap();
+            assert!(a.send_datagram(Bytes::from_static(b"first")));
+            let (b, _) = server.accept().await.unwrap();
+            assert_eq!(&b.recv_datagram().await.unwrap().unwrap()[..], b"first");
+            assert_eq!(client.datagram_stats().path_sent, 0);
+        }
+
+        /// A peer that ignores the path (as v0.4 does) gets everything in the connection.
+        #[tokio::test]
+        async fn a_peer_without_the_path_gets_everything_in_the_stream() {
+            let (client, server, _l) = sessions(false, false).await;
+            let a = client.open(Bytes::from_static(b"flow")).unwrap();
+            let (b, _) = server.accept().await.unwrap();
+            // Long enough for the server's probes to go out and be ignored.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(exchange(&b, &a, 20, 100).await, 20);
+            assert_eq!(exchange(&a, &b, 20, 100).await, 20);
+            let (c, s) = (client.datagram_stats(), server.datagram_stats());
+            assert_eq!((c.path_sent, c.path_received), (0, 0));
+            assert_eq!((s.path_sent, s.path_received), (0, 0));
+        }
     }
 }

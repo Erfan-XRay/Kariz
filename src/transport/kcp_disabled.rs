@@ -23,7 +23,7 @@ fn unsupported() -> io::Error {
 pub struct KcpParams;
 
 impl KcpParams {
-    pub fn new(_: &TunnelConfig) -> Self {
+    pub fn new(_: &TunnelConfig, _: crate::config::KcpConfig) -> Self {
         Self
     }
 }
@@ -62,9 +62,29 @@ pub enum KcpReader {}
 
 pub enum KcpWriter {}
 
+pub enum KcpDatagrams {}
+
+impl KcpDatagrams {
+    pub fn max_len(&self) -> usize {
+        match *self {}
+    }
+
+    pub fn send(&self, _: &[u8], _: bool) -> bool {
+        match *self {}
+    }
+
+    pub async fn recv(&self) -> Option<bytes::Bytes> {
+        match *self {}
+    }
+}
+
 impl KcpStream {
     pub fn into_split(self) -> (KcpReader, KcpWriter) {
         match self {}
+    }
+
+    pub fn datagrams(&self) -> Option<KcpDatagrams> {
+        match *self {}
     }
 
     pub fn is_alive(&self) -> bool {

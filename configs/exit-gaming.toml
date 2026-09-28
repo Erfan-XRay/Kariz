@@ -1,0 +1,16 @@
+# Exit side (abroad), gaming profile over KCP. Pair: entry-gaming.toml.
+#
+# Keep the gaming profile on this side too: FEC is set per sending side, so this side's
+# profile decides FEC for the packets towards the entry. Duplication comes from the
+# entry's forward rule and needs nothing here.
+role = "exit"
+mode = "direct"
+profile = "gaming"
+
+[tunnel]
+transport = "kcp"
+listen = "0.0.0.0:4000"            # UDP port
+token = "CHANGE-ME-run-kariz-token"
+
+[log]
+level = "info"

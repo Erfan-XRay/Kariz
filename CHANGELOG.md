@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.5.0 - 2026-09-28
+
+The gaming release. Works with v0.4 over every transport: the new datagram path over
+`kcp` is negotiated inside the session and stays off with a v0.4 peer. UDP rules with
+`duplicate` need the exit at v0.5 (a v0.4 exit rejects those flows, and the entry logs
+it).
+
+### Added
+
+- **Datagram path over `kcp`:** UDP flows travel beside KCP instead of inside its
+  reliable stream, so a lost packet never holds up the ones behind it. On an emulated
+  60 ms path the p99 round trip of game traffic stays at the path's RTT under loss
+  (64 ms, against 141 ms at 1 % loss and 236 ms at 5 % in v0.4).
+  - Sealed with keys from the handshake (forward secrecy, as everything else) and an
+    explicit packet number; replays and copies are dropped.
+  - Protected by FEC when FEC is on.
+  - Packets too large for one KCP packet (above about 1,300 bytes) still go through
+    the stream.
+- **Packet duplication per forward rule:** `duplicate = 2 | 3` and `duplicate_gap_ms`
+  (default 5). Each UDP packet is sent again, both ways, where it may be lost (KCP's
+  datagram path, QUIC datagrams); the receiver drops the copies. Over a path losing
+  10 % each way, echoed game packets lost 0.5-3.5 % of round trips with 2 copies,
+  against 21-23 % without.
+- **DSCP:** `[tuning] dscp = "ef"` (or `af41`, `cs4`, ..., or 0-63) marks TCP tunnel
+  sockets, KCP sockets and the exit's UDP sockets to targets. Off by default: most of
+  the internet clears or ignores the mark. QUIC sockets are not marked (quinn sets the
+  TOS byte of every packet itself); `kariz check` says so.
+- **`[tunnel.kcp] datagrams`** (default `true`): `false` keeps UDP flows in the
+  reliable stream, as in v0.4.
+- **Samples:** `entry-gaming.toml` / `exit-gaming.toml`.
+- **Game-traffic benchmark:** 128-byte packets at 64 Hz, echoed, on an idle tunnel and
+  next to four downloads, at 0 / 1 / 5 % and bursty loss (`cargo test --release --test
+  tunnel game_traffic -- --ignored --nocapture`). Results in the README and
+  docs/PHASE6.md.
+
+### Changed
+
+- **UDP over `kcp` can now lose packets, as UDP does**, rather than waiting for
+  retransmissions. On a link that a bulk transfer keeps full (the balanced profile's
+  large windows over `kcp`), UDP packets are dropped at the link's queue instead of
+  waiting behind it (5-13 % lost in the phase 4 benchmark, p99 about 115 ms instead of
+  200-340 ms). `[tunnel.kcp] datagrams = false` restores the old behaviour.
+- **The gaming profile turns FEC 10 / 3 on over `kcp`**, unless `[tunnel.kcp]` sets
+  `fec_data` or `fec_parity` (0 and 0 turn it off). At 5 % loss 99 % of game packets
+  came back instead of 90 %, and downloads next to the game went 2.3x faster.
+- `kariz check` shows each rule's duplication and the DSCP mark, and warns where they
+  have no effect.
+- Roadmap: the `icmp` transport (phase 5) is dropped; the stealth profile and
+  active-probe fallback are later work, not scheduled.
+
 ## 0.4.0 - 2026-09-28
 
 Works with v0.3 over `tcp`, `tcpmux`, `ws` and `wss` (their wire format is unchanged);

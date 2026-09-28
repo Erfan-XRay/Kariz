@@ -18,6 +18,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
+use crate::proto::Duplicate;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -196,11 +198,19 @@ pub struct KcpConfig {
     /// protection, 43 with FEC.
     #[serde(default = "default_kcp_mtu")]
     pub mtu: usize,
-    /// Reed-Solomon FEC: parity packets per group of data packets; both 0 = off.
-    #[serde(default)]
-    pub fec_data: usize,
-    #[serde(default)]
-    pub fec_parity: usize,
+    /// Reed-Solomon FEC: parity packets per group of data packets; both 0 = off. Unset:
+    /// the profile's default (`Config::kcp`).
+    pub fec_data: Option<usize>,
+    pub fec_parity: Option<usize>,
+    /// UDP flows take the datagram path beside KCP (docs/PHASE6.md, section 2). Off:
+    /// they stay in the reliable stream, as in v0.4 (never lost, but a lost segment makes
+    /// them wait for its retransmission).
+    #[serde(default = "default_true")]
+    pub datagrams: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_kcp_window() -> u16 {
@@ -223,8 +233,9 @@ impl Default for KcpConfig {
             send_window: default_kcp_window(),
             recv_window: default_kcp_window(),
             mtu: default_kcp_mtu(),
-            fec_data: 0,
-            fec_parity: 0,
+            fec_data: None,
+            fec_parity: None,
+            datagrams: true,
         }
     }
 }
@@ -270,7 +281,8 @@ pub struct KcpTiming {
 impl KcpConfig {
     /// `(data, parity)` packets per FEC group, or `None` when FEC is off.
     pub fn fec(&self) -> Option<(usize, usize)> {
-        (self.fec_data > 0).then_some((self.fec_data, self.fec_parity))
+        let (data, parity) = (self.fec_data.unwrap_or(0), self.fec_parity.unwrap_or(0));
+        (data > 0).then_some((data, parity))
     }
 
     pub fn timing(&self) -> KcpTiming {
@@ -420,7 +432,27 @@ pub struct Forward {
     pub target: String,
     #[serde(default)]
     pub protocol: ForwardProtocol,
+    /// UDP rules: how many times each packet is sent in all, both ways (1-3; default 1).
+    /// Copies go only where packets may be lost (KCP's datagram path, QUIC datagrams).
+    pub duplicate: Option<u8>,
+    /// Milliseconds between the copies of a packet (0-50; default 5).
+    pub duplicate_gap_ms: Option<u8>,
 }
+
+impl Forward {
+    /// Packet duplication for this rule's UDP flows; `None` with a single copy.
+    pub fn duplication(&self) -> Option<Duplicate> {
+        let copies = self.duplicate.unwrap_or(1);
+        (copies > 1).then(|| Duplicate {
+            copies,
+            gap_ms: self.duplicate_gap_ms.unwrap_or(DEFAULT_DUPLICATE_GAP_MS),
+        })
+    }
+}
+
+const DEFAULT_DUPLICATE_GAP_MS: u8 = 5;
+const DUPLICATE_COPIES: std::ops::RangeInclusive<u8> = 1..=3;
+const MAX_DUPLICATE_GAP_MS: u8 = 50;
 
 /// Optional per-field overrides applied on top of the selected profile.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -437,7 +469,68 @@ pub struct TuningOverrides {
     pub udp_timeout_secs: Option<u64>,
     /// Concurrent UDP flows (client addresses) per UDP forward rule.
     pub udp_max_flows: Option<usize>,
+    /// DSCP mark for tunnel sockets and the exit's UDP sockets to targets (unset: none).
+    pub dscp: Option<Dscp>,
 }
+
+/// A DSCP codepoint as written in `[tuning] dscp`: a name (`"ef"`, `"af41"`, `"cs4"`,
+/// ...) or a number 0-63.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum Dscp {
+    Name(String),
+    Value(u64),
+}
+
+impl Dscp {
+    /// The 6-bit codepoint; `None` for an unknown name or a number above 63.
+    pub fn codepoint(&self) -> Option<u8> {
+        match self {
+            Self::Value(v) => u8::try_from(*v).ok().filter(|v| *v < 64),
+            Self::Name(name) => DSCP_NAMES
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|&(_, v)| v),
+        }
+    }
+
+    /// The name of `codepoint`, if it has one.
+    pub fn name_of(codepoint: u8) -> Option<&'static str> {
+        DSCP_NAMES
+            .iter()
+            .find(|&&(_, v)| v == codepoint)
+            .map(|&(n, _)| n)
+    }
+}
+
+/// Codepoint names of RFC 2474 (class selectors), RFC 2597 (assured forwarding), RFC
+/// 3246 (expedited forwarding), RFC 5865 (voice admit) and RFC 8622 (lower effort).
+const DSCP_NAMES: [(&str, u8); 24] = [
+    ("cs0", 0),
+    ("le", 1),
+    ("cs1", 8),
+    ("af11", 10),
+    ("af12", 12),
+    ("af13", 14),
+    ("cs2", 16),
+    ("af21", 18),
+    ("af22", 20),
+    ("af23", 22),
+    ("cs3", 24),
+    ("af31", 26),
+    ("af32", 28),
+    ("af33", 30),
+    ("cs4", 32),
+    ("af41", 34),
+    ("af42", 36),
+    ("af43", 38),
+    ("cs5", 40),
+    ("va", 44),
+    ("ef", 46),
+    ("cs6", 48),
+    ("cs7", 56),
+    ("default", 0),
+];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -474,6 +567,9 @@ pub struct Tuning {
     /// the socket. Without it, a UDP packet waits behind everything already queued in the
     /// kernel on a slow link.
     pub notsent_lowat: Option<u32>,
+    /// DSCP codepoint for tunnel sockets and the exit's UDP sockets to targets
+    /// (docs/PHASE6.md, section 5); `None` leaves the OS default (0).
+    pub dscp: Option<u8>,
 }
 
 /// UDP forwarding limits and buffers (phase 3).
@@ -524,6 +620,7 @@ impl Tuning {
             threads: None,
             udp: UdpTuning::for_profile(profile),
             notsent_lowat: None,
+            dscp: None,
         }
     }
 
@@ -551,6 +648,10 @@ impl Tuning {
         }
         if let Some(v) = o.udp_max_flows {
             self.udp.max_flows = v;
+        }
+        // An invalid value is reported by `Config::validate`.
+        if let Some(d) = &o.dscp {
+            self.dscp = d.codepoint();
         }
         self
     }
@@ -704,6 +805,16 @@ impl Config {
                  enable tunnel.mux (or use tcpmux, ws, wss) for UDP",
             );
         }
+        let unreliable = matches!(
+            self.tunnel.transport,
+            TransportKind::Kcp | TransportKind::Quic
+        ) && self.mux().enabled;
+        if self.forward.iter().any(|f| f.duplication().is_some()) && !unreliable {
+            warnings.push(
+                "forward.duplicate has no effect here: copies are only sent over kcp (with mux) \
+                 or quic, where packets may be lost; other transports deliver every packet",
+            );
+        }
         if self
             .tunnel
             .quic
@@ -717,6 +828,18 @@ impl Config {
                 "tunnel.tls.insecure = true: the server certificate is not verified; \
                  prefer tls.pin_sha256",
             );
+        }
+        if self.tuning().dscp.is_some() {
+            if self.tunnel.transport == TransportKind::Quic {
+                warnings.push(
+                    "tuning.dscp does not mark QUIC tunnel packets: quinn sets the TOS byte of \
+                     every packet itself (for ECN); the exit's UDP sockets to targets are \
+                     still marked",
+                );
+            }
+            if cfg!(windows) {
+                warnings.push("tuning.dscp has no effect on Windows unless a QoS policy allows it");
+            }
         }
         warnings
     }
@@ -777,6 +900,18 @@ impl Config {
             if f.target.len() > u16::MAX as usize {
                 bail!("forward target is too long: {}", f.target);
             }
+            if (f.duplicate.is_some() || f.duplicate_gap_ms.is_some()) && !f.protocol.has_udp() {
+                bail!(
+                    "forward {}: duplicate and duplicate_gap_ms are for UDP rules",
+                    f.listen
+                );
+            }
+            if !DUPLICATE_COPIES.contains(&f.duplicate.unwrap_or(1)) {
+                bail!("forward.duplicate must be between 1 and 3");
+            }
+            if f.duplicate_gap_ms.unwrap_or(0) > MAX_DUPLICATE_GAP_MS {
+                bail!("forward.duplicate_gap_ms must be at most {MAX_DUPLICATE_GAP_MS}");
+            }
         }
 
         let tuning = self.tuning();
@@ -799,6 +934,17 @@ impl Config {
                 "tuning.udp_max_flows must be between {} and {}",
                 UDP_MAX_FLOWS.start(),
                 UDP_MAX_FLOWS.end()
+            );
+        }
+        if let Some(d) = self
+            .tuning
+            .dscp
+            .as_ref()
+            .filter(|d| d.codepoint().is_none())
+        {
+            bail!(
+                "tuning.dscp must be a codepoint name (ef, af41, cs4, ...) or a number from \
+                 0 to 63, not {d:?}"
             );
         }
 
@@ -859,7 +1005,7 @@ impl Config {
                 KCP_MTU.end()
             );
         }
-        match (k.fec_data, k.fec_parity) {
+        match (k.fec_data.unwrap_or(0), k.fec_parity.unwrap_or(0)) {
             (0, 0) => {}
             (data, parity) if KCP_FEC_DATA.contains(&data) && KCP_FEC_PARITY.contains(&parity) => {
                 if k.mtu > KCP_MTU_FEC {
@@ -876,6 +1022,18 @@ impl Config {
             ),
         }
         Ok(())
+    }
+
+    /// `[tunnel.kcp]` with the profile's defaults filled in: the gaming profile turns FEC
+    /// on (10 data + 3 parity packets per group) unless the table sets `fec_data` or
+    /// `fec_parity`, or an MTU too large for FEC (docs/PHASE6.md, 6.5).
+    pub fn kcp(&self) -> KcpConfig {
+        let mut k = self.tunnel.kcp.clone().unwrap_or_default();
+        let unset = k.fec_data.is_none() && k.fec_parity.is_none();
+        if self.profile == Profile::Gaming && unset && k.mtu <= KCP_MTU_FEC {
+            (k.fec_data, k.fec_parity) = (Some(10), Some(3));
+        }
+        k
     }
 
     fn validate_quic(&self) -> Result<()> {
@@ -1173,6 +1331,26 @@ mod tests {
         format!("{:#}", Config::parse(text).unwrap_err())
     }
 
+    #[test]
+    fn gaming_profile_turns_kcp_fec_on_unless_set() {
+        let kcp = |profile: &str, table: &str| {
+            let text = format!(
+                "profile = \"{profile}\"\n{}",
+                with_transport("entry", "kcp", &format!("[tunnel.kcp]\n{table}"))
+            );
+            Config::parse(&text).unwrap().kcp().fec()
+        };
+        assert_eq!(kcp("gaming", ""), Some((10, 3)));
+        assert_eq!(kcp("balanced", ""), None);
+        assert_eq!(kcp("throughput", ""), None);
+        // Set in the table: the table wins, off included.
+        assert_eq!(kcp("gaming", "fec_data = 0\nfec_parity = 0"), None);
+        assert_eq!(kcp("gaming", "fec_data = 4\nfec_parity = 2"), Some((4, 2)));
+        // An MTU too large for FEC keeps it off rather than making the config invalid.
+        assert_eq!(kcp("gaming", "mtu = 1440"), None);
+        assert_eq!(kcp("gaming", "mtu = 1429"), Some((10, 3)));
+    }
+
     /// Parses without validation, for checking effective values on their own.
     fn parse_unchecked(text: &str) -> Config {
         toml::from_str(text).unwrap()
@@ -1291,6 +1469,85 @@ mod tests {
         assert!(parse_unchecked(&with_forward("tcp", "tcp", ""))
             .warnings()
             .is_empty());
+    }
+
+    #[test]
+    fn dscp_names_and_numbers() {
+        let with = |value: &str| format!("{}[tuning]\ndscp = {value}\n", entry_reverse());
+        for (value, codepoint) in [
+            ("\"ef\"", 46),
+            ("\"EF\"", 46),
+            ("\"af41\"", 34),
+            ("\"cs4\"", 32),
+            ("\"le\"", 1),
+            ("\"default\"", 0),
+            ("0", 0),
+            ("63", 63),
+        ] {
+            let c = Config::parse(&with(value)).unwrap();
+            assert_eq!(c.tuning().dscp, Some(codepoint), "{value}");
+        }
+        assert_eq!(Config::parse(&entry_reverse()).unwrap().tuning().dscp, None);
+        for bad in ["\"fast\"", "64", "-1", "\"\""] {
+            let err = parse_err(&with(bad));
+            assert!(err.contains("dscp"), "{bad}: {err}");
+        }
+        assert_eq!(Dscp::name_of(46), Some("ef"));
+        assert_eq!(Dscp::name_of(0), Some("cs0"));
+        assert_eq!(Dscp::name_of(7), None);
+        // Over QUIC the tunnel's own packets cannot be marked: said, not hidden.
+        let quic = Config::parse(&format!(
+            "{}[tuning]\ndscp = \"ef\"\n",
+            with_transport("entry", "quic", "")
+        ))
+        .unwrap();
+        assert!(quic.warnings().iter().any(|w| w.contains("QUIC")));
+    }
+
+    #[test]
+    fn duplication_on_udp_rules() {
+        let dup = |protocol: &str, transport: &str, lines: &str| {
+            with_forward(protocol, transport, "").replace(
+                &format!("protocol = \"{protocol}\""),
+                &format!("protocol = \"{protocol}\"\n{lines}"),
+            )
+        };
+        let c = Config::parse(&dup("udp", "kcp", "duplicate = 2")).unwrap();
+        assert_eq!(
+            c.forward[0].duplication(),
+            Some(Duplicate {
+                copies: 2,
+                gap_ms: 5
+            })
+        );
+        assert!(c.warnings().is_empty(), "{:?}", c.warnings());
+        let c = Config::parse(&dup(
+            "tcp+udp",
+            "quic",
+            "duplicate = 3\nduplicate_gap_ms = 0",
+        ))
+        .unwrap();
+        assert_eq!(
+            c.forward[0].duplication(),
+            Some(Duplicate {
+                copies: 3,
+                gap_ms: 0
+            })
+        );
+        let one = Config::parse(&dup("udp", "kcp", "duplicate = 1")).unwrap();
+        assert_eq!(one.forward[0].duplication(), None);
+        // Accepted, but pointless over transports that lose nothing.
+        let c = Config::parse(&dup("udp", "tcpmux", "duplicate = 2")).unwrap();
+        assert!(c.warnings().iter().any(|w| w.contains("duplicate")));
+        for (protocol, lines, needle) in [
+            ("tcp", "duplicate = 2", "for UDP rules"),
+            ("udp", "duplicate = 0", "between 1 and 3"),
+            ("udp", "duplicate = 4", "between 1 and 3"),
+            ("udp", "duplicate = 2\nduplicate_gap_ms = 51", "at most 50"),
+        ] {
+            let err = parse_err(&dup(protocol, "kcp", lines));
+            assert!(err.contains(needle), "{lines}: {err}");
+        }
     }
 
     #[test]

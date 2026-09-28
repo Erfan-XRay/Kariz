@@ -3,6 +3,7 @@
 //!
 //! See `docs/PHASE2.md` (sections 3 and 4) for the wire formats.
 
+pub mod datagram;
 pub mod handshake;
 pub mod record;
 

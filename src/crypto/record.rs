@@ -31,7 +31,7 @@ const WRITE_BATCH: usize = 4 * MAX_PAYLOAD;
 /// Ciphertext read buffer: room for a few records per read.
 const READ_BUFFER: usize = 4 * MAX_RECORD;
 
-fn algorithm(cipher: Cipher) -> io::Result<&'static aead::Algorithm> {
+pub(super) fn algorithm(cipher: Cipher) -> io::Result<&'static aead::Algorithm> {
     match cipher {
         Cipher::Chacha20Poly1305 => Ok(&aead::CHACHA20_POLY1305),
         Cipher::Aes256Gcm => Ok(&aead::AES_256_GCM),
