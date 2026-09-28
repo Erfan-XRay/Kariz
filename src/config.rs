@@ -285,6 +285,12 @@ pub struct Tuning {
     pub handshake_timeout: Duration,
     pub threads: Option<usize>,
     pub udp: UdpTuning,
+    /// `TCP_NOTSENT_LOWAT` for tunnel connections, set when they carry mux. It keeps the
+    /// kernel from queueing much unsent data, so what is sent next is decided by the mux
+    /// writer (datagrams first, streams in turn) rather than by the order data entered
+    /// the socket. Without it, a UDP packet waits behind everything already queued in the
+    /// kernel on a slow link.
+    pub notsent_lowat: Option<u32>,
 }
 
 /// UDP forwarding limits and buffers (phase 3).
@@ -334,6 +340,7 @@ impl Tuning {
             handshake_timeout: Duration::from_secs(10),
             threads: None,
             udp: UdpTuning::for_profile(profile),
+            notsent_lowat: None,
         }
     }
 
@@ -419,6 +426,11 @@ const MUX_CONNECTIONS: std::ops::RangeInclusive<usize> = 1..=64;
 const MUX_MAX_STREAMS: std::ops::RangeInclusive<usize> = 1..=4096;
 const MUX_STREAM_WINDOW: std::ops::RangeInclusive<usize> = 16 * 1024..=16 * 1024 * 1024;
 const MUX_MIN_LIFETIME_SECS: u64 = 60;
+/// See [`Tuning::notsent_lowat`]. Over a throttled 20 Mbit/s link with four bulk
+/// transfers next to UDP pings (`udp_latency_under_load`), it cut the UDP round trip
+/// from about 340 ms to about 60 ms (the rest is the link's own buffer), with no
+/// throughput cost on localhost. 16 KiB is also what large HTTP/2 deployments use.
+const NOTSENT_LOWAT: u32 = 16 * 1024;
 const UDP_TIMEOUT_SECS: std::ops::RangeInclusive<u64> = 5..=3600;
 const UDP_MAX_FLOWS: std::ops::RangeInclusive<usize> = 1..=65536;
 /// Keepalives (mux pings) at most this far apart keep a WebSocket through a CDN.
@@ -460,7 +472,11 @@ impl Config {
     }
 
     pub fn tuning(&self) -> Tuning {
-        Tuning::for_profile(self.profile).apply(&self.tuning)
+        let mut tuning = Tuning::for_profile(self.profile).apply(&self.tuning);
+        if self.mux().enabled {
+            tuning.notsent_lowat = Some(NOTSENT_LOWAT);
+        }
+        tuning
     }
 
     pub fn mux(&self) -> MuxSettings {
@@ -948,6 +964,16 @@ mod tests {
         assert!(parse_unchecked(&with_forward("tcp", "tcp", ""))
             .warnings()
             .is_empty());
+    }
+
+    #[test]
+    fn notsent_lowat_only_with_mux() {
+        let tcp = Config::parse(&with_transport("entry", "tcp", "")).unwrap();
+        assert_eq!(tcp.tuning().notsent_lowat, None);
+        for transport in ["tcpmux", "ws", "wss"] {
+            let c = parse_unchecked(&with_transport("entry", transport, ""));
+            assert_eq!(c.tuning().notsent_lowat, Some(NOTSENT_LOWAT), "{transport}");
+        }
     }
 
     #[test]

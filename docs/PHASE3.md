@@ -1,6 +1,6 @@
 # Phase 3 plan: UDP forwarding
 
-Target release: **v0.3.0**. Scope from [ROADMAP.md](ROADMAP.md): UDP forwarding and
+Target release: **v0.3.0** (all steps done; see the status notes in each section). Scope from [ROADMAP.md](ROADMAP.md): UDP forwarding and
 UDP-over-stream framing.
 
 This document fixes the design, the wire formats and the order of work, so each step
@@ -250,7 +250,7 @@ Each step is one PR, keeps CI green, and keeps TCP working in every setup.
 | **3.1** Config and wire (done) | `KIND_UDP`, `protocol = "udp" \| "tcp+udp"`, UDP tuning fields and validation, non-mux datagram framing in `proto.rs`, "unsupported" status / reset. UDP rules are rejected as "not implemented yet" until 3.3. | Unit tests: open request round trip for both kinds, framing round trip (0-byte and 65,507-byte packets, split reads), config validation. No behaviour change for TCP. |
 | **3.2** Mux datagrams (done) | `DGRAM` queue with priority over stream data, drop policies, `send_datagram` / `recv_datagram`, `DATA` on UDP streams rejected. Tested over `duplex`. | Tests: datagrams keep packet boundaries; they overtake queued bulk data; a full queue drops instead of blocking; unknown ids are ignored; credit is untouched. |
 | **3.3** UDP end to end (done) | Entry flow table and listener, exit per-flow sockets, both over mux and whole channels, idle timeouts, max flows, failed-open backoff, clean failure against a v0.2 exit. | E2E UDP echo for every setup row (`tcp`, `tcpmux`, `ws`, `wss` × reverse / direct, mux on / off); many concurrent flows; idle flows closed on both sides; unreachable target; `tcp+udp` on one port. |
-| **3.4** Hardening and release | Latency test (UDP round trips during a bulk TCP transfer on the same session), packets-per-second and latency benchmarks, memory per flow, sample config (e.g. WireGuard / game server), README / README_FA, CHANGELOG, version `0.3.0`. | UDP p99 round trip under bulk load stays within a few ms of idle on localhost; numbers in the README; release tagged. |
+| **3.4** Hardening and release (done) | Latency test (UDP round trips during a bulk TCP transfer on the same session), packets-per-second and latency benchmarks, memory per flow, sample config (e.g. WireGuard / game server), README / README_FA, CHANGELOG, version `0.3.0`. | UDP p99 round trip under bulk load stays within a few ms of idle on localhost; numbers in the README; release tagged. |
 
 ## 10. Performance and resource targets
 
@@ -263,6 +263,35 @@ Measured on localhost like phase 2 (both sides on one machine), with an echo tar
 - Memory: 1,000 idle UDP flows add under 4 MiB per side.
 - A flooded flow (more packets than the tunnel can carry) drops its own packets and
   does not delay other flows or TCP streams by more than its fair share.
+
+*Status at release (3.4):* measured on the 4-core VM of phase 2, both sides on it.
+
+| Target | Result | |
+|---|---|---|
+| Idle latency added | about 90 µs per round trip (125 µs through the tunnel, 37 µs direct) | met |
+| p99 under bulk TCP on the same session | localhost: not measurable (buffers drain in microseconds). Over a throttled 20 Mbit/s link with four bulk transfers: p50 60 ms / p99 100 ms, most of it the emulated link's own buffer | met in spirit; see below |
+| 100k packets/s of 100 bytes via `tcpmux` | 143k packets/s each way (140-147k in every setup, 1.4 Gbit/s with 1,400-byte packets) | met |
+| 1,000 idle flows under 4 MiB per side | +3.1 to 3.5 MiB | met |
+| Floods drop their own packets without starving others | mux unit tests (half-batch limit, turns without coalescing) | met |
+
+Found and fixed on the way:
+
+- **Kernel queue behind the mux.** Datagram priority only reorders what is still in
+  Kariz's queue. On a slow link the kernel send buffer held up to a megabyte of bulk
+  data (several streams, 256 KiB window each), and UDP waited behind all of it: 340 ms
+  round trips at 20 Mbit/s. Mux connections now set `TCP_NOTSENT_LOWAT` to 16 KiB, which
+  keeps unsent data in Kariz's queue where the writer's priorities apply. In-flight data
+  is not limited, so throughput is not affected (measured). The benchmark
+  (`udp_latency_under_load`) puts a throttling proxy with small buffers between the
+  sides; the p99 target of 5 ms was written for localhost, where this effect does not
+  show at all.
+- **Memory per flow.** A first measurement gave 7 to 11 KiB per flow. Three causes:
+  - each exit flow had its own 64 KiB receive buffer (now one per worker thread, read
+    after readiness);
+  - each entry flow task kept the state of the open future, dial and handshake
+    included, for its whole life (now boxed and freed once open);
+  - a tokio channel per flow reserves room for 32 packets up front (replaced by a
+    small queue that allocates on use).
 
 ## 11. Risks
 

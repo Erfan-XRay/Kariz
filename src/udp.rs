@@ -7,7 +7,7 @@
 //! Either way [`relay`] moves packets both ways until the flow has been idle for the
 //! configured timeout or one side ends it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -19,7 +19,7 @@ use bytes::Bytes;
 use socket2::SockRef;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 use tokio::time::{sleep, timeout, Instant};
 use tracing::{debug, warn};
 
@@ -194,10 +194,17 @@ pub async fn connect(target: &str, tuning: &Tuning) -> io::Result<UdpSocket> {
     Ok(socket)
 }
 
+thread_local! {
+    /// Receive buffer for the exit's flow sockets, one per worker thread instead of one
+    /// per flow: a packet is read only once the socket is readable, and copied out at its
+    /// real size right away.
+    static RECV_BUFFER: std::cell::RefCell<Box<[u8]>> =
+        std::cell::RefCell::new(vec![0u8; PACKET_BUFFER].into_boxed_slice());
+}
+
 /// A connected socket as both ends of the local side.
 pub struct Connected {
     socket: Arc<UdpSocket>,
-    buf: Box<[u8]>,
 }
 
 impl Connected {
@@ -206,18 +213,26 @@ impl Connected {
         (
             Self {
                 socket: socket.clone(),
-                buf: vec![0u8; PACKET_BUFFER].into_boxed_slice(),
             },
             ConnectedSink(socket),
         )
+    }
+
+    fn read_now(&self) -> io::Result<Bytes> {
+        RECV_BUFFER.with_borrow_mut(|buf| {
+            let n = self.socket.try_recv(buf)?;
+            Ok(Bytes::copy_from_slice(&buf[..n]))
+        })
     }
 }
 
 impl PacketSource for Connected {
     async fn recv(&mut self) -> io::Result<Option<Bytes>> {
         loop {
-            match self.socket.recv(&mut self.buf).await {
-                Ok(n) => return Ok(Some(Bytes::copy_from_slice(&self.buf[..n]))),
+            self.socket.readable().await?;
+            match self.read_now() {
+                Ok(packet) => return Ok(Some(packet)),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
                 // An ICMP "port unreachable" from an earlier packet: the target may come
                 // back, so keep the flow.
                 Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => continue,
@@ -227,8 +242,7 @@ impl PacketSource for Connected {
     }
 
     fn try_recv(&mut self) -> Option<Bytes> {
-        let n = self.socket.try_recv(&mut self.buf).ok()?;
-        Some(Bytes::copy_from_slice(&self.buf[..n]))
+        self.read_now().ok()
     }
 }
 
@@ -245,13 +259,79 @@ impl PacketSink for ConnectedSink {
 
 // ---- Entry side ----
 
-impl PacketSource for mpsc::Receiver<Bytes> {
+/// Packets from one client waiting for its flow. Bounded, and it allocates only as
+/// packets arrive (a tokio channel reserves room for 32 packets up front, which adds up
+/// with thousands of mostly idle flows).
+struct FlowQueue {
+    state: Mutex<QueueState>,
+    ready: Notify,
+    capacity: usize,
+}
+
+#[derive(Default)]
+struct QueueState {
+    packets: VecDeque<Bytes>,
+    /// The flow has ended; no more packets are taken.
+    closed: bool,
+}
+
+enum PushError {
+    Full,
+    Closed(Bytes),
+}
+
+impl FlowQueue {
+    fn new(capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(QueueState::default()),
+            ready: Notify::new(),
+            capacity,
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, QueueState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn push(&self, packet: Bytes) -> Result<(), PushError> {
+        let mut st = self.lock();
+        if st.closed {
+            return Err(PushError::Closed(packet));
+        }
+        if st.packets.len() >= self.capacity {
+            return Err(PushError::Full);
+        }
+        st.packets.push_back(packet);
+        drop(st);
+        // One consumer: a stored permit covers a push that races with its wait.
+        self.ready.notify_one();
+        Ok(())
+    }
+}
+
+/// The flow's end of a [`FlowQueue`]; dropping it closes the queue.
+struct FlowReceiver(Arc<FlowQueue>);
+
+impl Drop for FlowReceiver {
+    fn drop(&mut self) {
+        let mut st = self.0.lock();
+        st.closed = true;
+        st.packets.clear();
+    }
+}
+
+impl PacketSource for FlowReceiver {
     async fn recv(&mut self) -> io::Result<Option<Bytes>> {
-        Ok(mpsc::Receiver::recv(self).await)
+        loop {
+            if let Some(packet) = self.0.lock().packets.pop_front() {
+                return Ok(Some(packet));
+            }
+            self.0.ready.notified().await;
+        }
     }
 
     fn try_recv(&mut self) -> Option<Bytes> {
-        mpsc::Receiver::try_recv(self).ok()
+        self.0.lock().packets.pop_front()
     }
 }
 
@@ -276,7 +356,7 @@ pub async fn bind(listen: &str, udp: &UdpTuning) -> io::Result<UdpSocket> {
 
 enum FlowState {
     Active {
-        tx: mpsc::Sender<Bytes>,
+        queue: Arc<FlowQueue>,
         id: u64,
     },
     /// Opening failed; packets from this client are dropped until then.
@@ -338,12 +418,12 @@ where
         let table = &mut *guard;
         let now = Instant::now();
         match table.map.get(&client) {
-            Some(FlowState::Active { tx, .. }) => match tx.try_send(packet) {
+            Some(FlowState::Active { queue, .. }) => match queue.push(packet) {
                 Ok(()) => continue,
                 // The flow is behind: drop, as the network would.
-                Err(mpsc::error::TrySendError::Full(_)) => continue,
-                // The flow just ended; start a new one below.
-                Err(mpsc::error::TrySendError::Closed(p)) => {
+                Err(PushError::Full) => continue,
+                // The flow just ended; start a new one.
+                Err(PushError::Closed(p)) => {
                     start_flow(table, client, p, &socket, &udp, &target, &flows, &open);
                     continue;
                 }
@@ -383,11 +463,12 @@ fn start_flow<O, F>(
     if matches!(table.map.get(&client), Some(FlowState::Active { .. })) {
         table.active -= 1;
     }
-    let (tx, rx) = mpsc::channel(udp.flow_queue);
-    let _ = tx.try_send(packet);
+    let queue = FlowQueue::new(udp.flow_queue);
+    let _ = queue.push(packet);
+    let rx = FlowReceiver(queue.clone());
     table.next_id += 1;
     let id = table.next_id;
-    table.map.insert(client, FlowState::Active { tx, id });
+    table.map.insert(client, FlowState::Active { queue, id });
     table.active += 1;
 
     let (socket, flows, open) = (socket.clone(), flows.clone(), open.clone());
@@ -396,7 +477,9 @@ fn start_flow<O, F>(
         debug!(%client, %target, "UDP flow opened");
         let mut opened = false;
         let result = async {
-            let channel = open().await?;
+            // Boxed: opening (dial, handshake, waiting for a session) needs far more state
+            // than relaying, and an unboxed future would reserve that for the flow's life.
+            let channel = Box::pin(open()).await?;
             opened = true;
             relay(channel, rx, ReplyTo { socket, client }, idle).await
         }

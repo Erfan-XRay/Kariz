@@ -10,8 +10,8 @@
 2. **عبور از DPI**: ترافیک رمزشده بدون هیچ بایت ثابت، WebSocket شبیه مرورگر، و کار کردن از پشت CDN.
 3. **بیشترین سرعت**: مسیر داده بدون dispatch پویا، سوکت‌های تنظیم‌شده و پروفایل‌های مخصوص هر کاربرد.
 
-> وضعیت: **نسخه‌ی 0.2.0.** فرمت داده‌ها روی شبکه بعد از 0.1.0 عوض شده؛ هر دو سرور را با هم آپدیت کنید.
-> کارهای بعدی (UDP، KCP، QUIC، ICMP و پروفایل استتار) در [docs/ROADMAP.md](docs/ROADMAP.md) و فهرست تغییرات در [CHANGELOG.md](CHANGELOG.md) است.
+> وضعیت: **نسخه‌ی 0.3.0.** نسخه‌ی 0.3 برای TCP با 0.2 کار می‌کند؛ برای forward کردن UDP هر دو سمت باید 0.3 باشند. (فرمت داده‌ها روی شبکه در 0.2 نسبت به 0.1 عوض شده بود.)
+> کارهای بعدی (KCP، QUIC، ICMP و پروفایل استتار) در [docs/ROADMAP.md](docs/ROADMAP.md) و فهرست تغییرات در [CHANGELOG.md](CHANGELOG.md) است.
 
 ## امکانات
 
@@ -44,6 +44,11 @@
   - با rustls پیاده شده.
   - سمت dial گواهی سرور را با root certificateهای Mozilla بررسی می‌کند، یا فقط یک گواهی self-signed مشخص را می‌پذیرد (`kariz pin`).
   - سمت listen با تغییر فایل‌های گواهی آن را دوباره بارگذاری می‌کند، پس تمدید Let's Encrypt ری‌استارت لازم ندارد.
+- **forward کردن UDP** (با `protocol = "udp"` یا `"tcp+udp"` در قانون `[[forward]]`):
+  - روی همه‌ی transportها کار می‌کند، پس UDP (WireGuard، بازی، DNS، QUIC) جایی که خود UDP بسته است هم کار می‌کند.
+  - هر آدرس کلاینت یک flow است و در سمت exit سوکت جدای خودش را دارد.
+  - مرز بسته‌ها حفظ می‌شود، بسته‌ها جلوتر از داده‌ی حجیم TCP روی همان اتصال فرستاده می‌شوند، و اگر تانل عقب بماند بسته دور ریخته می‌شود به‌جای اینکه صف بکشد.
+  - روی transportهای مبتنی بر TCP، گم شدن یک بسته روی لینک همچنان بسته‌های پشت سرش را معطل می‌کند. transportهای datagram که این مشکل را ندارند فاز بعدی هستند.
 - **حالت‌های reverse و direct** برای همه‌ی transportها، با اتصال دوباره‌ی خودکار.
 
 ## مفاهیم
@@ -78,6 +83,7 @@ kariz token                               # generate a shared token
 | `entry-reverse.toml` و `exit-reverse.toml` | حالت reverse روی `tcp`: سرور exit به entry وصل می‌شود |
 | `entry-direct.toml` و `exit-direct.toml` | حالت direct روی `tcp`: سرور entry به exit وصل می‌شود |
 | `entry-tcpmux-reverse.toml` و `exit-tcpmux-reverse.toml` | حالت reverse با mux |
+| `entry-udp-reverse.toml` و `exit-udp-reverse.toml` | forward کردن UDP (سرور WireGuard و یک سرور بازی روی TCP+UDP) با mux |
 | `entry-wss-direct.toml` و `exit-wss-direct.toml` | `wss` مستقیم به سرور خودتان، با گواهی self-signed که pin شده |
 | `entry-wss-cdn.toml` و `exit-wss-cdn.toml` | `wss` از پشت CDN مثل Cloudflare (راهنما: [docs/CDN.md](docs/CDN.md)) |
 
@@ -130,6 +136,9 @@ journalctl -u kariz -f
 | `tunnel.tls.pin_sha256` | در سمت dial: فقط همین گواهی پذیرفته می‌شود (با `kariz pin`) |
 | `tunnel.tls.cert` / `key` | در سمت listen: گواهی و کلید؛ با تغییر فایل‌ها دوباره بارگذاری می‌شوند |
 | `tuning.keepalive_secs` | فاصله‌ی keepalive و ping در mux؛ پشت CDN حداکثر ۹۰ |
+| `forward.protocol` | `tcp` (پیش‌فرض)، `udp` یا `tcp+udp`؛ برای UDP از mux استفاده کنید |
+| `tuning.udp_timeout_secs` | flow بیکار UDP بعد از این مدت بسته می‌شود (پیش‌فرض ۶۰) |
+| `tuning.udp_max_flows` | حداکثر flowهای UDP (آدرس‌های کلاینت) برای هر قانون (پیش‌فرض ۱۰۲۴) |
 
 ### پروفایل‌ها
 
@@ -152,6 +161,10 @@ journalctl -u kariz -f
 - `wss` با mux: حدود 2.3 تا 2.5 گیگابیت بر ثانیه
 - مصرف حافظه در حالت بیکار: حدود ۵ تا ۶ مگابایت برای هر سمت
 - ۱۰۰ اتصال بیکار روی mux: کمتر از ۱ مگابایت حافظه‌ی اضافه
+- UDP: حدود ۱۴۰ هزار بسته در ثانیه در هر جهت، در همه‌ی حالت‌ها
+- تأخیر UDP: تانل بیکار حدود ۹۰ میکروثانیه به رفت‌وبرگشت اضافه می‌کند
+- UDP زیر بار: با چهار انتقال حجیم TCP روی همان اتصال و لینک محدودشده به ۲۰ مگابیت، رفت‌وبرگشت UDP حدود ۶۰ میلی‌ثانیه می‌ماند (بدون تنظیم `TCP_NOTSENT_LOWAT` که کاریز روی اتصال‌های mux می‌گذارد، حدود ۳۴۰ میلی‌ثانیه بود)
+- ۱۰۰۰ flow بیکار UDP: حدود ۳ تا ۳.۵ مگابایت حافظه‌ی اضافه برای هر سمت
 
 ## نکته‌های امنیتی
 
@@ -170,10 +183,12 @@ cargo clippy --all-targets -- -D warnings
 cargo test                          # nginx tests run too when nginx is installed
 cargo test --release --test tunnel throughput -- --ignored --nocapture
 scripts/rss.sh tcpmux 100           # memory, after cargo build --release
+scripts/rss.sh tcpmux 1000 target/release/kariz udp   # memory per UDP flow
+KARIZ_TEST_LOG=1 cargo test --test tunnel <name>        # with the tunnel's debug logs
 ```
 
 </div>
 
-مستندات طراحی: [docs/ROADMAP.md](docs/ROADMAP.md) و [docs/PHASE2.md](docs/PHASE2.md).
+مستندات طراحی: [docs/ROADMAP.md](docs/ROADMAP.md)، [docs/PHASE2.md](docs/PHASE2.md) و [docs/PHASE3.md](docs/PHASE3.md).
 
 </div>

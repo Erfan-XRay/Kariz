@@ -14,6 +14,7 @@ token = "CHANGE-ME-run-kariz-token"
 [[forward]]
 listen = "0.0.0.0:443"
 target = "127.0.0.1:443"
+# protocol = "tcp"          # tcp | udp | tcp+udp (see entry-udp-reverse.toml)
 
 # Every field is optional and overrides the profile default.
 [tuning]
