@@ -1304,6 +1304,31 @@ cmd_agent() {
     esac
 }
 
+# The private network links of this server, read only: the kz- interfaces that the panel's
+# agent made (docs/networks.md). The panel is where they are made and removed.
+cmd_net() {
+    command -v ip >/dev/null || die "net: this needs the 'ip' command."
+    case ${1:-list} in
+        list)
+            local rows
+            rows=$(ip -br addr show 2>/dev/null | awk '$1 ~ /^kz-/')
+            if [[ -z "$rows" ]]; then
+                info "No private network links on this server."
+            else
+                printf '%s\n' "$rows"
+            fi
+            ;;
+        status)
+            local name=${2:-}
+            [[ "$name" =~ ^kz-[a-z0-9]{1,8}$ ]] || die "net status: give the link's name (kariz-manager net list)."
+            ip link show "$name" >/dev/null 2>&1 || die "There is no link '$name' on this server."
+            ip -d -s link show "$name"
+            ip -br addr show "$name"
+            ;;
+        *) die "net: list | status NAME" ;;
+    esac
+}
+
 # The menu's web panel entry.
 menu_panel() {
     local action code
@@ -1438,8 +1463,9 @@ usage() {
   panel link | password [--stdin] | status | logs | uninstall [--yes]
   --agent CODE [--version V]                   connect this server to a panel
   agent status | logs | remove
+  net list | status NAME                       the private network (GRE) links of this server
 
-  The repository is private for now: set GITHUB_TOKEN to download releases.
+  Set GITHUB_TOKEN if GitHub limits your downloads.
 EOF
 }
 
@@ -1456,6 +1482,7 @@ main() {
         speedtest) shift && cmd_speedtest "$@" ;;
         panel) shift && cmd_panel "$@" ;;
         agent) shift && cmd_agent "$@" ;;
+        net) shift && cmd_net "$@" ;;
         --agent) shift && agent_join "$@" ;;
         edit) cmd_edit "${2:-}" ;;
         remove) cmd_remove "${2:-}" "${3:-}" ;;

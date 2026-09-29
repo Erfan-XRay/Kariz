@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.10.0 - 2026-09-30
+
+**Private networks with GRE** (docs/networks.md, docs/PHASE13.md). Backward compatibility is
+not kept before 1.0: update the panel and its agents together.
+
+### Added
+
+- **Networks page** in the panel: make a network (a pool of private addresses), set each
+  server's address, add links between servers as a mesh or hub and spoke, and remove them.
+  Every link takes its own /30, so no two addresses are ever the same; the database enforces it
+  (`UNIQUE` on every subnet, address and interface name), and eight threads making 80 links at
+  once are tested to get 160 different addresses. A pool must be private, /24 or larger, and
+  must not overlap another network or a route a connected server already has (the panel says
+  which server and which route). A second link between the same pair gets its own GRE key.
+- **GRE from the agent:** `net_up`, `net_down`, `net_ping`, `net_status` and `net_sync`, as data
+  requests with every field checked, fixed `ip` invocations and only `kz-` interfaces. The
+  links are kept in `net.toml` and made again when the agent starts; the panel sends the whole
+  list when an agent connects. A path test (`ping` across the link) runs before a link is
+  kept, and a failed one is removed on both servers with the reason (a filtered protocol 47,
+  a server that cannot make GRE).
+- **The wizard** has *Use a private GRE network* for direct tunnels: the tunnel listens on and
+  dials the private addresses, and the panel makes the link between the two servers first if
+  it is not there (and removes it if the tunnel cannot be made).
+- **`health` reports `routes`** (the IPv4 networks a server already routes), used to keep new
+  private networks from overlapping them.
+- **`kariz-manager net list | status NAME`** (read only) on a server; `kariz-panel net
+  up|down|ping|status` for debugging.
+- **CI:** a `gre` job builds two network namespaces and tests real GRE links between them
+  (private addresses ping, two links at once, a filtered path fails, a Kariz tunnel works over
+  the private addresses).
+
+### Changed
+
+- The agent protocol has new requests; a panel and agent of different versions may not
+  understand each other's network requests.
+
 ## 0.9.0 - 2026-09-30
 
 The panel can now **make and manage tunnels**, and shows what they do (docs/panel.md,

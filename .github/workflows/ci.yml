@@ -174,6 +174,10 @@ jobs:
           out=$(sudo kariz-manager update --binary target/release/kariz --panel-binary target/release/kariz-panel)
           echo "$out" | grep -q "Restarted kariz-panel"
           echo "$out" | grep -q "Restarted kariz-agent"
+      - name: Private network links, read only
+        run: |
+          sudo kariz-manager net list | grep -q "No private network links"
+          if sudo kariz-manager net status kz-nothere 2>/dev/null; then exit 1; fi
       - name: Banner in the journal, priority prefixes understood
         run: |
           sudo journalctl -u kariz@plain -o cat --no-pager | tee journal.txt | head -20
