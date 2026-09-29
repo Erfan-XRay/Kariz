@@ -87,6 +87,24 @@ enum Command {
         #[arg(long)]
         key: Option<String>,
     },
+    /// What the panel runs, as a transient service, to swap in a new version (the panel
+    /// starts it itself; there is no reason to run it by hand).
+    #[command(hide = true)]
+    UpdateApply {
+        #[arg(long)]
+        stage: PathBuf,
+        #[arg(long)]
+        version: String,
+        #[arg(long, default_value = DEFAULT_CONFIG)]
+        config: PathBuf,
+        #[arg(long)]
+        panel_bin: PathBuf,
+        #[arg(long)]
+        kariz_bin: PathBuf,
+        /// Seconds the new panel has to answer.
+        #[arg(long, default_value_t = 30)]
+        wait: u64,
+    },
     /// Private network links on this server, by hand (what the agent does when the panel
     /// asks; for debugging and for the tests). Needs root and Linux.
     Net {
@@ -131,8 +149,16 @@ fn main() -> Result<()> {
             println!("  certificate : SHA-256 {}", done.fingerprint);
             Ok(())
         }
-        Command::Serve { config } => serve(Config::load(&config)?),
+        Command::Serve { config } => serve(Config::load(&config)?, &config),
         Command::Net { command } => net_command(command),
+        Command::UpdateApply {
+            stage,
+            version,
+            config,
+            panel_bin,
+            kariz_bin,
+            wait,
+        } => update_apply(&stage, &version, &config, panel_bin, kariz_bin, wait),
         Command::ReleaseKey { out } => release_key(&out),
         Command::ReleaseSign { file, key_env } => release_sign(&file, &key_env),
         Command::ReleaseVerify { archive, key } => release_verify(&archive, key.as_deref()),
@@ -181,6 +207,52 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+fn update_apply(
+    stage: &std::path::Path,
+    version: &str,
+    config: &std::path::Path,
+    panel: PathBuf,
+    kariz: PathBuf,
+    wait: u64,
+) -> Result<()> {
+    use kariz_panel::update::{self, SystemHost, Targets};
+    let config = Config::load(config)?;
+    let host = SystemHost {
+        unit: "kariz-panel".into(),
+        listen: config.listen.clone(),
+        path: config.path.clone(),
+        pin: kariz_panel::cert::fingerprint(&config.cert())?,
+    };
+    let outcome = update::apply(
+        stage,
+        &Targets { panel, kariz },
+        version,
+        &host,
+        std::time::Duration::from_secs(wait),
+        std::time::Duration::from_secs(1),
+        auth::now(),
+    );
+    // Beside the downloads, for the panel to show when it is back.
+    let dir = stage.parent().unwrap_or(stage);
+    update::write_outcome(dir, &outcome)?;
+    if let Ok(db) = Db::open(&config.database()) {
+        let what = if outcome.ok {
+            format!("the panel was updated to {version}")
+        } else {
+            format!(
+                "the update to {version} failed and the old version was put back: {}",
+                outcome.error.as_deref().unwrap_or("")
+            )
+        };
+        let _ = db.audit("update", None, &what);
+    }
+    if outcome.ok {
+        Ok(())
+    } else {
+        anyhow::bail!(outcome.error.unwrap_or_default())
     }
 }
 
@@ -279,7 +351,7 @@ fn net_command(command: NetCommand) -> Result<()> {
     })
 }
 
-fn serve(config: Config) -> Result<()> {
+fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -297,6 +369,18 @@ fn serve(config: Config) -> Result<()> {
             config.services.services(&config.kariz_dir),
             config.data_dir.clone(),
         );
+        // Where updating finds its releases and the programs it replaces.
+        hub.set_update_settings(kariz_panel::updater::UpdateSettings {
+            api: config
+                .release_api
+                .clone()
+                .unwrap_or_else(|| kariz_panel::update::DEFAULT_API.to_owned()),
+            key: config.release_key.clone(),
+            dir: config.data_dir.join("updates"),
+            config: config_path.to_path_buf(),
+            panel_bin: std::env::current_exe()?,
+            kariz_bin: std::env::current_exe()?.with_file_name("kariz"),
+        });
         tokio::spawn(hub.clone().run_local());
         let mut state = AppState::new(db);
         state.hub = hub.clone();

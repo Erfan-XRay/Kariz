@@ -34,6 +34,12 @@ pub struct Config {
     pub cert_file: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_file: Option<PathBuf>,
+    /// Where releases are looked up: `https://api.github.com/repos/OWNER/REPO` (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_api: Option<String>,
+    /// A release public key (hex) of your own, instead of the one built in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_key: Option<String>,
 }
 
 fn default_kariz_dir() -> PathBuf {

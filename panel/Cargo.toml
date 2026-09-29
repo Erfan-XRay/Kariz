@@ -35,6 +35,10 @@ serde_json = "1"
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal", "process"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 toml = "1"
+# Downloading a release (a blocking client, run off the async threads), and its archive.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+flate2 = "1"
+tar = "0.4"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

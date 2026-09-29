@@ -18,9 +18,17 @@ pub mod netops;
 pub mod networks;
 pub mod pair;
 pub mod sign;
+pub mod update;
+pub mod updater;
 pub mod wire;
 
 use std::path::Path;
+
+/// This build's version. `KARIZ_BUILD_VERSION` at build time overrides Cargo's (the CI test
+/// of updating builds a second panel that calls itself newer).
+pub fn version() -> &'static str {
+    option_env!("KARIZ_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
 
 use anyhow::{Context, Result};
 
@@ -48,6 +56,8 @@ pub fn init(config_path: &Path, data_dir: &Path, port: Option<u16>) -> Result<In
             services: Default::default(),
             cert_file: None,
             key_file: None,
+            release_api: None,
+            release_key: None,
         };
         config.validate()?;
         if let Some(dir) = config_path.parent() {

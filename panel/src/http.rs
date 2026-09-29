@@ -82,7 +82,7 @@ pub fn router(path: &str, state: AppState) -> Router {
 }
 
 async fn version(State(_): State<AppState>) -> impl IntoResponse {
-    Json(json!({ "name": "kariz-panel", "version": env!("CARGO_PKG_VERSION") }))
+    Json(json!({ "name": "kariz-panel", "version": crate::version() }))
 }
 
 /// A file of the web app, or its index page for a path the app handles itself.
