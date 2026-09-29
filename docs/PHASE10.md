@@ -63,6 +63,27 @@ against v0.4 to v0.6. QUIC sessions report quinn's own RTT estimate. Plain `tcp`
 first round thrown away, as in PHASE8) and the UDP packet benchmark. Kept only if both
 lose less than 1 %; otherwise the per-chunk and per-packet adds get batched further.
 
+*Status after 10.1:* `src/stats.rs` holds the counters; the entry, the exit, both relays
+and the UDP flows fill them; `maintain` and every accept loop record sessions,
+handshakes and failures. A UDP flow adds its bytes to the rule every 64 packets, at
+least once a second, at once for its first packet (so a lone DNS query shows), and when
+it ends. Mux sessions keep a smoothed RTT from their pings (the first ping goes out as a
+session starts); QUIC sessions report quinn's. Tests: the counters, the batching, RTT
+from pings (and a pong with a wrong number ignored), the counting relay.
+
+Measured on the Windows development machine, release builds, 4 alternating rounds of
+`main` and the branch, the first thrown away, mean of the other three:
+
+| Benchmark | Change |
+|---|---|
+| Throughput, 28 setups | mean +1.2 %, median +1.6 % (single setups -12.6 % to +16.7 %: run-to-run noise, both ways) |
+| UDP packets per second, 12 cases | mean -0.8 %, median -0.6 % (worst -3.8 %, tcpmux 100-byte) |
+
+Within the noise of the machine and under the 1 % bound on average, so the counters stay
+as they are. The UDP benchmark is bound by its clients here (about 110,000 packets per
+second in every setup), so it would not show a small cost per packet; the CI benchmark
+on Linux (10.4) is the better check.
+
 ## 3. `status` on the control socket (10.2)
 
 **Both sides get a control socket.** The exit side opens one too, at the same default
@@ -152,8 +173,8 @@ checks a config before writing it, without a temporary file.
 
 | Step | Content | Done when |
 |---|---|---|
-| **10.0** Plan | This document. | |
-| **10.1** Counters | `Stats`, counting in entry, exit, relays and UDP; mux RTT from pings; QUIC RTT. | Unit tests for every counter; benchmark A/B within 1 %. |
+| **10.0** Plan (done) | This document. | |
+| **10.1** Counters (done) | `Stats`, counting in entry, exit, relays and UDP; mux RTT from pings; QUIC RTT. | Unit tests for every counter; benchmark A/B within 1 %. |
 | **10.2** `status` | Control socket on the exit side too; the `status` request; `docs/status.md`. | Tests: a tunnel in memory answers `status` on both sides with the right numbers. |
 | **10.3** CLI | `kariz status` (`--watch`, `--json`), `kariz check --json`, `-c -`, manager Status. | Tests for the output and the error cases; manager tty test covers Status. |
 | **10.4** Release | README / docs, CHANGELOG, `0.7.0`. | CI green; release v0.7.0 with three archives. |
