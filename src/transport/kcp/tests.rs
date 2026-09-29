@@ -87,7 +87,17 @@ async fn large_transfer_arrives_intact() {
 
 #[tokio::test]
 async fn many_connections_on_one_listener() {
-    let (l, addr) = listener(1).await;
+    // A slow machine (the ARM tests run under QEMU) drops some of the 20 dialers' first
+    // packets when their bursts fill the listener's socket buffer. Until KCP's resend
+    // gets through, a keep-alive ping for a conversation the listener does not know
+    // ends it (that is how a restarted listener closes old conversations), so this
+    // test's pings must be rarer than its slowest start.
+    let mut slow = tuning();
+    slow.keepalive = Duration::from_secs(60);
+    let l = KcpListener::bind("127.0.0.1:0", &params(1), &slow)
+        .await
+        .unwrap();
+    let addr = l.local_addr().unwrap().to_string();
     let l = Arc::new(l);
     let acceptor = {
         let l = l.clone();
@@ -97,7 +107,7 @@ async fn many_connections_on_one_listener() {
             }
         })
     };
-    let dialer = Arc::new(KcpDialer::new(&addr, &params(1), &tuning()));
+    let dialer = Arc::new(KcpDialer::new(&addr, &params(1), &slow));
     let clients = (0..20).map(|i| {
         let dialer = dialer.clone();
         tokio::spawn(async move {

@@ -161,6 +161,11 @@ pub struct Config {
     pub tuning: TuningOverrides,
     #[serde(default)]
     pub log: LogConfig,
+    #[serde(default)]
+    pub control: ControlConfig,
+    /// The file this was loaded from, if it was (see [`Config::load`]).
+    #[serde(skip)]
+    pub path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -189,6 +194,20 @@ pub struct TunnelConfig {
     pub quic: Option<QuicConfig>,
     /// Only for `kcp`.
     pub kcp: Option<KcpConfig>,
+    /// The exit side answers speed test streams (`kariz speedtest` on the entry side).
+    /// They only produce, consume and echo data; they dial nothing.
+    #[serde(default = "default_true")]
+    pub speedtest: bool,
+}
+
+/// `[control]`: the entry side's local control socket, through which `kariz speedtest`
+/// uses the running daemon's live sessions (Unix only).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlConfig {
+    /// Where the socket goes. Default: the config file's path with `.sock` instead of
+    /// `.toml` (`/etc/kariz/main.toml` -> `/etc/kariz/main.sock`). Owner only.
+    pub socket: Option<PathBuf>,
 }
 
 /// `[tunnel.kcp]`.
@@ -565,14 +584,29 @@ const DSCP_NAMES: [(&str, u8); 24] = [
 pub struct LogConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
+    /// Colours and the startup banner's art: on a terminal (`auto`), always or never.
+    #[serde(default)]
+    pub color: LogColor,
 }
 
 impl Default for LogConfig {
     fn default() -> Self {
         Self {
             level: default_log_level(),
+            color: LogColor::default(),
         }
     }
+}
+
+/// `[log] color`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogColor {
+    /// Colours on a terminal, unless `NO_COLOR` is set.
+    #[default]
+    Auto,
+    Always,
+    Never,
 }
 
 fn default_log_level() -> String {
@@ -820,7 +854,19 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file {}", path.display()))?;
-        Self::parse(&text).with_context(|| format!("invalid config file {}", path.display()))
+        let mut config = Self::parse(&text)
+            .with_context(|| format!("invalid config file {}", path.display()))?;
+        config.path = Some(path.to_path_buf());
+        Ok(config)
+    }
+
+    /// Where the entry side's control socket is: `[control] socket`, else next to the
+    /// config file it was loaded from; `None` for a config that came from elsewhere.
+    pub fn control_socket(&self) -> Option<PathBuf> {
+        self.control
+            .socket
+            .clone()
+            .or_else(|| self.path.as_ref().map(|p| p.with_extension("sock")))
     }
 
     pub fn parse(text: &str) -> Result<Self> {

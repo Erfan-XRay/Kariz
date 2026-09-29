@@ -25,6 +25,7 @@ Unknown keys are errors, so a typo is caught rather than ignored.
 | `token` | at least 16 characters | required | Same on both sides. Generate with `kariz token`. |
 | `encryption` | `auto`, `chacha20-poly1305`, `aes-256-gcm`, `none` | `auto` | `auto` dials with AES-256-GCM on CPUs with AES instructions, else ChaCha20-Poly1305, and accepts either. `none` only authenticates; set it on both sides or neither. `quic` always uses TLS 1.3: leave `auto`. |
 | `pool` | at least 1 | `8` | Reverse mode without mux: idle connections the exit keeps open. |
+| `speedtest` | `true`, `false` | `true` | The exit answers speed test streams from `kariz speedtest` on the entry side (at most 32 at once). They only produce, read and echo data. See [Speed test](speedtest.md). |
 
 ## `[tunnel.mux]`
 
@@ -121,13 +122,30 @@ Overrides of the profile's values.
 | `udp_max_flows` | 1-65536 | 1024 | UDP flows (client addresses) per rule; packets from more clients are dropped. |
 | `dscp` | a name (`ef`, `af41`, `cs4`, ...) or 0-63 | off | DSCP mark on tunnel sockets and the exit's UDP sockets to targets. Not on QUIC sockets. See [UDP and games](udp-and-games.md#dscp). |
 
+## `[control]`
+
+The entry side's local socket, through which `kariz speedtest` uses the running daemon
+(Linux only; see [Speed test](speedtest.md)).
+
+| Key | Default | Notes |
+|---|---|---|
+| `socket` | the config file's path with `.sock` (`/etc/kariz/main.toml` gives `/etc/kariz/main.sock`) | Owner only. If it cannot be made, the tunnel runs without it and logs a warning. |
+
 ## `[log]`
 
 | Key | Values | Default |
 |---|---|---|
 | `level` | `error`, `warn`, `info`, `debug`, `trace` | `info` |
+| `color` | `auto`, `always`, `never` | `auto` |
 
-`RUST_LOG=kariz=debug` in the environment overrides it.
+`RUST_LOG=kariz=debug` in the environment overrides `level`. With `color = "auto"`, log
+lines are coloured on a terminal unless `NO_COLOR` is set.
+
+`kariz run` starts with a banner: the version, and what this side is about to do (its
+role and mode, transport, profile, addresses and forward rules). On a terminal, each
+line then shows the local time, a coloured level badge and the fields. Under systemd,
+lines carry systemd's priority prefix instead, so `journalctl` highlights warnings and
+errors itself and `journalctl -u kariz -p warning` shows only those.
 
 ## Settings that must match on both sides
 

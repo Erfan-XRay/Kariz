@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/Erfan-XRay/Kariz/actions/workflows/ci.yml"><img src="https://github.com/Erfan-XRay/Kariz/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/Erfan-XRay/Kariz/releases"><img src="https://img.shields.io/badge/version-0.5.1-34d0c3" alt="Version 0.5.1"></a>
+  <a href="https://github.com/Erfan-XRay/Kariz/releases"><img src="https://img.shields.io/badge/version-0.6.0-34d0c3" alt="Version 0.6.0"></a>
   <img src="https://img.shields.io/badge/rust-1.80%2B-e9c46a?logo=rust" alt="Rust 1.80+">
   <img src="https://img.shields.io/badge/platform-linux-12365e?logo=linux&logoColor=white" alt="Linux">
 </p>
@@ -30,7 +30,7 @@ flowchart LR
 
 <div dir="rtl">
 
-- 🪶 **سبک:** بدون Garbage Collector و با حدود ۵ مگابایت RAM برای هر سمت؛ روی ارزان‌ترین VPSها هم اجرا می‌شود.
+- 🪶 **سبک:** بدون Garbage Collector و با حدود ۸ مگابایت RAM برای هر سمت؛ روی ارزان‌ترین VPSها هم اجرا می‌شود.
 - 🔒 **امن:** احراز هویت دوطرفه با توکن مشترک، امنیت پیشرو با X25519، و رکوردهای رمزشده بدون هیچ بایت ثابت. از پشت CDN هم کار می‌کند.
 - ⚡ **سریع:** مسیر داده بدون dispatch پویا و سوکت‌های تنظیم‌شده؛ روی localhost حدود ۴ گیگابیت بر ثانیه رمزشده روی یک اتصال، و transportهایی که روی لینک پرتلفات هم سرعتشان را حفظ می‌کنند.
 
@@ -44,6 +44,7 @@ flowchart LR
 | **forward کردن UDP** | WireGuard، بازی، DNS و QUIC روی هر transportی؛ روی `quic` و `kcp` بسته‌ی گم‌شده چیز دیگری را معطل نمی‌کند |
 | **پروفایل‌ها** | `balanced`، `ultraspeed` برای بیشترین سرعت، و `gaming` برای تأخیر کم و پایدار |
 | **بازی** | FEC برای بازسازی بسته‌های گم‌شده، تکثیر بسته برای هر قانون، و علامت DSCP اختیاری |
+| **تست سرعت** | `kariz speedtest` سرعت دانلود و آپلود، تأخیر زیر بار و loss در UDP را از داخل تانل زنده و در هر دو حالت می‌سنجد ([مستندات](docs/speedtest.md)) |
 | **آماده برای CDN** | early data یک رفت‌وبرگشت صرفه‌جویی می‌کند، pingها اتصال بیکار را زنده نگه می‌دارند، و هر درخواست دیگری صفحه‌ی 404 شبیه nginx می‌گیرد |
 | **اجرای آسان** | یک فایل اجرایی، یک فایل TOML برای هر سمت، `kariz check` برای بررسی، و سرویس systemd |
 
@@ -58,6 +59,36 @@ flowchart LR
 | بازی و صدا | `kcp` با `profile = "gaming"` |
 
 ## 🚀 شروع سریع
+
+### راه آسان: اسکریپت مدیریت
+
+روی هر سرور، با دسترسی root، فقط یک خط:
+
+</div>
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh)
+```
+
+<div dir="rtl">
+
+اسکریپت کاریز را برای CPU سرور (x86_64، aarch64 یا armv7) نصب می‌کند و یک منو باز می‌کند. گزینه‌ی **New tunnel** چند سؤال می‌پرسد، تانل را به‌صورت سرویس systemd اجرا می‌کند، و دستور دقیقی را که باید روی سرور دیگر اجرا شود چاپ می‌کند؛ پس راه‌اندازی دو طرف فقط یک کپی و پیست است. بعداً با دستور `kariz-manager` منو برمی‌گردد، یا مستقیم از دستورهایش استفاده کنید:
+
+</div>
+
+```bash
+kariz-manager list                  # every tunnel and its state
+kariz-manager logs main             # follow a tunnel's log
+kariz-manager speedtest main        # speed, latency and UDP through the tunnel
+kariz-manager restart main
+kariz-manager update                # new release, running tunnels restarted
+```
+
+<div dir="rtl">
+
+تا وقتی مخزن private است، قبل از اجرای اسکریپت `GITHUB_TOKEN` را (توکنی که به مخزن دسترسی دارد) تنظیم کنید. توضیح کامل در [docs/manager.md](docs/manager.md).
+
+### راه دستی
 
 ۱. روی هر دو سرور نصب کنید (یا فایل اجرایی را از Releases بگیرید) و یک توکن بسازید که در هر دو سمت یکی باشد:
 
@@ -165,7 +196,7 @@ sudo cp systemd/kariz.service /etc/systemd/system/ && sudo systemctl enable --no
 | `tcp` با AES-256-GCM روی localhost | ۳٫۸ تا ۴ گیگابیت بر ثانیه در هر جهت |
 | `tcpmux` با AES-256-GCM روی localhost | ۳٫۲ تا ۳٫۳ گیگابیت بر ثانیه |
 | UDP از داخل تانل | حدود ۱۴۰ هزار بسته در ثانیه در هر جهت |
-| حافظه در حالت بیکار | حدود ۵ تا ۶ مگابایت برای هر سمت |
+| حافظه در حالت بیکار | حدود ۸ مگابایت برای هر سمت (۶ مگابایت بدون mimalloc) |
 | مسیر ۶۰ میلی‌ثانیه با ۱٪ loss: `tcpmux` / `kcp` / `quic` (BBR) | ۲٫۳ / ۲۸٫۵ / ۴۷٫۴ مگابیت بر ثانیه |
 
 ## 📚 مستندات

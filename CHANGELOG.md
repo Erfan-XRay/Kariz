@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.6.0 - 2026-09-29
+
+Works with v0.5 and v0.4 over every transport. `kariz speedtest` needs the exit side at
+v0.6 too (an older exit cannot answer the test streams).
+
+### Added
+
+- **Releases for three architectures:** static musl builds for x86_64, aarch64 (ARM64
+  servers and boards, Raspberry Pi 4 and 5) and armv7 (32-bit ARM), one archive each,
+  `kariz-<version>-<arch>-linux.tar.gz` with its SHA-256. CI builds the ARM targets and
+  runs the library tests for them under QEMU on every change.
+- **`kariz speedtest`:** measures download and upload speed, latency (idle and during
+  each transfer) and UDP loss and jitter, through the running tunnel's own sessions: the
+  same transport, encryption, mux and profile as users' traffic. It works in both
+  modes: the entry side's daemon serves a local control socket (`[control] socket`,
+  default next to the config file, owner only, Linux only) and runs the test over its
+  live sessions. Options: `--seconds`, `--streams`, `--no-udp`. The exit side answers
+  the test streams (`tunnel.speedtest = false` turns that off; at most 32 at once) and
+  must be v0.6 or newer. `kariz-manager speedtest NAME`, and option 6 of its menu.
+  See docs/speedtest.md.
+- **mimalloc** as the global allocator of the `kariz` binary (cargo feature
+  `mimalloc`, on by default). Static musl builds run 34 % faster on average across 28
+  benchmark setups (25 to 100 % with mux, `wss`, `quic` and `kcp`; plain `tcp` is
+  unchanged), for about 2 MiB more memory idle (8.1 against 6.0 MiB): Kariz commits
+  mimalloc's arena on demand, which cut the idle 15.6 MiB of its default. Memory grows
+  more with many idle UDP flows (+6 to +9 MiB per 1,000, against +4). Build with
+  `--no-default-features --features quic,kcp` for the least memory.
+- **A startup banner and new log lines.** `kariz run` starts with the Kariz logo, the
+  version, the author and a summary of this side's setup. On a terminal, log lines
+  carry the local time, coloured level badges and highlighted fields. Under systemd
+  they carry priority prefixes instead, so `journalctl` highlights warnings and errors
+  and `-p warning` filters them. `[log] color = "auto" | "always" | "never"`; `NO_COLOR`
+  is respected.
+- **The manager script** (`scripts/kariz.sh`, installed as `kariz-manager`): a
+  one-line install for x86_64, aarch64 and armv7, with the release's checksum checked.
+  - A menu, and the same actions as commands: add, list, start / stop / restart,
+    status, logs, edit (checked before it is applied), remove, update, uninstall.
+  - Each tunnel is `/etc/kariz/<name>.toml`, run by the systemd template
+    `kariz@<name>` (`systemd/kariz@.service`), so one server can run several.
+  - Adding a tunnel prints the exact command for the other server. For `wss` the
+    listening side makes a self-signed certificate and passes its pin along.
+
 ## 0.5.1 - 2026-09-29
 
 Works with v0.5 and v0.4 as before; the new settings only change the side they are set on.
