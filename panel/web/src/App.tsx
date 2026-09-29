@@ -4,6 +4,7 @@ import type { ServerInfo, SessionInfo } from "./api";
 import { Login, tokenIn } from "./Login";
 import { MapPage, ServersPage, Later, SettingsPage } from "./pages";
 import { Shell } from "./Shell";
+import { TunnelsPage } from "./Tunnels";
 import type { PageId } from "./Shell";
 import { useApp } from "./store";
 
@@ -126,7 +127,9 @@ export function App() {
       ? t("page.mapSub", { s: num(servers.length), t: num(new Set(servers.flatMap((x) => x.tunnels.map((y) => y.name))).size) })
       : page === "servers"
         ? t("srv.sub", { n: num(servers.length) })
-        : page === "settings"
+        : page === "tunnels"
+          ? t("tun.sub", { n: num(new Set(servers.flatMap((x) => x.tunnels.map((y) => y.name))).size) })
+          : page === "settings"
           ? t("set.sub")
           : "";
 
@@ -162,7 +165,7 @@ export function App() {
         >
           {page === "map" && <MapPage servers={servers} />}
           {page === "servers" && <ServersPage servers={servers} agentsOn={agentsOn} onChanged={() => setReload((n) => n + 1)} />}
-          {page === "tunnels" && <Later phase="12" />}
+          {page === "tunnels" && <TunnelsPage servers={servers} onChanged={() => setReload((n) => n + 1)} />}
           {page === "logs" && <Later phase="12" />}
           {page === "settings" && <SettingsPage hasPassword={info?.has_password ?? false} onPasswordSet={() => setInfo((i) => (i ? { ...i, has_password: true } : i))} />}
         </Shell>

@@ -460,6 +460,25 @@ async fn run(program: &str, args: &[String], limit: Duration) -> Result<(bool, S
     Ok((output.status.success(), text))
 }
 
+/// How a server runs its tunnels: `systemd` (the default) or `process`, as child
+/// processes of the panel or the agent, for a host that has no systemd.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceKind {
+    #[default]
+    Systemd,
+    Process,
+}
+
+impl ServiceKind {
+    pub fn services(self, dir: &Path) -> std::sync::Arc<dyn Services> {
+        match self {
+            Self::Systemd => std::sync::Arc::new(Systemd),
+            Self::Process => std::sync::Arc::new(Processes::new(dir, &kariz_binary())),
+        }
+    }
+}
+
 pub type Fut<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
 
 /// How a server starts, stops and asks about its tunnels' services. The agent uses
@@ -627,10 +646,13 @@ pub async fn logs(name: &str, lines: u32) -> TextReply {
 }
 
 /// The `kariz` program: beside this one, or where the installer puts it.
-fn kariz_binary() -> PathBuf {
+pub fn kariz_binary() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("kariz")))
+        .and_then(|p| {
+            p.parent()
+                .map(|d| d.join(format!("kariz{}", std::env::consts::EXE_SUFFIX)))
+        })
         .filter(|p| p.exists())
         .unwrap_or_else(|| PathBuf::from("/usr/local/bin/kariz"))
 }

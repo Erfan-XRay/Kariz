@@ -23,6 +23,7 @@ fn agent(kariz_dir: &std::path::Path) -> std::sync::Arc<Agent> {
         id: Some("id".into()),
         key: Some("00".repeat(32)),
         kariz_dir: kariz_dir.to_path_buf(),
+        services: Default::default(),
     };
     Agent::new(&kariz_dir.join("agent.toml"), config)
 }

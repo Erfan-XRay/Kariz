@@ -25,6 +25,9 @@ pub struct Config {
     /// Where this server's Kariz tunnel configs are.
     #[serde(default = "default_kariz_dir")]
     pub kariz_dir: PathBuf,
+    /// How tunnels are started: `systemd` (default) or `process`.
+    #[serde(default)]
+    pub services: crate::manage::ServiceKind,
 }
 
 fn default_kariz_dir() -> PathBuf {

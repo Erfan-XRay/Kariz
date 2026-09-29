@@ -39,6 +39,9 @@ pub struct AgentConfig {
     /// Where the Kariz tunnel configs are.
     #[serde(default = "default_kariz_dir")]
     pub kariz_dir: PathBuf,
+    /// How tunnels are started: `systemd` (default) or `process`.
+    #[serde(default)]
+    pub services: manage::ServiceKind,
 }
 
 fn default_kariz_dir() -> PathBuf {
@@ -55,6 +58,7 @@ impl AgentConfig {
             id: None,
             key: None,
             kariz_dir: default_kariz_dir(),
+            services: Default::default(),
         }
     }
 

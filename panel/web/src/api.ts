@@ -58,6 +58,78 @@ export interface SessionRow {
   current: boolean;
 }
 
+export interface ForwardSpec {
+  listen: string;
+  target: string;
+  protocol: string;
+}
+
+/** What the wizard sends: one tunnel, both sides (docs/PHASE12.md). */
+export interface PairRequest {
+  name: string;
+  entry: string;
+  exit: string;
+  mode: string;
+  transport: string;
+  profile?: string;
+  listen: string;
+  dial: string;
+  pool?: number;
+  ws_path?: string;
+  ws_host?: string;
+  tls_sni?: string;
+  forwards: ForwardSpec[];
+  rotate?: boolean;
+}
+
+/** One side of a tunnel as an agent keeps it (never with its token). */
+export interface Spec {
+  name: string;
+  role: string;
+  mode: string;
+  transport: string;
+  profile?: string;
+  listen?: string;
+  remote?: string;
+  pool?: number;
+  ws_path?: string;
+  ws_host?: string;
+  tls_sni?: string;
+  tls_pin?: string;
+  forwards: ForwardSpec[];
+}
+
+export interface PortOwner {
+  proto: string;
+  addr: string;
+  port: number;
+  process: string | null;
+  pid: number | null;
+}
+
+export interface CheckReply {
+  ok: boolean;
+  error?: string;
+  warnings: string[];
+  conflicts: PortOwner[];
+}
+
+export interface Step {
+  id: string;
+  state: "run" | "ok" | "fail";
+  detail: string | null;
+}
+
+export interface Op {
+  id: string;
+  kind: "create" | "edit" | "control" | "delete";
+  name: string;
+  state: "running" | "done" | "failed";
+  steps: Step[];
+  error: string | null;
+  undone: boolean | null;
+}
+
 export class ApiError extends Error {
   status: number;
   code: string;
@@ -108,5 +180,14 @@ export const api = {
   revoke: (id: number) => call<object>("POST", "sessions/revoke", { id }),
   changePassword: (current: string | undefined, next: string) =>
     call<object>("POST", "password", { current, new: next }),
+  tunnelCheck: (body: PairRequest) => call<{ entry: CheckReply; exit: CheckReply }>("POST", "tunnels/check", body),
+  createTunnel: (body: PairRequest) => call<{ op: string }>("POST", "tunnels", body),
+  editTunnel: (body: PairRequest) => call<{ op: string }>("POST", "tunnels/edit", body),
+  controlTunnel: (name: string, action: "start" | "stop" | "restart") => call<{ op: string }>("POST", "tunnels/control", { name, action }),
+  deleteTunnel: (name: string) => call<{ op: string }>("POST", "tunnels/delete", { name }),
+  tunnelSpec: (server: string, name: string) =>
+    call<Spec>("GET", `tunnel?server=${encodeURIComponent(server)}&name=${encodeURIComponent(name)}`),
+  op: (id: string) => call<Op>("GET", `op?id=${encodeURIComponent(id)}`),
+  ports: (server: string) => call<{ ports: PortOwner[] }>("GET", `ports?server=${encodeURIComponent(server)}`),
   newLink: () => call<{ token: string; valid_for: number }>("POST", "links"),
 };
