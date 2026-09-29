@@ -44,8 +44,9 @@ takes a command or a path from the panel.
 "update this server" instead of failing (used for real in phase 14).
 
 **The token** is the one secret that travels: it is made by the panel, sent once to each
-agent inside the encrypted link, and written 0600. The panel keeps it (encrypted with a key
-in `/var/lib/kariz-panel`) only to edit and to rotate; it is never in an API answer.
+agent inside the encrypted link, and written 0600. The panel does **not keep it**: an edit sends
+no token (each agent keeps its own file's), and rotating makes a new one for both sides. It
+is never in an API answer.
 
 *Status after 12.1:* the requests are in `panel/src/manage.rs` and the agent's handler; the
 spec is `wire::Spec`. Every text field of a spec must be one plain line (no control
@@ -67,6 +68,19 @@ The panel does this as an ordered plan and stops at the first failure, undoing w
 
 Edit is the same plan with `.bak` restores as the undo. The list of steps is shown before it
 starts, and each step's result after (a progress dialog, as designed).
+
+*Status after 12.2:* `panel/src/pair.rs` makes, edits, controls and deletes a pair as an
+operation that runs in the background (`POST /api/tunnels`, `/edit`, `/control`, `/delete`
+answer `202` with an operation id; `GET /api/op?id=` returns its steps as they happen, and
+`POST /api/tunnels/check` and `GET /api/ports?server=` serve the wizard). Because the panel
+keeps no tokens, an edit that fails after a **new token** was sent cannot put the old token
+back, and says so (`undone: false`); every other failure is undone. A listening `wss` side
+gets a self-signed certificate made by its agent, and its pin is passed to the dialing side.
+The servers run their tunnels through a `Services` trait: systemd by default, or child
+processes (`manage::Processes`), which is what the CI test uses and what a host without
+systemd could use later. `panel/tests/pair.rs` (Linux) makes a pair between the panel's own
+server and a real agent with real daemons, sends traffic through it, edits, rotates the token,
+stops, deletes, and checks that a tunnel that cannot connect leaves nothing on either side.
 
 ## 4. Live monitoring
 
@@ -94,7 +108,7 @@ starts, and each step's result after (a progress dialog, as designed).
 |---|---|---|
 | **12.0** Plan | This document. | |
 | **12.1** Agent (done) | The requests of section 2 with their validation, the spec renderer, port ownership; unit tests for every parser and rule. | A test drives each request against a real agent and checks the file written. |
-| **12.2** The pair | The plan of section 3 in the hub, with undo; API for create, edit, control, delete. | CI: a pair is made through the API on one host, carries traffic, is edited and deleted; a failure at each step leaves nothing behind. |
+| **12.2** The pair (done) | The plan of section 3 in the hub, with undo; API for create, edit, control, delete. | CI: a pair is made through the API on one host, carries traffic, is edited and deleted; a failure at each step leaves nothing behind. |
 | **12.3** Wizard and pages | The wizard, tunnel detail (state of both sides, edit, token rotation), Tunnels page actions, both languages and themes. | A tunnel made from the browser works. |
 | **12.4** Monitoring | `/api/live`, history and charts, events, the Logs page. | Charts fill in the driven browser; history survives a panel restart. |
 | **12.5** Speed test and backup | The speed test from the tunnel page, backup and restore, own certificate. | CI: back up, wipe, restore, agents come back. |

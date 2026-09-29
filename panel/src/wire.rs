@@ -90,6 +90,17 @@ pub struct PortOwner {
     pub pid: Option<u32>,
 }
 
+/// The answer to `tunnel_put`: the certificate pin of a listening wss side, for the
+/// dialing side's config.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
+}
+
 /// The answer to `tunnel_check`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CheckReply {

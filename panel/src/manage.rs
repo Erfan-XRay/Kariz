@@ -42,7 +42,7 @@ fn existing_token(path: &Path) -> Option<String> {
 }
 
 /// The config file for a spec, with `token` in it.
-pub fn render(spec: &Spec, token: &str) -> Result<String> {
+pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> Result<String> {
     use toml::{Table, Value};
     let text = |s: &str| Value::String(s.to_owned());
     let mut root = Table::new();
@@ -73,7 +73,13 @@ pub fn render(spec: &Spec, token: &str) -> Result<String> {
         }
         tunnel.insert("ws".into(), Value::Table(ws));
     }
-    if spec.tls_sni.is_some() || spec.tls_pin.is_some() {
+    if let Some((cert, key)) = cert_files {
+        // A listening wss side serves the certificate this agent made for it.
+        let mut tls = Table::new();
+        tls.insert("cert".into(), text(&cert.to_string_lossy()));
+        tls.insert("key".into(), text(&key.to_string_lossy()));
+        tunnel.insert("tls".into(), Value::Table(tls));
+    } else if spec.tls_sni.is_some() || spec.tls_pin.is_some() {
         let mut tls = Table::new();
         if let Some(sni) = &spec.tls_sni {
             tls.insert("sni".into(), text(sni));
@@ -115,9 +121,32 @@ fn build(dir: &Path, spec: &Spec, for_check: bool) -> Result<(String, Config)> {
         bail!("the token is too short or has characters it should not");
     }
     plain_text(spec)?;
-    let text = render(spec, &token)?;
+    let files = cert_files(dir, spec);
+    let text = render(
+        spec,
+        &token,
+        files.as_ref().map(|(c, k)| (c.as_path(), k.as_path())),
+    )?;
     let config = Config::parse(&text)?;
     Ok((text, config))
+}
+
+/// Whether this side of the spec listens for the tunnel.
+fn is_acceptor(spec: &Spec) -> bool {
+    matches!(
+        (spec.role.as_str(), spec.mode.as_str()),
+        ("entry", "reverse") | ("exit", "direct")
+    )
+}
+
+/// The certificate and key of a listening wss side, beside its config.
+fn cert_files(dir: &Path, spec: &Spec) -> Option<(PathBuf, PathBuf)> {
+    (spec.transport == "wss" && is_acceptor(spec)).then(|| {
+        (
+            dir.join(format!("{}.crt", spec.name)),
+            dir.join(format!("{}.key", spec.name)),
+        )
+    })
 }
 
 /// Every text field of a spec is one plain line: no control characters, so nothing a
@@ -152,11 +181,7 @@ fn plain_text(spec: &Spec) -> Result<()> {
 pub fn wanted_ports(spec: &Spec) -> Vec<(&'static str, u16)> {
     let mut out = Vec::new();
     let port = |addr: &str| addr.rsplit_once(':').map_or(addr, |(_, p)| p).parse().ok();
-    let acceptor = matches!(
-        (spec.role.as_str(), spec.mode.as_str()),
-        ("entry", "reverse") | ("exit", "direct")
-    );
-    if acceptor {
+    if is_acceptor(spec) {
         let udp = matches!(spec.transport.as_str(), "quic" | "kcp");
         if let Some(p) = spec.listen.as_deref().and_then(port) {
             out.push((if udp { "udp" } else { "tcp" }, p));
@@ -210,17 +235,24 @@ pub fn check(dir: &Path, owners: &[PortOwner], spec: &Spec) -> CheckReply {
     }
 }
 
-/// Writes the config (0600), keeping the previous file as `NAME.toml.bak`.
-pub fn put(dir: &Path, spec: &Spec) -> Result<()> {
+/// Writes the config (0600), keeping the previous file as `NAME.toml.bak`. A listening wss
+/// side gets a self-signed certificate made for it (once); its pin comes back, for the
+/// dialing side.
+pub fn put(dir: &Path, spec: &Spec) -> Result<Option<String>> {
     let (text, _) = build(dir, spec, false)?;
     let path = config_path(dir, &spec.name)?;
+    let pin = match cert_files(dir, spec) {
+        Some((cert, key)) => Some(crate::cert::ensure(&cert, &key)?),
+        None => None,
+    };
     if path.exists() {
         let mut bak = path.as_os_str().to_owned();
         bak.push(".bak");
         let old = std::fs::read(&path)?;
         crate::agent::write_private(Path::new(&bak), &old)?;
     }
-    crate::agent::write_private(&path, text.as_bytes())
+    crate::agent::write_private(&path, text.as_bytes())?;
+    Ok(pin)
 }
 
 /// The spec of an existing tunnel, without its token.
@@ -240,7 +272,13 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
         ws_path: c.tunnel.ws.as_ref().map(|w| w.path.clone()),
         ws_host: c.tunnel.ws.as_ref().and_then(|w| w.host.clone()),
         tls_sni: c.tunnel.tls.as_ref().and_then(|t| t.sni.clone()),
-        tls_pin: c.tunnel.tls.as_ref().and_then(|t| t.pin_sha256.clone()),
+        tls_pin: c.tunnel.tls.as_ref().and_then(|t| {
+            t.pin_sha256.clone().or_else(|| {
+                t.cert
+                    .as_deref()
+                    .and_then(|p| crate::cert::fingerprint(p).ok())
+            })
+        }),
         forwards: c
             .forward
             .iter()
@@ -261,6 +299,8 @@ pub fn remove_files(dir: &Path, name: &str) -> Result<()> {
         path.clone(),
         path.with_extension("toml.bak"),
         path.with_extension("sock"),
+        path.with_extension("crt"),
+        path.with_extension("key"),
     ] {
         match std::fs::remove_file(&p) {
             Ok(()) => {}
@@ -420,21 +460,137 @@ async fn run(program: &str, args: &[String], limit: Duration) -> Result<(bool, S
     Ok((output.status.success(), text))
 }
 
-pub async fn ctl(name: &str, action: &str) -> Result<()> {
-    let args = ctl_args(name, action)?;
-    let (ok, text) = run("systemctl", &args, Duration::from_secs(30)).await?;
-    if ok {
+pub type Fut<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
+
+/// How a server starts, stops and asks about its tunnels' services. The agent uses
+/// systemd; a host without it (a container) can run the daemons as child processes, and
+/// the tests do.
+pub trait Services: Send + Sync {
+    /// `start`, `stop`, `restart`, `enable` or `disable` (the last two also start and
+    /// stop).
+    fn ctl(&self, name: String, action: String) -> Fut<Result<()>>;
+    /// Whether the tunnel runs; `None` when this cannot be known.
+    fn active(&self, name: String) -> Fut<Option<bool>>;
+}
+
+/// The services of a Linux server with systemd: `kariz@NAME`.
+pub struct Systemd;
+
+impl Services for Systemd {
+    fn ctl(&self, name: String, action: String) -> Fut<Result<()>> {
+        Box::pin(async move {
+            let args = ctl_args(&name, &action)?;
+            let (ok, text) = run("systemctl", &args, Duration::from_secs(30)).await?;
+            if ok {
+                Ok(())
+            } else {
+                bail!("systemctl {action} failed: {}", text.trim())
+            }
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn active(&self, name: String) -> Fut<Option<bool>> {
+        Box::pin(async move {
+            let args = [
+                "is-active".to_owned(),
+                "--quiet".to_owned(),
+                format!("kariz@{name}"),
+            ];
+            match run("systemctl", &args, Duration::from_secs(3)).await {
+                Ok((ok, _)) => Some(ok),
+                Err(_) => None,
+            }
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn active(&self, _: String) -> Fut<Option<bool>> {
+        Box::pin(async { None })
+    }
+}
+
+/// Daemons run as child processes of the agent, for hosts without systemd. They stop
+/// with the agent.
+pub struct Processes {
+    dir: PathBuf,
+    binary: PathBuf,
+    children: std::sync::Mutex<HashMap<String, tokio::process::Child>>,
+}
+
+impl Processes {
+    pub fn new(dir: &Path, binary: &Path) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            binary: binary.to_path_buf(),
+            children: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn start(&self, name: &str) -> Result<()> {
+        let mut children = self.children.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(child) = children.get_mut(name) {
+            if matches!(child.try_wait(), Ok(None)) {
+                return Ok(());
+            }
+        }
+        let child = tokio::process::Command::new(&self.binary)
+            .arg("run")
+            .arg("-c")
+            .arg(config_path(&self.dir, name)?)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to start {}", self.binary.display()))?;
+        children.insert(name.to_owned(), child);
         Ok(())
-    } else {
-        bail!("systemctl {action} failed: {}", text.trim())
+    }
+
+    fn stop(&self, name: &str) {
+        let child = self
+            .children
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        if let Some(mut child) = child {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+impl Services for Processes {
+    fn ctl(&self, name: String, action: String) -> Fut<Result<()>> {
+        let result = ctl_args(&name, &action).and_then(|_| match action.as_str() {
+            "start" | "enable" => self.start(&name),
+            "stop" | "disable" => {
+                self.stop(&name);
+                Ok(())
+            }
+            _ => {
+                self.stop(&name);
+                self.start(&name)
+            }
+        });
+        Box::pin(async move { result })
+    }
+
+    fn active(&self, name: String) -> Fut<Option<bool>> {
+        let running = self
+            .children
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&name)
+            .map(|c| matches!(c.try_wait(), Ok(None)));
+        Box::pin(async move { Some(running.unwrap_or(false)) })
     }
 }
 
 /// Stops the service, then removes the files.
-pub async fn delete(dir: &Path, name: &str) -> Result<()> {
+pub async fn delete(dir: &Path, services: &dyn Services, name: &str) -> Result<()> {
     config_path(dir, name)?;
     // A tunnel that was never started has no service to stop; that is not a failure.
-    let _ = ctl(name, "disable").await;
+    let _ = services.ctl(name.to_owned(), "disable".to_owned()).await;
     remove_files(dir, name)
 }
 
@@ -641,6 +797,29 @@ mod tests {
         let got = get(&d.0, "secure").unwrap();
         assert_eq!(got.ws_path.as_deref(), Some("/x"));
         assert_eq!(got.tls_pin, Some("ab".repeat(32)));
+    }
+
+    #[test]
+    fn a_listening_wss_side_gets_its_own_certificate_and_reports_the_pin() {
+        let d = Dir::new();
+        let s = Spec {
+            name: "secure-exit".into(),
+            role: "exit".into(),
+            mode: "direct".into(),
+            transport: "wss".into(),
+            listen: Some("0.0.0.0:443".into()),
+            token: Some("d".repeat(48)),
+            ws_path: Some("/x".into()),
+            ..Default::default()
+        };
+        let pin = put(&d.0, &s).unwrap().expect("a pin");
+        assert_eq!(pin.len(), 64);
+        assert!(d.0.join("secure-exit.crt").exists() && d.0.join("secure-exit.key").exists());
+        // the same certificate on an edit, and the pin can be read back for the other side
+        assert_eq!(put(&d.0, &s).unwrap(), Some(pin.clone()));
+        assert_eq!(get(&d.0, "secure-exit").unwrap().tls_pin, Some(pin));
+        remove_files(&d.0, "secure-exit").unwrap();
+        assert_eq!(std::fs::read_dir(&d.0).unwrap().count(), 0);
     }
 
     #[test]
