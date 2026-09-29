@@ -25,6 +25,31 @@ jobs:
       - run: cargo clippy --lib --bins --no-default-features --features kcp -- -D warnings
       - run: cargo test
 
+  # The release targets, built the way the release builds them (`cross` for the ARM ones:
+  # Docker images with the C cross-compilers that ring and mimalloc need). The ARM
+  # library tests run under QEMU, so a target-specific break (32-bit atomics, alignment)
+  # shows before a release.
+  cross:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - run: cross build --release --locked --target ${{ matrix.target }}
+      - run: ls -l target/${{ matrix.target }}/release/kariz
+      - name: Library tests under QEMU
+        run: cross test --locked --target ${{ matrix.target }} --lib
+
   # scripts/kariz.sh on a real systemd host: install from a local build, a tcpmux pair
   # and a wss pair (self-signed certificate and pin), traffic through both, the banner
   # in the journal without its priority prefix, then removal.

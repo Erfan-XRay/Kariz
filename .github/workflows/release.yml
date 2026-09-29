@@ -1,7 +1,9 @@
 name: Release
 
-# Pushing a tag like v0.2.0 builds a static Linux binary and publishes a GitHub release
-# with the notes of that version from CHANGELOG.md.
+# Pushing a tag like v0.2.0 builds static Linux binaries for x86_64, aarch64 and armv7
+# and publishes a GitHub release with the notes of that version from CHANGELOG.md.
+# One archive per architecture, named kariz-<tag>-<arch>-linux.tar.gz, each with its
+# SHA-256 (scripts/kariz.sh downloads them by those names).
 on:
   push:
     tags: ["v*"]
@@ -11,17 +13,25 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  TARGET: x86_64-unknown-linux-musl
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+            cross: false
+          - arch: aarch64
+            target: aarch64-unknown-linux-musl
+            cross: true
+          - arch: armv7
+            target: armv7-unknown-linux-musleabihf
+            cross: true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Tag matches the version in Cargo.toml
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
@@ -29,15 +39,48 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
             exit 1
           fi
-      - run: cargo build --release --locked --target "$TARGET"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: ${{ !matrix.cross }}
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - if: ${{ !matrix.cross }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - if: ${{ matrix.cross }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - if: ${{ matrix.cross }}
+        run: cross build --release --locked --target ${{ matrix.target }}
       - name: Package
         run: |
-          name="kariz-$GITHUB_REF_NAME-x86_64-linux"
+          name="kariz-$GITHUB_REF_NAME-${{ matrix.arch }}-linux"
           mkdir "$name"
-          cp "target/$TARGET/release/kariz" README.md README_FA.md CHANGELOG.md "$name/"
-          cp -r configs systemd scripts "$name/"
+          cp "target/${{ matrix.target }}/release/kariz" README.md README_FA.md CHANGELOG.md "$name/"
+          cp -r configs systemd scripts assets "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kariz-${{ matrix.arch }}
+          path: |
+            kariz-*.tar.gz
+            kariz-*.tar.gz.sha256
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kariz-*
+          merge-multiple: true
+      - name: Three archives, each with its checksum
+        run: |
+          ls -l kariz-*
+          test "$(ls kariz-*.tar.gz | wc -l)" = 3
+          for f in kariz-*.tar.gz; do sha256sum -c "$f.sha256"; done
       - name: Release notes from CHANGELOG.md
         run: |
           awk -v version="${GITHUB_REF_NAME#v}" '
