@@ -70,7 +70,9 @@ jobs:
           python3 -m http.server 18081 --bind 127.0.0.1 >/dev/null 2>&1 &
           token() { sudo sed -n 's/^token = "\(.*\)"/\1/p' "/etc/kariz/$1.toml"; }
           sudo kariz-manager add plain --role entry --mode reverse --transport tcpmux \
-            --listen 127.0.0.1:3080 --forward 127.0.0.1:18080=127.0.0.1:18081 --public-ip 127.0.0.1
+            --listen 3080 --forward 127.0.0.1:18080=127.0.0.1:18081 --public-ip 127.0.0.1
+          # a bare port listens on [::], which takes IPv4 too: the exit dials 127.0.0.1
+          sudo grep -q 'listen = "\[::\]:3080"' /etc/kariz/plain.toml
           sudo kariz-manager add plain-exit --role exit --mode reverse --transport tcpmux \
             --remote 127.0.0.1:3080 --token "$(token plain)"
           # wss: the listening side first; it prints the pin for the dialing side.
@@ -82,10 +84,18 @@ jobs:
           sudo kariz-manager add secure --role entry --mode direct --transport wss \
             --remote 127.0.0.1:3443 --forward 127.0.0.1:18082=127.0.0.1:18081 \
             --ws-path /manager-test --pin "$pin" --token "$(token secure-exit)"
+          # IPv6 between the servers (kcp over ::1), and a port range onto one port.
+          sudo kariz-manager add six --role entry --mode reverse --transport kcp \
+            --listen 3092 --ports 18090-18092=18081 --public-ip ::1
+          sudo kariz-manager add six-exit --role exit --mode reverse --transport kcp \
+            --remote '[::1]:3092' --token "$(token six)"
+          test "$(sudo grep -c '^\[\[forward\]\]' /etc/kariz/six.toml)" = 3
           sleep 3
           sudo kariz-manager list
           curl -sf --max-time 5 http://127.0.0.1:18080/ >/dev/null
           curl -sf --max-time 5 http://127.0.0.1:18082/ >/dev/null
+          for p in 18090 18091 18092; do curl -sf --max-time 5 "http://127.0.0.1:$p/" >/dev/null; done
+          curl -sfg --max-time 5 "http://[::1]:18091/" >/dev/null
       - name: Speed test through the daemons, both modes, and the exit side's refusal
         run: |
           # 'plain' is a reverse tcpmux pair, 'secure' a direct wss pair: both modes.
@@ -100,15 +110,6 @@ jobs:
           fi
           cat exit.txt
           grep -q "entry server" exit.txt
-      - name: The menu and its wizard, with scripted answers
-        run: |
-          # menu: 2 = new tunnel, then the wizard's answers, Enter to return, 0 = exit
-          printf '%s\n' 2 wiz entry reverse tcpmux balanced 3090 127.0.0.1 y \
-            18083=127.0.0.1:18081 '' '' 0 > answers.txt
-          sudo env KARIZ_INPUT="$PWD/answers.txt" kariz-manager
-          sudo kariz-manager list | tee list.txt
-          grep -q "wiz .*active" list.txt
-          sudo grep -q 'listen = "0.0.0.0:18083"' /etc/kariz/wiz.toml
       - name: The menu through a real terminal, installed and piped in
         run: |
           sudo python3 tests/manager_tty.py kariz-manager
@@ -117,7 +118,7 @@ jobs:
         run: |
           out=$(sudo kariz-manager update --binary target/release/kariz)
           echo "$out"
-          echo "$out" | grep -q "5 running tunnel(s) restarted"
+          echo "$out" | grep -q "6 running tunnel(s) restarted"
           sleep 3
           curl -sf --max-time 5 http://127.0.0.1:18080/ >/dev/null
       - name: Banner in the journal, priority prefixes understood
@@ -127,7 +128,7 @@ jobs:
           ! grep -q '^<[0-9]>' journal.txt
       - name: Remove and uninstall
         run: |
-          for t in plain plain-exit secure secure-exit wiz; do sudo kariz-manager remove "$t" --yes; done
+          for t in plain plain-exit secure secure-exit six six-exit; do sudo kariz-manager remove "$t" --yes; done
           sudo kariz-manager uninstall --yes
           test ! -e /usr/local/bin/kariz
       - if: failure()
