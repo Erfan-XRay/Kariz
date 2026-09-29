@@ -142,14 +142,26 @@ impl Agent {
         config: AgentConfig,
         services: Arc<dyn Services>,
     ) -> Arc<Self> {
+        Self::with_exec(path, config, services, Arc::new(crate::net::Real))
+    }
+
+    /// Like [`Agent::with_services`], and the programs of the private network code (`ip`,
+    /// `ping`) run through `exec` (the tests record them instead).
+    pub fn with_exec(
+        path: &Path,
+        config: AgentConfig,
+        services: Arc<dyn Services>,
+        exec: Arc<dyn crate::net::Exec>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             path: path.to_path_buf(),
             config: Mutex::new(config),
             sampler: Mutex::new(Sampler::default()),
             services,
             // The links of private networks are kept beside the agent's own settings.
-            net: crate::net::Net::new(
+            net: crate::net::Net::with_exec(
                 (!path.as_os_str().is_empty()).then(|| path.with_file_name("net.toml")),
+                exec,
             ),
         })
     }
@@ -256,6 +268,7 @@ impl Agent {
             ),
             Request::NetUp { net } => ack(self.net.up(net).await),
             Request::NetDown { name } => ack(self.net.down(&name).await),
+            Request::NetSync { links } => ack(self.net.sync(links).await),
             Request::NetPing { name } => to_json(&self.net.ping(&name).await),
             Request::NetStatus => to_json(&self.net.status().await),
             Request::Logs { name, lines } => to_json(&manage::logs(&name, lines).await),

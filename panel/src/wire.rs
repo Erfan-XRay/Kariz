@@ -48,6 +48,9 @@ pub enum Request {
     NetUp { net: NetSpec },
     /// Remove a link's interface.
     NetDown { name: String },
+    /// The panel's whole list of this server's links: make the ones that are missing or
+    /// changed, remove the ones that are not in it (sent when an agent connects).
+    NetSync { links: Vec<NetSpec> },
     /// Ping the far end of a link across it.
     NetPing { name: String },
     /// Whether GRE can be made here, and the state of this server's links.

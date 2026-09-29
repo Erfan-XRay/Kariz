@@ -54,6 +54,8 @@ pub struct ServerView {
     pub version: String,
     pub arch: String,
     pub hostname: String,
+    /// The address other servers reach this one at (for private networks), if set.
+    pub addr: Option<String>,
     pub seen_secs: Option<u64>,
     pub health: Option<Health>,
     pub tunnels: Vec<TunnelView>,
@@ -86,6 +88,8 @@ pub struct Hub {
     pub ops: crate::pair::Ops,
     /// Charts and events.
     pub history: crate::history::History,
+    /// Private networks and their links.
+    pub networks: crate::networks::Networks,
     /// How long a new tunnel has to connect (shortened in tests).
     pub connect_wait: Duration,
 }
@@ -99,7 +103,14 @@ impl Hub {
 
     /// A hub whose own server runs its tunnels through `services`.
     pub fn with_services(db: Db, kariz_dir: PathBuf, services: Arc<dyn Services>) -> Arc<Self> {
-        Self::with_options(db, kariz_dir, services, crate::pair::CONNECT_WAIT, None)
+        Self::with_options(
+            db,
+            kariz_dir,
+            services,
+            crate::pair::CONNECT_WAIT,
+            None,
+            None,
+        )
     }
 
     /// Like [`Hub::with_services`], and this server's private network links are kept in
@@ -116,6 +127,7 @@ impl Hub {
             services,
             crate::pair::CONNECT_WAIT,
             Some(state_dir),
+            None,
         )
     }
 
@@ -126,6 +138,7 @@ impl Hub {
         services: Arc<dyn Services>,
         connect_wait: Duration,
         state_dir: Option<PathBuf>,
+        exec: Option<Arc<dyn crate::net::Exec>>,
     ) -> Arc<Self> {
         let config = AgentConfig {
             panel: String::new(),
@@ -138,11 +151,13 @@ impl Hub {
         };
         Arc::new(Self {
             history: crate::history::History::new(db.clone()),
+            networks: crate::networks::Networks::new(db.clone()),
             db,
-            local: Agent::with_services(
+            local: Agent::with_exec(
                 &state_dir.map_or_else(PathBuf::new, |d| d.join("local-agent.toml")),
                 config,
                 services.clone(),
+                exec.unwrap_or_else(|| Arc::new(crate::net::Real)),
             ),
             services,
             ops: crate::pair::Ops::default(),
@@ -202,6 +217,59 @@ impl Hub {
         let token = crate::auth::new_token()?;
         self.db.set_meta("link_token", &token)?;
         Ok(token)
+    }
+
+    /// The address other servers reach `server` at, if it has been set.
+    pub fn addr_of(&self, server: &str) -> Option<String> {
+        self.db
+            .conn()
+            .query_row(
+                "SELECT addr FROM server_addrs WHERE server = ?1",
+                [server],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// Sets (or with an empty address, clears) the address other servers reach `server`
+    /// at. A server that is not known is refused.
+    pub fn set_addr(&self, server: &str, addr: &str) -> Result<()> {
+        if server != LOCAL
+            && self
+                .db
+                .conn()
+                .query_row("SELECT 1 FROM servers WHERE id = ?1", [server], |_| Ok(()))
+                .optional()?
+                .is_none()
+        {
+            bail!("no_such_server");
+        }
+        let addr = addr.trim();
+        if addr.is_empty() {
+            self.db
+                .conn()
+                .execute("DELETE FROM server_addrs WHERE server = ?1", [server])?;
+            return Ok(());
+        }
+        if !crate::netops::valid_addr(addr) {
+            bail!("bad_input");
+        }
+        self.db.conn().execute(
+            "INSERT INTO server_addrs (server, addr) VALUES (?1, ?2)
+             ON CONFLICT (server) DO UPDATE SET addr = excluded.addr",
+            params![server, addr],
+        )?;
+        Ok(())
+    }
+
+    /// The networks each connected server already routes, by server id.
+    pub fn routes(&self) -> crate::networks::Routes {
+        self.live()
+            .iter()
+            .filter_map(|(id, l)| Some((id.clone(), l.health.as_ref()?.routes.clone())))
+            .collect()
     }
 
     /// A join code for a new server: `name` (optional) is what it will be called, and
@@ -284,15 +352,35 @@ impl Hub {
     }
 
     /// Removes a server: its row, and its link if it has one. False if there is none.
-    pub fn remove(&self, id: &str) -> Result<bool> {
+    pub fn remove(self: &Arc<Self>, id: &str) -> Result<bool> {
         if id == LOCAL {
             return Ok(false);
+        }
+        // Its private network links go with it; the servers on their other ends are
+        // told at once.
+        let peers: Vec<String> = self
+            .networks
+            .links(None)?
+            .into_iter()
+            .filter(|l| l.a == id || l.b == id)
+            .map(|l| if l.a == id { l.b } else { l.a })
+            .collect();
+        {
+            let conn = self.db.conn();
+            conn.execute("DELETE FROM net_links WHERE a = ?1 OR b = ?1", [id])?;
+            conn.execute("DELETE FROM server_addrs WHERE server = ?1", [id])?;
         }
         let removed = self
             .db
             .conn()
             .execute("DELETE FROM servers WHERE id = ?1", [id])?
             == 1;
+        for peer in peers {
+            let hub = self.clone();
+            tokio::spawn(async move {
+                let _ = hub.net_sync(&peer).await;
+            });
+        }
         if let Some(live) = self.live().remove(id) {
             if let Some(session) = live.session {
                 session.close();
@@ -348,6 +436,11 @@ impl Hub {
             entry.arch = hello.arch.clone();
         }
         self.history.event("server_up", &id, "");
+        // The server is told its private network links (they may have changed while it
+        // was away).
+        if let Err(e) = self.net_sync(&id).await {
+            warn!(server = %id, error = %e, "the private network links could not be synced");
+        }
         let result = self.poll(&id, &session).await;
         let mut live = self.live();
         if let Some(entry) = live.get_mut(&id) {
@@ -418,7 +511,11 @@ impl Hub {
         .await?;
         let ack: Ack = serde_json::from_slice(&raw)?;
         if !ack.ok {
-            let _ = self.remove(&id);
+            // Registered a moment ago and never used: just forget it.
+            let _ = self
+                .db
+                .conn()
+                .execute("DELETE FROM servers WHERE id = ?1", [&id]);
             bail!(
                 "the agent did not keep its identity: {}",
                 ack.error.unwrap_or_default()
@@ -536,6 +633,9 @@ impl Hub {
     /// The panel's own server, sampled here (no link).
     pub async fn run_local(self: Arc<Self>) {
         self.local.restore_net().await;
+        if let Err(e) = self.net_sync(LOCAL).await {
+            warn!(error = %e, "the private network links could not be synced");
+        }
         let mut sampler = Sampler::default();
         let mut round = 0u32;
         loop {
@@ -589,6 +689,7 @@ impl Hub {
                     hostname: l
                         .filter(|l| !l.hostname.is_empty())
                         .map_or(host, |l| l.hostname.clone()),
+                    addr: None,
                     seen_secs: l.and_then(|l| l.seen).map(|s| s.elapsed().as_secs()),
                     health: l.and_then(|l| l.health.clone()),
                     tunnels: l.map(|l| l.tunnels.clone()).unwrap_or_default(),
@@ -609,6 +710,15 @@ impl Hub {
         )];
         for (id, name, version, arch, host) in rows {
             out.push(view(&id, name, false, version, arch, host));
+        }
+        let addrs: HashMap<String, String> = {
+            let conn = self.db.conn();
+            let mut stmt = conn.prepare("SELECT server, addr FROM server_addrs")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for s in &mut out {
+            s.addr = addrs.get(&s.id).cloned();
         }
         Ok(out)
     }

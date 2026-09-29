@@ -245,6 +245,39 @@ impl Net {
         Ok(())
     }
 
+    /// Makes this list the server's links: the ones not in it are removed, the missing or
+    /// changed ones are made, and the ones that are already right are left alone (so
+    /// reconnecting an agent does not drop a working link).
+    pub async fn sync(&self, wanted: Vec<NetSpec>) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let state = self.load();
+        for old in &state.link {
+            if !wanted.iter().any(|w| w.name == old.name) {
+                let _ = self
+                    .exec
+                    .run("ip", vec!["link".into(), "del".into(), old.name.clone()])
+                    .await;
+            }
+        }
+        let mut failed = Vec::new();
+        for spec in &wanted {
+            let same = state.link.iter().any(|l| l == spec);
+            let there = std::path::Path::new(&format!("/sys/class/net/{}", spec.name)).exists();
+            if same && there {
+                continue;
+            }
+            if let Err(e) = self.apply(spec).await {
+                failed.push(format!("{}: {e:#}", spec.name));
+            }
+        }
+        self.save(&State { link: wanted })?;
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            bail!("{}", failed.join("; "))
+        }
+    }
+
     /// Makes every saved link again (the agent's start, after a reboot). Returns how many
     /// came up; the ones that did not are logged by the caller through the errors.
     pub async fn restore(&self) -> Vec<(String, Result<()>)> {
