@@ -167,7 +167,15 @@ kariz-manager uninstall             # asks before removing configs; --yes remove
 ```
 
 `update` checks the new release's SHA-256 like `install` does, and restarts every running
-tunnel so it uses the new binary.
+tunnel so it uses the new binary. It does not replace the manager script itself; for a
+new version of the manager, fetch it again (with the token while the repository is
+private):
+
+```bash
+curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -o /usr/local/bin/kariz-manager \
+    https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh
+chmod +x /usr/local/bin/kariz-manager
+```
 
 ## Logs
 
