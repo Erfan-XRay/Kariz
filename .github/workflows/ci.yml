@@ -3,7 +3,15 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md', 'design/**', 'LICENSE']
   pull_request:
+    paths-ignore: ['**.md', 'design/**', 'LICENSE']
+  workflow_dispatch:
+
+# A new push to the same branch cancels the run still going for the old one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -40,7 +48,10 @@ jobs:
   # Docker images with the C cross-compilers that ring and mimalloc need). The ARM
   # library tests run under QEMU, so a target-specific break (32-bit atomics, alignment)
   # shows before a release.
+  # Slow (about 20 minutes of runner time), so it runs on main and by hand, not on every
+  # pull request push; the release workflow builds the same targets again on a tag.
   cross:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
