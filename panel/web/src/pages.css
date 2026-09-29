@@ -700,3 +700,21 @@ textarea.text { padding: var(--sp-3); min-height: 88px; resize: vertical; line-h
   .search-btn { min-width: 0; }
   .search-btn .label { display: none; }
 }
+
+/* ------------------------------------------------------------------ tunnels page (phase 12) */
+
+.tunnels tr.clickable { cursor: pointer; }
+.linklike { background: none; border: 0; padding: 0; color: inherit; font: inherit; text-align: start; cursor: pointer; }
+.linklike:hover { color: var(--accent); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px var(--sp-4); margin: 0; font-size: var(--fs-sm); }
+.kv dt { color: var(--text-3); }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.checklist li.fail { color: var(--danger); }
+.checklist li.fail .st { border-color: var(--danger); background: var(--danger); color: var(--bg); }
+.checklist li.fail .st svg { width: 14px; height: 14px; }
+.btn-danger { background: var(--danger); color: #fff; border: 0; }
+.btn-danger:hover { filter: brightness(1.1); }
+.dialog footer .grow { flex: 1; }
+.pick .radio { flex: none; }
+.wz-step .grid-2 { align-items: start; }
+@media (max-width: 767px) { .wz-step .grid-2 { grid-template-columns: 1fr !important; } }

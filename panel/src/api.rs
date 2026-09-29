@@ -45,6 +45,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/tunnels/delete", post(tunnel_delete))
         .route("/api/op", get(op_status))
         .route("/api/ports", get(server_ports))
+        .route("/api/tunnel", get(tunnel_spec))
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/revoke", post(revoke))
         .route("/api/password", post(password))
@@ -657,5 +658,30 @@ async fn server_ports(
     {
         Ok(ports) => reply(StatusCode::OK, json!({ "ports": ports })),
         Err(_) => error(StatusCode::NOT_FOUND, "server_offline"),
+    }
+}
+
+#[derive(Deserialize)]
+struct SpecQuery {
+    server: String,
+    name: String,
+}
+
+/// One side of a tunnel as its server keeps it (no token), for the wizard to edit.
+async fn tunnel_spec(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<SpecQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match state
+        .hub
+        .ask_as::<crate::wire::Spec>(&q.server, &crate::wire::Request::TunnelGet { name: q.name })
+        .await
+    {
+        Ok(spec) => reply(StatusCode::OK, json!(spec)),
+        Err(_) => error(StatusCode::NOT_FOUND, "no_such_tunnel"),
     }
 }

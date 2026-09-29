@@ -112,6 +112,7 @@ impl Hub {
             id: None,
             key: None,
             kariz_dir: kariz_dir.clone(),
+            services: Default::default(),
         };
         Arc::new(Self {
             db,

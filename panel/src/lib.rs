@@ -39,6 +39,7 @@ pub fn init(config_path: &Path, data_dir: &Path, port: Option<u16>) -> Result<In
             data_dir: data_dir.to_path_buf(),
             agent_listen: Some(format!("0.0.0.0:{}", random_port()?)),
             kariz_dir: std::path::PathBuf::from("/etc/kariz"),
+            services: Default::default(),
         };
         config.validate()?;
         if let Some(dir) = config_path.parent() {
