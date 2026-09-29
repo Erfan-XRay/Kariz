@@ -99,6 +99,7 @@ pub struct Proc {
     pub net_dev: Option<String>,
     pub uptime: Option<String>,
     pub loadavg: Option<String>,
+    pub route: Option<String>,
 }
 
 impl Proc {
@@ -110,6 +111,7 @@ impl Proc {
             net_dev: read("/proc/net/dev"),
             uptime: read("/proc/uptime"),
             loadavg: read("/proc/loadavg"),
+            route: read("/proc/net/route"),
         }
     }
 }
@@ -148,8 +150,43 @@ impl Sampler {
         }
         health.uptime_secs = p.uptime.as_deref().and_then(first_number).map(|s| s as u64);
         health.load1 = p.loadavg.as_deref().and_then(first_number);
+        health.routes = p.route.as_deref().map(parse_routes).unwrap_or_default();
         health
     }
+}
+
+/// The IPv4 networks in `/proc/net/route` that are up, without the default route and the
+/// `kz-` interfaces of Kariz's own private links, as `a.b.c.d/p`, sorted and without repeats.
+pub fn parse_routes(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = text
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < 8 || f[0].starts_with("kz-") {
+                return None;
+            }
+            let flags = u32::from_str_radix(f[3], 16).ok()?;
+            // Bit 0 is RTF_UP; the addresses are in memory (network) order, read as
+            // a little-endian number.
+            if flags & 1 == 0 {
+                return None;
+            }
+            let dest = u32::from_str_radix(f[1], 16).ok()?.swap_bytes();
+            let mask = u32::from_str_radix(f[7], 16).ok()?.swap_bytes();
+            if mask == 0 || mask.count_zeros() != mask.trailing_zeros() {
+                return None;
+            }
+            Some(format!(
+                "{}/{}",
+                std::net::Ipv4Addr::from(dest & mask),
+                mask.count_ones()
+            ))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 // ---- tunnels ----
@@ -246,6 +283,23 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn routes_are_read_without_the_default_and_our_own_links() {
+        let text =
+            "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n\
+eth0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n\
+eth0\t0000A8C0\t00000000\t0001\t0\t0\t100\t0000FFFF\t0\t0\t0\n\
+docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n\
+kz-ab12c\t0000004D\t00000000\t0001\t0\t0\t0\t0000F0FF\t0\t0\t0\n\
+eth1\t0000000A\t00000000\t0000\t0\t0\t0\t000000FF\t0\t0\t0\n";
+        // eth1's route is not up; the kz- link is ours; the default route is skipped.
+        assert_eq!(
+            parse_routes(text),
+            vec!["172.17.0.0/16".to_string(), "192.168.0.0/16".to_string()]
+        );
+        assert!(parse_routes("").is_empty());
+    }
+
     const STAT_1: &str = "cpu  100 0 100 700 100 0 0 0 0 0\ncpu0 50 0 50 350 50 0 0 0 0 0\n";
     const STAT_2: &str = "cpu  200 0 200 750 150 0 0 0 0 0\n";
     const NET_1: &str = "Inter-|   Receive |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 5000 10 0 0 0 0 0 0 5000 10 0 0 0 0 0 0\n  eth0: 1000 10 0 0 0 0 0 0 2000 10 0 0 0 0 0 0\n  eth1:  500  5 0 0 0 0 0 0  300  5 0 0 0 0 0 0\n";
@@ -277,6 +331,7 @@ mod tests {
                 net_dev: Some(NET_1.into()),
                 uptime: Some("3600.5 100.0".into()),
                 loadavg: Some("0.52 0.40 0.30 1/200 999".into()),
+                route: None,
             },
             t0,
         );
