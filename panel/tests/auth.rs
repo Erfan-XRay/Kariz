@@ -470,3 +470,25 @@ async fn without_a_password_a_signed_in_session_can_set_the_first_one() {
     assert_eq!(status, StatusCode::OK);
     assert!(auth::check_password(&panel.db, "my brand new password").unwrap());
 }
+
+#[tokio::test]
+async fn the_server_list_needs_a_session_and_names_this_server() {
+    let panel = Panel::new();
+    let mut b = panel.browser("10.4.4.4");
+    let link = auth::create_link(&panel.db, auth::now()).unwrap();
+    b.call(
+        &panel,
+        "POST",
+        "/api/link",
+        Some(json!({"token": link})),
+        false,
+    )
+    .await;
+    let (status, doc, _) = b.call(&panel, "GET", "/api/servers", None, false).await;
+    assert_eq!(status, StatusCode::OK);
+    let servers = doc["servers"].as_array().unwrap();
+    assert_eq!(servers.len(), 1);
+    assert_eq!(servers[0]["local"], true);
+    assert!(!servers[0]["name"].as_str().unwrap().is_empty());
+    assert_eq!(servers[0]["version"], env!("CARGO_PKG_VERSION"));
+}

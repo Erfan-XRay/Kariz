@@ -161,6 +161,34 @@ Checked by hand with the binary and `curl -k`: `init`, `login-link`, a link sign
 once, CSRF refused without the header, `reset-password` ending the old session, and five
 wrong tries turning the right password into a 429.
 
+*Status after 11.3:* the web app is the prototype's design as React 19 and TypeScript
+(`panel/web/src`): the tokens, the three fonts and both themes as they were in phase 9;
+Persian (RTL) and English, Persian or Latin digits, low power (also on with the browser's
+reduced-motion setting); the preferences are kept in `localStorage`, and the app works
+without it. What runs on the real API:
+
+- **Boot and sign-in:** the logo draws itself while `GET /api/session` is asked; the login
+  scene (stars, dunes, the wells, the channel) ripples red on a wrong try and descends
+  into the dashboard on a right one. Password or a pasted link or code; `#t=...` in the
+  address signs in by itself and is removed from the address bar at once. The messages
+  say how many tries are left, or for how long the address is locked out.
+- **The shell:** the side rail (a bottom bar on phones), the sky strip, `Ctrl+K` with the
+  pages, the theme, the language, low power, a new login link and sign-out. A session that
+  ends elsewhere (revoked, a new password) takes the panel back to the sign-in page.
+- **Map, Servers:** the wells of the servers the panel knows (`GET /api/servers`: for now
+  the one it runs on, named by its hostname), the four numbers with rolling digits, the
+  tunnels list (empty until 11.4). Tunnels and Logs show that they come in phase 12.
+- **Settings:** the admin password (set, change, with a strength meter), one-time login
+  links with a countdown and a copy button, the sessions (device, address, last seen,
+  revoke) and the appearance settings.
+
+Built size: 88 KB of JavaScript and 10 KB of CSS gzipped, and 180 KB of fonts (already
+compressed): about 280 KB against the 400 KB budget. Checked in a real browser (Edge over
+the DevTools protocol, real time, since a headless browser's virtual time never finishes
+the animations): the login page, the lockout message, sign-in by link and its descent, the
+map, servers and settings pages, English with the Dawn theme, the palette, a phone width,
+and the whole password path (set a password, sign out, sign in with it).
+
 ## 7. Work breakdown
 
 | Step | Content | Done when |
@@ -168,6 +196,6 @@ wrong tries turning the right password into a 429.
 | **11.0** Plan (done) | This document. | |
 | **11.1** Skeleton (done) | Workspace, `panel/` crate, config, SQLite schema, axum on TLS under the secret path, the embedded app (or placeholder), CLI; `panel/web` scaffold; CI builds and tests both; the release carries `kariz-panel`. | `kariz-panel serve` answers on HTTPS; CI green. |
 | **11.2** Sign-in (done) | Section 3, API and tests. | Tests for every rule in the table. |
-| **11.3** Web app | Section 5. | Build under the budget; the prototype's screens in the real app, both languages and themes. |
+| **11.3** Web app (done) | Section 5. | Build under the budget; the prototype's screens in the real app, both languages and themes. |
 | **11.4** Agents | Section 4: `kariz::link`, join codes, the agent, health and tunnels, both directions, live Servers and map. | An in-process test joins an agent and reads its health; a second in CI over real sockets. |
 | **11.5** Installer, release | Section 6, `docs/panel.md`, CHANGELOG, `0.8.0-beta`. | Installed on a clean Linux VM in CI (manager job), release with the panel. |
