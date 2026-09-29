@@ -50,6 +50,11 @@ pub fn routes() -> Router<AppState> {
         .route("/api/events", get(events))
         .route("/api/logs", get(tunnel_logs))
         .route("/api/tunnels/speedtest", post(tunnel_speedtest))
+        .route("/api/networks", get(networks_list).post(network_create))
+        .route("/api/networks/delete", post(network_delete))
+        .route("/api/networks/links", post(links_create))
+        .route("/api/networks/links/delete", post(link_delete))
+        .route("/api/servers/address", post(server_address))
         .route("/api/backup", post(backup))
         .route(
             "/api/restore",
@@ -884,5 +889,210 @@ async fn restore(
             "not_empty" => error(StatusCode::CONFLICT, "not_empty"),
             _ => internal(e),
         },
+    }
+}
+
+// ---- private networks (docs/PHASE13.md) ----
+
+/// Turns a refusal from the network code into a response: the code is the text before a
+/// colon (`overlaps_route:frankfurt:10.77.3.0/24` keeps its detail for the browser).
+fn net_error(e: anyhow::Error) -> Response {
+    let text = format!("{e:#}");
+    let code = text.split(':').next().unwrap_or_default();
+    match code {
+        "bad_name" | "bad_cidr" | "not_private" | "too_small" | "overlaps_route"
+        | "overlaps_network" | "bad_input" | "same_server" => error(StatusCode::BAD_REQUEST, &text),
+        "name_taken" | "in_use" | "pool_full" | "busy" => error(StatusCode::CONFLICT, &text),
+        "no_such_network" | "no_such_link" | "no_such_server" => {
+            error(StatusCode::NOT_FOUND, &text)
+        }
+        _ => internal(e),
+    }
+}
+
+async fn networks_list(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match (
+        state.hub.networks.networks(),
+        state.hub.networks.links(None),
+    ) {
+        (Ok(networks), Ok(links)) => reply(
+            StatusCode::OK,
+            json!({ "networks": networks, "links": links }),
+        ),
+        (Err(e), _) | (_, Err(e)) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct NetworkBody {
+    name: String,
+    cidr: String,
+}
+
+async fn network_create(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<NetworkBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let routes = state.hub.routes();
+    let named: Vec<(String, Vec<String>)> = state
+        .hub
+        .snapshot()
+        .map(|list| {
+            list.into_iter()
+                .filter_map(|s| Some((s.name, routes.get(&s.id)?.clone())))
+                .collect()
+        })
+        .unwrap_or_default();
+    match state
+        .hub
+        .networks
+        .create_network(&body.name, &body.cidr, &named)
+    {
+        Ok(n) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("made network {} ({})", n.name, n.cidr),
+            );
+            reply(StatusCode::OK, json!(n))
+        }
+        Err(e) => net_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct IdBody {
+    id: String,
+}
+
+async fn network_delete(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<IdBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match state.hub.networks.delete_network(&body.id) {
+        Ok(true) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                "deleted a network",
+            );
+            reply(StatusCode::OK, json!({}))
+        }
+        Ok(false) => error(StatusCode::NOT_FOUND, "no_such_network"),
+        Err(e) => net_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct LinksBody {
+    network: String,
+    servers: Vec<String>,
+    /// Hub and spoke: this server is linked to each of the others (a full mesh without it).
+    hub: Option<String>,
+}
+
+async fn links_create(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<LinksBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match crate::netops::create_links(&state.hub, &body.network, body.servers, body.hub) {
+        Ok(op) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                "made network links",
+            );
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => net_error(e),
+    }
+}
+
+async fn link_delete(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<IdBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match crate::netops::delete_link(&state.hub, &body.id).await {
+        Ok(()) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                "deleted a network link",
+            );
+            reply(StatusCode::OK, json!({}))
+        }
+        Err(e) => net_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct AddressBody {
+    id: String,
+    addr: String,
+}
+
+/// The address other servers reach a server at (private networks need both ends' addresses).
+async fn server_address(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<AddressBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match state.hub.set_addr(&body.id, &body.addr) {
+        Ok(()) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("set the address of server {}", body.id),
+            );
+            // Links that were waiting for this address can be made now.
+            let hub = state.hub.clone();
+            tokio::spawn(async move {
+                if let Ok(links) = hub.networks.links(None) {
+                    for l in links.iter().filter(|l| l.a == body.id || l.b == body.id) {
+                        let _ = hub.net_sync(&l.a).await;
+                        let _ = hub.net_sync(&l.b).await;
+                    }
+                }
+            });
+            reply(StatusCode::OK, json!({}))
+        }
+        Err(e) => net_error(e),
     }
 }

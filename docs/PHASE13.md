@@ -93,6 +93,31 @@ net_down { name: "kz-a1b2" }
   demand). Containers and some VPS types (OpenVZ) cannot make GRE: the agent reports
   `gre: unavailable` and the checkbox is disabled for that server, with the reason.
 
+*Status after 13.1:* `panel/src/networks.rs` and migration 5 (`networks`, `net_links`, with
+`UNIQUE` on every subnet, address and interface name, and `CHECK (a < b)`). Rules 1 to 4 are
+implemented and tested, including eight threads making 80 links at once (160 different
+addresses) and a raw `INSERT` that repeats an address, which the schema refuses. A pool may
+not overlap the routes the connected servers report; instead of a list of addresses, `health`
+now carries `routes`: the IPv4 networks in `/proc/net/route` that are up, without the default
+route and Kariz's own `kz-` interfaces (a server's addresses show there as their connected
+networks, which is what can collide). A link's /30 skips any block that overlaps a route of
+either of its two servers, so a pair never gets an address one of them already uses.
+A link is `kz-` and five hex digits (the same name on both servers), its two hosts are the
+/30's `.1` and `.2`, and its GRE key is the smallest one that pair has not used. The API,
+the wizard and the agent come in the next steps.
+
+*Status after 13.2 to 13.4:* the agent side is `panel/src/net.rs` (data requests, validation,
+fixed `ip` invocations, `net.toml`, the path test, `net_sync`), the panel side `netops.rs`
+(links as operations, with undo) and `api.rs`; the Networks page is `Networks.tsx`, and the
+wizard's option is in `Wizard.tsx`. Changes from the plan: (1) a tunnel **reuses** the link
+between its two servers (one is made if there is none) instead of taking a link of its own; a
+second link between the same pair is made by adding links again, and gets its own key. (2)
+Each server's **public address** is entered on the Networks page (the panel cannot know the
+address a server has for the others); GRE needs both ends. (3) The firewall hint is shown
+when the path test fails; the agent does not try to guess a filter beforehand. (4) A server's
+**routes** rather than its addresses are reported, since a server's addresses appear as its
+connected networks. Released as 0.10.0; the user's guide is [networks.md](networks.md).
+
 ## 5. Also in this phase
 
 - A **Networks** page: each network, its pool and how full it is, its links (the two
@@ -105,7 +130,7 @@ net_down { name: "kz-a1b2" }
 | Step | Content | Done when |
 |---|---|---|
 | **13.0** Plan | This document. | |
-| **13.1** Addresses | Networks and links in SQLite, the allocator and its rules (section 3), the report of each server's addresses and routes; unit tests for every rule, including two requests at the same moment. | No test can make a duplicate or overlapping address. |
-| **13.2** Agent | `net_up` / `net_down`, validation, `net.toml`, the path test, the firewall hint. | Tests on the parsers and the validation; a CI job that builds two network namespaces with GRE between them and pings across. |
-| **13.3** Wizard and pages | The checkbox and its step, the Networks page, the map line, the review. | Both languages and themes; a tunnel made over GRE between two namespaces in CI. |
-| **13.4** Release | Docs (`docs/networks.md`), CHANGELOG, `0.10.0`. | CI green; release. |
+| **13.1** Addresses (done) | Networks and links in SQLite, the allocator and its rules (section 3), the report of each server's addresses and routes; unit tests for every rule, including two requests at the same moment. | No test can make a duplicate or overlapping address. |
+| **13.2** Agent (done) | `net_up` / `net_down`, validation, `net.toml`, the path test, the firewall hint. | Tests on the parsers and the validation; a CI job that builds two network namespaces with GRE between them and pings across. |
+| **13.3** Wizard and pages (done) | The checkbox and its step, the Networks page, the map line, the review. | Both languages and themes; a tunnel made over GRE between two namespaces in CI. |
+| **13.4** Release (done) | Docs (`docs/networks.md`), CHANGELOG, `0.10.0`. | CI green; release. |

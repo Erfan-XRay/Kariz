@@ -5,6 +5,7 @@ import type { Tunnel } from "./derive";
 import { useApp } from "./store";
 import { Icon, Seg } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
+import { useNetworks } from "./Networks";
 
 const TRANSPORTS = ["tcp", "tcpmux", "ws", "wss", "quic", "kcp"] as const;
 const PROFILES = ["balanced", "ultraspeed", "gaming"] as const;
@@ -54,6 +55,11 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
   const [profile, setProfile] = useState<string>("balanced");
   const [listenPort, setListenPort] = useState("3080");
   const [dialHost, setDialHost] = useState("");
+  // The host the accepting side listens on: every address, or (for a tunnel that was made
+  // over a private network) its private one.
+  const [listenHost, setListenHost] = useState("0.0.0.0");
+  const [netId, setNetId] = useState("");
+  const { networks, links } = useNetworks();
   const [wsPath, setWsPath] = useState("/");
   const [ports, setPorts] = useState("");
   const [protocol, setProtocol] = useState("tcp");
@@ -84,6 +90,7 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
         setTransport(a.transport);
         setProfile(a.profile ?? "balanced");
         setListenPort(portOf(acceptor.listen));
+        setListenHost(hostOf(acceptor.listen) || "0.0.0.0");
         setDialHost(hostOf(dialer.remote));
         setWsPath(a.ws_path ?? "/");
         setPool(a.pool);
@@ -103,6 +110,10 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
   const acceptor = mode === "reverse" ? entry : exit;
   const dialer = mode === "reverse" ? exit : entry;
   const parsed = useMemo(() => parsePorts(ports, protocol, target.trim() || "127.0.0.1"), [ports, protocol, target]);
+  const greLink = netId
+    ? links.find((l) => l.network === netId && [l.a, l.b].sort().join() === [entry, exit].sort().join())
+    : undefined;
+  const greAddr = greLink ? (greLink.a === exit ? greLink.addr_a : greLink.addr_b) : "";
   const udp = transport === "quic" || transport === "kcp";
   const isWs = transport === "ws" || transport === "wss";
 
@@ -119,8 +130,9 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
     mode,
     transport,
     profile,
-    listen: `0.0.0.0:${listenPort}`,
+    listen: `${listenHost}:${listenPort}`,
     dial: `${dialHost.includes(":") && !dialHost.startsWith("[") ? `[${dialHost}]` : dialHost}:${listenPort}`,
+    network: mode === "direct" && netId ? netId : undefined,
     pool,
     ws_path: isWs ? wsPath : undefined,
     forwards: parsed.forwards,
@@ -133,7 +145,7 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
     }
     if (s === 2) {
       if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
-      if (!dialHost.trim()) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
+      if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
       if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
     }
     if (s === 3 && parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
@@ -273,12 +285,35 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
               <>
                 <h3 className="wz-q">{t("wz.q3")}</h3>
                 <p className="wz-lead">{t("wz.lead3", { acceptor: serverName(acceptor), dialer: serverName(dialer) })}</p>
+                {mode === "direct" && !editing && (
+                  <div className="field" style={{ marginBottom: "var(--sp-5)" }}>
+                    <label className="check">
+                      <input type="checkbox" checked={!!netId} disabled={networks.length === 0} onChange={(e) => setNetId(e.target.checked ? networks[0]?.id ?? "" : "")} /> {t("wz.gre")}
+                    </label>
+                    {networks.length === 0 && <span className="help">{t("wz.greNone")}</span>}
+                    {netId && (
+                      <>
+                        <select className="select" aria-label={t("wz.greNet")} value={netId} onChange={(e) => setNetId(e.target.value)} style={{ maxWidth: 360 }}>
+                          {networks.map((n) => (
+                            <option key={n.id} value={n.id}>
+                              {n.name} ({n.cidr})
+                            </option>
+                          ))}
+                        </select>
+                        <span className="help">{t("wz.greText")}</span>
+                        <span className="help mono" dir="ltr">
+                          {greLink ? t("wz.greAddrs", { addr: `${greAddr}:${listenPort}`, server: serverName(exit) }) : t("wz.greNew")}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                )}
                 <div className="grid-2" style={{ display: "grid", gap: "var(--sp-5)", gridTemplateColumns: "1fr 1fr" }}>
                   <div className="field">
                     <label htmlFor="wz-port">{t("wz.port", { server: serverName(acceptor) })}</label>
                     <input className="text mono" id="wz-port" dir="ltr" inputMode="numeric" value={listenPort} onChange={(e) => setListenPort(e.target.value.trim())} />
                   </div>
-                  <div className="field">
+                  <div className="field" hidden={!!netId}>
                     <label htmlFor="wz-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>
                     <input className="text mono" id="wz-dial" dir="ltr" value={dialHost} placeholder="203.0.113.5" onChange={(e) => setDialHost(e.target.value.trim())} />
                     <span className="help">{t("wz.dialHelp")}</span>
@@ -347,7 +382,7 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
                             </dd>
                             <dt>{accepts ? "⇢" : "⇠"}</dt>
                             <dd className="mono" dir="ltr">
-                              {accepts ? `0.0.0.0:${listenPort}` : `${dialHost}:${listenPort}`}
+                              {netId ? (greAddr ? `${greAddr}:${listenPort}` : "GRE") : accepts ? `${listenHost}:${listenPort}` : `${dialHost}:${listenPort}`}
                             </dd>
                             {side === "entry" && (
                               <>
@@ -373,7 +408,7 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
                 {op?.state === "done" && <p className="ok small">{t("tun.done")}</p>}
                 {op?.state === "failed" && (
                   <>
-                    <p className="err small">{t("tun.failed", { why: opError(t, op.error) })}</p>
+                    <p className="err small">{t("tun.failed", { why: opError(t, op.error, new Map(servers.map((x) => [x.id, x.name]))) })}</p>
                     <p className="muted small">{op.undone ? t("tun.undone") : t("tun.notUndone")}</p>
                   </>
                 )}

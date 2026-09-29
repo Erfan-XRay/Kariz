@@ -1,6 +1,6 @@
 # Kariz documentation
 
-For Kariz **v0.9.0**. Start with [Getting started](getting-started.md); come back to the
+For Kariz **v0.10.0**. Start with [Getting started](getting-started.md); come back to the
 reference pages when you need a specific setting.
 
 | Page | What it covers |
@@ -11,6 +11,7 @@ reference pages when you need a specific setting.
 | [Speed test](speedtest.md) | `kariz speedtest`: speed, latency and UDP through the live tunnel, in either mode |
 | [The web panel](panel.md) | Install the panel, sign in, connect servers with agents, what it shows |
 | [Status](status.md) | `kariz status`: connection, round trip, last error and traffic per port, on either side; the JSON document |
+| [Private networks (GRE)](networks.md) | private addresses between your servers, made by the panel, never repeated |
 | [Transports](transports.md) | `tcp`, `tcpmux`, `ws`, `wss`, `quic`, `kcp`: how each works and when to pick it |
 | [Profiles](profiles.md) | `balanced`, `ultraspeed`, `gaming`, and overriding their values |
 | [UDP forwarding and games](udp-and-games.md) | UDP rules, the datagram path, packet duplication, DSCP |

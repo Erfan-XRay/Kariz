@@ -40,6 +40,11 @@ pub struct PairRequest {
     /// Edit only: make a new token for both sides.
     #[serde(default)]
     pub rotate: bool,
+    /// Direct mode only: run the tunnel over a private GRE network (its id). The panel
+    /// finds or makes the link between the two servers and the tunnel listens on and
+    /// dials the private address (docs/PHASE13.md, section 2).
+    #[serde(default)]
+    pub network: Option<String>,
 }
 
 impl PairRequest {
@@ -129,7 +134,7 @@ impl Ops {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn begin(&self, kind: &'static str, name: &str) -> Result<String> {
+    pub(crate) fn begin(&self, kind: &'static str, name: &str) -> Result<String> {
         let id = random_hex(8)?;
         let mut ops = self.lock();
         // One operation per tunnel at a time.
@@ -158,7 +163,7 @@ impl Ops {
     }
 
     /// A step starts.
-    fn run(&self, id: &str, step: &str) {
+    pub(crate) fn run(&self, id: &str, step: &str) {
         self.with(id, |op| {
             op.steps.push(Step {
                 id: step.to_owned(),
@@ -169,7 +174,7 @@ impl Ops {
     }
 
     /// The last step ends.
-    fn end(&self, id: &str, ok: bool, detail: Option<String>) {
+    pub(crate) fn end(&self, id: &str, ok: bool, detail: Option<String>) {
         self.with(id, |op| {
             if let Some(step) = op.steps.last_mut() {
                 step.state = if ok { "ok" } else { "fail" };
@@ -178,7 +183,7 @@ impl Ops {
         });
     }
 
-    fn finish(&self, id: &str, error: Option<String>, undone: Option<bool>) {
+    pub(crate) fn finish(&self, id: &str, error: Option<String>, undone: Option<bool>) {
         self.with(id, |op| {
             op.state = if error.is_some() { "failed" } else { "done" };
             op.error = error;
@@ -335,16 +340,28 @@ pub fn create(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
     let hub = hub.clone();
     let op = id.clone();
     tokio::spawn(async move {
-        let outcome = run_create(&hub, &op, &req).await;
+        // A link made for this tunnel goes again if the tunnel cannot be made.
+        let mut made_link = None;
+        let outcome = run_create(&hub, &op, &req, &mut made_link).await;
         match outcome {
             Ok(()) => hub.ops.finish(&op, None, None),
-            Err((error, undone)) => hub.ops.finish(&op, Some(error), Some(undone)),
+            Err((error, undone)) => {
+                if let Some(link) = made_link {
+                    crate::netops::tear_down(&hub, &link).await;
+                }
+                hub.ops.finish(&op, Some(error), Some(undone));
+            }
         }
     });
     Ok(id)
 }
 
-async fn run_create(hub: &Hub, op: &str, req: &PairRequest) -> Result<(), (String, bool)> {
+async fn run_create(
+    hub: &Hub,
+    op: &str,
+    req: &PairRequest,
+    made_link: &mut Option<crate::networks::Link>,
+) -> Result<(), (String, bool)> {
     let ops = &hub.ops;
     let step_fail = |ops: &Ops, e: String| {
         ops.end(op, false, Some(e.clone()));
@@ -358,6 +375,34 @@ async fn run_create(hub: &Hub, op: &str, req: &PairRequest) -> Result<(), (Strin
         Ok(_) => return Err((step_fail(ops, "name_taken".into()), true)),
         Err(e) => return Err((step_fail(ops, format!("{e:#}")), true)),
     }
+
+    // Over a private network: the link between the two servers (made now if it is not
+    // there), and the tunnel listens on and dials its addresses.
+    let resolved;
+    let req = if let Some(network) = &req.network {
+        if req.mode != "direct" {
+            return Err(("gre_needs_direct".into(), true));
+        }
+        let (link, fresh) =
+            match crate::netops::ensure_link(hub, op, network, &req.entry, &req.exit).await {
+                Ok(v) => v,
+                Err(e) => return Err((e, true)),
+            };
+        if fresh {
+            *made_link = Some(link.clone());
+        }
+        // The exit listens in direct mode: on its end of the link.
+        let endpoint = crate::netops::tunnel_endpoint(&link, &req.exit, &req.listen);
+        resolved = PairRequest {
+            listen: endpoint.clone(),
+            dial: endpoint,
+            network: None,
+            ..req.clone()
+        };
+        &resolved
+    } else {
+        req
+    };
 
     // Both servers agree it is valid, and its ports are free.
     for (step, server, spec) in [

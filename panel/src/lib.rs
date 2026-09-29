@@ -13,6 +13,9 @@ pub mod http;
 pub mod hub;
 pub mod join;
 pub mod manage;
+pub mod net;
+pub mod netops;
+pub mod networks;
 pub mod pair;
 pub mod wire;
 

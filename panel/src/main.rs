@@ -66,6 +66,33 @@ enum Command {
         #[arg(long)]
         stdin: bool,
     },
+    /// Private network links on this server, by hand (what the agent does when the panel
+    /// asks; for debugging and for the tests). Needs root and Linux.
+    Net {
+        #[command(subcommand)]
+        command: NetCommand,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum NetCommand {
+    /// Make the link described in a TOML file (fields of `NetSpec`).
+    Up {
+        file: PathBuf,
+        /// Keep the link in this file so it can be made again (default: not kept).
+        #[arg(long)]
+        state: Option<PathBuf>,
+    },
+    /// Remove a link's interface.
+    Down { name: String },
+    /// Ping the far end of a link (the link must be kept in `--state`).
+    Ping {
+        name: String,
+        #[arg(long)]
+        state: PathBuf,
+    },
+    /// Whether GRE can be made here.
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -84,6 +111,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Serve { config } => serve(Config::load(&config)?),
+        Command::Net { command } => net_command(command),
         Command::Agent {
             config,
             join,
@@ -132,6 +160,39 @@ fn main() -> Result<()> {
     }
 }
 
+fn net_command(command: NetCommand) -> Result<()> {
+    use kariz_panel::net::Net;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        match command {
+            NetCommand::Up { file, state } => {
+                let spec: kariz_panel::wire::NetSpec =
+                    toml::from_str(&std::fs::read_to_string(&file)?)?;
+                let name = spec.name.clone();
+                Net::new(state).up(spec).await?;
+                println!("{name} is up");
+            }
+            NetCommand::Down { name } => {
+                Net::new(None).down(&name).await?;
+                println!("{name} is down");
+            }
+            NetCommand::Ping { name, state } => {
+                let reply = Net::new(Some(state)).ping(&name).await;
+                println!("{}", serde_json::to_string(&reply)?);
+                if !reply.ok {
+                    std::process::exit(1);
+                }
+            }
+            NetCommand::Status => {
+                println!("{}", serde_json::to_string(&Net::new(None).status().await)?);
+            }
+        }
+        Ok(())
+    })
+}
+
 fn serve(config: Config) -> Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
@@ -144,10 +205,11 @@ fn serve(config: Config) -> Result<()> {
         let listener = tokio::net::TcpListener::bind(&config.listen)
             .await
             .with_context(|| format!("failed to listen on {}", config.listen))?;
-        let hub = kariz_panel::hub::Hub::with_services(
+        let hub = kariz_panel::hub::Hub::with_state_dir(
             db.clone(),
             config.kariz_dir.clone(),
             config.services.services(&config.kariz_dir),
+            config.data_dir.clone(),
         );
         tokio::spawn(hub.clone().run_local());
         let mut state = AppState::new(db);
