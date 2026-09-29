@@ -124,8 +124,9 @@ Overrides of the profile's values.
 
 ## `[control]`
 
-The entry side's local socket, through which `kariz speedtest` uses the running daemon
-(Linux only; see [Speed test](speedtest.md)).
+A local socket on each side, through which `kariz status` reads the running daemon's
+counters (both sides, see [Status](status.md)) and `kariz speedtest` uses its sessions
+(the entry side, see [Speed test](speedtest.md)). Linux only.
 
 | Key | Default | Notes |
 |---|---|---|
