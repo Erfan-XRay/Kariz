@@ -1,0 +1,15 @@
+[Unit]
+Description=Kariz agent (connects this server to a Kariz panel)
+Documentation=https://github.com/Erfan-XRay/Kariz
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/kariz-panel agent -c /etc/kariz-panel/agent.toml
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

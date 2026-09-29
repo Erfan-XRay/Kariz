@@ -198,3 +198,18 @@ journalctl -u kariz@main -p warning         # only warnings and errors
   the [configuration reference](configuration.md) for every setting.
 - The service unit is `systemd/kariz@.service`. The older `systemd/kariz.service` (one
   tunnel, `/etc/kariz/config.toml`) still works for a hand-made setup.
+
+## The web panel and agents
+
+The manager also installs the [web panel](panel.md) and connects servers to it:
+
+```bash
+kariz-manager panel install         # the panel on this server: address, certificate, a login link
+kariz-manager panel link            # another one-time login link
+kariz-manager panel password        # a new admin password
+kariz-manager --agent kz1_...       # connect this server to a panel (the code is from the panel)
+kariz-manager agent status          # also: logs, remove
+```
+
+The menu has them under *w*. `install` and `update` handle the panel program that comes with
+the release archive (from 0.8), and `update` restarts the panel and the agent as well.

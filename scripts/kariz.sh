@@ -10,6 +10,8 @@
 #   kariz-manager add NAME --role entry|exit --mode reverse|direct --transport T --ports 443,...
 #   kariz-manager list | status NAME | start|stop|restart NAME | logs NAME | speedtest NAME
 #   kariz-manager edit NAME | remove NAME [--yes] | update | uninstall [--yes]
+#   kariz-manager panel install | link | password | status | logs | uninstall
+#   kariz-manager --agent CODE        connect this server to a panel (its join code)
 #
 # The repository is private for now: set GITHUB_TOKEN to a token that can read it.
 set -euo pipefail
@@ -19,6 +21,14 @@ BIN=/usr/local/bin/kariz
 MANAGER=/usr/local/bin/kariz-manager
 CONF_DIR=/etc/kariz
 UNIT=/etc/systemd/system/kariz@.service
+# The web panel (docs/panel.md) and its agent.
+PANEL_BIN=/usr/local/bin/kariz-panel
+PANEL_DIR=/etc/kariz-panel
+PANEL_DATA=/var/lib/kariz-panel
+PANEL_CONF=$PANEL_DIR/panel.toml
+AGENT_CONF=$PANEL_DIR/agent.toml
+PANEL_UNIT=/etc/systemd/system/kariz-panel.service
+AGENT_UNIT=/etc/systemd/system/kariz-agent.service
 RAW_URL="https://raw.githubusercontent.com/$REPO/main/scripts/kariz.sh"
 
 # ---- Looks ----
@@ -223,6 +233,44 @@ EOF
     systemctl daemon-reload
 }
 
+install_panel_units() {
+    cat >"$PANEL_UNIT" <<'EOF'
+[Unit]
+Description=Kariz web panel
+Documentation=https://github.com/Erfan-XRay/Kariz
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/kariz-panel serve -c /etc/kariz-panel/panel.toml
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    cat >"$AGENT_UNIT" <<'EOF'
+[Unit]
+Description=Kariz agent (connects this server to a Kariz panel)
+Documentation=https://github.com/Erfan-XRay/Kariz
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/kariz-panel agent -c /etc/kariz-panel/agent.toml
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+}
+
 # Puts this script in place as kariz-manager: from its own file when it is one, else
 # from the repository (when it was run through `bash <(curl ...)`).
 install_manager() {
@@ -244,14 +292,19 @@ install_manager() {
 cmd_install() {
     need_root
     need_systemd
-    local version="" binary=""
+    local version="" binary="" panel_binary=""
     while [[ $# -gt 0 ]]; do
         case $1 in
             --version) version=$2 && shift 2 ;;
             --binary) binary=$2 && shift 2 ;;
+            --panel-binary) panel_binary=$2 && shift 2 ;;
             *) die "install: unknown option $1" ;;
         esac
     done
+    if [[ -n "$panel_binary" ]]; then
+        [[ -x "$panel_binary" ]] || die "No executable at $panel_binary."
+        install -m 0755 "$panel_binary" "$PANEL_BIN"
+    fi
     if [[ -n "$binary" ]]; then
         [[ -x "$binary" ]] || die "No executable at $binary."
         install -m 0755 "$binary" "$BIN"
@@ -269,11 +322,18 @@ cmd_install() {
             die "Checksum mismatch: the download is damaged."
         tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
         install -m 0755 "$tmp/$name/kariz" "$BIN"
+        # Releases from 0.8 carry the web panel and its agent in the same archive.
+        if [[ -f "$tmp/$name/kariz-panel" ]]; then
+            install -m 0755 "$tmp/$name/kariz-panel" "$PANEL_BIN"
+        fi
         rm -rf "$tmp"
     fi
     mkdir -p "$CONF_DIR"
     chmod 700 "$CONF_DIR"
     install_unit
+    if [[ -x "$PANEL_BIN" ]]; then
+        install_panel_units
+    fi
     install_manager
     ok "Installed: $("$BIN" --version)"
     info "Manage it any time with: ${C_BOLD}kariz-manager${C_RESET}"
@@ -290,6 +350,13 @@ cmd_update() {
         systemctl restart "$unit" && restarted=$((restarted + 1))
     done
     ok "$before -> $("$BIN" --version); $restarted running tunnel(s) restarted"
+    local svc
+    for svc in kariz-panel kariz-agent; do
+        if systemctl is-active --quiet "$svc"; then
+            systemctl restart "$svc"
+            info "Restarted $svc."
+        fi
+    done
 }
 
 cmd_uninstall() {
@@ -1067,6 +1134,196 @@ pick_tunnel() {
     done
 }
 
+# ---- The web panel and its agent ----
+
+# The panel's address, certificate and ports, from its settings.
+panel_setting() { sed -n "s/^$1 = \"\(.*\)\"/\1/p" "$PANEL_CONF" | head -n 1; }
+
+# This server's address as another machine would use it: --host, else its IPv4, else IPv6.
+panel_host() {
+    local host=${1:-}
+    [[ -n "$host" ]] || host=$(own_ip4)
+    [[ -n "$host" ]] || host=$(own_ip6)
+    [[ -n "$host" ]] || host="<this-server>"
+    printf '%s' "$host"
+}
+
+panel_show() {
+    local host=$1 fingerprint=${2:-}
+    local listen path agent
+    listen=$(panel_setting listen)
+    path=$(panel_setting path)
+    agent=$(panel_setting agent_listen)
+    echo
+    printf '  %s address     %s https://%s:%s/%s/\n' "$C_TEAL" "$C_RESET" "$host" "${listen##*:}" "$path"
+    if [[ -n "$fingerprint" ]]; then
+        printf '  %s certificate %s SHA-256 %s\n' "$C_TEAL" "$C_RESET" "$fingerprint"
+        printf '  %s             %s (self-signed: the browser warns; compare this fingerprint)\n' "$C_DIM" "$C_RESET"
+    fi
+    if [[ -n "$agent" ]]; then
+        printf '  %s agents      %s port %s (open it in the firewall for the servers you add)\n' "$C_TEAL" "$C_RESET" "${agent##*:}"
+    fi
+    printf '  %s sign in     %s ' "$C_TEAL" "$C_RESET"
+    "$PANEL_BIN" login-link -c "$PANEL_CONF" --host "$host" 2>/dev/null
+    printf '  %s             %s (works once, for 60 minutes; make another with: kariz-manager panel link)\n' "$C_DIM" "$C_RESET"
+}
+
+panel_install() {
+    need_root
+    need_systemd
+    local port="" host="" version=()
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --port) port=$2 && shift 2 ;;
+            --host) host=$2 && shift 2 ;;
+            --version) version=(--version "$2") && shift 2 ;;
+            *) die "panel install: unknown option $1" ;;
+        esac
+    done
+    if [[ ! -x "$PANEL_BIN" ]]; then
+        cmd_install "${version[@]}"
+    fi
+    [[ -x "$PANEL_BIN" ]] ||
+        die "This Kariz release has no web panel. Install a 0.8 release: kariz-manager install --version v0.8.0-beta"
+    local init_args=(-c "$PANEL_CONF" --data-dir "$PANEL_DATA")
+    if [[ -n "$port" ]]; then
+        init_args+=(--port "$port")
+    fi
+    mkdir -p "$PANEL_DIR" "$PANEL_DATA"
+    chmod 700 "$PANEL_DIR" "$PANEL_DATA"
+    local out fingerprint
+    out=$("$PANEL_BIN" init "${init_args[@]}")
+    fingerprint=$(printf '%s\n' "$out" | sed -n 's/.*SHA-256 \([0-9a-f]*\).*/\1/p')
+    install_panel_units
+    systemctl enable --now kariz-panel
+    sleep 2
+    systemctl is-active --quiet kariz-panel ||
+        die "The panel did not start: journalctl -u kariz-panel -n 50"
+    ok "The web panel is running."
+    panel_show "$(panel_host "$host")" "$fingerprint"
+}
+
+cmd_panel() {
+    local action=${1:-}
+    shift || true
+    case $action in
+        install) panel_install "$@" ;;
+        link)
+            need_root
+            [[ -f "$PANEL_CONF" ]] || die "The panel is not installed: kariz-manager panel install"
+            local host=""
+            if [[ ${1:-} == --host ]]; then
+                host=${2:-}
+            fi
+            "$PANEL_BIN" login-link -c "$PANEL_CONF" --host "$(panel_host "$host")"
+            ;;
+        password)
+            need_root
+            [[ -f "$PANEL_CONF" ]] || die "The panel is not installed: kariz-manager panel install"
+            "$PANEL_BIN" reset-password -c "$PANEL_CONF" "$@"
+            ;;
+        status)
+            need_systemd
+            systemctl status kariz-panel --no-pager || true
+            if [[ -f "$PANEL_CONF" ]]; then
+                panel_show "$(panel_host "")"
+            fi
+            ;;
+        logs) journalctl -u kariz-panel -n 100 -f ;;
+        uninstall) panel_uninstall "$@" ;;
+        *) die "panel: install [--port N] [--host H] | link | password [--stdin] | status | logs | uninstall [--yes]" ;;
+    esac
+}
+
+panel_uninstall() {
+    need_root
+    local yes=${1:-}
+    if [[ "$yes" != --yes ]]; then
+        confirm "Stop the web panel and remove it?" || return 0
+    fi
+    systemctl disable --now kariz-panel 2>/dev/null || true
+    rm -f "$PANEL_UNIT"
+    systemctl daemon-reload
+    if [[ ! -f "$AGENT_CONF" ]]; then
+        rm -f "$PANEL_BIN"
+    fi
+    if [[ "$yes" == --yes ]] || confirm "Also delete the panel's database, certificate and settings (the servers it knows)?"; then
+        rm -rf "$PANEL_DATA" "$PANEL_CONF"
+    fi
+    ok "The web panel is removed."
+}
+
+# Connects this server to a panel: `kariz-manager --agent CODE`.
+agent_join() {
+    need_root
+    need_systemd
+    local code=${1:-} version=()
+    shift || true
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --version) version=(--version "$2") && shift 2 ;;
+            *) die "agent: unknown option $1" ;;
+        esac
+    done
+    [[ "$code" == kz1_* ]] || die "That is not a join code (it starts with kz1_). Copy it whole from the panel: Servers, Add server."
+    if [[ ! -x "$PANEL_BIN" ]]; then
+        cmd_install "${version[@]}"
+    fi
+    [[ -x "$PANEL_BIN" ]] ||
+        die "This Kariz release has no agent. Install a 0.8 release: kariz-manager --agent CODE --version v0.8.0-beta"
+    mkdir -p "$PANEL_DIR"
+    chmod 700 "$PANEL_DIR"
+    "$PANEL_BIN" agent --join "$code" --no-run -c "$AGENT_CONF"
+    install_panel_units
+    systemctl enable --now kariz-agent
+    sleep 2
+    systemctl is-active --quiet kariz-agent ||
+        die "The agent did not start: journalctl -u kariz-agent -n 50"
+    ok "This server is connected: it shows up in the panel under Servers."
+    info "Follow it with: kariz-manager agent logs"
+}
+
+cmd_agent() {
+    local action=${1:-}
+    case $action in
+        kz1_*) agent_join "$@" ;;
+        join) shift && agent_join "$@" ;;
+        status)
+            need_systemd
+            systemctl status kariz-agent --no-pager
+            ;;
+        logs) journalctl -u kariz-agent -n 100 -f ;;
+        remove)
+            need_root
+            systemctl disable --now kariz-agent 2>/dev/null || true
+            rm -f "$AGENT_UNIT" "$AGENT_CONF"
+            systemctl daemon-reload
+            ok "The agent is removed. Remove the server in the panel too (Servers, Remove)."
+            ;;
+        *) die "agent: CODE | join CODE | status | logs | remove" ;;
+    esac
+}
+
+# The menu's web panel entry.
+menu_panel() {
+    local action code
+    choose action "Web panel" install \
+        "install|install the web panel on this server" \
+        "link|make a one-time login link" \
+        "password|set a new admin password" \
+        "status|its address and state" \
+        "agent|connect this server to a panel (with a join code)" \
+        "uninstall|remove the web panel"
+    case $action in
+        install) panel_install ;;
+        agent)
+            ask code "Join code (starts with kz1_)"
+            agent_join "$code"
+            ;;
+        *) cmd_panel "$action" ;;
+    esac
+}
+
 # Ctrl+C at the menu's own question leaves the manager. During an action (which runs in
 # a subshell, and so ends on it) it comes back to the menu at once.
 MENU_BUSY=0 INTERRUPTED=0
@@ -1110,6 +1367,7 @@ menu() {
    ${C_TEAL}7${C_RESET}) Edit a tunnel
    ${C_TEAL}8${C_RESET}) Remove a tunnel
    ${C_TEAL}9${C_RESET}) Uninstall Kariz
+   ${C_TEAL}w${C_RESET}) Web panel and agent
    ${C_TEAL}0${C_RESET}) Exit         ${C_DIM}(Ctrl+C: back to the menu, or out from here)${C_RESET}
 
 EOF
@@ -1135,9 +1393,10 @@ EOF
             7) (pick_tunnel name && cmd_edit "$name") || true ;;
             8) (pick_tunnel name && cmd_remove "$name") || true ;;
             9) (cmd_uninstall) || true ;;
+            w | W) (menu_panel) || true ;;
             0 | q) exit 0 ;;
             "") ;;
-            *) warn "Choose 0-9." ;;
+            *) warn "Choose 0-9 or w." ;;
         esac
         # Wait for Enter before the menu hides what the action printed, unless it was
         # left with Ctrl+C. The wait runs in a subshell too: Ctrl+C there returns at once.
@@ -1175,6 +1434,10 @@ usage() {
   edit NAME                                    edit, check and restart
   remove NAME [--yes]
   uninstall [--yes]                            also deletes the configs with --yes
+  panel install [--port N] [--host H]          the web panel on this server (docs/panel.md)
+  panel link | password [--stdin] | status | logs | uninstall [--yes]
+  --agent CODE [--version V]                   connect this server to a panel
+  agent status | logs | remove
 
   The repository is private for now: set GITHUB_TOKEN to download releases.
 EOF
@@ -1191,6 +1454,9 @@ main() {
         start | stop | restart | logs) need_root && cmd_service "$1" "${2:-}" ;;
         status) shift && cmd_status "$@" ;;
         speedtest) shift && cmd_speedtest "$@" ;;
+        panel) shift && cmd_panel "$@" ;;
+        agent) shift && cmd_agent "$@" ;;
+        --agent) shift && agent_join "$@" ;;
         edit) cmd_edit "${2:-}" ;;
         remove) cmd_remove "${2:-}" "${3:-}" ;;
         help | -h | --help) usage ;;
