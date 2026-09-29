@@ -60,6 +60,32 @@ Details: [docs/transports.md](docs/transports.md).
 
 ## 🚀 Quick start
 
+### The easy way: the manager script
+
+One line, as root, on each server:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh)
+```
+
+It installs Kariz for your CPU (x86_64, aarch64, armv7) and opens a menu. **New tunnel**
+asks a few questions, starts the tunnel as a systemd service, and prints the exact
+command to run on the other server. Later, `kariz-manager` brings the menu back, or use
+its commands directly:
+
+```bash
+kariz-manager list                  # every tunnel and its state
+kariz-manager logs main             # follow a tunnel's log
+kariz-manager restart main
+kariz-manager add main --role entry --mode reverse --transport tcpmux     --listen 0.0.0.0:3080 --forward 443=127.0.0.1:443
+kariz-manager update                # new release, running tunnels restarted
+```
+
+While the repository is private, set `GITHUB_TOKEN` (a token that can read it) before
+running the script. More in [docs/manager.md](docs/manager.md).
+
+### By hand
+
 ```bash
 # 1. On both servers: install (or download from Releases)
 cargo build --release && sudo cp target/release/kariz /usr/local/bin/

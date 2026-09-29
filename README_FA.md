@@ -59,6 +59,35 @@ flowchart LR
 
 ## 🚀 شروع سریع
 
+### راه آسان: اسکریپت مدیریت
+
+روی هر سرور، با دسترسی root، فقط یک خط:
+
+</div>
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh)
+```
+
+<div dir="rtl">
+
+اسکریپت کاریز را برای CPU سرور (x86_64، aarch64 یا armv7) نصب می‌کند و یک منو باز می‌کند. گزینه‌ی **New tunnel** چند سؤال می‌پرسد، تانل را به‌صورت سرویس systemd اجرا می‌کند، و دستور دقیقی را که باید روی سرور دیگر اجرا شود چاپ می‌کند؛ پس راه‌اندازی دو طرف فقط یک کپی و پیست است. بعداً با دستور `kariz-manager` منو برمی‌گردد، یا مستقیم از دستورهایش استفاده کنید:
+
+</div>
+
+```bash
+kariz-manager list                  # every tunnel and its state
+kariz-manager logs main             # follow a tunnel's log
+kariz-manager restart main
+kariz-manager update                # new release, running tunnels restarted
+```
+
+<div dir="rtl">
+
+تا وقتی مخزن private است، قبل از اجرای اسکریپت `GITHUB_TOKEN` را (توکنی که به مخزن دسترسی دارد) تنظیم کنید. توضیح کامل در [docs/manager.md](docs/manager.md).
+
+### راه دستی
+
 ۱. روی هر دو سرور نصب کنید (یا فایل اجرایی را از Releases بگیرید) و یک توکن بسازید که در هر دو سمت یکی باشد:
 
 </div>

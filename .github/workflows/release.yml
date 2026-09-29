@@ -35,7 +35,7 @@ jobs:
           name="kariz-$GITHUB_REF_NAME-x86_64-linux"
           mkdir "$name"
           cp "target/$TARGET/release/kariz" README.md README_FA.md CHANGELOG.md "$name/"
-          cp -r configs systemd "$name/"
+          cp -r configs systemd scripts "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
       - name: Release notes from CHANGELOG.md

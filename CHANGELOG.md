@@ -12,6 +12,14 @@
   they carry priority prefixes instead, so `journalctl` highlights warnings and errors
   and `-p warning` filters them. `[log] color = "auto" | "always" | "never"`; `NO_COLOR`
   is respected.
+- **The manager script** (`scripts/kariz.sh`, installed as `kariz-manager`): a
+  one-line install for x86_64, aarch64 and armv7, with the release's checksum checked.
+  - A menu, and the same actions as commands: add, list, start / stop / restart,
+    status, logs, edit (checked before it is applied), remove, update, uninstall.
+  - Each tunnel is `/etc/kariz/<name>.toml`, run by the systemd template
+    `kariz@<name>` (`systemd/kariz@.service`), so one server can run several.
+  - Adding a tunnel prints the exact command for the other server. For `wss` the
+    listening side makes a self-signed certificate and passes its pin along.
 
 ## 0.5.1 - 2026-09-29
 

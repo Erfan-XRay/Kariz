@@ -1,0 +1,16 @@
+[Unit]
+Description=Kariz tunnel %i
+Documentation=https://github.com/Erfan-XRay/Kariz
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/kariz run -c /etc/kariz/%i.toml
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
