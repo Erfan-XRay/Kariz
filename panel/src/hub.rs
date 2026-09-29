@@ -10,7 +10,7 @@
 //! server.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -99,7 +99,24 @@ impl Hub {
 
     /// A hub whose own server runs its tunnels through `services`.
     pub fn with_services(db: Db, kariz_dir: PathBuf, services: Arc<dyn Services>) -> Arc<Self> {
-        Self::with_options(db, kariz_dir, services, crate::pair::CONNECT_WAIT)
+        Self::with_options(db, kariz_dir, services, crate::pair::CONNECT_WAIT, None)
+    }
+
+    /// Like [`Hub::with_services`], and this server's private network links are kept in
+    /// `state_dir`, so they come back after a reboot.
+    pub fn with_state_dir(
+        db: Db,
+        kariz_dir: PathBuf,
+        services: Arc<dyn Services>,
+        state_dir: PathBuf,
+    ) -> Arc<Self> {
+        Self::with_options(
+            db,
+            kariz_dir,
+            services,
+            crate::pair::CONNECT_WAIT,
+            Some(state_dir),
+        )
     }
 
     /// Also sets how long a new tunnel has to connect.
@@ -108,6 +125,7 @@ impl Hub {
         kariz_dir: PathBuf,
         services: Arc<dyn Services>,
         connect_wait: Duration,
+        state_dir: Option<PathBuf>,
     ) -> Arc<Self> {
         let config = AgentConfig {
             panel: String::new(),
@@ -121,7 +139,11 @@ impl Hub {
         Arc::new(Self {
             history: crate::history::History::new(db.clone()),
             db,
-            local: Agent::with_services(Path::new(""), config, services.clone()),
+            local: Agent::with_services(
+                &state_dir.map_or_else(PathBuf::new, |d| d.join("local-agent.toml")),
+                config,
+                services.clone(),
+            ),
             services,
             ops: crate::pair::Ops::default(),
             connect_wait,
@@ -513,6 +535,7 @@ impl Hub {
 
     /// The panel's own server, sampled here (no link).
     pub async fn run_local(self: Arc<Self>) {
+        self.local.restore_net().await;
         let mut sampler = Sampler::default();
         let mut round = 0u32;
         loop {

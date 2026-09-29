@@ -128,6 +128,7 @@ pub struct Agent {
     config: Mutex<AgentConfig>,
     sampler: Mutex<Sampler>,
     services: Arc<dyn Services>,
+    net: crate::net::Net,
 }
 
 impl Agent {
@@ -146,6 +147,10 @@ impl Agent {
             config: Mutex::new(config),
             sampler: Mutex::new(Sampler::default()),
             services,
+            // The links of private networks are kept beside the agent's own settings.
+            net: crate::net::Net::new(
+                (!path.as_os_str().is_empty()).then(|| path.with_file_name("net.toml")),
+            ),
         })
     }
 
@@ -249,6 +254,10 @@ impl Agent {
                     .await
                     .unwrap_or_default(),
             ),
+            Request::NetUp { net } => ack(self.net.up(net).await),
+            Request::NetDown { name } => ack(self.net.down(&name).await),
+            Request::NetPing { name } => to_json(&self.net.ping(&name).await),
+            Request::NetStatus => to_json(&self.net.status().await),
             Request::Logs { name, lines } => to_json(&manage::logs(&name, lines).await),
             Request::Speedtest {
                 name,
@@ -283,6 +292,18 @@ impl Agent {
         }
     }
 
+    /// Makes the private network links this server had (after a start or a reboot).
+    pub async fn restore_net(&self) {
+        for (name, result) in self.net.restore().await {
+            match result {
+                Ok(()) => info!(link = %name, "a private network link is up"),
+                Err(e) => {
+                    warn!(link = %name, error = %e, "a private network link could not be made")
+                }
+            }
+        }
+    }
+
     /// Keeps a session to the panel up, for ever.
     pub async fn run(self: Arc<Self>) -> Result<()> {
         let c = self.config();
@@ -290,6 +311,15 @@ impl Agent {
             bail!(
                 "the agent has no join code and no identity: run `kariz-panel agent --join CODE`"
             );
+        }
+        // The private network links this server had come back with the agent.
+        for (name, result) in self.net.restore().await {
+            match result {
+                Ok(()) => info!(link = %name, "a private network link is up"),
+                Err(e) => {
+                    warn!(link = %name, error = %e, "a private network link could not be made")
+                }
+            }
         }
         let dialer = kariz::link::Dialer::new(&c.panel, &c.link_token)?;
         let mut backoff = Duration::from_secs(1);
