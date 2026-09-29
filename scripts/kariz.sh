@@ -394,17 +394,19 @@ proto_words() {
 
 # "443" or "1000-2000" into the variables named $2 and $3 (first and last port).
 port_span() {
-    local a b
+    local _a _b
     if [[ "$1" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-        a=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]}
+        _a=${BASH_REMATCH[1]} _b=${BASH_REMATCH[2]}
     elif [[ "$1" =~ ^[0-9]+$ ]]; then
-        a=$1 b=$1
+        _a=$1 _b=$1
     else
         return 1
     fi
-    valid_port "$a" && valid_port "$b" && ((10#$a <= 10#$b)) || return 1
-    printf -v "$2" '%d' $((10#$a))
-    printf -v "$3" '%d' $((10#$b))
+    if ! valid_port "$_a" || ! valid_port "$_b" || ((10#$_a > 10#$_b)); then
+        return 1
+    fi
+    printf -v "$2" '%d' $((10#$_a))
+    printf -v "$3" '%d' $((10#$_b))
 }
 
 # Turns a port list into forward rules and adds them to T_FORWARDS:
@@ -669,7 +671,9 @@ cmd_add() {
     load_busy_ports
     local spec
     for spec in "${ports[@]}"; do
-        split_addr "$to" && [[ -z "$ADDR_PORT" ]] || die "add: --to takes a host without a port."
+        if ! split_addr "$to" || [[ -n "$ADDR_PORT" ]]; then
+            die "add: --to takes a host without a port."
+        fi
         expand_ports "$spec" "$ADDR_HOST" "$proto" "$T_BIND" || die "add: bad --ports $spec"
     done
     finish_tunnel_vars
