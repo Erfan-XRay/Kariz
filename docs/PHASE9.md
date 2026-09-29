@@ -98,6 +98,22 @@ Checked at 1440, 800 and 375 px wide in both themes and both languages: no horiz
 scroll, labels at the map's edges stay on screen. Other pages show the loader and a note
 that they come in 9.3.
 
+*Status after 9.3:* the prototype now has every screen: servers and adding a server with
+a join code, tunnels, tunnel detail (with a diagnosis for a broken tunnel), the pair
+wizard (create and edit), logs and settings. It is split into `app.js` (boot, login, the
+map, the shell), `pages.js` (the screens) and `wizard.js`; [design/README.md](../design/README.md#9-screens)
+lists what each screen settles. Checked at 1440, 800 and 375 px, in both themes and both
+languages, with no script errors and no horizontal scroll. Things the design had to
+settle along the way:
+
+- **Addresses in Persian text.** IPv6 addresses, paths and `kariz@name` came out
+  reordered inside Persian sentences; they are now isolated as left-to-right text, in the
+  page and on the canvas.
+- **Wide code.** A config or a command widened its column or dialog; code blocks now
+  scroll inside themselves.
+- **Port conflicts name their owner.** "443 is in use" is not enough; the wizard says
+  which tunnel (or service, like `sshd`) holds it on which server.
+
 ## 3. The panel plan (phases 10 to 13)
 
 ### Architecture
@@ -169,5 +185,5 @@ Each phase gets its own plan document when it starts.
 |---|---|---|
 | **9.0** Plan (done) | This document. | |
 | **9.1** Design system (done) | Tokens (colour for both themes, type, spacing, radius, motion), fonts, RTL rules, in `design/`. | Document and `tokens.css` in the repository. |
-| **9.2** Prototype | Interactive HTML: loader, login, the map with live-looking traffic, both themes, both languages. | Approved. |
+| **9.2** Prototype (done) | Interactive HTML: loader, login, the map with live-looking traffic, both themes, both languages. | Approved. |
 | **9.3** Screens | Servers, tunnels, the pair wizard, tunnel detail, logs, settings, mobile. | Approved. |

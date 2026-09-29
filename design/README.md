@@ -123,7 +123,24 @@ update.
 - Live numbers update politely (`aria-live="polite"`, at most every few seconds).
 - Labels above fields, errors under the field that caused them.
 
-## 9. Fonts and licences
+## 9. Screens
+
+The prototype has every screen of the panel. What each one settles:
+
+| Screen | Pattern |
+|---|---|
+| **Map** (home) | The live cross-section; key numbers; the tunnel table with switches. |
+| **Servers** | One stratum row per server: a well whose water level is its CPU load, name, location, role, architecture and version, IP and how it is linked to the panel, CPU / memory / network meters (water filling a channel), its tunnels. The row opens a dialog with details and actions (restart the agent; remove, only when it carries no tunnels). |
+| **Add a server** | A dialog: an optional name, who dials (the server dials the panel, recommended; or the panel dials the server), then the one-line command with a join code that works once and counts down from 10 minutes. The dialog waits with the qanat loader and turns to water when the server connects. |
+| **Tunnels** | Filter chips with counts (all, flowing, broken, stopped), search over names, servers and ports, and a table with transport, profile, mode, port count, state, live rate and a switch. |
+| **Tunnel detail** | The tunnel as one channel between its two wells, with the actions (speed test, restart, stop/start, edit, delete). A broken tunnel gets a diagnosis band first: what fails, the likely cause, the steps, and a button that fixes the common case. Then key facts, the traffic chart (5 min live, 1 h, 24 h) with a hover read-out, forwarded ports, the speed test (water rising in a well), both configs as the panel writes them, and events. Delete asks for the tunnel's name. |
+| **The wizard** | Full screen, five steps drawn as wells on a horizon with a channel that fills as you go: servers and who dials, transport and profile (tiles with four traits: hidden, speed, games, CDN), connection (the port checked against the listening server, IPv4 and IPv6 or IPv4 only, the address the dialer uses, the WebSocket path), ports (rules in the manager's syntax, parsed live into chips, with conflicts named: the tunnel or service that holds a port), and review with both configs. Creating digs the channel from both ends while a checklist runs (check, write both files, start both sides, handshake, first stream), then the water runs through. The same wizard edits a tunnel. |
+| **Logs** | A live tail of both servers: filter by tunnel and level, search with highlighting, pause, clear. It follows new lines while you are at the bottom; scrolled up, it counts them on a "jump to the latest" button. |
+| **Settings** | A section list on the side (a scrolling strip on phones) and rows of title, explanation and control: password (with a strength meter), one-time login links with a countdown, two-step sign-in (TOTP), active sessions with revoke, lockout; the panel address with its secret path, TLS (self-signed with its fingerprint, or Let's Encrypt for a domain); language, theme, digits, motion; updates per server; encrypted backup; the audit log. |
+
+Everywhere: `Ctrl+K` opens commands (new tunnel, add a server, open any tunnel, make a login link); `N` starts a new tunnel; `Esc` closes a dialog or the wizard. Addresses, paths and ports are isolated as left-to-right text inside Persian sentences.
+
+## 10. Fonts and licences
 
 `fonts/` holds the three fonts (SIL Open Font License 1.1, texts next to them):
 Estedad by Amin Abedi, Space Grotesk by Florian Karsten, IBM Plex Mono by IBM.
