@@ -142,13 +142,32 @@ two over real TLS with the core's pinned client (a wrong pin and plain HTTP get 
 One thing found: axum's `nest` does not pass `/<path>/` (trailing slash) to the inner
 router, so that address, the panel's front page, has its own route.
 
+*Status after 11.2:* `auth.rs` (the rules, taking `now` so tests move time) and `api.rs`
+(the JSON API) implement section 3. Passwords are Argon2id (19 MiB, 2 passes); login
+links, sessions and the CSRF value are random 32-byte tokens stored as BLAKE3 hashes, so
+a stolen database opens nothing. The cookie is `__Host-kariz` (`Secure`, `HttpOnly`,
+`SameSite=Strict`, `Path=/`). Changes need `X-Kariz-CSRF`; sign-in requests need a JSON
+body (a form post from another site is refused before it is read). Five failed tries from
+one address (a wrong password, a wrong or spent link, a wrong current password) lock it
+out for 15 minutes, right passwords included. A session ends after 7 idle days, at most 30
+exist (the least recently used goes), and changing the password ends all the others.
+Endpoints: `GET /api/session`, `POST /api/login`, `POST /api/link`, `POST /api/logout`,
+`GET /api/sessions`, `POST /api/sessions/revoke`, `POST /api/password`, `POST /api/links`.
+The audit log records sign-ins, failures, revocations and password changes. CLI:
+`kariz-panel login-link [--host H]` and `kariz-panel reset-password [--stdin]` (it makes a
+random password unless told to read one). Tests: 4 for the rules and 6 through the router
+(cookie flags, CSRF, JSON-only, one-time links, the lockout, sessions and the password).
+Checked by hand with the binary and `curl -k`: `init`, `login-link`, a link signing in
+once, CSRF refused without the header, `reset-password` ending the old session, and five
+wrong tries turning the right password into a 429.
+
 ## 7. Work breakdown
 
 | Step | Content | Done when |
 |---|---|---|
 | **11.0** Plan (done) | This document. | |
 | **11.1** Skeleton (done) | Workspace, `panel/` crate, config, SQLite schema, axum on TLS under the secret path, the embedded app (or placeholder), CLI; `panel/web` scaffold; CI builds and tests both; the release carries `kariz-panel`. | `kariz-panel serve` answers on HTTPS; CI green. |
-| **11.2** Sign-in | Section 3, API and tests. | Tests for every rule in the table. |
+| **11.2** Sign-in (done) | Section 3, API and tests. | Tests for every rule in the table. |
 | **11.3** Web app | Section 5. | Build under the budget; the prototype's screens in the real app, both languages and themes. |
 | **11.4** Agents | Section 4: `kariz::link`, join codes, the agent, health and tunnels, both directions, live Servers and map. | An in-process test joins an agent and reads its health; a second in CI over real sockets. |
 | **11.5** Installer, release | Section 6, `docs/panel.md`, CHANGELOG, `0.8.0-beta`. | Installed on a clean Linux VM in CI (manager job), release with the panel. |

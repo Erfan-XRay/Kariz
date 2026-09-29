@@ -11,6 +11,12 @@ publish = false
 [workspace]
 members = ["panel"]
 
+# Password hashing is slow unoptimized; the panel tests hash a few passwords.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake3]
+opt-level = 3
+
 [lib]
 path = "src/lib.rs"
 

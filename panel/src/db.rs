@@ -22,6 +22,24 @@ const MIGRATIONS: &[&str] = &[
          what TEXT NOT NULL
      );
      CREATE INDEX audit_at ON audit (at);",
+    // 2: sign-in. Tokens are stored as hashes only (see auth.rs).
+    "CREATE TABLE login_links (
+         hash TEXT PRIMARY KEY,
+         created INTEGER NOT NULL,
+         expires INTEGER NOT NULL,
+         used INTEGER NOT NULL DEFAULT 0
+     );
+     CREATE TABLE sessions (
+         id INTEGER PRIMARY KEY,
+         hash TEXT NOT NULL UNIQUE,
+         csrf TEXT NOT NULL,
+         created INTEGER NOT NULL,
+         last_seen INTEGER NOT NULL,
+         ip TEXT NOT NULL,
+         agent TEXT NOT NULL
+     );
+     CREATE TABLE failures (ip TEXT NOT NULL, at INTEGER NOT NULL);
+     CREATE INDEX failures_ip ON failures (ip, at);",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a
