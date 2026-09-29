@@ -1,6 +1,6 @@
 # Kariz documentation
 
-For Kariz **v0.6.1**. Start with [Getting started](getting-started.md); come back to the
+For Kariz **v0.7.0**. Start with [Getting started](getting-started.md); come back to the
 reference pages when you need a specific setting.
 
 | Page | What it covers |

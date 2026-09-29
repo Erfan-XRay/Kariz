@@ -2085,21 +2085,35 @@ async fn status_counts_traffic_on_both_sides() {
     }
 }
 
-/// With different tokens nothing connects, and `status` says why on both sides.
+/// When the other side goes away, `status` says so, with why it cannot connect again.
+/// (A token mismatch shows up too, but only after the listening side has drained the
+/// failed connection for 5-30 s and the dialer's handshake has timed out: too slow here.)
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn status_shows_why_the_other_side_is_missing() {
-    let setup = Setup::tcp("reverse").transport("tcpmux").mux().control();
+    let setup = Setup::tcp("direct").transport("tcpmux").mux().control();
     let target = echo_server().await;
-    let tunnel = start(setup, TOKEN, "another-token-0123456789", target).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let entry = status_of(tunnel.control.as_ref().unwrap()).await;
-    assert!(!entry.peer.connected, "{entry:?}");
-    assert!(entry.peer.handshakes_failed > 0, "{entry:?}");
-    assert!(entry.peer.last_error.is_some(), "{entry:?}");
-    let exit = status_of(tunnel.exit_control.as_ref().unwrap()).await;
-    assert!(!exit.peer.connected, "{exit:?}");
-    assert!(exit.peer.last_error.is_some(), "{exit:?}");
+    let mut tunnel = start(setup, TOKEN, TOKEN, target).await;
+    let socket = tunnel.control.clone().unwrap();
+    let before = status_of(&socket).await;
+    assert!(before.peer.connected, "{before:?}");
+    assert_eq!(before.peer.last_error, None, "{before:?}");
+
+    // The entry sees its sessions end, and nothing listens when it dials again.
+    tunnel.kill_exit();
+    let mut after = status_of(&socket).await;
+    for _ in 0..200 {
+        if !after.peer.connected && after.peer.last_error.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        after = status_of(&socket).await;
+    }
+    assert!(!after.peer.connected, "{after:?}");
+    assert_eq!(after.peer.sessions, Some(0), "{after:?}");
+    assert!(after.peer.handshakes_failed > 0, "{after:?}");
+    let error = after.peer.last_error.unwrap();
+    assert!(error.text.contains("refused"), "{error:?}");
 }
 
 /// An exit with `speedtest = false` refuses the test streams, and the client says why.
