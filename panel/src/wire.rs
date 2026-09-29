@@ -23,6 +23,94 @@ pub enum Request {
     Health,
     /// The tunnels on this server (the `/etc/kariz/*.toml` files) and their state.
     Tunnels,
+    /// Is this tunnel spec valid here, and are its ports free?
+    TunnelCheck { spec: Spec },
+    /// Write the tunnel's config from a spec (the agent renders the file).
+    TunnelPut { spec: Spec },
+    /// One tunnel's spec, without its token.
+    TunnelGet { name: String },
+    /// Stop it, remove its config.
+    TunnelDelete { name: String },
+    /// `start`, `stop`, `restart`, `enable` or `disable` the tunnel's service.
+    TunnelCtl { name: String, action: String },
+    /// The listening ports of this server and who owns them.
+    Ports,
+    /// The last lines of a tunnel's log.
+    Logs { name: String, lines: u32 },
+    /// Run the entry side's speed test.
+    Speedtest {
+        name: String,
+        seconds: u32,
+        streams: u32,
+        udp: bool,
+    },
+}
+
+/// What a tunnel is, as data: everything the manager's `add` takes, without free text
+/// going into the file. The agent turns it into the config (docs/PHASE12.md, section 2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Spec {
+    pub name: String,
+    pub role: String,
+    pub mode: String,
+    pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// Sent when a tunnel is made or its token changes; `None` keeps the one in the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ws_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ws_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_sni: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_pin: Option<String>,
+    #[serde(default)]
+    pub forwards: Vec<ForwardInfo>,
+}
+
+/// Something that listens on a port of this server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortOwner {
+    /// `tcp` or `udp`.
+    pub proto: String,
+    pub addr: String,
+    pub port: u16,
+    /// The process name (`sshd`, `kariz`), when it could be found.
+    pub process: Option<String>,
+    pub pid: Option<u32>,
+}
+
+/// The answer to `tunnel_check`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CheckReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// Ports the spec wants that something else already listens on.
+    #[serde(default)]
+    pub conflicts: Vec<PortOwner>,
+}
+
+/// The answer to `logs` and `speedtest`: text, or why there is none.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TextReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,7 +147,7 @@ pub struct Health {
     pub load1: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForwardInfo {
     pub listen: String,
     pub target: String,
