@@ -61,7 +61,7 @@ csrf=$(sed -n 's/.*"csrf":"\([0-9a-f]*\)".*/\1/p' "$WORK/signin.json")
 # While the panel restarts these get "connection refused": that is not a failure of the
 # test, the loops below just ask again.
 api() { curl -sk -b "$WORK/jar" -H "X-Kariz-CSRF: $csrf" -H 'Content-Type: application/json' "$@" || true; }
-version() { { curl -sk "${base}api/version" || true; } | sed -n 's/.*"version":"\([^"]*\)".*//p'; }
+version() { { curl -sk "${base}api/version" || true; } | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'; }
 original=$(version)
 echo "the panel is $original"
 
