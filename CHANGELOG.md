@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.6.1 - 2026-09-29
+
+A kariz-manager release: the `kariz` binary is the same as 0.6.0 apart from its version
+number, and works with the same peers (v0.6, v0.5 and v0.4, every transport). To update
+the manager on a server, fetch the script again into `/usr/local/bin/kariz-manager`
+(docs/manager.md).
 
 ### Changed (kariz-manager)
 
