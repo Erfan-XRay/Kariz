@@ -129,7 +129,7 @@ for _ in $(seq 1 120); do
     sleep 2
 done
 api "${base}api/op?id=$op" | jq -c '{state, error, steps: [.steps[].id]}'
-test "$state" = done
+test "$state" = "done"
 test "$(agent_version)" = 99.0.0
 test "$(api "${base}api/update" | jq -r '.outdated | length')" = 0
 after=$(systemctl show kariz@plain -p ActiveEnterTimestampMonotonic --value)
