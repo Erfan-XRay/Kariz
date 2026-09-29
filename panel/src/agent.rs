@@ -42,6 +42,9 @@ pub struct AgentConfig {
     /// How tunnels are started: `systemd` (default) or `process`.
     #[serde(default)]
     pub services: manage::ServiceKind,
+    /// A release public key (hex) of your own, instead of the one built in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_key: Option<String>,
 }
 
 fn default_kariz_dir() -> PathBuf {
@@ -59,6 +62,7 @@ impl AgentConfig {
             key: None,
             kariz_dir: default_kariz_dir(),
             services: Default::default(),
+            release_key: None,
         }
     }
 
@@ -129,6 +133,7 @@ pub struct Agent {
     sampler: Mutex<Sampler>,
     services: Arc<dyn Services>,
     net: crate::net::Net,
+    update: crate::agent_update::AgentUpdate,
 }
 
 impl Agent {
@@ -153,6 +158,7 @@ impl Agent {
         services: Arc<dyn Services>,
         exec: Arc<dyn crate::net::Exec>,
     ) -> Arc<Self> {
+        let config_key = config.release_key.clone();
         Arc::new(Self {
             path: path.to_path_buf(),
             config: Mutex::new(config),
@@ -162,6 +168,16 @@ impl Agent {
             net: crate::net::Net::with_exec(
                 (!path.as_os_str().is_empty()).then(|| path.with_file_name("net.toml")),
                 exec,
+            ),
+            update: crate::agent_update::AgentUpdate::new(
+                path.with_file_name("updates"),
+                path.to_path_buf(),
+                config_key,
+                std::env::current_exe().unwrap_or_default(),
+                std::env::current_exe()
+                    .unwrap_or_default()
+                    .with_file_name("kariz"),
+                Box::new(crate::agent_update::SystemdRun),
             ),
         })
     }
@@ -271,6 +287,14 @@ impl Agent {
             Request::NetSync { links } => ack(self.net.sync(links).await),
             Request::NetPing { name } => to_json(&self.net.ping(&name).await),
             Request::NetStatus => to_json(&self.net.status().await),
+            Request::UpdateBegin { version, files } => ack(self.update.begin(&version, &files)),
+            Request::UpdateChunk {
+                version,
+                name,
+                offset,
+                data,
+            } => ack(self.update.chunk(&version, &name, offset, &data)),
+            Request::UpdateApply { version } => ack(self.update.apply(&version)),
             Request::Logs { name, lines } => to_json(&manage::logs(&name, lines).await),
             Request::Speedtest {
                 name,
@@ -340,6 +364,7 @@ impl Agent {
             match dialer.connect(Side::Server).await {
                 Ok(session) => {
                     info!(panel = %c.panel, "connected to the panel");
+                    crate::agent_update::touch(&self.path.with_file_name("connected"));
                     backoff = Duration::from_secs(1);
                     let started = std::time::Instant::now();
                     self.serve(session).await;

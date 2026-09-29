@@ -7,7 +7,7 @@ import { LogsPage } from "./Logs";
 import { NetworksPage } from "./Networks";
 import { Shell } from "./Shell";
 import { TunnelsPage } from "./Tunnels";
-import { UpdateDialog, UpdatePill, UpdatesSection, useUpdate } from "./Update";
+import { ServersDialog, UpdateDialog, UpdatePill, UpdatesSection, useUpdate } from "./Update";
 import type { PageId } from "./Shell";
 import { useApp } from "./store";
 
@@ -62,6 +62,7 @@ export function App() {
   const [agentsOn, setAgentsOn] = useState(false);
   const [reload, setReload] = useState(0);
   const [updating, setUpdating] = useState(false);
+  const [updatingServers, setUpdatingServers] = useState(false);
   const update = useUpdate(screen === "app");
   const [rising, setRising] = useState(false);
   const [loginKey, setLoginKey] = useState(0);
@@ -167,7 +168,7 @@ export function App() {
             void api.logout().finally(signOut);
           }}
           onMakeLink={() => setPage("settings")}
-          notice={<UpdatePill status={update.status} onOpen={() => setUpdating(true)} />}
+          notice={<UpdatePill status={update.status} onOpen={() => setUpdating(true)} onServers={() => setUpdatingServers(true)} />}
         >
           {page === "map" && <MapPage servers={servers} />}
           {page === "servers" && <ServersPage servers={servers} agentsOn={agentsOn} onChanged={() => setReload((n) => n + 1)} />}
@@ -182,6 +183,15 @@ export function App() {
             />
           )}
           {updating && update.status && <UpdateDialog status={update.status} onClose={() => setUpdating(false)} />}
+          {updatingServers && update.status && (
+            <ServersDialog
+              status={update.status}
+              onClose={() => {
+                setUpdatingServers(false);
+                update.reload();
+              }}
+            />
+          )}
         </Shell>
       )}
     </>

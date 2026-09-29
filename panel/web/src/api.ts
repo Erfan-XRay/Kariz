@@ -181,6 +181,8 @@ export interface UpdateStatus {
   error: string | null;
   last_result: { version: string; ok: boolean; rolled_back: boolean; error: string | null; at: number } | null;
   busy: boolean;
+  /** Servers whose agent is older than this panel. */
+  outdated: { id: string; name: string; version: string; online: boolean }[];
 }
 
 export class ApiError extends Error {
@@ -259,5 +261,6 @@ export const api = {
   checkUpdate: () => call<UpdateStatus>("POST", "update/check", {}),
   updateSettings: (body: { channel?: "stable" | "beta"; auto?: boolean }) => call<UpdateStatus>("POST", "update/settings", body),
   applyUpdate: (confirm_major: boolean) => call<{ op: string }>("POST", "update/apply", { confirm_major }),
+  updateServers: (restart_tunnels: boolean) => call<{ op: string }>("POST", "update/servers", { restart_tunnels }),
   newLink: () => call<{ token: string; valid_for: number }>("POST", "links"),
 };

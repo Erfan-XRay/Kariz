@@ -152,6 +152,7 @@ impl Hub {
             key: None,
             kariz_dir: kariz_dir.clone(),
             services: Default::default(),
+            release_key: None,
         };
         Arc::new(Self {
             history: crate::history::History::new(db.clone()),
