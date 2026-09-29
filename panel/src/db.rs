@@ -96,6 +96,8 @@ const MIGRATIONS: &[&str] = &[
          UNIQUE (a, b, gre_key),
          CHECK (a < b)
      );",
+    // 6: the public address of each server, as the others reach it (GRE needs both ends).
+    "CREATE TABLE server_addrs (server TEXT PRIMARY KEY, addr TEXT NOT NULL);",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

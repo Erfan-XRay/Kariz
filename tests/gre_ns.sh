@@ -6,10 +6,13 @@
 # removes the interface. Needs root (CI runs it with sudo) and the ip_gre module.
 set -euo pipefail
 
-BIN=${1:?usage: gre_ns.sh PATH-TO-kariz-panel}
+BIN=${1:?usage: gre_ns.sh PATH-TO-kariz-panel [PATH-TO-kariz]}
 BIN=$(readlink -f "$BIN")
+KARIZ=${2:+$(readlink -f "$2")}
 WORK=$(mktemp -d)
+PIDS=()
 cleanup() {
+    for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
     ip netns del kza 2>/dev/null || true
     ip netns del kzb 2>/dev/null || true
     rm -rf "$WORK"
@@ -96,6 +99,56 @@ if command -v iptables >/dev/null; then
     ip netns exec kzb iptables -D INPUT -p gre -j DROP
     ip netns exec kza "$BIN" net ping kz-one --state "$WORK/a-state.toml" >/dev/null
     echo "a filtered path fails the test, and it passes again once open"
+fi
+
+# a Kariz tunnel over the private addresses: the exit listens on its end of the link
+# (10.77.0.2), the entry dials it from the other, and a request goes through end to end
+if [[ -n "$KARIZ" ]]; then
+    ip netns exec kzb python3 -m http.server 18081 --bind 127.0.0.1 --directory "$WORK" >/dev/null 2>&1 &
+    PIDS+=($!)
+    echo hello-over-gre >"$WORK/index.html"
+    cat >"$WORK/exit.toml" <<EOF
+role = "exit"
+mode = "direct"
+[tunnel]
+transport = "tcpmux"
+listen = "10.77.0.2:3080"
+token = "gre-test-token-0123456789abcdef"
+EOF
+    cat >"$WORK/entry.toml" <<EOF
+role = "entry"
+mode = "direct"
+[tunnel]
+transport = "tcpmux"
+remote = "10.77.0.2:3080"
+token = "gre-test-token-0123456789abcdef"
+[[forward]]
+listen = "127.0.0.1:18080"
+target = "127.0.0.1:18081"
+EOF
+    ip netns exec kzb "$KARIZ" run -c "$WORK/exit.toml" >"$WORK/exit.log" 2>&1 &
+    PIDS+=($!)
+    sleep 1
+    ip netns exec kza "$KARIZ" run -c "$WORK/entry.toml" >"$WORK/entry.log" 2>&1 &
+    PIDS+=($!)
+    ok=0
+    for _ in $(seq 1 20); do
+        if [[ "$(ip netns exec kza curl -sf --max-time 3 http://127.0.0.1:18080/)" == hello-over-gre ]]; then
+            ok=1
+            break
+        fi
+        sleep 1
+    done
+    if [[ $ok != 1 ]]; then
+        echo "no answer through a tunnel over the private link" >&2
+        cat "$WORK/exit.log" "$WORK/entry.log" >&2
+        exit 1
+    fi
+    # it went over the private link, not the public path: GRE packets were counted
+    ip -n kza -s link show kz-one | awk '/RX:/{getline; if ($2 == 0) exit 1}'
+    echo "a Kariz tunnel works over the private addresses"
+    for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+    PIDS=()
 fi
 
 # down removes the interface

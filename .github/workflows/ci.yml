@@ -201,8 +201,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: shellcheck tests/gre_ns.sh
-      - run: cargo build -p kariz-panel
-      - run: sudo bash tests/gre_ns.sh target/debug/kariz-panel
+      - run: cargo build -p kariz -p kariz-panel
+      - run: sudo bash tests/gre_ns.sh target/debug/kariz-panel target/debug/kariz
 
   # nginx in front of the tunnel as a stand-in for a CDN: WebSocket proxying, TLS
   # termination and an idle timeout (tests/tunnel.rs, module `nginx`).
