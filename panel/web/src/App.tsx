@@ -7,6 +7,7 @@ import { LogsPage } from "./Logs";
 import { NetworksPage } from "./Networks";
 import { Shell } from "./Shell";
 import { TunnelsPage } from "./Tunnels";
+import { UpdateDialog, UpdatePill, UpdatesSection, useUpdate } from "./Update";
 import type { PageId } from "./Shell";
 import { useApp } from "./store";
 
@@ -60,6 +61,8 @@ export function App() {
   const [servers, setServers] = useState<ServerInfo[]>([]);
   const [agentsOn, setAgentsOn] = useState(false);
   const [reload, setReload] = useState(0);
+  const [updating, setUpdating] = useState(false);
+  const update = useUpdate(screen === "app");
   const [rising, setRising] = useState(false);
   const [loginKey, setLoginKey] = useState(0);
   const autoLink = useRef<string | null>(null);
@@ -164,13 +167,21 @@ export function App() {
             void api.logout().finally(signOut);
           }}
           onMakeLink={() => setPage("settings")}
+          notice={<UpdatePill status={update.status} onOpen={() => setUpdating(true)} />}
         >
           {page === "map" && <MapPage servers={servers} />}
           {page === "servers" && <ServersPage servers={servers} agentsOn={agentsOn} onChanged={() => setReload((n) => n + 1)} />}
           {page === "tunnels" && <TunnelsPage servers={servers} onChanged={() => setReload((n) => n + 1)} />}
           {page === "networks" && <NetworksPage servers={servers} onChanged={() => setReload((n) => n + 1)} />}
           {page === "logs" && <LogsPage servers={servers} />}
-          {page === "settings" && <SettingsPage hasPassword={info?.has_password ?? false} onPasswordSet={() => setInfo((i) => (i ? { ...i, has_password: true } : i))} />}
+          {page === "settings" && (
+            <SettingsPage
+              hasPassword={info?.has_password ?? false}
+              onPasswordSet={() => setInfo((i) => (i ? { ...i, has_password: true } : i))}
+              updates={<UpdatesSection status={update.status} reload={update.reload} />}
+            />
+          )}
+          {updating && update.status && <UpdateDialog status={update.status} onClose={() => setUpdating(false)} />}
         </Shell>
       )}
     </>

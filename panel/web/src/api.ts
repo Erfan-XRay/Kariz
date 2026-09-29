@@ -169,6 +169,20 @@ export interface Link {
   ifname: string;
 }
 
+export interface UpdateStatus {
+  current: string;
+  configured: boolean;
+  channel: "stable" | "beta";
+  auto: boolean;
+  state: "none" | "newer" | "same" | "older";
+  major: boolean;
+  latest: { tag: string; version: string; notes: string; prerelease: boolean } | null;
+  checked_at: number | null;
+  error: string | null;
+  last_result: { version: string; ok: boolean; rolled_back: boolean; error: string | null; at: number } | null;
+  busy: boolean;
+}
+
 export class ApiError extends Error {
   status: number;
   code: string;
@@ -241,5 +255,9 @@ export const api = {
   createLinks: (network: string, servers: string[], hub?: string) => call<{ op: string }>("POST", "networks/links", { network, servers, hub }),
   deleteLink: (id: string) => call<object>("POST", "networks/links/delete", { id }),
   setAddress: (id: string, addr: string) => call<object>("POST", "servers/address", { id, addr }),
+  update: () => call<UpdateStatus>("GET", "update"),
+  checkUpdate: () => call<UpdateStatus>("POST", "update/check", {}),
+  updateSettings: (body: { channel?: "stable" | "beta"; auto?: boolean }) => call<UpdateStatus>("POST", "update/settings", body),
+  applyUpdate: (confirm_major: boolean) => call<{ op: string }>("POST", "update/apply", { confirm_major }),
   newLink: () => call<{ token: string; valid_for: number }>("POST", "links"),
 };

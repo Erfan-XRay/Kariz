@@ -669,7 +669,7 @@ function Sessions() {
   );
 }
 
-export function SettingsPage({ hasPassword, onPasswordSet }: { hasPassword: boolean; onPasswordSet: () => void }) {
+export function SettingsPage({ hasPassword, onPasswordSet, updates }: { hasPassword: boolean; onPasswordSet: () => void; updates?: React.ReactNode }) {
   const { t, lang, setLang, theme, setTheme, digits, setDigits, low, setLow, toast } = useApp();
   const [dialog, setDialog] = useState(false);
   const [backup, setBackup] = useState<"save" | "restore" | null>(null);
@@ -700,6 +700,7 @@ export function SettingsPage({ hasPassword, onPasswordSet }: { hasPassword: bool
         {row(t("set.link"), t("set.linkText"), <LoginLink />)}
         {row(t("set.sessions"), t("set.sessionsText"), <Sessions />)}
       </section>
+      {updates}
       <section className="stratum s2">
         <div className="stratum-head">
           <h2>{t("set.backup")}</h2>
