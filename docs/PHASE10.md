@@ -84,6 +84,21 @@ as they are. The UDP benchmark is bound by its clients here (about 110,000 packe
 second in every setup), so it would not show a small cost per packet; the CI benchmark
 on Linux (10.4) is the better check.
 
+The same on Linux (GitHub Actions runner, 2 vCPU, temporary CI job, removed), v0.6.1
+against the release, 4 alternating rounds, the first thrown away:
+
+| Benchmark | Change |
+|---|---|
+| Throughput, 28 setups | mean -1.3 %, median +0.4 % |
+| UDP packets per second, 12 cases | mean -0.5 %, median -0.5 % (from -1.4 % to +0.4 %) |
+
+- **UDP pays a little, steadily:** 11 of the 12 cases are slightly slower, by half a
+  percent on average: the per-flow tallies. Under the 1 % bound.
+- **Throughput shows no cost:** single setups swing from -18.8 % to +11.1 % with no
+  pattern (`tcp_direct` -18.8 % while `tcp_direct_plain`, the same path without
+  encryption, -0.4 %; `mux_direct` +0.6 % while `tcpmux_direct_chacha` -16.5 %): the
+  noise of a shared 2-core runner. The median is +0.4 %.
+
 ## 3. `status` on the control socket (10.2)
 
 **Both sides get a control socket.** The exit side opens one too, at the same default
@@ -194,4 +209,4 @@ setting at fault, no key when none is named, line and column of a syntax error).
 | **10.1** Counters (done) | `Stats`, counting in entry, exit, relays and UDP; mux RTT from pings; QUIC RTT. | Unit tests for every counter; benchmark A/B within 1 %. |
 | **10.2** `status` (done) | Control socket on the exit side too; the `status` request; `docs/status.md`. | Tests: a tunnel in memory answers `status` on both sides with the right numbers. |
 | **10.3** CLI (done) | `kariz status` (`--watch`, `--json`), `kariz check --json`, `-c -`, manager Status. | Tests for the output and the error cases; manager tty test covers Status. |
-| **10.4** Release | README / docs, CHANGELOG, `0.7.0`. | CI green; release v0.7.0 with three archives. |
+| **10.4** Release (done) | README / docs, CHANGELOG, `0.7.0`. | CI green; release v0.7.0 with three archives. |
