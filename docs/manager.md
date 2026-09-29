@@ -141,7 +141,8 @@ menu. At the menu itself, it leaves the manager (so does `0`).
 
 ```bash
 kariz-manager list                  # name, side, transport, ports, state, address
-kariz-manager status main
+kariz-manager status main           # connection, round trip, traffic per port
+kariz-manager status                # the same for every tunnel
 kariz-manager logs main             # follows the log; Ctrl-C to stop
 kariz-manager speedtest main        # speed, latency and UDP; on the entry server
 kariz-manager restart main          # also: start, stop
@@ -149,6 +150,9 @@ kariz-manager edit main             # opens $EDITOR (nano, else vi)
 kariz-manager remove main
 ```
 
+- **`status`** runs `kariz status` for the tunnel (on either server; `--watch` passes
+  through), or for every tunnel without a name. A stopped tunnel shows systemd's view
+  instead, with the reason it stopped. See [Status](status.md).
 - **`speedtest`** runs `kariz speedtest` for the tunnel (options pass through, e.g.
   `--seconds 5`). It works on the entry server, while the tunnel runs; see
   [Speed test](speedtest.md).

@@ -1,0 +1,181 @@
+/*
+ * Kariz panel design tokens.
+ * Theme: data-theme="night" (default) or "dawn" on <html>. Direction: dir="rtl" | "ltr".
+ * Components use only the semantic tokens (--bg, --text, --accent, ...), never raw colours.
+ * Contrast of every text token on --bg / --stratum-1 / --stratum-2 is at least 4.5:1
+ * (see design/README.md).
+ */
+
+/* Fonts: all OFL, self-hosted (the panel loads nothing from a CDN). */
+@font-face {
+  font-family: "Space Grotesk";
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("fonts/SpaceGrotesk-wght.woff2") format("woff2");
+}
+@font-face {
+  /* Arabic script only: Latin text (IPs, ports, versions) falls through to Space Grotesk. */
+  font-family: "Estedad";
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("fonts/Estedad-wght.woff2") format("woff2");
+  unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+200C-200F, U+FB50-FDFF, U+FE70-FEFF;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/IBMPlexMono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/IBMPlexMono-500.woff2") format("woff2");
+}
+
+:root {
+  /* ---- Type ---- */
+  --font-ui: "Space Grotesk", "Estedad", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "Estedad", ui-monospace, Consolas, monospace;
+
+  --fs-xs: 0.75rem;   /* 12 captions, chips */
+  --fs-sm: 0.875rem;  /* 14 secondary text, table cells */
+  --fs-md: 1rem;      /* 16 body */
+  --fs-lg: 1.25rem;   /* 20 section titles */
+  --fs-xl: 1.75rem;   /* 28 page titles */
+  --fs-2xl: 2.5rem;   /* 40 key numbers */
+  --fs-3xl: 4rem;     /* 64 hero number, login title */
+  --lh-tight: 1.15;
+  --lh-body: 1.55;    /* Persian needs a little more than Latin */
+  --tracking-caps: 0.12em;
+
+  /* ---- Space (4 px grid) ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+  --sp-8: 64px;
+
+  /* ---- Shape: small radii; strata are bands, not bubbles ---- */
+  --r-1: 4px;   /* chips, inputs inside bands */
+  --r-2: 8px;   /* buttons, fields */
+  --r-3: 14px;  /* dialogs, the login well */
+  --r-pill: 999px;
+  --hairline: 1px;
+
+  /* ---- Motion ---- */
+  --dur-micro: 120ms;  /* press, hover */
+  --dur-short: 200ms;  /* toggles, chips */
+  --dur-mid: 320ms;    /* panels, drawers */
+  --dur-long: 560ms;   /* page changes */
+  --dur-scene: 1200ms; /* the login descent */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in: cubic-bezier(0.5, 0, 0.75, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-water: cubic-bezier(0.45, 0.05, 0.25, 1);
+
+  /* ---- Brand primitives (from assets/logo.svg) ---- */
+  --navy-950: #050d18;
+  --navy-900: #081a2e;
+  --navy-850: #0e2036;
+  --navy-800: #14294a;
+  --navy-700: #1d3a62;
+  --gold-300: #f4d58a;
+  --gold-400: #e9c46a;
+  --gold-700: #7a4e00;
+  --water-200: #7ef0e4;
+  --water-400: #34d0c3;
+  --water-600: #1a9e93;
+  --water-800: #0a6e65;
+  --sand-50: #f6efe2;
+  --sand-100: #ede2ce;
+  --sand-200: #e3d4b8;
+  --ink-900: #0b1f34;
+}
+
+/* ---- Night (default) ---- */
+:root,
+[data-theme="night"] {
+  color-scheme: dark;
+  --sky-top: var(--navy-950);
+  --bg: var(--navy-900);
+  --stratum-1: var(--navy-850);
+  --stratum-2: var(--navy-800);
+  --stratum-3: var(--navy-700);
+  --earth: #0a1624;
+
+  --text: #eef2f7;
+  --text-2: #a9b8cc;
+  --text-3: #7f92ab;
+
+  --accent: var(--gold-400);        /* actions, focus, selection */
+  --accent-strong: var(--gold-300);
+  --on-accent: #1a1305;
+  --accent-soft: rgb(233 196 106 / 0.12);
+
+  --water: var(--water-400);        /* live traffic and health only */
+  --water-bright: var(--water-200);
+  --water-deep: var(--water-600);
+  --water-soft: rgb(52 208 195 / 0.14);
+
+  --warn: #f4a259;
+  --danger: #ff7a7a;
+  --danger-soft: rgb(255 122 122 / 0.12);
+
+  --line: rgb(233 196 106 / 0.16);  /* gold hairline between strata */
+  --line-strong: rgb(233 196 106 / 0.42);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  --shadow-deep: 0 24px 64px -24px rgb(0 0 0 / 0.7);
+  --grain-opacity: 0.05;
+  --star: #e9c46a;
+}
+
+/* ---- Dawn (light) ---- */
+[data-theme="dawn"] {
+  color-scheme: light;
+  --sky-top: #fbf6ec;
+  --bg: var(--sand-50);
+  --stratum-1: var(--sand-100);
+  --stratum-2: var(--sand-200);
+  --stratum-3: #d8c6a4;             /* surfaces only, no small text on it */
+  --earth: #e9dcc4;
+
+  --text: var(--ink-900);
+  --text-2: #3a4f66;
+  --text-3: #4f6175;
+
+  --accent: var(--gold-700);
+  --accent-strong: #5e3c00;
+  --on-accent: #fff8ea;
+  --accent-soft: rgb(122 78 0 / 0.1);
+
+  --water: var(--water-800);
+  --water-bright: #0f8c80;
+  --water-deep: #07564f;
+  --water-soft: rgb(10 110 101 / 0.12);
+
+  --warn: #8a4800;
+  --danger: #b42318;
+  --danger-soft: rgb(180 35 24 / 0.1);
+
+  --line: rgb(122 78 0 / 0.18);
+  --line-strong: rgb(122 78 0 / 0.45);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  --shadow-deep: 0 24px 64px -28px rgb(60 40 0 / 0.35);
+  --grain-opacity: 0.07;
+  --star: #c8962e;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-micro: 0ms;
+    --dur-short: 0ms;
+    --dur-mid: 120ms;
+    --dur-long: 160ms;
+    --dur-scene: 200ms;
+  }
+}

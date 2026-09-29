@@ -13,6 +13,7 @@ use tracing::{debug, error, info, warn};
 
 use super::{Session, SessionStream};
 use crate::crypto::random_below;
+use crate::stats::Peer;
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
@@ -89,8 +90,11 @@ impl SessionPool {
 /// With `lifetime`, a session is also replaced after roughly that long (±10 %, so
 /// several sessions do not rotate in lockstep): the replacement is connected first, then
 /// the old session stops taking streams and closes once its streams are done.
+///
+/// Sessions coming up and failed attempts are counted in `link`.
 pub async fn maintain<C, Fut>(
     peer: &'static str,
+    link: Arc<Peer>,
     mut connect: C,
     lifetime: Option<Duration>,
     on_session: impl Fn(Arc<Session>),
@@ -104,6 +108,7 @@ pub async fn maintain<C, Fut>(
         let session = match connect().await {
             Ok(session) => Arc::new(session),
             Err(e) => {
+                link.failed(&e);
                 match e.kind() {
                     io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported => {
                         error!(error = %e, "{peer} rejected the tunnel connection")
@@ -117,6 +122,7 @@ pub async fn maintain<C, Fut>(
         };
         let kind = session.kind();
         let started = Instant::now();
+        link.session_up(&session);
         on_session(session.clone());
         info!("{kind} session to {peer} established");
         if let Some(old) = retiring.take() {
@@ -215,7 +221,10 @@ mod tests {
         };
         let p = pool.clone();
         let lifetime = Some(Duration::from_millis(300));
-        tokio::spawn(maintain("test peer", connect, lifetime, move |s| p.add(s)));
+        let link = Arc::new(Peer::default());
+        tokio::spawn(maintain("test peer", link, connect, lifetime, move |s| {
+            p.add(s)
+        }));
 
         // First session comes up.
         let first = peers_rx.recv().await.unwrap();

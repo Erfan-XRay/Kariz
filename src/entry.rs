@@ -19,10 +19,11 @@ use crate::config::{Config, Forward, Mode, TransportKind, Tuning};
 use crate::crypto::{Crypto, ReplayFilter};
 use crate::mux::{MuxSession, SessionConfig, Side};
 use crate::proto::{self, Open};
-use crate::relay::{relay, relay_stream};
+use crate::relay::{relay, relay_stream, Counters};
 #[cfg(feature = "quic")]
 use crate::session::quic::{accept_sessions, QuicSession};
 use crate::session::{maintain, Session, SessionPool};
+use crate::stats::{ForwardStats, Stats};
 #[cfg(feature = "quic")]
 use crate::transport::quic::{QuicDialer, QuicListener, QuicSettings};
 use crate::transport::{Dialer, Listener, Settings};
@@ -35,6 +36,7 @@ struct Entry {
     crypto: Crypto,
     tuning: Tuning,
     source: Source,
+    stats: Arc<Stats>,
 }
 
 enum Source {
@@ -52,10 +54,11 @@ pub async fn run(config: Config) -> Result<()> {
     let transport = Settings::new(&config.tunnel, config.kcp());
     let crypto = Crypto::new(&config.tunnel.token, config.tunnel.encryption).with_mux(mux.enabled);
     let sessions = SessionConfig::new(&mux);
+    let stats = Stats::new(&config);
     let mut tasks = JoinSet::new();
 
     let source = if transport.kind == TransportKind::Quic {
-        Source::Mux(quic_pool(&config, &crypto, &sessions, &mut tasks).await?)
+        Source::Mux(quic_pool(&config, &crypto, &sessions, &stats, &mut tasks).await?)
     } else {
         match config.mode {
             Mode::Direct if mux.enabled => {
@@ -87,9 +90,12 @@ pub async fn run(config: Config) -> Result<()> {
                             )))
                         }
                     };
-                    let lifetime = mux.max_lifetime;
+                    let (lifetime, link) = (mux.max_lifetime, stats.peer.clone());
                     tasks.spawn(async move {
-                        maintain("the exit side", connect, lifetime, move |s| pool.add(s)).await;
+                        maintain("the exit side", link, connect, lifetime, move |s| {
+                            pool.add(s)
+                        })
+                        .await;
                         Ok(())
                     });
                 }
@@ -118,23 +124,31 @@ pub async fn run(config: Config) -> Result<()> {
                 let hs = tuning.handshake_timeout;
                 if mux.enabled {
                     let pool = Arc::new(SessionPool::default());
-                    let p = pool.clone();
+                    let (p, link_stats) = (pool.clone(), stats.peer.clone());
                     let on_link = move |link: Link, peer: SocketAddr| {
                         let session = MuxSession::over(link, Side::Client, sessions.clone());
-                        p.add(Arc::new(Session::Kmux(session)));
+                        let session = Arc::new(Session::Kmux(session));
+                        link_stats.session_up(&session);
+                        p.add(session);
                         info!(%peer, "mux session from the exit side established");
                     };
-                    tasks.spawn(accept_reverse(listener, crypto.clone(), hs, on_link));
+                    let accept =
+                        accept_reverse(listener, crypto.clone(), hs, stats.clone(), on_link);
+                    tasks.spawn(accept);
                     Source::Mux(pool)
                 } else {
                     let (tx, rx) = mpsc::channel(POOL_CAPACITY);
+                    let link_stats = stats.peer.clone();
                     let on_link = move |link: Link, peer: SocketAddr| {
+                        link_stats.link_up();
                         debug!(%peer, "tunnel connection added to pool");
                         if tx.try_send(link).is_err() {
                             warn!(%peer, "tunnel pool is full, dropping connection");
                         }
                     };
-                    tasks.spawn(accept_reverse(listener, crypto.clone(), hs, on_link));
+                    let accept =
+                        accept_reverse(listener, crypto.clone(), hs, stats.clone(), on_link);
+                    tasks.spawn(accept);
                     Source::Reverse(Mutex::new(rx))
                 }
             }
@@ -145,9 +159,11 @@ pub async fn run(config: Config) -> Result<()> {
         crypto,
         tuning,
         source,
+        stats: stats.clone(),
     });
 
-    // `kariz speedtest` reaches the live sessions through this (Unix only).
+    // `kariz status` reads the counters and `kariz speedtest` reaches the live sessions
+    // through this (Unix only).
     #[cfg(unix)]
     if let Some(socket) = config.control_socket() {
         let entry = entry.clone();
@@ -155,15 +171,16 @@ pub async fn run(config: Config) -> Result<()> {
             let entry = entry.clone();
             async move { entry.open_channel(&open).await }
         };
-        tasks.spawn(crate::control::serve(socket, open));
+        tasks.spawn(crate::control::serve(socket, Some(open), stats.clone()));
     }
 
-    for forward in &config.forward {
+    for (forward, counters) in config.forward.iter().zip(&stats.forwards) {
         if forward.protocol.has_tcp() {
             let listener = TcpListener::bind(&forward.listen)
                 .await
                 .with_context(|| format!("failed to listen on forward port {}", forward.listen))?;
-            tasks.spawn(accept_users(entry.clone(), listener, forward.clone()));
+            let (entry, forward, counters) = (entry.clone(), forward.clone(), counters.clone());
+            tasks.spawn(accept_users(entry, listener, forward, counters));
         }
         if forward.protocol.has_udp() {
             let socket = udp::bind(&forward.listen, &entry.tuning.udp)
@@ -179,8 +196,9 @@ pub async fn run(config: Config) -> Result<()> {
             };
             let (udp_tuning, target) = (entry.tuning.udp.clone(), forward.target.clone());
             let (listen, duplicate) = (forward.listen.clone(), forward.duplication());
+            let counters = counters.clone();
             tasks.spawn(async move {
-                udp::serve(socket, udp_tuning, target, duplicate, opener)
+                udp::serve(socket, udp_tuning, target, duplicate, counters, opener)
                     .await
                     .with_context(|| format!("UDP forward port {listen} failed"))
             });
@@ -208,6 +226,7 @@ async fn quic_pool(
     config: &Config,
     crypto: &Crypto,
     sessions: &SessionConfig,
+    stats: &Arc<Stats>,
     tasks: &mut JoinSet<Result<()>>,
 ) -> Result<Arc<SessionPool>> {
     let (tuning, mux) = (config.tuning(), config.mux());
@@ -238,9 +257,12 @@ async fn quic_pool(
                         )))
                     }
                 };
-                let lifetime = mux.max_lifetime;
+                let (lifetime, link) = (mux.max_lifetime, stats.peer.clone());
                 tasks.spawn(async move {
-                    maintain("the exit side", connect, lifetime, move |s| pool.add(s)).await;
+                    maintain("the exit side", link, connect, lifetime, move |s| {
+                        pool.add(s)
+                    })
+                    .await;
                     Ok(())
                 });
             }
@@ -254,14 +276,16 @@ async fn quic_pool(
                 addr = %listener.local_addr()?,
                 "entry: reverse mode over QUIC, waiting for the exit side"
             );
-            let p = pool.clone();
+            let (p, link) = (pool.clone(), stats.peer.clone());
             let on_session = move |session: QuicSession, peer: SocketAddr| {
-                p.add(Arc::new(Session::Quic(session)));
+                let session = Arc::new(Session::Quic(session));
+                link.session_up(&session);
+                p.add(session);
                 info!(%peer, "quic session from the exit side established");
             };
-            let sessions = sessions.clone();
+            let (sessions, link) = (sessions.clone(), stats.peer.clone());
             tasks.spawn(async move {
-                accept_sessions(listener, sessions, open_timeout, on_session).await;
+                accept_sessions(listener, sessions, open_timeout, link, on_session).await;
                 Ok(())
             });
         }
@@ -275,6 +299,7 @@ async fn quic_pool(
     _: &Config,
     _: &Crypto,
     _: &SessionConfig,
+    _: &Arc<Stats>,
     _: &mut JoinSet<Result<()>>,
 ) -> Result<Arc<SessionPool>> {
     anyhow::bail!("this build has no QUIC support (the `quic` feature is off)")
@@ -286,6 +311,7 @@ async fn accept_reverse(
     listener: Listener,
     crypto: Crypto,
     handshake_timeout: Duration,
+    stats: Arc<Stats>,
     on_link: impl Fn(Link, SocketAddr) + Send + Sync + 'static,
 ) -> Result<()> {
     let replay = Arc::new(ReplayFilter::default());
@@ -300,16 +326,25 @@ async fn accept_reverse(
             }
         };
         let (crypto, replay, on_link) = (crypto.clone(), replay.clone(), on_link.clone());
+        let stats = stats.clone();
         tokio::spawn(async move {
             match channel::accept(stream, &crypto, &replay, handshake_timeout).await {
                 Ok(link) => on_link(link, peer),
-                Err(e) => warn!(%peer, error = %e, "tunnel handshake failed"),
+                Err(e) => {
+                    stats.peer.failed(&e);
+                    warn!(%peer, error = %e, "tunnel handshake failed")
+                }
             }
         });
     }
 }
 
-async fn accept_users(entry: Arc<Entry>, listener: TcpListener, forward: Forward) -> Result<()> {
+async fn accept_users(
+    entry: Arc<Entry>,
+    listener: TcpListener,
+    forward: Forward,
+    counters: Arc<ForwardStats>,
+) -> Result<()> {
     let open = encode_open(Open::tcp(forward.target.clone()));
     loop {
         let (user, peer) = match listener.accept().await {
@@ -321,9 +356,9 @@ async fn accept_users(entry: Arc<Entry>, listener: TcpListener, forward: Forward
             }
         };
         let (entry, open) = (entry.clone(), open.clone());
-        let target = forward.target.clone();
+        let (target, counters) = (forward.target.clone(), counters.clone());
         tokio::spawn(async move {
-            if let Err(e) = handle_user(&entry, user, &open).await {
+            if let Err(e) = handle_user(&entry, user, &open, &counters).await {
                 debug!(%peer, %target, error = %e, "connection ended with error");
             }
         });
@@ -336,14 +371,36 @@ fn encode_open(open: Open) -> Bytes {
     frame.into()
 }
 
-async fn handle_user(entry: &Entry, mut user: TcpStream, open: &Bytes) -> io::Result<()> {
+async fn handle_user(
+    entry: &Entry,
+    mut user: TcpStream,
+    open: &Bytes,
+    stats: &Arc<ForwardStats>,
+) -> io::Result<()> {
+    let _open = stats.tcp_connection();
     user.set_nodelay(entry.tuning.nodelay)?;
     let size = entry.tuning.buffer_size;
-    match entry.open_channel(open).await? {
-        Channel::Stream(stream) => relay_stream(&mut user, &stream, size).await?,
-        Channel::Link(mut link) => relay(&mut user, &mut link, size).await?,
+    let channel = entry
+        .open_channel(open)
+        .await
+        .inspect_err(|_| stats.open_failed())?;
+    let counters = Counters {
+        read: &stats.traffic.up,
+        written: &stats.traffic.down,
     };
-    Ok(())
+    let result = match channel {
+        Channel::Stream(stream) => relay_stream(&mut user, &stream, size, counters).await,
+        Channel::Link(mut link) => relay(&mut user, &mut link, size, counters).await,
+    };
+    // With mux the stream is used before the exit side answers; it resets the stream
+    // when it cannot reach the target.
+    if result
+        .as_ref()
+        .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionRefused)
+    {
+        stats.open_failed();
+    }
+    result.map(|_| ())
 }
 
 impl Entry {
@@ -367,7 +424,9 @@ impl Entry {
     async fn open_direct(&self, dialer: &Dialer, open: &[u8]) -> io::Result<Link> {
         let wait = self.tuning.handshake_timeout + self.tuning.dial_timeout;
         timeout(wait, async {
-            let mut link = channel::connect(dialer, &self.crypto, open).await?;
+            let connected = channel::connect(dialer, &self.crypto, open).await;
+            let mut link = connected.inspect_err(|e| self.stats.peer.failed(e))?;
+            self.stats.peer.link_up();
             proto::read_status(&mut link).await?;
             Ok(link)
         })

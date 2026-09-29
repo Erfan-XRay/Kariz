@@ -292,6 +292,33 @@ async fn idle_session_stays_up() {
 }
 
 #[tokio::test]
+async fn pings_measure_the_round_trip() {
+    // The first ping goes out as the session starts; its pong gives the first sample.
+    let (client, server) = pair();
+    assert!(
+        within(2, async {
+            loop {
+                if client.rtt().is_some() && server.rtt().is_some() {
+                    break true;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+    );
+    assert!(client.rtt().unwrap() < Duration::from_secs(1));
+
+    // A pong for another sequence number (an old one, or a peer's bug) is not a sample.
+    let (a, mut b) = tokio::io::duplex(64 * 1024);
+    let lone = MuxSession::new(a, Side::Client, config());
+    let mut pong = Vec::new();
+    frame::put(&mut pong, FrameType::Pong, 0, &999u64.to_be_bytes());
+    b.write_all(&pong).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(lone.rtt(), None);
+}
+
+#[tokio::test]
 async fn goaway_stops_new_streams_only() {
     let (client, server) = pair();
     let mut a = client.open(Bytes::from_static(b"t")).unwrap();

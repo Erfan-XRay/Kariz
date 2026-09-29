@@ -1,7 +1,9 @@
 # Troubleshooting
 
 Start with `kariz check -c /etc/kariz/config.toml` on both sides: it validates the file,
-prints the values in effect and lists warnings. Then read the logs:
+prints the values in effect and lists warnings. On a running tunnel, `kariz status -c ...`
+says whether the other side is connected and, if not, the last error
+([Status](status.md)). Then read the logs:
 
 ```bash
 journalctl -u kariz -f                      # with systemd

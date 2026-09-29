@@ -171,6 +171,10 @@ struct State {
     incoming: Option<mpsc::UnboundedSender<(MuxStream, Bytes)>>,
     last_recv: Instant,
     ping_seq: u64,
+    /// The latest ping not answered yet, and when it went out.
+    ping_sent: Option<(u64, Instant)>,
+    /// Smoothed round-trip time from ping to pong (7/8 old, 1/8 new, as TCP's SRTT).
+    srtt: Option<Duration>,
     /// Datagrams to send, all streams, oldest first; `dgram_bytes` counts them with
     /// their frame headers.
     dgrams: VecDeque<(u32, Bytes)>,
@@ -251,6 +255,8 @@ impl Shared {
                 incoming,
                 last_peer_id,
                 goaway,
+                ping_sent,
+                srtt,
                 ..
             } = &mut *st;
             match h.kind {
@@ -367,7 +373,18 @@ impl Shared {
                         }
                     }
                 }
-                FrameType::Pong => {}
+                FrameType::Pong => {
+                    // Every peer echoes the ping's 8 bytes (our sequence number), so this
+                    // measures the round trip against old peers too.
+                    let seq = u64::from_be_bytes(payload[..8].try_into().unwrap());
+                    if let Some((sent_seq, at)) = *ping_sent {
+                        if sent_seq == seq {
+                            let sample = at.elapsed();
+                            *srtt = Some(srtt.map_or(sample, |old| (old * 7 + sample) / 8));
+                            *ping_sent = None;
+                        }
+                    }
+                }
                 FrameType::GoAway => {
                     *goaway = true;
                     // No more streams will arrive.
@@ -644,6 +661,8 @@ impl MuxSession {
                 incoming: Some(tx),
                 last_recv: Instant::now(),
                 ping_seq: 0,
+                ping_sent: None,
+                srtt: None,
                 dgrams: VecDeque::new(),
                 dgram_bytes: 0,
                 dgram_turn: false,
@@ -772,6 +791,11 @@ impl MuxSession {
 
     pub fn stream_count(&self) -> usize {
         self.shared.lock().streams.len()
+    }
+
+    /// Smoothed round-trip time from pings; `None` until the first pong.
+    pub fn rtt(&self) -> Option<Duration> {
+        self.shared.lock().srtt
     }
 
     /// Resolves once the session is closed, for whatever reason.
@@ -910,6 +934,7 @@ async fn keepalive_loop(shared: &Shared) -> io::Result<()> {
                 ));
             }
             st.ping_seq += 1;
+            st.ping_sent = Some((st.ping_seq, Instant::now()));
             let seq = st.ping_seq.to_be_bytes();
             frame::put(&mut st.control, FrameType::Ping, 0, &seq);
             st.peer_path

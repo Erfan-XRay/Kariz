@@ -18,11 +18,12 @@ use crate::mux::{MuxSession, SessionConfig, Side};
 use crate::proto::{
     self, Open, KIND_SPEEDTEST, KIND_UDP, STATUS_DIAL_FAILED, STATUS_OK, STATUS_UNSUPPORTED,
 };
-use crate::relay::{relay, relay_stream};
+use crate::relay::{relay, relay_stream, Counters};
 #[cfg(feature = "quic")]
 use crate::session::quic::{accept_sessions, QuicSession};
 use crate::session::{maintain, ResetReason, Session, SessionStream};
 use crate::speedtest::{self, Pipe};
+use crate::stats::Stats;
 #[cfg(feature = "quic")]
 use crate::transport::quic::{QuicDialer, QuicListener, QuicSettings};
 use crate::transport::{tcp, Dialer, Listener, Settings};
@@ -39,9 +40,19 @@ struct Exit {
     tuning: Tuning,
     /// Slots for speed test streams; `None` when `tunnel.speedtest` is off.
     speedtest: Option<Arc<Semaphore>>,
+    stats: Arc<Stats>,
 }
 
 impl Exit {
+    /// Counters for a relay with a target: what is read from the target goes down to the
+    /// users, what is written to it came up from them.
+    fn target_counters(&self) -> Counters<'_> {
+        Counters {
+            read: &self.stats.targets.traffic.down,
+            written: &self.stats.targets.traffic.up,
+        }
+    }
+
     /// A slot for a speed test stream, or why there is none.
     fn speedtest_slot(&self) -> Result<OwnedSemaphorePermit, ResetReason> {
         let slots = self.speedtest.as_ref().ok_or(ResetReason::Unsupported)?;
@@ -63,9 +74,18 @@ pub async fn run(config: Config) -> Result<()> {
             .tunnel
             .speedtest
             .then(|| Arc::new(Semaphore::new(SPEEDTEST_STREAMS))),
+        stats: Stats::new(&config),
     });
     let sessions = SessionConfig::new(&mux);
     let mut tasks = JoinSet::new();
+
+    // `kariz status` reads the counters through this (Unix only).
+    #[cfg(unix)]
+    if let Some(socket) = config.control_socket() {
+        let serve =
+            crate::control::serve(socket, None::<crate::control::NoOpen>, exit.stats.clone());
+        tasks.spawn(serve);
+    }
 
     if transport.kind == TransportKind::Quic {
         run_quic(&config, &exit, &sessions, &mut tasks).await?;
@@ -96,12 +116,12 @@ pub async fn run(config: Config) -> Result<()> {
                             }
                         }
                     };
-                    let lifetime = mux.max_lifetime;
+                    let (lifetime, link) = (mux.max_lifetime, exit.stats.peer.clone());
                     tasks.spawn(async move {
                         let on_session = move |s| {
                             tokio::spawn(run_session(exit.clone(), s));
                         };
-                        maintain("the entry side", connect, lifetime, on_session).await;
+                        maintain("the entry side", link, connect, lifetime, on_session).await;
                         Ok(())
                     });
                 }
@@ -190,12 +210,12 @@ async fn run_quic(
                         )))
                     }
                 };
-                let lifetime = mux.max_lifetime;
+                let (lifetime, link) = (mux.max_lifetime, exit.stats.peer.clone());
                 tasks.spawn(async move {
                     let on_session = move |s| {
                         tokio::spawn(run_session(exit.clone(), s));
                     };
-                    maintain("the entry side", connect, lifetime, on_session).await;
+                    maintain("the entry side", link, connect, lifetime, on_session).await;
                     Ok(())
                 });
             }
@@ -210,13 +230,16 @@ async fn run_quic(
                 "exit: direct mode over QUIC, waiting for the entry side"
             );
             let exit = exit.clone();
+            let link = exit.stats.peer.clone();
             let on_session = move |session: QuicSession, peer: std::net::SocketAddr| {
                 info!(%peer, "quic session from the entry side established");
-                tokio::spawn(run_session(exit.clone(), Arc::new(Session::Quic(session))));
+                let session = Arc::new(Session::Quic(session));
+                exit.stats.peer.session_up(&session);
+                tokio::spawn(run_session(exit.clone(), session));
             };
             let sessions = sessions.clone();
             tasks.spawn(async move {
-                accept_sessions(listener, sessions, open_timeout, on_session).await;
+                accept_sessions(listener, sessions, open_timeout, link, on_session).await;
                 Ok(())
             });
         }
@@ -231,10 +254,12 @@ async fn pool_worker(exit: Arc<Exit>, dialer: Arc<Dialer>) -> Result<()> {
     loop {
         let mut link = match connect_once(&exit, &dialer).await {
             Ok(link) => {
+                exit.stats.peer.link_up();
                 backoff = BACKOFF_MIN;
                 link
             }
             Err(e) => {
+                exit.stats.peer.failed(&e);
                 if matches!(
                     e.kind(),
                     io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
@@ -291,13 +316,18 @@ async fn accept_direct(
             let hs_timeout = exit.tuning.handshake_timeout;
             let link = match channel::accept(stream, &exit.crypto, &replay, hs_timeout).await {
                 Ok(link) => link,
-                Err(e) => return warn!(%peer, error = %e, "tunnel handshake failed"),
+                Err(e) => {
+                    exit.stats.peer.failed(&e);
+                    return warn!(%peer, error = %e, "tunnel handshake failed");
+                }
             };
             if let Some(config) = sessions {
                 info!(%peer, "mux session from the entry side established");
-                let session = MuxSession::over(link, Side::Server, config);
-                return run_session(exit, Arc::new(Session::Kmux(session))).await;
+                let session = Arc::new(Session::Kmux(MuxSession::over(link, Side::Server, config)));
+                exit.stats.peer.session_up(&session);
+                return run_session(exit, session).await;
             }
+            exit.stats.peer.link_up();
             let mut link = link;
             match timeout(hs_timeout, Open::read(&mut link)).await {
                 Ok(Ok(open)) => serve(&exit, link, open).await,
@@ -321,12 +351,14 @@ async fn serve(exit: &Exit, mut tunnel: Link, open: Open) {
         let _ = speedtest::serve(pipe, &open.target).await;
         return;
     }
+    exit.stats.targets.stream();
     if open.kind == KIND_UDP {
         return serve_udp(exit, tunnel, open).await;
     }
     let mut target = match tcp::connect(&open.target, &exit.tuning).await {
         Ok(t) => t,
         Err(e) => {
+            exit.stats.targets.dial_failed(&open.target, &e);
             warn!(target = %open.target, error = %e, "could not connect to target");
             let _ = proto::write_status(&mut tunnel, STATUS_DIAL_FAILED).await;
             return;
@@ -335,7 +367,14 @@ async fn serve(exit: &Exit, mut tunnel: Link, open: Open) {
     if proto::write_status(&mut tunnel, STATUS_OK).await.is_err() {
         return;
     }
-    if let Err(e) = relay(&mut tunnel, &mut target, exit.tuning.buffer_size).await {
+    if let Err(e) = relay(
+        &mut target,
+        &mut tunnel,
+        exit.tuning.buffer_size,
+        exit.target_counters(),
+    )
+    .await
+    {
         debug!(target = %open.target, error = %e, "connection ended with error");
     }
 }
@@ -371,10 +410,12 @@ async fn serve_stream(exit: &Exit, stream: SessionStream, syn: Bytes) {
         let _ = speedtest::serve(Pipe::Stream(stream), &open.target).await;
         return;
     }
+    exit.stats.targets.stream();
     if open.kind == KIND_UDP {
         let socket = match udp::connect(&open.target, &exit.tuning).await {
             Ok(s) => s,
             Err(e) => {
+                exit.stats.targets.dial_failed(&open.target, &e);
                 warn!(target = %open.target, error = %e, "could not open UDP to target");
                 return stream.reset(ResetReason::DialFailed);
             }
@@ -384,11 +425,13 @@ async fn serve_stream(exit: &Exit, stream: SessionStream, syn: Bytes) {
     let mut target = match tcp::connect(&open.target, &exit.tuning).await {
         Ok(t) => t,
         Err(e) => {
+            exit.stats.targets.dial_failed(&open.target, &e);
             warn!(target = %open.target, error = %e, "could not connect to target");
             return stream.reset(ResetReason::DialFailed);
         }
     };
-    if let Err(e) = relay_stream(&mut target, &stream, exit.tuning.buffer_size).await {
+    let size = exit.tuning.buffer_size;
+    if let Err(e) = relay_stream(&mut target, &stream, size, exit.target_counters()).await {
         debug!(target = %open.target, error = %e, "connection ended with error");
     }
 }
@@ -399,6 +442,7 @@ async fn serve_udp(exit: &Exit, mut tunnel: Link, open: Open) {
     let socket = match udp::connect(&open.target, &exit.tuning).await {
         Ok(s) => s,
         Err(e) => {
+            exit.stats.targets.dial_failed(&open.target, &e);
             warn!(target = %open.target, error = %e, "could not open UDP to target");
             let _ = proto::write_status(&mut tunnel, STATUS_DIAL_FAILED).await;
             return;
@@ -414,7 +458,16 @@ async fn relay_udp(exit: &Exit, tunnel: Channel, socket: tokio::net::UdpSocket, 
     debug!(target = %open.target, "UDP flow opened");
     let (source, sink) = udp::Connected::new(socket);
     let (idle, duplicate) = (exit.tuning.udp.timeout, open.duplicate);
-    match udp::relay(tunnel, source, sink, idle, duplicate).await {
+    match udp::relay(
+        tunnel,
+        source,
+        sink,
+        idle,
+        duplicate,
+        exit.target_counters(),
+    )
+    .await
+    {
         Ok(()) => debug!(target = %open.target, "UDP flow closed"),
         Err(e) => debug!(target = %open.target, error = %e, "UDP flow ended with error"),
     }
