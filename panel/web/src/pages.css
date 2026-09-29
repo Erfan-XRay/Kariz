@@ -726,3 +726,12 @@ textarea.text { padding: var(--sp-3); min-height: 88px; resize: vertical; line-h
 .page-band .select, .page-band .search { min-height: 40px; }
 
 .check { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--text-2); }
+
+/* private networks (phase 13) */
+.addr-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-3); }
+.addr-row { display: grid; grid-template-columns: minmax(120px, 200px) minmax(160px, 320px) auto; gap: var(--sp-3); align-items: center; }
+.addr-row .nm { font-weight: 600; }
+.meter { height: 6px; border-radius: 3px; background: var(--stratum-3); overflow: hidden; }
+.meter i { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--water-deep), var(--water-bright)); transition: width 700ms var(--ease-water); }
+[dir="rtl"] .meter i { background: linear-gradient(270deg, var(--water-deep), var(--water-bright)); }
+@media (max-width: 767px) { .addr-row { grid-template-columns: 1fr; } .rail-item span { font-size: 10px; } }

@@ -4,8 +4,8 @@ import { useApp } from "./store";
 import { Icon } from "./ui";
 import logo from "./logo.svg";
 
-export type PageId = "map" | "servers" | "tunnels" | "logs" | "settings";
-export const PAGES: PageId[] = ["map", "servers", "tunnels", "logs", "settings"];
+export type PageId = "map" | "servers" | "tunnels" | "networks" | "logs" | "settings";
+export const PAGES: PageId[] = ["map", "servers", "tunnels", "networks", "logs", "settings"];
 
 interface Command {
   label: string;

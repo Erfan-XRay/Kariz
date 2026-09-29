@@ -44,6 +44,64 @@ pub enum Request {
         streams: u32,
         udp: bool,
     },
+    /// Make (or make again) the GRE interface of a private network link.
+    NetUp { net: NetSpec },
+    /// Remove a link's interface.
+    NetDown { name: String },
+    /// The panel's whole list of this server's links: make the ones that are missing or
+    /// changed, remove the ones that are not in it (sent when an agent connects).
+    NetSync { links: Vec<NetSpec> },
+    /// Ping the far end of a link across it.
+    NetPing { name: String },
+    /// Whether GRE can be made here, and the state of this server's links.
+    NetStatus,
+}
+
+/// One private network link on this server, as data (docs/PHASE13.md, section 4). The
+/// agent checks every field before it runs anything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetSpec {
+    /// `kz-` and up to eight small letters or digits.
+    pub name: String,
+    /// This server's public address, and the other server's.
+    pub local: String,
+    pub remote: String,
+    /// Tells two GRE tunnels between the same two addresses apart.
+    pub key: u32,
+    /// This end's private address, the other end's, and the prefix length (30 or 31).
+    pub address: String,
+    pub peer: String,
+    pub prefix: u8,
+    pub mtu: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetIface {
+    pub name: String,
+    pub address: String,
+    pub exists: bool,
+    pub up: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetStatus {
+    /// This server can make GRE interfaces (root, the `ip_gre` module, no container limit).
+    pub gre: bool,
+    /// Why not, when it cannot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub links: Vec<NetIface>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PingReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// What a tunnel is, as data: everything the manager's `add` takes, without free text
@@ -156,6 +214,11 @@ pub struct Health {
     pub tx_bps: Option<f64>,
     pub uptime_secs: Option<u64>,
     pub load1: Option<f64>,
+    /// The IPv4 networks this server already has routes for (`172.17.0.0/16`, a cloud's
+    /// private network...), without the default route and Kariz's own `kz-` links. Private
+    /// networks are never given a range that overlaps one (docs/PHASE13.md, section 3).
+    #[serde(default)]
+    pub routes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

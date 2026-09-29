@@ -33,11 +33,25 @@ export function useOp(id: string | null): Op | null {
   return op;
 }
 
-/** The text of an operation's error: a known code, or what the server said. */
-export function opError(t: (k: string, v?: Record<string, string | number>) => string, error: string | null): string {
+type T = (k: string, v?: Record<string, string | number>) => string;
+
+/**
+ * The text of an error: a known code (`gre_blocked`, or one with details after colons such as
+ * `no_address:SERVER`, `overlaps_route:SERVER:10.0.0.0/8`), or what the server said.
+ */
+export function describeError(t: T, error: string, names?: Map<string, string>): string {
   if (!error) return "";
-  const known = t(`op.err.${error}`);
-  return known === `op.err.${error}` ? error : known;
+  const [code, a, ...rest] = error.split(":");
+  const key = `op.err.${code}`;
+  const known = t(key);
+  if (known === key) return error;
+  const who = a ? (names?.get(a) ?? a) : "";
+  return t(key, { server: who, route: rest.join(":"), detail: [a, ...rest].filter(Boolean).join(":") });
+}
+
+/** The text of an operation's error: a known code, or what the server said. */
+export function opError(t: T, error: string | null, names?: Map<string, string>): string {
+  return describeError(t, error ?? "", names);
 }
 
 /** The steps of an operation as a checklist that fills in as they finish. */

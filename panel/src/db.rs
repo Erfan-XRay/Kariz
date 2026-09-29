@@ -74,6 +74,30 @@ const MIGRATIONS: &[&str] = &[
          detail TEXT NOT NULL DEFAULT ''
      );
      CREATE INDEX events_ts ON events (ts);",
+    // 5: private networks (docs/PHASE13.md). Every subnet, address and interface name is
+    // UNIQUE, so no address can be given twice whatever the code does.
+    "CREATE TABLE networks (
+         id TEXT PRIMARY KEY,
+         name TEXT NOT NULL UNIQUE,
+         cidr TEXT NOT NULL UNIQUE,
+         created INTEGER NOT NULL
+     );
+     CREATE TABLE net_links (
+         id TEXT PRIMARY KEY,
+         network TEXT NOT NULL REFERENCES networks (id),
+         a TEXT NOT NULL,
+         b TEXT NOT NULL,
+         subnet TEXT NOT NULL UNIQUE,
+         addr_a TEXT NOT NULL UNIQUE,
+         addr_b TEXT NOT NULL UNIQUE,
+         gre_key INTEGER NOT NULL,
+         ifname TEXT NOT NULL UNIQUE,
+         created INTEGER NOT NULL,
+         UNIQUE (a, b, gre_key),
+         CHECK (a < b)
+     );",
+    // 6: the public address of each server, as the others reach it (GRE needs both ends).
+    "CREATE TABLE server_addrs (server TEXT PRIMARY KEY, addr TEXT NOT NULL);",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

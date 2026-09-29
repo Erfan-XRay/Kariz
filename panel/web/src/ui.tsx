@@ -27,6 +27,14 @@ const ICONS: Record<string, ReactNode> = {
     </>
   ),
   logs: <path d="M5 5h14M5 9.5h9M5 14h14M5 18.5h7" />,
+  networks: (
+    <>
+      <path d="M2.5 8h19" />
+      <path d="M6 8v6M18 8v6" />
+      <path d="M4.5 8a1.5 1.2 0 0 1 3 0M16.5 8a1.5 1.2 0 0 1 3 0" />
+      <path d="M6 16.5c4 3.2 8 3.2 12 0" strokeDasharray="2.2 2.2" />
+    </>
+  ),
   settings: (
     <>
       <path d="M4 7h10M18 7h2M4 17h2M10 17h10" />

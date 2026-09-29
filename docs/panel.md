@@ -69,7 +69,9 @@ panel within seconds.
    entry dials the exit), the transport (`tcp`, `tcpmux`, `ws`, `wss`, `quic`, `kcp`) and the
    profile (`balanced`, `ultraspeed`, `gaming`).
 3. **Connection:** the port the accepting side listens on and its address as the other side
-   reaches it. For `ws`/`wss`, the path.
+   reaches it. For `ws`/`wss`, the path. In *direct* mode you can tick **Use a private GRE
+   network** and the tunnel runs over private addresses the panel hands out
+   ([networks.md](networks.md)).
 4. **Ports:** what the entry opens: `443, 8080-8090, 2053=53`, with TCP, UDP or both, and the
    host the exit reaches them at (default `127.0.0.1`).
 5. **Build:** the review, then the panel does it on both servers, in order, and you watch each
@@ -103,6 +105,8 @@ and forgets it. So *a new token* cannot be undone if it fails half way; run it a
   have **the same name**, which is how `kariz-manager` names the two sides. Each tunnel's page
   has charts of its throughput and round trip over 1 hour, 24 hours, 7 days and 30 days. The
   last hour is kept in memory; five-minute averages are stored in the database for 30 days.
+- **Networks:** private GRE networks between your servers, with addresses that are never
+  repeated ([networks.md](networks.md)).
 - **Logs:** pick a tunnel and read the log of **both sides interleaved by time**, filtered by
   level or text, with *Follow*. The *Events* tab lists a server going offline or back, a tunnel
   losing its connection or getting it back.
