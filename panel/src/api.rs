@@ -35,6 +35,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/link", post(link_login))
         .route("/api/logout", post(logout))
         .route("/api/servers", get(servers))
+        .route("/api/servers/join-code", post(join_code))
+        .route("/api/servers/remove", post(remove_server))
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/revoke", post(revoke))
         .route("/api/password", post(password))
@@ -375,31 +377,98 @@ async fn new_link(State(state): State<AppState>, peer: Peer, headers: HeaderMap)
     }
 }
 
-/// This server's name: its hostname, as the system gives it.
-fn hostname() -> String {
-    std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|h| h.trim().to_owned())
-        .filter(|h| !h.is_empty())
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .or_else(|| std::env::var("COMPUTERNAME").ok())
-        .unwrap_or_else(|| "this-server".to_owned())
-}
-
-/// The servers the panel knows. For now that is the one it runs on; connected servers
-/// (agents) join in step 11.4.
+/// The servers the panel knows: its own and every connected agent's, with their health and
+/// tunnels as of the last time they were asked (every couple of seconds).
 async fn servers(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(r) = authenticate(&state, &headers, false) {
         return r;
     }
-    reply(
-        StatusCode::OK,
-        json!({ "servers": [{
-            "id": "local",
-            "name": hostname(),
-            "local": true,
-            "version": env!("CARGO_PKG_VERSION"),
-            "arch": std::env::consts::ARCH,
-        }] }),
-    )
+    match state.hub.snapshot() {
+        Ok(list) => reply(
+            StatusCode::OK,
+            json!({ "servers": list, "agents": state.agent_port.is_some() }),
+        ),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct JoinBody {
+    name: Option<String>,
+    /// The address the browser reached the panel by: what the new server should dial.
+    host: String,
+}
+
+async fn join_code(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<JoinBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let Some(port) = state.agent_port else {
+        return error(StatusCode::CONFLICT, "agents_off");
+    };
+    let host = body.host.trim();
+    let name = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    if !crate::join::valid_host(host) || name.is_some_and(|n| !crate::join::valid_name(n)) {
+        return error(StatusCode::BAD_REQUEST, "bad_input");
+    }
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    match state.hub.create_join(name, &format!("{host}:{port}")) {
+        Ok(code) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                "made a join code",
+            );
+            reply(
+                StatusCode::OK,
+                json!({ "code": code, "valid_for": crate::join::JOIN_TTL }),
+            )
+        }
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RemoveBody {
+    id: String,
+}
+
+async fn remove_server(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<RemoveBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match state.hub.remove(&body.id) {
+        Ok(true) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("removed server {}", body.id),
+            );
+            reply(StatusCode::OK, json!({}))
+        }
+        Ok(false) => error(StatusCode::NOT_FOUND, "no_such_server"),
+        Err(e) => internal(e),
+    }
 }

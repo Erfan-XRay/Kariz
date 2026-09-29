@@ -40,6 +40,25 @@ const MIGRATIONS: &[&str] = &[
      );
      CREATE TABLE failures (ip TEXT NOT NULL, at INTEGER NOT NULL);
      CREATE INDEX failures_ip ON failures (ip, at);",
+    // 3: agents. A server's key is what it proves itself with (the panel needs it to
+    // check the proof), so it is stored as it is; the database file is private.
+    "CREATE TABLE servers (
+         id TEXT PRIMARY KEY,
+         name TEXT NOT NULL,
+         key TEXT NOT NULL,
+         created INTEGER NOT NULL,
+         last_seen INTEGER NOT NULL DEFAULT 0,
+         version TEXT NOT NULL DEFAULT '',
+         arch TEXT NOT NULL DEFAULT '',
+         host TEXT NOT NULL DEFAULT ''
+     );
+     CREATE TABLE joins (
+         hash TEXT PRIMARY KEY,
+         name TEXT NOT NULL,
+         created INTEGER NOT NULL,
+         expires INTEGER NOT NULL,
+         used INTEGER NOT NULL DEFAULT 0
+     );",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

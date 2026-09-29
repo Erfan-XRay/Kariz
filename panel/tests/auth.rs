@@ -31,7 +31,7 @@ impl Panel {
     fn new() -> Self {
         let db = Db::in_memory().unwrap();
         Self {
-            app: http::router(PATH, AppState { db: db.clone() }),
+            app: http::router(PATH, AppState::new(db.clone())),
             db,
         }
     }

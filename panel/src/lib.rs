@@ -1,11 +1,16 @@
 //! The Kariz web panel (docs/PHASE11.md).
 
+pub mod agent;
 pub mod api;
 pub mod auth;
 pub mod cert;
+pub mod collect;
 pub mod config;
 pub mod db;
 pub mod http;
+pub mod hub;
+pub mod join;
+pub mod wire;
 
 use std::path::Path;
 
@@ -30,6 +35,8 @@ pub fn init(config_path: &Path, data_dir: &Path, port: Option<u16>) -> Result<In
             listen: format!("0.0.0.0:{}", port.map_or_else(random_port, Ok)?),
             path: format!("k-{}", random_hex(4)?),
             data_dir: data_dir.to_path_buf(),
+            agent_listen: Some(format!("0.0.0.0:{}", random_port()?)),
+            kariz_dir: std::path::PathBuf::from("/etc/kariz"),
         };
         config.validate()?;
         if let Some(dir) = config_path.parent() {

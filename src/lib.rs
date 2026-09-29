@@ -4,6 +4,7 @@ pub mod allocator;
 pub mod config;
 pub mod control;
 pub mod crypto;
+pub mod link;
 pub mod mux;
 pub mod proto;
 pub mod session;

@@ -6,12 +6,47 @@ export interface SessionInfo {
   csrf?: string;
 }
 
+export interface Health {
+  cpu_pct: number | null;
+  mem_total: number | null;
+  mem_used: number | null;
+  rx_bps: number | null;
+  tx_bps: number | null;
+  uptime_secs: number | null;
+  load1: number | null;
+}
+
+export interface TunnelStatus {
+  peer: { connected: boolean; sessions: number | null; rtt_ms: number | null; last_error: { secs_ago: number; text: string } | null };
+  totals: { bytes_up: number; bytes_down: number; tcp_open: number; udp_flows: number };
+}
+
+export interface TunnelInfo {
+  name: string;
+  role: string;
+  mode: string;
+  transport: string;
+  profile: string;
+  listen: string | null;
+  remote: string | null;
+  forwards: { listen: string; target: string; protocol: string }[];
+  active: boolean | null;
+  status: TunnelStatus | null;
+  error: string | null;
+  rate_mbps: number | null;
+}
+
 export interface ServerInfo {
   id: string;
   name: string;
   local: boolean;
+  online: boolean;
   version: string;
   arch: string;
+  hostname: string;
+  seen_secs: number | null;
+  health: Health | null;
+  tunnels: TunnelInfo[];
 }
 
 export interface SessionRow {
@@ -66,7 +101,9 @@ export const api = {
   login: (password: string) => call<{ csrf: string }>("POST", "login", { password }),
   loginWithLink: (token: string) => call<{ csrf: string }>("POST", "link", { token }),
   logout: () => call<object>("POST", "logout"),
-  servers: () => call<{ servers: ServerInfo[] }>("GET", "servers"),
+  servers: () => call<{ servers: ServerInfo[]; agents: boolean }>("GET", "servers"),
+  joinCode: (name: string | undefined, host: string) => call<{ code: string; valid_for: number }>("POST", "servers/join-code", { name, host }),
+  removeServer: (id: string) => call<object>("POST", "servers/remove", { id }),
   sessions: () => call<{ sessions: SessionRow[] }>("GET", "sessions"),
   revoke: (id: number) => call<object>("POST", "sessions/revoke", { id }),
   changePassword: (current: string | undefined, next: string) =>

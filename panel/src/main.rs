@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+use kariz_panel::agent::{self, AgentConfig, DEFAULT_AGENT_CONFIG};
 use kariz_panel::auth;
 use kariz_panel::config::{Config, DEFAULT_CONFIG, DEFAULT_DATA_DIR};
 use kariz_panel::db::Db;
@@ -34,6 +35,15 @@ enum Command {
         /// The port, instead of a random one (20000-59999).
         #[arg(long)]
         port: Option<u16>,
+    },
+    /// Run the agent that connects this server to a panel. The first time, give it the
+    /// join code the panel shows (*Add server*); after that it remembers who it is.
+    Agent {
+        #[arg(short, long, default_value = DEFAULT_AGENT_CONFIG)]
+        config: PathBuf,
+        /// The join code from the panel.
+        #[arg(long)]
+        join: Option<String>,
     },
     /// Make a one-time login link (valid for 60 minutes, works once).
     LoginLink {
@@ -70,6 +80,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Serve { config } => serve(Config::load(&config)?),
+        Command::Agent { config, join } => run_agent(&config, join.as_deref()),
         Command::LoginLink { config, host } => {
             let config = Config::load(&config)?;
             let db = Db::open(&config.database())?;
@@ -125,7 +136,18 @@ fn serve(config: Config) -> Result<()> {
         let listener = tokio::net::TcpListener::bind(&config.listen)
             .await
             .with_context(|| format!("failed to listen on {}", config.listen))?;
-        let app = http::router(&config.path, AppState { db });
+        let hub = kariz_panel::hub::Hub::new(db.clone(), config.kariz_dir.clone());
+        tokio::spawn(hub.clone().run_local());
+        let mut state = AppState::new(db);
+        state.hub = hub.clone();
+        if let Some(listen) = &config.agent_listen {
+            let acceptor = kariz::link::Acceptor::bind(listen, &hub.link_token()?)
+                .await
+                .with_context(|| format!("failed to listen for agents on {listen}"))?;
+            state.agent_port = config.agent_port();
+            tokio::spawn(hub.clone().serve_agents(acceptor));
+        }
+        let app = http::router(&config.path, state);
         tokio::select! {
             result = http::serve(listener, &config, app) => result,
             _ = shutdown_signal() => {
@@ -153,4 +175,33 @@ async fn shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
+}
+
+fn run_agent(path: &std::path::Path, join: Option<&str>) -> Result<()> {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+    let config = match join {
+        Some(code) => {
+            if path.exists() && AgentConfig::load(path).is_ok_and(|c| c.id.is_some()) {
+                anyhow::bail!(
+                    "{} is registered already; delete it to join a panel again",
+                    path.display()
+                );
+            }
+            let config = agent::enroll_from_code(code, path)?;
+            eprintln!("settings written to {}", path.display());
+            config
+        }
+        None => AgentConfig::load(path)?,
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        let agent = agent::Agent::new(path, config);
+        tokio::select! {
+            result = agent.run() => result,
+            _ = shutdown_signal() => Ok(()),
+        }
+    })
 }

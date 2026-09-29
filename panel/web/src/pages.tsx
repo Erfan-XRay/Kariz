@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api } from "./api";
 import type { ServerInfo, SessionRow } from "./api";
+import { bytesPerSec, pairTunnels, rateParts } from "./derive";
 import { paletteNow } from "./draw";
 import { startMap } from "./scene-map";
 import type { MapData, MapHit } from "./scene-map";
@@ -9,16 +10,31 @@ import { CodeBlock, Dialog, Icon, Odo, Seg, useAgo } from "./ui";
 
 // ---------------------------------------------------------------- the map
 
+const stateKey = { up: "st.up", down: "st.down", off: "st.off" } as const;
+
 export function MapPage({ servers }: { servers: ServerInfo[] }) {
   const { t, num, low } = useApp();
   const canvas = useRef<HTMLCanvasElement>(null);
   const [tip, setTip] = useState<MapHit | null>(null);
+  const tunnels = useMemo(() => pairTunnels(servers), [servers]);
   // The scene reads the latest data and settings without restarting.
   const data = useRef<MapData>({ servers: [], tunnels: [] });
   const lowRef = useRef(low);
   data.current = {
-    servers: servers.map((s) => ({ id: s.id, name: s.name, sub: s.local ? t("role.local") : "", st: "up" as const })),
-    tunnels: [],
+    servers: servers.map((s) => ({ id: s.id, name: s.name, sub: s.local ? t("role.local") : `${s.arch} · ${s.version}`, st: s.online ? ("up" as const) : ("down" as const) })),
+    tunnels: tunnels
+      .filter((x) => x.paired)
+      .map((x) => {
+        const r = rateParts(x.rate);
+        return {
+          id: x.name,
+          a: x.entry!.server.id,
+          b: x.exit!.server.id,
+          st: x.state,
+          rate: x.rate,
+          label: x.state === "up" ? `${x.name}  ${num(r.value, r.decimals)} ${r.unit}` : `${x.name}  ${t(stateKey[x.state])}`,
+        };
+      }),
   };
   lowRef.current = low;
 
@@ -34,7 +50,13 @@ export function MapPage({ servers }: { servers: ServerInfo[] }) {
     });
   }, []);
 
-  const hovered = tip?.kind === "server" ? servers.find((s) => s.id === tip.id) : undefined;
+  const up = tunnels.filter((x) => x.state === "up");
+  const total = up.reduce((n, x) => n + x.rate, 0);
+  const rate = rateParts(total);
+  const conns = up.reduce((n, x) => n + x.connections, 0);
+  const online = servers.filter((s) => s.online).length;
+  const hoveredServer = tip?.kind === "server" ? servers.find((s) => s.id === tip.id) : undefined;
+  const hoveredTunnel = tip?.kind === "tunnel" ? tunnels.find((x) => x.name === tip.id) : undefined;
   return (
     <div className="page is-on">
       <div className="map-band">
@@ -53,21 +75,52 @@ export function MapPage({ servers }: { servers: ServerInfo[] }) {
             {t("st.off")}
           </span>
         </div>
-        {hovered && tip && (
+        {tip && (hoveredServer || hoveredTunnel) && (
           <div className="map-tip is-on" style={{ left: Math.min(tip.x + 16, 600), top: tip.y + 16 }}>
-            <b>{hovered.name}</b>
-            <div className="row">
-              <span>{t("tip.role")}</span>
-              <span>{t("role.local")}</span>
-            </div>
-            <div className="row">
-              <span>{t("srv.version", { v: hovered.version })}</span>
-              <span className="mono">{hovered.arch}</span>
-            </div>
+            {hoveredServer && (
+              <>
+                <b>{hoveredServer.name}</b>
+                <div className="row">
+                  <span>{t("srv.cpu")}</span>
+                  <span className="num">{hoveredServer.health?.cpu_pct != null ? `${num(Math.round(hoveredServer.health.cpu_pct))}%` : "—"}</span>
+                </div>
+                <div className="row">
+                  <span>{t("srv.ram")}</span>
+                  <span className="num">{hoveredServer.health?.mem_total ? `${num(Math.round(((hoveredServer.health.mem_used ?? 0) * 100) / hoveredServer.health.mem_total))}%` : "—"}</span>
+                </div>
+                <div className="row">
+                  <span>{t("tip.tunnels")}</span>
+                  <span className="num">{num(hoveredServer.tunnels.length)}</span>
+                </div>
+              </>
+            )}
+            {hoveredTunnel && (
+              <>
+                <b>{hoveredTunnel.name}</b>
+                <div className="row">
+                  <span className="mono">
+                    {hoveredTunnel.entry?.server.name} → {hoveredTunnel.exit?.server.name}
+                  </span>
+                </div>
+                <div className="row">
+                  <span>{t("t.transport")}</span>
+                  <span className="mono">
+                    {hoveredTunnel.transport} · {hoveredTunnel.profile}
+                  </span>
+                </div>
+                {hoveredTunnel.rtt != null && (
+                  <div className="row">
+                    <span>rtt</span>
+                    <span className="num">{num(hoveredTunnel.rtt, 1)} ms</span>
+                  </div>
+                )}
+                {hoveredTunnel.error && <div className="row" style={{ color: "var(--danger)" }}>{hoveredTunnel.error}</div>}
+              </>
+            )}
           </div>
         )}
         <p className="sr-only" id="map-alt">
-          {t("alt.prefix")} {servers.map((s) => s.name).join(", ")}
+          {t("alt.prefix")} {servers.map((s) => s.name).join(", ")}; {tunnels.map((x) => `${x.name}: ${t(stateKey[x.state])}`).join(", ")}
         </p>
       </div>
 
@@ -76,29 +129,29 @@ export function MapPage({ servers }: { servers: ServerInfo[] }) {
           <div className="metric">
             <div className="label">{t("m.through")}</div>
             <div className="value num">
-              <Odo value={num(0, 1)} />
-              <span className="unit">Mbps</span>
+              <Odo value={num(rate.value, rate.decimals)} />
+              <span className="unit">{rate.unit}</span>
             </div>
           </div>
           <div className="metric">
             <div className="label">{t("m.conns")}</div>
             <div className="value num">
-              <Odo value={num(0)} />
+              <Odo value={num(conns)} />
             </div>
           </div>
           <div className="metric">
             <div className="label">{t("m.tunnels")}</div>
             <div className="value num">
-              <Odo value={num(0)} />
+              <Odo value={num(up.length)} />
               <span className="unit">
-                {t("m.of")} {num(0)}
+                {t("m.of")} {num(tunnels.length)}
               </span>
             </div>
           </div>
           <div className="metric">
             <div className="label">{t("m.servers")}</div>
             <div className="value num">
-              <Odo value={num(servers.length)} />
+              <Odo value={num(online)} />
               <span className="unit">
                 {t("m.of")} {num(servers.length)}
               </span>
@@ -110,10 +163,62 @@ export function MapPage({ servers }: { servers: ServerInfo[] }) {
       <div className="stratum s2">
         <div className="stratum-head">
           <h2>{t("t.title")}</h2>
+          <span className="eyebrow">{t("t.hint")}</span>
         </div>
-        <p className="muted small" style={{ margin: 0, maxWidth: 640 }}>
-          {t("t.empty")}
-        </p>
+        {tunnels.length === 0 ? (
+          <p className="muted small" style={{ margin: 0, maxWidth: 640 }}>
+            {t("t.empty")}
+          </p>
+        ) : (
+          <table className="tunnels">
+            <thead>
+              <tr>
+                <th>{t("t.name")}</th>
+                <th>{t("t.route")}</th>
+                <th>{t("t.transport")}</th>
+                <th>{t("t.state")}</th>
+                <th>{t("t.rate")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tunnels.map((x) => {
+                const r = rateParts(x.rate);
+                return (
+                  <tr key={x.name}>
+                    <td>
+                      <span className="t-name">{x.name}</span>
+                    </td>
+                    <td>
+                      <span className="t-route">
+                        {x.paired ? (
+                          <>
+                            <span>{x.entry!.server.name}</span>
+                            <Icon name="arrow" size={16} />
+                            <span>{x.exit!.server.name}</span>
+                          </>
+                        ) : (
+                          <span>
+                            {(x.entry ?? x.exit)!.server.name} · {t("t.oneSide")}
+                          </span>
+                        )}
+                      </span>
+                    </td>
+                    <td className="c-transport">
+                      <span className="tag">{x.transport}</span> <span className="tag">{x.profile}</span>
+                    </td>
+                    <td>
+                      <span className={`state ${x.state}`}>
+                        <i className={`dot ${x.state}`} />
+                        {t(stateKey[x.state])}
+                      </span>
+                    </td>
+                    <td className="rate num">{x.state === "up" ? `${num(r.value, r.decimals)} ${r.unit}` : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );
@@ -121,25 +226,155 @@ export function MapPage({ servers }: { servers: ServerInfo[] }) {
 
 // ---------------------------------------------------------------- servers
 
-function Well({ level = 0.6 }: { level?: number }) {
+function Well({ level = 0.6, online = true }: { level?: number; online?: boolean }) {
   const y = 40 - 14 * level;
   return (
     <svg className="srv-well" viewBox="0 0 44 44" aria-hidden="true">
       <path d="M4 16h36" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
       <path d="M12 16a10 7 0 0 1 20 0Z" fill="var(--accent)" />
       <rect x="18" y="16" width="8" height="25" rx="2" fill="var(--stratum-3)" />
-      <rect x="18" y={y} width="8" height={41 - y} rx="2" fill="var(--water)" />
+      <rect x="18" y={y} width="8" height={41 - y} rx="2" fill={online ? "var(--water)" : "var(--text-3)"} />
     </svg>
   );
 }
 
-export function ServersPage({ servers }: { servers: ServerInfo[] }) {
-  const { t } = useApp();
+function Meter({ label, pct }: { label: string; pct: number | null }) {
+  const { num } = useApp();
+  const v = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+  return (
+    <div className={`meter ${v > 85 ? "hot" : ""}`}>
+      <div className="top">
+        <span>{label}</span>
+        <b>{pct == null ? "—" : `${num(Math.round(v))}%`}</b>
+      </div>
+      <div className="bar">
+        <i style={{ width: `${v}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agentsOn: boolean; onClose: () => void }) {
+  const { t, digitsOf, toast } = useApp();
+  const [name, setName] = useState("");
+  const [host, setHost] = useState(location.hostname);
+  const [code, setCode] = useState("");
+  const [left, setLeft] = useState(0);
+  const [error, setError] = useState("");
+  const known = useRef<Set<string>>(new Set());
+  const joined = servers.find((s) => code && !known.current.has(s.id) && s.online);
+
+  useEffect(() => {
+    if (left <= 0 || joined) return;
+    const id = setInterval(() => setLeft((v) => Math.max(0, v - 1)), 1000);
+    return () => clearInterval(id);
+  }, [left > 0, !!joined]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const make = async () => {
+    setError("");
+    try {
+      known.current = new Set(servers.map((s) => s.id));
+      const made = await api.joinCode(name.trim() || undefined, host.trim());
+      setCode(made.code);
+      setLeft(made.valid_for);
+    } catch (e) {
+      setError(e instanceof ApiError && e.code === "agents_off" ? t("add.off") : t("add.bad"));
+    }
+  };
+
+  const mmss = `${String(Math.floor(left / 60)).padStart(2, "0")}:${String(left % 60).padStart(2, "0")}`;
+  return (
+    <Dialog
+      title={t("add.title")}
+      onClose={onClose}
+      footer={
+        joined ? (
+          <button
+            className="btn btn-primary btn-sm"
+            type="button"
+            onClick={() => {
+              toast(t("add.connected", { name: joined.name }));
+              onClose();
+            }}
+          >
+            {t("add.done")}
+          </button>
+        ) : (
+          <>
+            <button className="btn btn-ghost btn-sm" type="button" onClick={onClose}>
+              {t("cancel")}
+            </button>
+            {!code && (
+              <button className="btn btn-primary btn-sm" type="button" disabled={!host.trim() || !agentsOn} onClick={() => void make()}>
+                {t("add.make")}
+              </button>
+            )}
+          </>
+        )
+      }
+    >
+      {!agentsOn && <p className="err small">{t("add.off")}</p>}
+      {!code && (
+        <>
+          <div className="field">
+            <label htmlFor="add-name">{t("add.name")}</label>
+            <input className="text mono" id="add-name" dir="ltr" placeholder="istanbul-1" value={name} onChange={(e) => setName(e.target.value)} />
+            <span className="help">{t("add.nameHelp")}</span>
+          </div>
+          <div className="field">
+            <label htmlFor="add-host">{t("add.host")}</label>
+            <input className="text mono" id="add-host" dir="ltr" value={host} onChange={(e) => setHost(e.target.value)} />
+            <span className="err">{error}</span>
+          </div>
+        </>
+      )}
+      {code && (
+        <>
+          <div className="field">
+            <span className="label">{t("add.run")}</span>
+            <CodeBlock text={`kariz-panel agent --join ${code}`} />
+            <span className="countdown">{joined ? "" : t("add.valid", { m: digitsOf(mmss) })}</span>
+          </div>
+          <div className={`waiting ${joined ? "done" : ""}`}>
+            {!joined && (
+              <svg className="qloader" viewBox="0 0 180 90" aria-hidden="true">
+                <path className="bed" d="M30 58 L158 76" />
+                <path className="flow" pathLength={1} d="M30 58 L158 76" />
+                <path className="shaft" d="M38 26 V58 M84 26 V64 M130 26 V70" />
+                <path className="ground" d="M8 26 H172" />
+                <path className="mound" d="M30 26 a8 6 0 0 1 16 0Z M76 26 a8 6 0 0 1 16 0Z M122 26 a8 6 0 0 1 16 0Z" />
+                <circle className="drop" cx="38" cy="26" r="4" />
+                <path className="out" d="M164 68 L178 77 L164 86 Z" />
+              </svg>
+            )}
+            <span>{joined ? t("add.connected", { name: joined.name }) : t("add.waiting")}</span>
+          </div>
+        </>
+      )}
+    </Dialog>
+  );
+}
+
+export function ServersPage({ servers, agentsOn, onChanged }: { servers: ServerInfo[]; agentsOn: boolean; onChanged: () => void }) {
+  const { t, num, toast, digitsOf } = useApp();
+  const ago = useAgo();
+  const [adding, setAdding] = useState(false);
+  const [removing, setRemoving] = useState<ServerInfo | null>(null);
   return (
     <div className="page is-on">
       <div className="page-band">
+        <div className="summary">
+          <div>
+            <b>{num(servers.length)}</b>
+            <span>{t("m.serversNote")}</span>
+          </div>
+          <div>
+            <b>{num(servers.filter((s) => s.online).length)}</b>
+            <span>{t("srv.online")}</span>
+          </div>
+        </div>
         <div className="grow" />
-        <button className="btn btn-primary btn-sm" type="button" disabled title={t("srv.addSoon")}>
+        <button className="btn btn-primary btn-sm" type="button" onClick={() => setAdding(true)}>
           <span className="shine" />
           <Icon name="plus" size={18} />
           {t("srv.add")}
@@ -151,24 +386,86 @@ export function ServersPage({ servers }: { servers: ServerInfo[] }) {
         </div>
       )}
       <ul className="srv-list">
-        {servers.map((s) => (
-          <li className="srv" key={s.id} style={{ gridTemplateColumns: "56px minmax(180px, 1.3fr) auto" }}>
-            <Well />
-            <div>
-              <div className="srv-name">{s.name}</div>
-              <div className="srv-sub">
-                {t("srv.version", { v: s.version })} · {s.arch}
+        {servers.map((s) => {
+          const h = s.health;
+          const mem = h?.mem_total ? ((h.mem_used ?? 0) * 100) / h.mem_total : null;
+          const rx = h?.rx_bps != null ? bytesPerSec(h.rx_bps) : null;
+          const tx = h?.tx_bps != null ? bytesPerSec(h.tx_bps) : null;
+          return (
+            <li className="srv" key={s.id}>
+              <Well level={h?.cpu_pct != null ? Math.min(1, h.cpu_pct / 100 + 0.3) : 0.5} online={s.online} />
+              <div>
+                <div className="srv-name">{s.name}</div>
+                <div className="srv-sub">
+                  {t("srv.version", { v: s.version })} · {s.arch}
+                  {h?.uptime_secs != null && ` · ${t("srv.up")} ${digitsOf(Math.floor(h.uptime_secs / 86400) > 0 ? `${Math.floor(h.uptime_secs / 86400)} d` : `${Math.floor(h.uptime_secs / 3600)} h`)}`}
+                </div>
               </div>
-            </div>
-            <span className="badge water">{s.local ? t("srv.panel") : ""}</span>
-          </li>
-        ))}
+              <div className="c-link">
+                <div className="srv-link">
+                  <i className={`dot ${s.online ? "up" : "down"}`} />
+                  <span>{s.local ? t("srv.panel") : s.online ? t("srv.online") : `${t("srv.offline")}${s.seen_secs != null ? ` · ${ago(s.seen_secs)}` : ""}`}</span>
+                </div>
+              </div>
+              <div className="m-cpu">
+                <Meter label={t("srv.cpu")} pct={h?.cpu_pct ?? null} />
+              </div>
+              <div className="m-ram">
+                <Meter label={t("srv.ram")} pct={mem} />
+              </div>
+              <div className="m-net">
+                <div className="meter">
+                  <div className="top">
+                    <span>{t("srv.net")}</span>
+                  </div>
+                  <span className="num small" dir="ltr">
+                    {rx && tx ? `↓ ${num(rx.value, rx.decimals)} ↑ ${num(tx.value, tx.decimals)} ${rx.unit}` : "—"}
+                  </span>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: "var(--sp-2)", alignItems: "center" }}>
+                <span className={`badge ${s.tunnels.length ? "" : "muted"}`}>{t(s.tunnels.length === 1 ? "srv.tn1" : "srv.tn", { n: num(s.tunnels.length) })}</span>
+                {!s.local && (
+                  <button className="btn btn-ghost btn-sm" type="button" onClick={() => setRemoving(s)}>
+                    {t("srv.remove")}
+                  </button>
+                )}
+              </div>
+            </li>
+          );
+        })}
       </ul>
-      <div className="stratum s2">
-        <p className="muted small" style={{ margin: 0 }}>
-          {t("srv.addSoon")}
-        </p>
-      </div>
+      {adding && <AddServer servers={servers} agentsOn={agentsOn} onClose={() => setAdding(false)} />}
+      {removing && (
+        <Dialog
+          title={t("srv.removeTitle", { name: removing.name })}
+          onClose={() => setRemoving(null)}
+          footer={
+            <>
+              <button className="btn btn-ghost btn-sm" type="button" onClick={() => setRemoving(null)}>
+                {t("cancel")}
+              </button>
+              <button
+                className="btn btn-danger solid btn-sm"
+                type="button"
+                onClick={async () => {
+                  const gone = removing;
+                  setRemoving(null);
+                  await api.removeServer(gone.id).catch(() => {});
+                  toast(t("srv.removed", { name: gone.name }));
+                  onChanged();
+                }}
+              >
+                {t("srv.remove")}
+              </button>
+            </>
+          }
+        >
+          <p className="small" style={{ margin: 0 }}>
+            {t("srv.removeText")}
+          </p>
+        </Dialog>
+      )}
     </div>
   );
 }
