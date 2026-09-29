@@ -1,2 +1,4 @@
 /target
 *.local.toml
+/panel/web/dist/
+/panel/web/node_modules/
