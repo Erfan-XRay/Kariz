@@ -25,35 +25,6 @@ jobs:
       - run: cargo clippy --lib --bins --no-default-features --features kcp -- -D warnings
       - run: cargo test
 
-  # TEMPORARY (phase 10.4): A/B benchmark of this branch against v0.6.1 on Linux, for
-  # docs/PHASE10.md. Removed before merge.
-  bench:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build v0.6.1 and this branch
-        run: |
-          git worktree add ../base v0.6.1
-          bin() {
-            (cd "$1" && cargo test --release --test tunnel --no-run --message-format=json |
-              jq -r 'select(.executable != null and .target.name == "tunnel") | .executable' | tail -1)
-          }
-          echo "A=$(bin ../base)" >> "$GITHUB_ENV"
-          echo "B=$(bin .)" >> "$GITHUB_ENV"
-      - name: Alternating rounds (the first is thrown away)
-        run: |
-          mkdir bench
-          for r in 0 1 2 3; do
-            for s in A B; do
-              "${!s}" throughput --ignored --nocapture --test-threads=1 > "bench/$s-$r.txt" 2>&1 || true
-            done
-          done
-          python3 .github/bench_compare.py bench
-
   # The release targets, built the way the release builds them (`cross` for the ARM ones:
   # Docker images with the C cross-compilers that ring and mimalloc need). The ARM
   # library tests run under QEMU, so a target-specific break (32-bit atomics, alignment)
