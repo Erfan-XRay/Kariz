@@ -6,6 +6,11 @@ rust-version = "1.80"
 description = "High-performance, resource-efficient tunnel core for server-to-server links, built to resist DPI."
 publish = false
 
+# The web panel is a separate crate that uses this one as a library (docs/PHASE11.md).
+# A plain `cargo build` at the root still builds only `kariz`.
+[workspace]
+members = ["panel"]
+
 [lib]
 path = "src/lib.rs"
 

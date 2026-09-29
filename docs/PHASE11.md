@@ -126,12 +126,28 @@ build must stay under about 400 KB compressed.
 
 The menu gets a *Web panel* entry for the first three.
 
+*Status after 11.1:* the workspace has `panel/` (lib and the `kariz-panel` binary with
+`init` and `serve`). `init` writes `panel.toml` with a random port (20000-59999) and a
+secret path `k-XXXXXXXX`, makes the SQLite database (migrations, `meta` and `audit` so
+far) and the self-signed certificate, and prints the certificate's SHA-256. `serve`
+answers over TLS (the core's acceptor, HTTP/1.1) only under `/<path>/`; every other
+address gets the nginx 404 page, plain HTTP gets nothing, and the app's pages carry a
+strict Content-Security-Policy. The web app (`panel/web`: Vite, React 19, TypeScript, 70
+KB gzipped for the scaffold) is embedded from `panel/web/dist`, or a placeholder page
+when it is not built. Checked by hand: `init`, `serve`, `curl -k` on every kind of path,
+and headless Edge rendering the app, which calls `api/version`. CI builds the web app
+first in the `check`, `cross` and release jobs, and builds `kariz-panel` with `kariz` for
+all three architectures. Tests: config, database, certificate, `init`, the routes, and
+two over real TLS with the core's pinned client (a wrong pin and plain HTTP get nothing).
+One thing found: axum's `nest` does not pass `/<path>/` (trailing slash) to the inner
+router, so that address, the panel's front page, has its own route.
+
 ## 7. Work breakdown
 
 | Step | Content | Done when |
 |---|---|---|
-| **11.0** Plan | This document. | |
-| **11.1** Skeleton | Workspace, `panel/` crate, config, SQLite schema, axum on TLS under the secret path, the embedded app (or placeholder), CLI; `panel/web` scaffold; CI builds and tests both; the release carries `kariz-panel`. | `kariz-panel serve` answers on HTTPS; CI green. |
+| **11.0** Plan (done) | This document. | |
+| **11.1** Skeleton (done) | Workspace, `panel/` crate, config, SQLite schema, axum on TLS under the secret path, the embedded app (or placeholder), CLI; `panel/web` scaffold; CI builds and tests both; the release carries `kariz-panel`. | `kariz-panel serve` answers on HTTPS; CI green. |
 | **11.2** Sign-in | Section 3, API and tests. | Tests for every rule in the table. |
 | **11.3** Web app | Section 5. | Build under the budget; the prototype's screens in the real app, both languages and themes. |
 | **11.4** Agents | Section 4: `kariz::link`, join codes, the agent, health and tunnels, both directions, live Servers and map. | An in-process test joins an agent and reads its health; a second in CI over real sockets. |
