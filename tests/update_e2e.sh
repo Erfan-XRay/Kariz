@@ -76,8 +76,8 @@ test "$(jq -r .latest.version <<<"$status")" = 98.0.0
 test "$(api -o /dev/null -w '%{http_code}' -X POST "${base}api/update/apply" -d '{}')" = 409
 api -X POST "${base}api/update/apply" -d '{"confirm_major":true}' | jq -e .op >/dev/null
 for _ in $(seq 1 90); do
-    result=$(api "${base}api/update" | jq -c .last_result)
-    [[ "$result" != null ]] && break
+    result=$(api "${base}api/update" | jq -c .last_result 2>/dev/null || true)
+    if [[ -n "$result" && "$result" != null ]]; then break; fi
     sleep 2
 done
 echo "result: $result"
@@ -94,13 +94,13 @@ make_release v99.0.0
 test "$(api -X POST "${base}api/update/check" -d '{}' | jq -r .latest.version)" = 99.0.0
 api -X POST "${base}api/update/apply" -d '{"confirm_major":true}' | jq -e .op >/dev/null
 for _ in $(seq 1 90); do
-    [[ "$(version)" == 99.0.0 ]] && break
+    if [[ "$(version)" == 99.0.0 ]]; then break; fi
     sleep 2
 done
 test "$(version)" = 99.0.0
 for _ in $(seq 1 30); do
-    result=$(api "${base}api/update" | jq -c .last_result)
-    [[ "$(jq -r .version <<<"$result")" == 99.0.0 ]] && break
+    result=$(api "${base}api/update" | jq -c .last_result 2>/dev/null || true)
+    if [[ -n "$result" && "$(jq -r .version <<<"$result")" == 99.0.0 ]]; then break; fi
     sleep 1
 done
 echo "result: $result"
@@ -122,8 +122,8 @@ before=$(systemctl show kariz@plain -p ActiveEnterTimestampMonotonic --value)
 op=$(api -X POST "${base}api/update/servers" -d '{"restart_tunnels":true}' | jq -r .op)
 test -n "$op"
 for _ in $(seq 1 120); do
-    state=$(api "${base}api/op?id=$op" | jq -r .state)
-    [[ "$state" != running ]] && break
+    state=$(api "${base}api/op?id=$op" | jq -r .state 2>/dev/null || true)
+    if [[ -n "$state" && "$state" != running ]]; then break; fi
     sleep 2
 done
 api "${base}api/op?id=$op" | jq -c '{state, error, steps: [.steps[].id]}'
