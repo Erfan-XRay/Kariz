@@ -4,6 +4,7 @@ import type { ServerInfo } from "./api";
 import { pairTunnels, rateParts } from "./derive";
 import type { Tunnel } from "./derive";
 import { useApp } from "./store";
+import { Chart } from "./Chart";
 import { Dialog, Icon } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { Wizard } from "./Wizard";
@@ -172,6 +173,12 @@ function Detail({ tunnel, onClose, onAct, onEdit }: { tunnel: Tunnel; onClose: (
               </span>
             ))}
           </div>
+        </div>
+      )}
+      {tunnel.entry && (
+        <div className="review">
+          <Chart series={`tun:${tunnel.name}:rate`} unit="Mbps" />
+          <Chart series={`tun:${tunnel.name}:rtt`} unit="ms" decimals={0} />
         </div>
       )}
       <p className="muted small">

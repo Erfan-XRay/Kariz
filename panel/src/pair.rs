@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::random_hex;
 use crate::hub::Hub;
 use crate::manage::valid_name;
-use crate::wire::{Ack, CheckReply, ForwardInfo, PutReply, Request, Spec, TunnelInfo};
+use crate::wire::{Ack, CheckReply, ForwardInfo, PutReply, Request, Spec, TextReply, TunnelInfo};
 
 /// How long a new tunnel has to connect before it counts as failed.
 pub const CONNECT_WAIT: Duration = Duration::from_secs(30);
@@ -689,4 +689,54 @@ async fn run_delete(hub: &Hub, op: &str, name: &str) -> Result<(), String> {
         }
     }
     failed.map_or(Ok(()), Err)
+}
+
+/// One line of a tunnel's log, from one of its sides.
+#[derive(Debug, Clone, Serialize)]
+pub struct LogLine {
+    pub server: String,
+    pub role: String,
+    pub text: String,
+}
+
+/// The last `lines` lines of a tunnel's log from both sides, in time order (the journal's
+/// lines start with an ISO time, which sorts as text).
+pub async fn logs(hub: &Hub, name: &str, lines: u32) -> Result<Vec<LogLine>> {
+    if !valid_name(name) {
+        bail!("bad_name");
+    }
+    let placement = place(hub, name)?;
+    if placement.sides.is_empty() {
+        bail!("no_such_tunnel");
+    }
+    let mut all: Vec<LogLine> = Vec::new();
+    for (server, info) in placement.sides {
+        let reply: TextReply = match hub
+            .ask_as(
+                &server,
+                &Request::Logs {
+                    name: name.to_owned(),
+                    lines,
+                },
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        all.extend(
+            reply
+                .text
+                .lines()
+                .filter(|l| !l.trim().is_empty() && !l.starts_with("-- "))
+                .map(|l| LogLine {
+                    server: server.clone(),
+                    role: info.role.clone(),
+                    text: l.to_owned(),
+                }),
+        );
+    }
+    all.sort_by(|a, b| a.text.cmp(&b.text));
+    let skip = all.len().saturating_sub(lines as usize);
+    Ok(all.split_off(skip))
 }

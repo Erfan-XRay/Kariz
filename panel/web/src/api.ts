@@ -130,6 +130,20 @@ export interface Op {
   undone: boolean | null;
 }
 
+export interface EventRow {
+  id: number;
+  at: number;
+  kind: string;
+  subject: string;
+  detail: string;
+}
+
+export interface LogLine {
+  server: string;
+  role: string;
+  text: string;
+}
+
 export class ApiError extends Error {
   status: number;
   code: string;
@@ -189,5 +203,8 @@ export const api = {
     call<Spec>("GET", `tunnel?server=${encodeURIComponent(server)}&name=${encodeURIComponent(name)}`),
   op: (id: string) => call<Op>("GET", `op?id=${encodeURIComponent(id)}`),
   ports: (server: string) => call<{ ports: PortOwner[] }>("GET", `ports?server=${encodeURIComponent(server)}`),
+  history: (key: string, range: string) => call<{ points: [number, number][] }>("GET", `history?key=${encodeURIComponent(key)}&range=${range}`),
+  events: (limit = 100) => call<{ events: EventRow[] }>("GET", `events?limit=${limit}`),
+  logs: (name: string, lines = 200) => call<{ lines: LogLine[] }>("GET", `logs?name=${encodeURIComponent(name)}&lines=${lines}`),
   newLink: () => call<{ token: string; valid_for: number }>("POST", "links"),
 };

@@ -59,6 +59,21 @@ const MIGRATIONS: &[&str] = &[
          expires INTEGER NOT NULL,
          used INTEGER NOT NULL DEFAULT 0
      );",
+    // 4: history for the charts (five-minute averages) and the events list.
+    "CREATE TABLE metrics (
+         key TEXT NOT NULL,
+         ts INTEGER NOT NULL,
+         v REAL NOT NULL,
+         PRIMARY KEY (key, ts)
+     ) WITHOUT ROWID;
+     CREATE TABLE events (
+         id INTEGER PRIMARY KEY,
+         ts INTEGER NOT NULL,
+         kind TEXT NOT NULL,
+         subject TEXT NOT NULL,
+         detail TEXT NOT NULL DEFAULT ''
+     );
+     CREATE INDEX events_ts ON events (ts);",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

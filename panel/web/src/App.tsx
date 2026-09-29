@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, setCsrf } from "./api";
 import type { ServerInfo, SessionInfo } from "./api";
 import { Login, tokenIn } from "./Login";
-import { MapPage, ServersPage, Later, SettingsPage } from "./pages";
+import { MapPage, ServersPage, SettingsPage } from "./pages";
+import { LogsPage } from "./Logs";
 import { Shell } from "./Shell";
 import { TunnelsPage } from "./Tunnels";
 import type { PageId } from "./Shell";
@@ -166,7 +167,7 @@ export function App() {
           {page === "map" && <MapPage servers={servers} />}
           {page === "servers" && <ServersPage servers={servers} agentsOn={agentsOn} onChanged={() => setReload((n) => n + 1)} />}
           {page === "tunnels" && <TunnelsPage servers={servers} onChanged={() => setReload((n) => n + 1)} />}
-          {page === "logs" && <Later phase="12" />}
+          {page === "logs" && <LogsPage servers={servers} />}
           {page === "settings" && <SettingsPage hasPassword={info?.has_password ?? false} onPasswordSet={() => setInfo((i) => (i ? { ...i, has_password: true } : i))} />}
         </Shell>
       )}

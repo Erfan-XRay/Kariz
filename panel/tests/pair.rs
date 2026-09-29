@@ -187,6 +187,20 @@ async fn a_pair_is_made_edited_stopped_deleted_and_a_failure_leaves_nothing() {
     assert!(local_dir.join("pair-1.toml").exists());
     assert!(agent_dir.join("pair-1.toml").exists());
     assert!(through(front, b"hello through the pair").await);
+    // the entry's numbers are being remembered for the charts
+    let mut points = 0;
+    for _ in 0..50 {
+        points = hub
+            .history
+            .series("tun:pair-1:rate", kariz_panel::history::Range::Hour)
+            .unwrap()
+            .len();
+        if points > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(points > 0, "no history was recorded for the tunnel");
     // the same name again is refused while it exists (once the servers have reported it)
     for _ in 0..60 {
         let known = hub

@@ -7,6 +7,7 @@ pub mod cert;
 pub mod collect;
 pub mod config;
 pub mod db;
+pub mod history;
 pub mod http;
 pub mod hub;
 pub mod join;

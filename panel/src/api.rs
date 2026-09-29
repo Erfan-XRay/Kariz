@@ -46,6 +46,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/op", get(op_status))
         .route("/api/ports", get(server_ports))
         .route("/api/tunnel", get(tunnel_spec))
+        .route("/api/history", get(history))
+        .route("/api/events", get(events))
+        .route("/api/logs", get(tunnel_logs))
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/revoke", post(revoke))
         .route("/api/password", post(password))
@@ -683,5 +686,73 @@ async fn tunnel_spec(
     {
         Ok(spec) => reply(StatusCode::OK, json!(spec)),
         Err(_) => error(StatusCode::NOT_FOUND, "no_such_tunnel"),
+    }
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    key: String,
+    range: Option<String>,
+}
+
+/// One series for a chart: `srv:ID:cpu|mem|rx|tx`, `tun:NAME:rate|conns|rtt`.
+async fn history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HistoryQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    let range = crate::history::Range::parse(q.range.as_deref().unwrap_or("1h"));
+    let (true, Some(range)) = (crate::history::valid_key(&q.key), range) else {
+        return error(StatusCode::BAD_REQUEST, "bad_input");
+    };
+    match state.hub.history.series(&q.key, range) {
+        Ok(points) => reply(StatusCode::OK, json!({ "points": points })),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    limit: Option<u32>,
+}
+
+async fn events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<EventsQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match state.hub.history.events(q.limit.unwrap_or(100)) {
+        Ok(events) => reply(StatusCode::OK, json!({ "events": events })),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct LogsQuery {
+    name: String,
+    lines: Option<u32>,
+}
+
+async fn tunnel_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<LogsQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match pair::logs(&state.hub, &q.name, q.lines.unwrap_or(200).clamp(1, 1000)).await {
+        Ok(lines) => reply(StatusCode::OK, json!({ "lines": lines })),
+        Err(e) => match format!("{e:#}").as_str() {
+            "no_such_tunnel" => error(StatusCode::NOT_FOUND, "no_such_tunnel"),
+            "bad_name" => error(StatusCode::BAD_REQUEST, "bad_name"),
+            _ => internal(e),
+        },
     }
 }
