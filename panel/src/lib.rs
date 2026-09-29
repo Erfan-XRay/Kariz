@@ -17,6 +17,7 @@ pub mod net;
 pub mod netops;
 pub mod networks;
 pub mod pair;
+pub mod sign;
 pub mod wire;
 
 use std::path::Path;
