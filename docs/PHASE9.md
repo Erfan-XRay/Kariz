@@ -68,6 +68,13 @@ ports stay in Latin type.
 The design system (tokens, type, spacing, motion timing) is in
 [design/README.md](../design/README.md).
 
+*Status after 9.1:* [design/README.md](../design/README.md) sets out the metaphor, colour
+roles, type, strata layout, motion and accessibility rules; [design/tokens.css](../design/tokens.css)
+holds the tokens for both themes. Every text colour reaches 4.5:1 on the three main
+surfaces of its theme (measured, table in the design document). The fonts are
+self-hosted in `design/fonts/` with their licences: 180 KB in all, most of it Estedad,
+which phase 11 will subset.
+
 ## 3. The panel plan (phases 10 to 13)
 
 ### Architecture
@@ -138,6 +145,6 @@ Each phase gets its own plan document when it starts.
 | Step | Content | Done when |
 |---|---|---|
 | **9.0** Plan (done) | This document. | |
-| **9.1** Design system | Tokens (colour for both themes, type, spacing, radius, motion), fonts, RTL rules, in `design/`. | Document and `tokens.css` in the repository. |
+| **9.1** Design system (done) | Tokens (colour for both themes, type, spacing, radius, motion), fonts, RTL rules, in `design/`. | Document and `tokens.css` in the repository. |
 | **9.2** Prototype | Interactive HTML: loader, login, the map with live-looking traffic, both themes, both languages. | Approved. |
 | **9.3** Screens | Servers, tunnels, the pair wizard, tunnel detail, logs, settings, mobile. | Approved. |
