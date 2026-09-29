@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.7.0 - 2026-09-29
+
+Status for the coming web panel, and for people on the server (docs/PHASE10.md). Nothing
+changes between the two sides: v0.7 works with v0.6, v0.5 and v0.4 peers over every
+transport.
+
+### Added
+
+- **`kariz status`** on either server: whether the other side is connected (sessions,
+  for how long), the round-trip time, failed handshakes and the last error, and for each
+  forwarded port the open connections, UDP flows and live rates up and down; on the exit
+  side, the traffic to the targets, streams served and targets that could not be reached.
+  `--watch` redraws every second; `--json` prints the daemon's document. Exit code 3 when
+  the tunnel is not running (docs/status.md).
+- **A control socket on the exit side too**, answering `status` (the entry's also runs
+  speed tests). The `status` document is JSON with a version number, for tools.
+- **Live counters:** bytes are counted as they flow, not when a connection ends, so a
+  connection open for hours shows up at once. UDP flows add theirs in batches (every 64
+  packets and at least once a second), so busy flows on many cores do not share one
+  counter per packet.
+- **Round-trip time** from the mux pings the sides already exchange (no wire change, so
+  it works against older peers too), and from QUIC's own estimate.
+- **`kariz check --json`**: one document with the settings in effect, or the error with
+  the setting it names (`key`) and, for TOML syntax errors, the `line` and `column`.
+  `kariz check -c -` reads the config from standard input.
+- **kariz-manager:** `status [NAME] [--watch]` runs `kariz status` for a tunnel, or for
+  every tunnel without a name; the menu's status action shows it too (systemd's view for
+  a stopped tunnel, or with Kariz older than 0.7).
+
+### Changed
+
+- The design of the web panel is in the repository: its plan for phases 9 to 13
+  (docs/PHASE9.md), the design system (design/) and an interactive prototype of every
+  screen (design/prototype/). Nothing of it runs yet.
+
 ## 0.6.1 - 2026-09-29
 
 A kariz-manager release: the `kariz` binary is the same as 0.6.0 apart from its version
