@@ -34,6 +34,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/login", post(login))
         .route("/api/link", post(link_login))
         .route("/api/logout", post(logout))
+        .route("/api/servers", get(servers))
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/revoke", post(revoke))
         .route("/api/password", post(password))
@@ -372,4 +373,33 @@ async fn new_link(State(state): State<AppState>, peer: Peer, headers: HeaderMap)
         }
         Err(e) => internal(e),
     }
+}
+
+/// This server's name: its hostname, as the system gives it.
+fn hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|h| h.trim().to_owned())
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .unwrap_or_else(|| "this-server".to_owned())
+}
+
+/// The servers the panel knows. For now that is the one it runs on; connected servers
+/// (agents) join in step 11.4.
+async fn servers(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    reply(
+        StatusCode::OK,
+        json!({ "servers": [{
+            "id": "local",
+            "name": hostname(),
+            "local": true,
+            "version": env!("CARGO_PKG_VERSION"),
+            "arch": std::env::consts::ARCH,
+        }] }),
+    )
 }
