@@ -38,7 +38,7 @@ supported for every transport.
 | 8 | Release builds (static musl for x86_64 / aarch64 / armv7), mimalloc, the manager script, `kariz speedtest`, new log lines; plan in [PHASE8.md](PHASE8.md) | **done (v0.6.0)** |
 | 9 | Web panel design: design system, interactive prototype, all screens; plan (with the whole panel) in [PHASE9.md](PHASE9.md) | **done** (no release) |
 | 10 | Core for the panel: counters, `status` on the control socket (both sides), `kariz status`, `kariz check --json`; plan in [PHASE10.md](PHASE10.md) | **done (v0.7.0)** |
-| 11 | Panel base: `kariz-panel`, sign-in, installer, agents and servers, app shell | planned (v0.8.0-beta) |
+| 11 | Panel base: `kariz-panel`, sign-in, installer, agents and servers, app shell; plan in [PHASE11.md](PHASE11.md) | in progress (v0.8.0-beta) |
 | 12 | Panel tunnels and live monitoring | planned (v0.9.0) |
 | 13 | Panel tests, security review, docs | planned (v1.0.0) |
 
