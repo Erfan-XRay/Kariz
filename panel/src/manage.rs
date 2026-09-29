@@ -447,7 +447,7 @@ pub fn ctl_args(name: &str, action: &str) -> Result<Vec<String>> {
 }
 
 /// Runs a program with fixed arguments and a time limit; its output, or why it failed.
-async fn run(program: &str, args: &[String], limit: Duration) -> Result<(bool, String)> {
+pub(crate) async fn run(program: &str, args: &[String], limit: Duration) -> Result<(bool, String)> {
     let mut command = tokio::process::Command::new(program);
     command.args(args).kill_on_drop(true);
     let output = tokio::time::timeout(limit, command.output())

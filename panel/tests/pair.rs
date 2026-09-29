@@ -107,6 +107,7 @@ async fn a_pair_is_made_edited_stopped_deleted_and_a_failure_leaves_nothing() {
         local_dir.clone(),
         Arc::new(Processes::new(&local_dir, &binary)),
         Duration::from_secs(8),
+        None,
     );
     tokio::spawn(hub.clone().run_local());
     let acceptor = kariz::link::Acceptor::bind("127.0.0.1:0", &hub.link_token().unwrap())

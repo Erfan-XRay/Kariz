@@ -191,6 +191,19 @@ jobs:
       - if: failure()
         run: sudo journalctl -u 'kariz@*' -u kariz-panel -u kariz-agent --no-pager -n 200
 
+  # Private networks (phase 13): two network namespaces play two servers, and the agent's
+  # GRE code (`kariz-panel net`) links them: the private addresses answer, two links between
+  # the same pair work at once, a filtered GRE path fails the test, `net down` removes it.
+  gre:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: shellcheck tests/gre_ns.sh
+      - run: cargo build -p kariz-panel
+      - run: sudo bash tests/gre_ns.sh target/debug/kariz-panel
+
   # nginx in front of the tunnel as a stand-in for a CDN: WebSocket proxying, TLS
   # termination and an idle timeout (tests/tunnel.rs, module `nginx`).
   cdn:
