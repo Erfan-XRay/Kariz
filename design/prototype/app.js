@@ -27,7 +27,7 @@
       "nav.settings": "تنظیمات",
       "nav.logout": "خروج",
       "page.map": "نقشه",
-      "page.mapSub": "۵ سرور، ۵ تانل",
+      "page.mapSub": "{s} سرور، {t} تانل",
       "page.servers": "سرورها",
       "page.tunnels": "تانل‌ها",
       "page.logs": "لاگ",
@@ -110,7 +110,7 @@
       "nav.settings": "Settings",
       "nav.logout": "Sign out",
       "page.map": "Map",
-      "page.mapSub": "5 servers, 5 tunnels",
+      "page.mapSub": "{s} servers, {t} tunnels",
       "page.servers": "Servers",
       "page.tunnels": "Tunnels",
       "page.logs": "Logs",
@@ -221,7 +221,7 @@
   const FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
 
   function localDigits(s) {
-    if (state.lang !== "fa") return s;
+    if (state.lang !== "fa" || state.digits === "latin") return s;
     return s.replace(/\d/g, (d) => FA_DIGITS[d]).replace(/\./g, "٫").replace(/,/g, "٬");
   }
 
@@ -317,7 +317,7 @@
     $("#pw-eye").setAttribute("aria-label", t("login.show"));
     $("#palette-input").placeholder = t("pal.placeholder");
     applyThemeLabels();
-    setPage(state.page, true);
+    setPage(state.page, true, state.param);
     renderRows();
     odoAll(true);
   }
@@ -333,6 +333,7 @@
     readPalette();
     applyThemeLabels();
     drawSparks();
+    for (const f of K.ticks) f();
   }
 
   function toggleLang() {
@@ -721,20 +722,38 @@
     openLogin();
   }
 
-  // pages
+  // pages: "map" lives here; the others register in K.pages (pages.js)
   const PAGES = ["map", "servers", "tunnels", "logs", "settings"];
-  function setPage(id, silent) {
+  function setTitle(title, sub, back) {
+    $("#page-title").textContent = title;
+    $("#page-sub").textContent = sub || "";
+    const b = $("#page-back");
+    b.hidden = !back;
+    b.onclick = back || null;
+  }
+
+  function setPage(id, silent, param) {
+    const same = state.page === id && state.param === param;
     state.page = id;
+    state.param = param;
+    const rail = id === "tunnel" ? "tunnels" : id;
     for (const b of $$(".rail-item[data-page]")) {
-      if (b.dataset.page === id) b.setAttribute("aria-current", "page");
+      if (b.dataset.page === rail) b.setAttribute("aria-current", "page");
       else b.removeAttribute("aria-current");
     }
-    $("#page-title").textContent = t(`page.${id}`);
-    $("#page-sub").textContent = id === "map" ? t("page.mapSub") : t("page.soon");
     const swap = () => {
-      for (const p of $$(".page")) p.classList.toggle("is-on", p.dataset.page === (id === "map" ? "map" : "other"));
+      let box = $(`.page[data-page="${id}"]`);
+      if (!box) {
+        box = document.createElement("div");
+        box.className = "page";
+        box.dataset.page = id;
+        $("#main").append(box);
+      }
+      for (const p of $$(".page")) p.classList.toggle("is-on", p === box);
+      if (id === "map") setTitle(t("page.map"), t("page.mapSub").replace("{s}", fmt(SERVERS.length)).replace("{t}", fmt(TUNNELS.length)));
+      else K.pages[id]?.render(box, param);
     };
-    if (silent) return swap();
+    if (silent || same) return swap();
     const line = $("#loader-line");
     line.classList.add("is-on");
     setTimeout(() => {
@@ -765,6 +784,7 @@
     updateRowRates();
     drawSparks();
     updateAlt();
+    for (const f of K.ticks) f();
   }
 
   // ------------------------------------------------------------------ odometer numbers
@@ -836,7 +856,7 @@
     body.innerHTML = TUNNELS.map(
       (tn) => `
       <tr data-t="${tn.id}">
-        <td><span class="t-name">${tn.id}</span></td>
+        <td><button class="t-name link">${tn.id}</button></td>
         <td><span class="t-route"><span>${byId(tn.a).name}</span><svg><use href="#i-arrow"/></svg><span>${byId(tn.b).name}</span></span></td>
         <td class="c-transport"><span class="tag">${tn.tr}</span> <span class="tag">${tn.prof}</span></td>
         <td><span class="state ${tn.st}"><i class="dot ${tn.st}"></i>${stateLabel(tn.st)}</span></td>
@@ -848,6 +868,7 @@
     for (const row of $$("tr[data-t]", body)) {
       const tn = TUNNELS.find((x) => x.id === row.dataset.t);
       $(".switch", row).addEventListener("click", () => toggleTunnel(tn));
+      $(".t-name", row).addEventListener("click", () => setPage("tunnel", false, tn.id));
       row.addEventListener("mouseenter", () => (state.hot = tn.id));
       row.addEventListener("mouseleave", () => (state.hot = null));
     }
@@ -896,15 +917,15 @@
   }
 
   function toggleTunnel(tn) {
-    if (tn.st === "off") tn.st = tn.id === "backup" ? "down" : "up";
-    else tn.st = "off";
-    tick();
-    renderRows();
+    K.setRunning(tn, tn.st === "off"); // pages.js keeps the events and the broken flag
   }
 
   // ------------------------------------------------------------------ the map
 
   const map = { canvas: $("#map"), running: false, geo: null, stars: [], mouse: null };
+
+  // the layout changes with the size, the direction and the servers and tunnels on it
+  const mapKey = (W, H) => `${W}x${H}${html.dir}${SERVERS.map((s) => s.id).join()}${TUNNELS.map((x) => x.id + x.level).join()}`;
 
   function layout(W, H) {
     const narrow = W < 640;
@@ -915,7 +936,8 @@
     const pos = {};
     SERVERS.forEach((s, i) => (pos[s.id] = rtl ? W - xs[i] : xs[i]));
     const base = yH + (narrow ? 52 : 64);
-    const step = narrow ? 32 : 38;
+    const levels = Math.max(...TUNNELS.map((x) => x.level)) + 1;
+    const step = Math.min(narrow ? 32 : 38, (H - base - 44) / Math.max(1, levels - 1));
     const chans = TUNNELS.map((tn) => {
       const y0 = base + tn.level * step;
       const p0 = { x: pos[tn.a], y: y0 };
@@ -934,7 +956,7 @@
     const r = rng(11);
     map.stars = Array.from({ length: Math.round(W / 14) }, () => ({ x: r() * W, y: r() * (yH - 70) + 6, z: 0.3 + r() * 0.7, ph: r() * 6.28 }));
     const pebbles = Array.from({ length: Math.round(W / 9) }, () => ({ x: r() * W, y: yH + 10 + r() * (H - yH - 14), r: 0.6 + r() * 1.4 }));
-    return { W, H, yH, pos, chans, depth, narrow, rtl, pebbles, key: `${W}x${H}${rtl}` };
+    return { W, H, yH, pos, chans, depth, narrow, rtl, pebbles, key: mapKey(W, H) };
   }
 
   function mapFrame(now) {
@@ -946,7 +968,7 @@
     if (state.page !== "map") return;
     const { ctx, W, H } = fitCanvas(map.canvas);
     const rtl = html.dir === "rtl";
-    if (!map.geo || map.geo.key !== `${W}x${H}${rtl}`) map.geo = layout(W, H);
+    if (!map.geo || map.geo.key !== mapKey(W, H)) map.geo = layout(W, H);
     const g = map.geo;
     const time = now / 1000;
     const dt = Math.min(0.05, map.last ? time - map.last : 0.016);
@@ -1211,7 +1233,7 @@
       const s = hit.s;
       tip.innerHTML =
         `<b>${s.name}</b>` +
-        row("IP", s.ip, true) +
+        row("IP", `<span dir="ltr">${s.ip}</span>`, true) +
         row(t("tip.role"), t("role." + s.role)) +
         row(t("tip.cpu"), `${fmt(s.cpu)}%`) +
         row(t("tip.ram"), `${fmt(s.ram)}%`) +
@@ -1237,7 +1259,7 @@
     $("#map-tip").classList.remove("is-on");
   });
   map.canvas.addEventListener("click", () => {
-    if (map.hoverT) toast(`${t("toast.open")} ${map.hoverT}`);
+    if (map.hoverT) setPage("tunnel", false, map.hoverT);
   });
 
   function updateAlt() {
@@ -1250,7 +1272,7 @@
   // ------------------------------------------------------------------ command palette
 
   const commands = () => [
-    { label: t("pal.new"), hint: "N", run: () => toast(t("toast.wizard")) },
+    ...K.commands(),
     ...PAGES.map((p) => ({ label: `${t("pal.goto")} ${t("page." + p)}`, hint: "", run: () => setPage(p) })),
     { label: t("pal.speed"), hint: "", run: speedtest },
     { label: t("pal.theme"), hint: "", run: toggleTheme },
@@ -1358,6 +1380,17 @@
     }
   });
 
+  // shared with pages.js and wizard.js
+  const K = (window.K = {
+    T, SERVERS, TUNNELS, state, pages: {}, ticks: [], commands: () => [],
+    $, $$, t, fmt, fmtRate, localDigits, clamp, lerp, rgba, fitCanvas, uiFont, monoFont, rng, byId, stateLabel,
+    toast, setPage, setTitle, odo, LOADER, speedtest, toggleTheme, toggleLang, setLow, logout, renderRows, tick,
+    get P() { return P; },
+    addStrings(more) {
+      for (const lang of Object.keys(more)) Object.assign(T[lang], more[lang]);
+    },
+  });
+
   reduced.addEventListener("change", () => setLow(reduced.matches, false));
   addEventListener("resize", () => drawSparks());
 
@@ -1367,5 +1400,5 @@
   tick();
   setInterval(tick, 1000);
   document.fonts?.ready.then(() => (map.geo = null));
-  boot();
+  addEventListener("DOMContentLoaded", boot); // after pages.js and wizard.js have registered
 })();
