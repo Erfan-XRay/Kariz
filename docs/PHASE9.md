@@ -175,7 +175,7 @@ download still needs `GITHUB_TOKEN`.
 | **10** | Core: counters, `status` on the control socket on both sides, `kariz status`, `kariz check --json` | v0.7.0 |
 | **11** | Panel base: crate, sign-in, installer, agents and servers, app shell | v0.8.0-beta |
 | **12** | Tunnels (pair wizard, edit, import) and live monitoring (map, charts, logs, speed test, updates, backup) | v0.9.0 |
-| **13** | Playwright tests, security review, accessibility, docs in both languages | v1.0.0 |
+| **13** | Playwright tests, security review, accessibility, docs in both languages | v1.0.0 (now phase 15: see ROADMAP.md, which added private networks and updating before it) |
 
 Each phase gets its own plan document when it starts.
 
