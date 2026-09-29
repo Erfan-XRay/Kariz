@@ -38,9 +38,12 @@ supported for every transport.
 | 8 | Release builds (static musl for x86_64 / aarch64 / armv7), mimalloc, the manager script, `kariz speedtest`, new log lines; plan in [PHASE8.md](PHASE8.md) | **done (v0.6.0)** |
 | 9 | Web panel design: design system, interactive prototype, all screens; plan (with the whole panel) in [PHASE9.md](PHASE9.md) | **done** (no release) |
 | 10 | Core for the panel: counters, `status` on the control socket (both sides), `kariz status`, `kariz check --json`; plan in [PHASE10.md](PHASE10.md) | **done (v0.7.0)** |
-| 11 | Panel base: `kariz-panel`, sign-in, installer, agents and servers, app shell | planned (v0.8.0-beta) |
+| 11 | Panel base: `kariz-panel`, sign-in, installer, agents and servers, app shell; plan in [PHASE11.md](PHASE11.md) | **done (v0.8.0-beta)** |
 | 12 | Panel tunnels and live monitoring | planned (v0.9.0) |
-| 13 | Panel tests, security review, docs | planned (v1.0.0) |
+| 13 | Private networks: a direct-mode tunnel can run over GRE with private addresses the panel hands out, never repeated, for two or many servers; plan in [PHASE13.md](PHASE13.md) | planned (v0.10.0) |
+| 14 | Updating from the panel: signed releases, one button for the panel and one for every server (agents get the update over their link); plan in [PHASE14.md](PHASE14.md) | planned (v0.11.0) |
+| 15 | Panel tests (Playwright), security review, accessibility, docs in both languages | planned (v1.0.0) |
+| 16 | The documentation website on GitHub Pages: animated, in the panel's design, Persian and English, with a live demo; plan in [PHASE16.md](PHASE16.md) | planned (after v1.0.0) |
 
 ## Protocol (v2)
 
