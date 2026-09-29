@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="fa" dir="rtl" data-theme="night">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Kariz panel prototype</title>
+  <link rel="icon" href="../../assets/logo.svg">
+  <link rel="stylesheet" href="../tokens.css">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<!-- ============================================================ symbols -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-map" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2 9h20"/><path d="M6 9v6M12 9v8M18 9v6"/><path d="M4 15.5c4 1.2 12 2.4 16 2" opacity=".6"/><path d="M4.5 9a1.5 1.2 0 0 1 3 0M10.5 9a1.5 1.2 0 0 1 3 0M16.5 9a1.5 1.2 0 0 1 3 0"/>
+  </symbol>
+  <symbol id="i-servers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+    <rect x="3.5" y="4" width="17" height="6.5" rx="1.5"/><rect x="3.5" y="13.5" width="17" height="6.5" rx="1.5"/><path d="M7 7.25h.01M7 16.75h.01M11 7.25h6M11 16.75h6"/>
+  </symbol>
+  <symbol id="i-tunnels" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 17c3-6 15-6 18 0"/><path d="M6.5 17c2-3.2 9-3.2 11 0"/><path d="M3 17h3.5M17.5 17H21"/>
+  </symbol>
+  <symbol id="i-logs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+    <path d="M5 5h14M5 9.5h9M5 14h14M5 18.5h7"/>
+  </symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+    <path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>
+  </symbol>
+  <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+    <circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>
+  </symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+    <path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10Z"/>
+  </symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+    <path d="M3 16h18"/><path d="M7 16a5 5 0 0 1 10 0"/><path d="M12 5v2.5M5.5 8.5l1.6 1.6M18.5 8.5l-1.6 1.6"/>
+  </symbol>
+  <symbol id="i-leaf" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13 3 5 13.5h6L10 21l8-10.5h-6L13 3Z"/>
+  </symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+    <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/>
+  </symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 12h15M14 7l5 5-5 5"/>
+  </symbol>
+  <symbol id="i-exit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14 4h4.5A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5H14"/><path d="M10 8l-4 4 4 4M6 12h10"/>
+  </symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+    <path d="M12 5v14M5 12h14"/>
+  </symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 16a8 8 0 1 1 16 0"/><path d="m12 16 4-5"/>
+  </symbol>
+</svg>
+
+<!-- ============================================================ boot -->
+<section id="boot" class="screen is-on" aria-label="Loading">
+  <div class="boot-inner">
+    <svg class="boot-logo" viewBox="0 0 256 256" aria-hidden="true">
+      <defs>
+        <linearGradient id="bw" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="#1fb5a8"/><stop offset=".6" stop-color="#34d0c3"/><stop offset="1" stop-color="#7ef0e4"/>
+        </linearGradient>
+      </defs>
+      <rect class="draw" pathLength="1" x="4" y="4" width="248" height="248" rx="54" stroke="var(--line-strong)" stroke-width="2"/>
+      <path class="draw d2" pathLength="1" d="M0 96 H256" stroke="#e9c46a" stroke-width="4"/>
+      <g stroke="#e9c46a" stroke-linecap="round" stroke-width="5" opacity=".6">
+        <path class="draw d3" pathLength="1" d="M58 96 V146"/>
+        <path class="draw d3" pathLength="1" d="M104 96 V154"/>
+        <path class="draw d4" pathLength="1" d="M150 96 V162"/>
+      </g>
+      <g class="fillin" fill="#e9c46a">
+        <path d="M46 96 a12 9 0 0 1 24 0 Z"/><path d="M92 96 a12 9 0 0 1 24 0 Z"/><path d="M138 96 a12 9 0 0 1 24 0 Z"/>
+        <circle cx="44" cy="44" r="2" opacity=".8"/><circle cx="198" cy="34" r="1.6" opacity=".6"/><circle cx="150" cy="58" r="1.2" opacity=".5"/>
+      </g>
+      <path class="fillin" d="M26 142 L186 172" stroke="#06121f" stroke-width="26" stroke-linecap="round"/>
+      <path class="water" pathLength="1" d="M26 142 L186 172" stroke="url(#bw)" stroke-width="16" stroke-linecap="round" fill="none"/>
+      <path class="arrow" d="M190 154 L226 176 L190 198 Z" fill="#7ef0e4" stroke="#7ef0e4" stroke-width="6" stroke-linejoin="round"/>
+    </svg>
+    <div class="boot-word">Kariz<small data-i18n="boot.sub">tunnel panel</small></div>
+  </div>
+</section>
+
+<!-- ============================================================ login -->
+<section id="login" class="screen" aria-labelledby="login-title">
+  <canvas id="login-scene" aria-hidden="true"></canvas>
+
+  <div class="login-top">
+    <div class="brand"><img src="../../assets/logo.svg" alt=""><span>Kariz</span></div>
+    <div class="chip-group">
+      <button class="chip" data-act="lang" type="button">English</button>
+      <button class="chip" data-act="theme" type="button" data-i18n="theme.toDawn">Dawn</button>
+    </div>
+  </div>
+
+  <form class="login-form" id="login-form" novalidate>
+    <h1 class="login-title" id="login-title" data-i18n="login.title">کاریز</h1>
+    <p class="login-sub" data-i18n="login.sub">Water finds its way underground.</p>
+
+    <div class="login-fields">
+      <div class="well-field" id="pw-wrap">
+        <label class="field-label" for="pw" data-i18n="login.password">Admin password</label>
+        <input class="input mono" id="pw" type="password" autocomplete="current-password" aria-describedby="pw-err">
+        <button class="icon-btn" type="button" id="pw-eye" aria-label="Show password"><svg width="20" height="20"><use href="#i-eye"/></svg></button>
+      </div>
+      <p class="field-error" id="pw-err" role="alert"></p>
+      <div style="display:grid;gap:var(--sp-3)">
+        <button class="btn btn-primary" type="submit"><span class="shine"></span><span data-i18n="login.enter">Enter</span></button>
+        <div class="divider" data-i18n="login.or">or</div>
+        <button class="btn btn-ghost" type="button" id="link-login" data-i18n="login.link">I have a one-time link</button>
+        <p class="login-foot"><span data-i18n="login.foot">Make a one-time link on the server:</span> <span class="mono" dir="ltr">kariz-panel login-link</span></p>
+      </div>
+    </div>
+
+    <div class="login-busy" aria-live="polite">
+      <svg class="qloader" viewBox="0 0 180 90" aria-hidden="true"></svg>
+      <span data-i18n="login.checking">Checking the link…</span>
+    </div>
+  </form>
+
+</section>
+
+
+<!-- ============================================================ app -->
+<section id="app" class="screen" aria-label="Kariz panel">
+  <nav class="rail" aria-label="Main">
+    <div class="brand"><img src="../../assets/logo.svg" alt="Kariz"></div>
+    <button class="rail-item" data-page="map" aria-current="page"><svg><use href="#i-map"/></svg><span data-i18n="nav.map">Map</span></button>
+    <button class="rail-item" data-page="servers"><svg><use href="#i-servers"/></svg><span data-i18n="nav.servers">Servers</span></button>
+    <button class="rail-item" data-page="tunnels"><svg><use href="#i-tunnels"/></svg><span data-i18n="nav.tunnels">Tunnels</span></button>
+    <button class="rail-item" data-page="logs"><svg><use href="#i-logs"/></svg><span data-i18n="nav.logs">Logs</span></button>
+    <div class="rail-spacer"></div>
+    <button class="rail-item" data-page="settings"><svg><use href="#i-settings"/></svg><span data-i18n="nav.settings">Settings</span></button>
+    <button class="rail-item rail-extra" data-act="logout"><svg><use href="#i-exit"/></svg><span data-i18n="nav.logout">Sign out</span></button>
+  </nav>
+
+  <header class="sky">
+    <h1 class="page-title"><span id="page-title" data-i18n="page.map">Map</span><small id="page-sub" data-i18n="page.mapSub">5 servers, 5 tunnels</small></h1>
+    <div class="sky-spacer"></div>
+    <button class="search-btn" data-act="palette" type="button" aria-label="Search and commands">
+      <svg width="18" height="18"><use href="#i-search"/></svg><span class="label" data-i18n="search">Search or run a command</span><kbd>Ctrl K</kbd>
+    </button>
+    <div class="sky-actions">
+      <button class="square-btn" data-act="lang" type="button" aria-label="Language">EN</button>
+      <button class="square-btn" data-act="theme" type="button" aria-label="Theme"><svg><use href="#i-sun"/></svg></button>
+      <button class="square-btn" data-act="lowpower" type="button" aria-label="Low power" aria-pressed="false"><svg><use href="#i-leaf"/></svg></button>
+    </div>
+    <div class="loader-line" id="loader-line"></div>
+  </header>
+
+  <main class="main" id="main">
+    <!-- map page -->
+    <div class="page is-on" data-page="map">
+      <div class="map-band">
+        <canvas id="map" role="img" aria-describedby="map-alt"></canvas>
+        <div class="map-legend">
+          <span><i class="dot up"></i><span data-i18n="st.up">flowing</span></span>
+          <span><i class="dot down"></i><span data-i18n="st.down">broken</span></span>
+          <span><i class="dot off"></i><span data-i18n="st.off">stopped</span></span>
+        </div>
+        <div class="map-tip" id="map-tip" aria-hidden="true"></div>
+        <p class="sr-only" id="map-alt"></p>
+      </div>
+
+      <div class="stratum s1">
+        <div class="metrics">
+          <div class="metric">
+            <div class="label" data-i18n="m.through">Throughput now</div>
+            <div class="value num"><span class="odo" id="m-rate"></span><span class="unit" id="m-rate-unit">Mbps</span></div>
+            <div class="note"><span class="up" id="m-rate-note"></span></div>
+          </div>
+          <div class="metric">
+            <div class="label" data-i18n="m.conns">Open connections</div>
+            <div class="value num"><span class="odo" id="m-conns"></span></div>
+            <div class="note" data-i18n="m.connsNote">TCP streams and UDP flows</div>
+          </div>
+          <div class="metric">
+            <div class="label" data-i18n="m.tunnels">Tunnels flowing</div>
+            <div class="value num"><span class="odo" id="m-tun"></span><span class="unit" id="m-tun-of"></span></div>
+            <div class="note" id="m-tun-note"></div>
+          </div>
+          <div class="metric">
+            <div class="label" data-i18n="m.servers">Servers online</div>
+            <div class="value num"><span class="odo" id="m-srv"></span><span class="unit" id="m-srv-of"></span></div>
+            <div class="note" data-i18n="m.serversNote">all on Kariz 0.6.1</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="stratum s2">
+        <div class="stratum-head">
+          <h2 data-i18n="t.title">Tunnels</h2>
+          <span class="eyebrow" data-i18n="t.hint">switch one off to watch its channel drain</span>
+        </div>
+        <table class="tunnels">
+          <thead>
+            <tr>
+              <th data-i18n="t.name">Name</th>
+              <th data-i18n="t.route">Route</th>
+              <th data-i18n="t.transport">Transport</th>
+              <th data-i18n="t.state">State</th>
+              <th data-i18n="t.traffic">Last minute</th>
+              <th data-i18n="t.rate">Now</th>
+              <th><span class="sr-only" data-i18n="t.onoff">On / off</span></th>
+            </tr>
+          </thead>
+          <tbody id="tunnel-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- other pages: phase 9.3 -->
+    <div class="page" data-page="other">
+      <div class="stratum s1">
+        <div class="placeholder">
+          <svg class="qloader" viewBox="0 0 180 90" aria-hidden="true"></svg>
+          <p data-i18n="placeholder">This screen is designed in step 9.3.</p>
+        </div>
+      </div>
+    </div>
+  </main>
+</section>
+
+<!-- ============================================================ command palette -->
+<div class="palette-backdrop" id="palette" role="dialog" aria-modal="true" aria-label="Commands">
+  <div class="palette">
+    <input id="palette-input" type="text" autocomplete="off" aria-controls="palette-list">
+    <ul id="palette-list" role="listbox"></ul>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<div class="proto-bar" id="proto-bar">
+  <span data-i18n="proto.label">Prototype · password: kariz</span>
+  <button type="button" data-act="replay" data-i18n="proto.replay">Replay intro</button>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
