@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.9.0 - 2026-09-30
+
+The panel can now **make and manage tunnels**, and shows what they do (docs/panel.md,
+docs/PHASE12.md). Backward compatibility is not kept before 1.0: the agent protocol changed,
+so update the panel and its agents together (`kariz-manager update` on each server).
+
+### Added
+
+- **Make a tunnel from the panel:** a five-step wizard (servers, kind, connection, ports,
+  build) for a pair of servers. The panel checks both servers (settings valid, ports free, and
+  who holds a port that is not), writes the accepting side first, starts both, waits for them
+  to connect, and **undoes everything on both servers if any step fails**. Edit (both sides in
+  step, the old settings put back if they do not reconnect), start, stop, restart, a new token
+  and delete, for a pair. Tunnels made with `kariz-manager` can be edited the same way.
+- **Live monitoring:** charts of a tunnel's throughput and round trip (1 hour, 24 hours,
+  7 days, 30 days; the last hour in memory, five-minute averages in SQLite for 30 days), a
+  **Logs** page that interleaves both sides of a tunnel by time with a level filter, search and
+  follow, and an **Events** list (a server offline or back, a tunnel losing or regaining its
+  connection).
+- **Speed test** from a tunnel's page (run by the entry server).
+- **Backup and restore** of the servers a panel knows, locked with a passphrase (Argon2id and
+  ChaCha20-Poly1305); the restore refuses to replace servers unless told to.
+- **Your own certificate** (`cert_file` and `key_file` in `panel.toml`), reloaded on SIGHUP.
+- **`services = "process"`** for hosts without systemd: the panel or agent runs tunnels as
+  child processes.
+
+### Changed
+
+- **The agent** answers a longer fixed list of requests (check, write, read and delete a
+  tunnel, control its service, listening ports, log, speed test). A tunnel's settings travel as
+  typed fields and the agent renders the file, refusing control characters; the programs it runs
+  get fixed arguments and a checked name. The panel never keeps a tunnel's token.
+- Web app: 106 KB compressed script, 10 KB style.
+
 ## 0.8.0-beta - 2026-09-29
 
 The first release of the **web panel** (docs/panel.md, docs/PHASE11.md). It is a beta: a
