@@ -19,7 +19,7 @@ Tunnels made from the panel, live monitoring and the rest of the screens are pha
 5. **Settings, security:** admin password, one-time login links, active sessions.
 
 Not yet: creating or editing tunnels, logs, speed tests, updates, backups, TOTP, Let's
-Encrypt (phase 12); Playwright tests and the security review (phase 13).
+Encrypt (phase 12); Playwright tests and the security review (phase 15).
 
 ## 2. The crate
 
