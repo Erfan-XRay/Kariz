@@ -1,17 +1,16 @@
 # The web panel
 
-A web panel for Kariz: see your servers and tunnels on one page, with their traffic live.
-It is a **beta** (v0.8.0-beta): it shows and connects; making and editing tunnels from the
-panel comes in the next phase. Tunnels are still made with
-[kariz-manager](manager.md) on each server, and the panel reads them.
+A web panel for Kariz: connect your servers, make and manage tunnels between them, and watch
+their traffic live, from one page. Tunnels made with [kariz-manager](manager.md) on a server
+show up in the panel too, and the other way round: the panel and the manager share the same
+files (`/etc/kariz/NAME.toml`) and services (`kariz@NAME`).
 
 ## Install
 
-On the server that will run the panel, as root. The beta is a prerelease, so name its
-version:
+On the server that will run the panel, as root:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh) install --version v0.8.0-beta
+bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh) install
 kariz-manager panel install
 ```
 
@@ -49,8 +48,8 @@ command. On the other server, as root:
 kariz-manager --agent kz1_...
 ```
 
-(If Kariz is not installed there yet, this installs it first; a beta needs
-`--agent kz1_... --version v0.8.0-beta`.) The server appears in the panel within seconds.
+(If Kariz is not installed there yet, this installs it first.) The server appears in the
+panel within seconds.
 
 - **The agent dials the panel**, so the new server opens no port. It needs to reach the
   panel's *agents* port.
@@ -59,6 +58,37 @@ kariz-manager --agent kz1_...
 - The agent runs as the service `kariz-agent`: `kariz-manager agent status | logs | remove`.
 - **Remove a server** in the panel (*Servers*, *Remove*): it leaves the panel and its link
   closes. Nothing is deleted on it; its tunnels keep running.
+
+## Make a tunnel
+
+*Tunnels*, *New tunnel* opens the wizard (it needs two connected servers):
+
+1. **Servers:** a name (small letters, digits, dashes) and which server is the *entry* (where
+   your users connect) and which the *exit* (which reaches the real services).
+2. **Kind:** *reverse* (the exit dials the entry, so the exit opens no port) or *direct* (the
+   entry dials the exit), the transport (`tcp`, `tcpmux`, `ws`, `wss`, `quic`, `kcp`) and the
+   profile (`balanced`, `ultraspeed`, `gaming`).
+3. **Connection:** the port the accepting side listens on and its address as the other side
+   reaches it. For `ws`/`wss`, the path.
+4. **Ports:** what the entry opens: `443, 8080-8090, 2053=53`, with TCP, UDP or both, and the
+   host the exit reaches them at (default `127.0.0.1`).
+5. **Build:** the review, then the panel does it on both servers, in order, and you watch each
+   step: both servers check the settings and that the ports are free (a port that something
+   else holds is named, with the program), the accepting side is written and started first,
+   then the dialing side, and the panel waits (up to 30 seconds) until both report *connected*.
+
+**If any step fails, everything made so far is removed from both servers**, and the wizard says
+which step and why (a refused connection, a wrong token, a port in use...). A `wss` accepting
+side gets a self-signed certificate made by its own server, and the other side is given its pin
+automatically.
+
+Open a tunnel (click its row) to see both sides, its charts, and to **edit** it (the same
+wizard, filled in; both sides change together and are restarted, and if they do not connect
+again the old settings are put back), **start / stop / restart** it, give it **a new token**, run
+a **speed test**, or **delete** it (both sides).
+
+The panel never keeps a tunnel's token: it makes one, sends it to the two servers over the link
+and forgets it. So *a new token* cannot be undone if it fails half way; run it again.
 
 ## What you see
 
@@ -70,9 +100,17 @@ kariz-manager --agent kz1_...
   Linux; nothing is shown where there is no `/proc`.)
 - **Tunnels** come from the `*.toml` files in `/etc/kariz` on each server, with systemd's
   state and the running daemon's `kariz status`. A tunnel is drawn when its entry and exit
-  have **the same name**, which is how `kariz-manager` names the two sides.
-- **Settings:** the password, one-time login links, and the sessions (each device, its
-  address, when it was last used, and *Revoke*).
+  have **the same name**, which is how `kariz-manager` names the two sides. Each tunnel's page
+  has charts of its throughput and round trip over 1 hour, 24 hours, 7 days and 30 days. The
+  last hour is kept in memory; five-minute averages are stored in the database for 30 days.
+- **Logs:** pick a tunnel and read the log of **both sides interleaved by time**, filtered by
+  level or text, with *Follow*. The *Events* tab lists a server going offline or back, a tunnel
+  losing its connection or getting it back.
+- **Speed test:** on a tunnel's page. The entry server measures download, upload and UDP
+  through the tunnel (the same as `kariz-manager speedtest`); it uses the tunnel for the
+  seconds you choose.
+- **Settings:** the password, one-time login links, the sessions (each device, its address,
+  when it was last used, and *Revoke*), the backup, and the appearance.
 
 Persian and English, Night and Dawn, and a low-power mode (also on when your browser asks for
 less motion) are in the top bar and in *Settings*. `Ctrl+K` opens commands.
@@ -87,8 +125,14 @@ less motion) are in the top bar and in *Settings*. `Ctrl+K` opens commands.
   15 minutes.
 - Agents talk to the panel over Kariz's own link (the tunnels' handshake, encryption and
   mux). A token alone is not enough: each agent also proves a key of its own, made when it
-  joined. **Agents answer four fixed requests** (who are you, keep this identity, health,
-  tunnels). There is no remote shell, and tunnel tokens are never sent to the panel.
+  joined. **Agents answer a fixed list of requests**: who are you, keep this identity, health,
+  tunnels, check / write / read / delete a tunnel, start / stop / restart it, listening ports,
+  the log, the speed test. **There is no remote shell:** a request carries data (a tunnel's
+  settings as typed fields, which the agent turns into the file itself, refusing anything with a
+  control character in it), never a command or a path, and the programs an agent runs
+  (`systemctl`, `journalctl`, `kariz speedtest`) get fixed arguments and a checked name.
+- A tunnel's token is made by the panel, sent once to its two servers inside the encrypted
+  link, and written there with mode 0600. The panel does not keep it and never shows it.
 - The database (`/var/lib/kariz-panel`, root only) holds the agents' keys, because the
   panel needs them to check the proofs. Guard it like the tunnel configs.
 
@@ -107,12 +151,48 @@ kariz-manager agent status | logs | remove
 The menu has the same under *w*. Without the manager: `kariz-panel init`, `serve`,
 `login-link`, `reset-password`, `agent --join CODE` (see `kariz-panel --help`).
 
+## Backup and restore
+
+*Settings*, *Download a backup* gives one file, locked with a passphrase you choose (10
+characters or more; Argon2id and ChaCha20-Poly1305). It holds the servers this panel knows,
+with the keys they prove themselves with, and the token they dial with. It does **not** hold
+tunnels (they live on the servers, in their own files, and the panel reads them from there),
+sessions or login links. Keep the passphrase: without it the file cannot be opened.
+
+To move to a new server: install the panel there, sign in, *Restore a backup*, then
+`systemctl restart kariz-panel` so the agents can connect with the restored token. They dial
+the panel's address, so point that name at the new server (or run `kariz-panel agent` again on
+each server with a new join code if the address changed).
+
+## Your own certificate
+
+Set both in `panel.toml` and restart, or reload without dropping anything:
+
+```toml
+cert_file = "/etc/ssl/panel.pem"     # the certificate chain, PEM
+key_file  = "/etc/ssl/panel.key"
+```
+
+```bash
+systemctl kill -s HUP kariz-panel    # loads the new files for the next connections
+```
+
+A file that cannot be read is refused and the old certificate stays. Automatic Let's Encrypt
+is not built in; use your own tool (certbot, acme.sh) and the reload above after each renewal.
+
+## A host without systemd
+
+In a container there is no systemd to start the tunnels. Set `services = "process"` in
+`panel.toml` (or `agent.toml`): the panel or the agent then runs each tunnel as a child process
+(`kariz run`), which stops when it stops. Tunnels then do not come back after a reboot by
+themselves; that is the price of having no service manager.
+
 ## Files
 
 | Path | What |
 |---|---|
-| `/etc/kariz-panel/panel.toml` | the panel's settings: `listen`, `path`, `agent_listen`, `data_dir`, `kariz_dir` |
-| `/etc/kariz-panel/agent.toml` | an agent's identity (id and key) and the panel's address |
+| `/etc/kariz-panel/panel.toml` | the panel's settings: `listen`, `path`, `agent_listen`, `data_dir`, `kariz_dir`, `services`, `cert_file`, `key_file` |
+| `/etc/kariz-panel/agent.toml` | an agent's identity (id and key), the panel's address, `kariz_dir`, `services` |
 | `/var/lib/kariz-panel/` | the database, the certificate and its key |
 | `kariz-panel.service`, `kariz-agent.service` | the systemd units |
 
@@ -133,5 +213,13 @@ database); `kariz-manager agent remove` removes the agent.
 - **A tunnel shows as broken:** the panel reports what the entry side's daemon says
   (`kariz status`): not connected, or no daemon running. Start with `kariz-manager status NAME`
   on the server.
+- **The wizard says a port is in use:** it names the program (`sshd`, `nginx`, another
+  tunnel). Pick another port, or stop that program. The check is done on the server itself, so
+  a firewall rule does not matter here, but do open the port for your users.
+- **A new tunnel did not connect:** the wizard shows the reason each side reported (for
+  example *connection refused*: the accepting server's port is not reachable from the other, a
+  firewall in between; or a timeout). Nothing is left behind; fix the cause and try again.
+- **Logs are empty:** they come from `journalctl -u kariz@NAME`, so they need systemd; with
+  `services = "process"` the daemons' output is not kept.
 - **Locked out:** wait 15 minutes, or make a link on the server with
   `kariz-manager panel link`.

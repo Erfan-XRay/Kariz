@@ -14,7 +14,7 @@
 
 use std::net::SocketAddr;
 
-use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 
 use crate::auth::{self, Session};
 use crate::http::AppState;
+use crate::pair::{self, PairRequest};
 
 const COOKIE: &str = "__Host-kariz";
 const CSRF_HEADER: &str = "x-kariz-csrf";
@@ -37,6 +38,23 @@ pub fn routes() -> Router<AppState> {
         .route("/api/servers", get(servers))
         .route("/api/servers/join-code", post(join_code))
         .route("/api/servers/remove", post(remove_server))
+        .route("/api/tunnels/check", post(tunnel_check))
+        .route("/api/tunnels", post(tunnel_create))
+        .route("/api/tunnels/edit", post(tunnel_edit))
+        .route("/api/tunnels/control", post(tunnel_control))
+        .route("/api/tunnels/delete", post(tunnel_delete))
+        .route("/api/op", get(op_status))
+        .route("/api/ports", get(server_ports))
+        .route("/api/tunnel", get(tunnel_spec))
+        .route("/api/history", get(history))
+        .route("/api/events", get(events))
+        .route("/api/logs", get(tunnel_logs))
+        .route("/api/tunnels/speedtest", post(tunnel_speedtest))
+        .route("/api/backup", post(backup))
+        .route(
+            "/api/restore",
+            post(restore).layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/revoke", post(revoke))
         .route("/api/password", post(password))
@@ -470,5 +488,401 @@ async fn remove_server(
         }
         Ok(false) => error(StatusCode::NOT_FOUND, "no_such_server"),
         Err(e) => internal(e),
+    }
+}
+
+// ---- tunnels (docs/PHASE12.md) ----
+
+/// Turns a refusal from the pair code into a response.
+fn pair_error(e: anyhow::Error) -> Response {
+    let code = format!("{e:#}");
+    match code.as_str() {
+        "bad_name" | "same_server" | "bad_mode" | "bad_action" => {
+            error(StatusCode::BAD_REQUEST, &code)
+        }
+        "busy" => error(StatusCode::CONFLICT, "busy"),
+        _ => internal(e),
+    }
+}
+
+async fn tunnel_check(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PairRequest>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, true) {
+        return r;
+    }
+    match pair::check(&state.hub, &body).await {
+        Ok((entry, exit)) => reply(StatusCode::OK, json!({ "entry": entry, "exit": exit })),
+        Err(e) => pair_error(e),
+    }
+}
+
+async fn tunnel_create(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<PairRequest>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let name = body.name.clone();
+    match pair::create(&state.hub, body) {
+        Ok(op) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("made tunnel {name}"),
+            );
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => pair_error(e),
+    }
+}
+
+async fn tunnel_edit(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<PairRequest>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let what = format!(
+        "edited tunnel {}{}",
+        body.name,
+        if body.rotate { " (new token)" } else { "" }
+    );
+    match pair::edit(&state.hub, body) {
+        Ok(op) => {
+            audit(&state, &format!("session {}", me.id), &ip_of(&peer), &what);
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => pair_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ControlBody {
+    name: String,
+    action: String,
+}
+
+async fn tunnel_control(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<ControlBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match pair::control(&state.hub, &body.name, &body.action) {
+        Ok(op) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("{} tunnel {}", body.action, body.name),
+            );
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => pair_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct NameBody {
+    name: String,
+}
+
+async fn tunnel_delete(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<NameBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match pair::delete(&state.hub, &body.name) {
+        Ok(op) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("deleted tunnel {}", body.name),
+            );
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => pair_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct IdQuery {
+    id: String,
+}
+
+async fn op_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<IdQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match state.hub.ops.get(&q.id) {
+        Some(op) => reply(StatusCode::OK, json!(op)),
+        None => error(StatusCode::NOT_FOUND, "no_such_operation"),
+    }
+}
+
+#[derive(Deserialize)]
+struct ServerQuery {
+    server: String,
+}
+
+/// The listening ports of a server, for the wizard to show what is taken.
+async fn server_ports(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ServerQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match state
+        .hub
+        .ask_as::<Vec<crate::wire::PortOwner>>(&q.server, &crate::wire::Request::Ports)
+        .await
+    {
+        Ok(ports) => reply(StatusCode::OK, json!({ "ports": ports })),
+        Err(_) => error(StatusCode::NOT_FOUND, "server_offline"),
+    }
+}
+
+#[derive(Deserialize)]
+struct SpecQuery {
+    server: String,
+    name: String,
+}
+
+/// One side of a tunnel as its server keeps it (no token), for the wizard to edit.
+async fn tunnel_spec(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<SpecQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match state
+        .hub
+        .ask_as::<crate::wire::Spec>(&q.server, &crate::wire::Request::TunnelGet { name: q.name })
+        .await
+    {
+        Ok(spec) => reply(StatusCode::OK, json!(spec)),
+        Err(_) => error(StatusCode::NOT_FOUND, "no_such_tunnel"),
+    }
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    key: String,
+    range: Option<String>,
+}
+
+/// One series for a chart: `srv:ID:cpu|mem|rx|tx`, `tun:NAME:rate|conns|rtt`.
+async fn history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HistoryQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    let range = crate::history::Range::parse(q.range.as_deref().unwrap_or("1h"));
+    let (true, Some(range)) = (crate::history::valid_key(&q.key), range) else {
+        return error(StatusCode::BAD_REQUEST, "bad_input");
+    };
+    match state.hub.history.series(&q.key, range) {
+        Ok(points) => reply(StatusCode::OK, json!({ "points": points })),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    limit: Option<u32>,
+}
+
+async fn events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<EventsQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match state.hub.history.events(q.limit.unwrap_or(100)) {
+        Ok(events) => reply(StatusCode::OK, json!({ "events": events })),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct LogsQuery {
+    name: String,
+    lines: Option<u32>,
+}
+
+async fn tunnel_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<LogsQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match pair::logs(&state.hub, &q.name, q.lines.unwrap_or(200).clamp(1, 1000)).await {
+        Ok(lines) => reply(StatusCode::OK, json!({ "lines": lines })),
+        Err(e) => match format!("{e:#}").as_str() {
+            "no_such_tunnel" => error(StatusCode::NOT_FOUND, "no_such_tunnel"),
+            "bad_name" => error(StatusCode::BAD_REQUEST, "bad_name"),
+            _ => internal(e),
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct SpeedBody {
+    name: String,
+    seconds: Option<u32>,
+    streams: Option<u32>,
+    udp: Option<bool>,
+}
+
+async fn tunnel_speedtest(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<SpeedBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    audit(
+        &state,
+        &format!("session {}", me.id),
+        &ip_of(&peer),
+        &format!("ran a speed test on {}", body.name),
+    );
+    match pair::speedtest(
+        &state.hub,
+        &body.name,
+        body.seconds.unwrap_or(10),
+        body.streams.unwrap_or(4),
+        body.udp.unwrap_or(true),
+    )
+    .await
+    {
+        Ok(r) => reply(
+            StatusCode::OK,
+            json!({ "ok": r.ok, "error": r.error, "text": r.text }),
+        ),
+        Err(e) => match format!("{e:#}").as_str() {
+            "no_such_tunnel" => error(StatusCode::NOT_FOUND, "no_such_tunnel"),
+            "bad_name" => error(StatusCode::BAD_REQUEST, "bad_name"),
+            _ => internal(e),
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct BackupBody {
+    passphrase: String,
+}
+
+/// The backup file, sealed with the passphrase, as base64 in JSON.
+async fn backup(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<BackupBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match crate::backup::export(&state.db, &body.passphrase) {
+        Ok(file) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                "downloaded a backup",
+            );
+            use base64::Engine;
+            reply(
+                StatusCode::OK,
+                json!({ "data": base64::engine::general_purpose::STANDARD.encode(file) }),
+            )
+        }
+        Err(e) if format!("{e:#}") == "short_passphrase" => {
+            error(StatusCode::BAD_REQUEST, "short_passphrase")
+        }
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RestoreBody {
+    passphrase: String,
+    data: String,
+    #[serde(default)]
+    replace: bool,
+}
+
+async fn restore(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<RestoreBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    use base64::Engine;
+    let Ok(file) = base64::engine::general_purpose::STANDARD.decode(body.data.trim()) else {
+        return error(StatusCode::BAD_REQUEST, "not_a_backup");
+    };
+    match crate::backup::import(&state.db, &body.passphrase, &file, body.replace) {
+        Ok(n) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("restored a backup ({n} servers)"),
+            );
+            reply(StatusCode::OK, json!({ "servers": n, "restart": true }))
+        }
+        Err(e) => match format!("{e:#}").as_str() {
+            code @ ("wrong_passphrase" | "not_a_backup" | "bad_backup") => {
+                error(StatusCode::BAD_REQUEST, code)
+            }
+            "not_empty" => error(StatusCode::CONFLICT, "not_empty"),
+            _ => internal(e),
+        },
     }
 }

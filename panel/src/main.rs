@@ -140,11 +140,15 @@ fn serve(config: Config) -> Result<()> {
         .build()?;
     runtime.block_on(async move {
         let db = Db::open(&config.database())?;
-        kariz_panel::cert::ensure(&config.cert(), &config.key())?;
+        config.ensure_cert()?;
         let listener = tokio::net::TcpListener::bind(&config.listen)
             .await
             .with_context(|| format!("failed to listen on {}", config.listen))?;
-        let hub = kariz_panel::hub::Hub::new(db.clone(), config.kariz_dir.clone());
+        let hub = kariz_panel::hub::Hub::with_services(
+            db.clone(),
+            config.kariz_dir.clone(),
+            config.services.services(&config.kariz_dir),
+        );
         tokio::spawn(hub.clone().run_local());
         let mut state = AppState::new(db);
         state.hub = hub.clone();
@@ -209,7 +213,8 @@ fn run_agent(path: &std::path::Path, join: Option<&str>, no_run: bool) -> Result
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        let agent = agent::Agent::new(path, config);
+        let services = config.services.services(&config.kariz_dir);
+        let agent = agent::Agent::with_services(path, config, services);
         tokio::select! {
             result = agent.run() => result,
             _ = shutdown_signal() => Ok(()),

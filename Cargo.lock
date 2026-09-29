@@ -775,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "kariz"
-version = "0.8.0-beta"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "kariz-panel"
-version = "0.8.0-beta"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -821,6 +821,7 @@ dependencies = [
  "hyper-util",
  "kariz",
  "rcgen",
+ "ring",
  "rusqlite",
  "rust-embed",
  "serde",

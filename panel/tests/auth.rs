@@ -492,3 +492,132 @@ async fn the_server_list_needs_a_session_and_names_this_server() {
     assert!(!servers[0]["name"].as_str().unwrap().is_empty());
     assert_eq!(servers[0]["version"], env!("CARGO_PKG_VERSION"));
 }
+
+#[tokio::test]
+async fn a_backup_is_downloaded_locked_and_restored_through_the_api() {
+    let panel = Panel::new();
+    auth::set_password(&panel.db, "correct horse battery", None).unwrap();
+    panel
+        .db
+        .conn()
+        .execute(
+            "INSERT INTO servers (id, name, key, created) VALUES ('a1', 'frankfurt', 'k1', 100)",
+            [],
+        )
+        .unwrap();
+    let mut anon = panel.browser("10.0.0.9");
+    let (status, ..) = anon
+        .call(
+            &panel,
+            "POST",
+            "/api/backup",
+            Some(json!({"passphrase": "long enough passphrase"})),
+            true,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let mut b = panel.browser("10.0.0.1");
+    b.call(
+        &panel,
+        "POST",
+        "/api/login",
+        Some(json!({"password": "correct horse battery"})),
+        false,
+    )
+    .await;
+    let (status, doc, _) = b
+        .call(
+            &panel,
+            "POST",
+            "/api/backup",
+            Some(json!({"passphrase": "short"})),
+            true,
+        )
+        .await;
+    assert_eq!(
+        (status, doc["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("short_passphrase"))
+    );
+
+    let (status, doc, _) = b
+        .call(
+            &panel,
+            "POST",
+            "/api/backup",
+            Some(json!({"passphrase": "long enough passphrase"})),
+            true,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{doc}");
+    let data = doc["data"].as_str().unwrap().to_owned();
+
+    // a panel that has servers wants to be told to replace them
+    let (status, doc, _) = b
+        .call(
+            &panel,
+            "POST",
+            "/api/restore",
+            Some(json!({"passphrase": "long enough passphrase", "data": data})),
+            true,
+        )
+        .await;
+    assert_eq!(
+        (status, doc["error"].as_str()),
+        (StatusCode::CONFLICT, Some("not_empty"))
+    );
+    let (status, doc, _) = b
+        .call(
+            &panel,
+            "POST",
+            "/api/restore",
+            Some(json!({"passphrase": "not the passphrase", "data": data, "replace": true})),
+            true,
+        )
+        .await;
+    assert_eq!(
+        (status, doc["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("wrong_passphrase"))
+    );
+
+    panel.db.conn().execute("DELETE FROM servers", []).unwrap();
+    let (status, doc, _) = b
+        .call(
+            &panel,
+            "POST",
+            "/api/restore",
+            Some(json!({"passphrase": "long enough passphrase", "data": data})),
+            true,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{doc}");
+    assert_eq!(doc["servers"], 1);
+    assert_eq!(doc["restart"], true);
+
+    // the restore takes a body bigger than the other calls do, but not an enormous one
+    let big = "A".repeat(200 * 1024);
+    let (status, doc, _) = b
+        .call(
+            &panel,
+            "POST",
+            "/api/restore",
+            Some(json!({"passphrase": "long enough passphrase", "data": big})),
+            true,
+        )
+        .await;
+    assert_eq!(
+        (status, doc["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("not_a_backup"))
+    );
+    let huge = "A".repeat(2 * 1024 * 1024);
+    let (status, ..) = b
+        .call(
+            &panel,
+            "POST",
+            "/api/restore",
+            Some(json!({"passphrase": "long enough passphrase", "data": huge})),
+            true,
+        )
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}

@@ -3,13 +3,17 @@
 pub mod agent;
 pub mod api;
 pub mod auth;
+pub mod backup;
 pub mod cert;
 pub mod collect;
 pub mod config;
 pub mod db;
+pub mod history;
 pub mod http;
 pub mod hub;
 pub mod join;
+pub mod manage;
+pub mod pair;
 pub mod wire;
 
 use std::path::Path;
@@ -37,6 +41,9 @@ pub fn init(config_path: &Path, data_dir: &Path, port: Option<u16>) -> Result<In
             data_dir: data_dir.to_path_buf(),
             agent_listen: Some(format!("0.0.0.0:{}", random_port()?)),
             kariz_dir: std::path::PathBuf::from("/etc/kariz"),
+            services: Default::default(),
+            cert_file: None,
+            key_file: None,
         };
         config.validate()?;
         if let Some(dir) = config_path.parent() {
@@ -49,7 +56,7 @@ pub fn init(config_path: &Path, data_dir: &Path, port: Option<u16>) -> Result<In
     };
     let db = db::Db::open(&config.database())?;
     db.audit("cli", None, "panel set up")?;
-    let fingerprint = cert::ensure(&config.cert(), &config.key())?;
+    let fingerprint = config.ensure_cert()?;
     Ok(Installed {
         config,
         fingerprint,
