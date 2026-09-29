@@ -78,10 +78,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: shellcheck scripts/*.sh
-      - run: cargo build --release --locked
+      - run: cargo build --release --locked -p kariz -p kariz-panel
       - name: Install with the manager
         run: |
-          sudo scripts/kariz.sh install --binary target/release/kariz
+          sudo scripts/kariz.sh install --binary target/release/kariz --panel-binary target/release/kariz-panel
           kariz-manager help >/dev/null
       - name: Tunnels through the manager
         run: |
@@ -139,6 +139,41 @@ jobs:
           echo "$out" | grep -q "6 running tunnel(s) restarted"
           sleep 3
           curl -sf --max-time 5 http://127.0.0.1:18080/ >/dev/null
+      # The web panel and an agent, through the manager: install, sign in with the link it
+      # prints, make a join code, connect this same machine as an agent, and see it online
+      # with the health `/proc` gives and the tunnels made above.
+      - name: The web panel and an agent through the manager
+        run: |
+          sudo kariz-manager panel install --port 28443 --host 127.0.0.1 | tee panel.txt
+          grep -q "certificate" panel.txt
+          link=$(grep -o 'https://[^ ]*#t=[0-9a-f]*' panel.txt)
+          base=${link%%#*}
+          token=${link##*#t=}
+          curl -skf "$base" | grep -q Kariz
+          test "$(curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:28443/nothing)" = 404
+          curl -sk -c jar -H 'Content-Type: application/json' -d "{\"token\":\"$token\"}" "${base}api/link" | tee signin.json
+          csrf=$(sed -n 's/.*"csrf":"\([0-9a-f]*\)".*/\1/p' signin.json)
+          test -n "$csrf"
+          code=$(curl -sk -b jar -H "X-Kariz-CSRF: $csrf" -H 'Content-Type: application/json' \
+            -d '{"name":"ci-agent","host":"127.0.0.1"}' "${base}api/servers/join-code" |
+            sed -n 's/.*"code":"\([^"]*\)".*/\1/p')
+          test -n "$code"
+          sudo kariz-manager --agent "$code"
+          for _ in $(seq 1 30); do
+            curl -sk -b jar "${base}api/servers" > servers.json
+            jq -e '.servers[] | select(.name == "ci-agent" and .online)' servers.json >/dev/null && break
+            sleep 1
+          done
+          cat servers.json
+          jq -e '.servers[] | select(.name == "ci-agent" and .online)' servers.json >/dev/null
+          grep -q '"name":"plain"' servers.json
+          grep -Eq '"mem_total":[0-9]+' servers.json
+          # a login link works once
+          curl -sk -H 'Content-Type: application/json' -d "{\"token\":\"$token\"}" "${base}api/link" | grep -q wrong
+          # the update restarts the panel and the agent
+          out=$(sudo kariz-manager update --binary target/release/kariz --panel-binary target/release/kariz-panel)
+          echo "$out" | grep -q "Restarted kariz-panel"
+          echo "$out" | grep -q "Restarted kariz-agent"
       - name: Banner in the journal, priority prefixes understood
         run: |
           sudo journalctl -u kariz@plain -o cat --no-pager | tee journal.txt | head -20
@@ -147,10 +182,14 @@ jobs:
       - name: Remove and uninstall
         run: |
           for t in plain plain-exit secure secure-exit six six-exit; do sudo kariz-manager remove "$t" --yes; done
+          sudo kariz-manager agent remove
+          sudo kariz-manager panel uninstall --yes
+          test ! -e /etc/kariz-panel/panel.toml
+          test ! -e /usr/local/bin/kariz-panel
           sudo kariz-manager uninstall --yes
           test ! -e /usr/local/bin/kariz
       - if: failure()
-        run: sudo journalctl -u 'kariz@*' --no-pager -n 200
+        run: sudo journalctl -u 'kariz@*' -u kariz-panel -u kariz-agent --no-pager -n 200
 
   # nginx in front of the tunnel as a stand-in for a CDN: WebSocket proxying, TLS
   # termination and an idle timeout (tests/tunnel.rs, module `nginx`).

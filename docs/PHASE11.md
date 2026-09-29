@@ -237,6 +237,21 @@ and the whole password path (set a password, sign out, sign in with it).
   polled every 2 s rather than pushed (server-sent events), which is enough for a handful
   of servers.
 
+*Status after 11.5:* `kariz-manager` installs the panel and the agent (section 6 of this
+document, as planned, with `--agent CODE` instead of a flag of the install line):
+`panel install [--port N] [--host H]`, `panel link`, `panel password`, `panel status`,
+`panel logs`, `panel uninstall`, `--agent CODE`, `agent status | logs | remove`, and a
+*Web panel and agent* entry (`w`) in the menu. `install` puts `kariz-panel` in place when the
+archive has it (or with `--panel-binary`), and both `install` and `update` write the units
+`kariz-panel.service` and `kariz-agent.service` and restart the running ones. The release
+archives carry `kariz-panel` (built with the web app, for all three architectures), and a
+version with a dash is published as a **prerelease**, so GitHub's "latest release", which
+`install` and `update` use, stays on the last stable version. `docs/panel.md` is the user's
+guide. CI's manager job installs the panel on a real systemd host, signs in with the link it
+prints, makes a join code through the API, connects this same machine with
+`kariz-manager --agent`, and checks that the agent shows online with health from `/proc` and
+that the machine's tunnels are listed; then updates and removes everything.
+
 ## 7. Work breakdown
 
 | Step | Content | Done when |
@@ -246,4 +261,4 @@ and the whole password path (set a password, sign out, sign in with it).
 | **11.2** Sign-in (done) | Section 3, API and tests. | Tests for every rule in the table. |
 | **11.3** Web app (done) | Section 5. | Build under the budget; the prototype's screens in the real app, both languages and themes. |
 | **11.4** Agents (done) | Section 4: `kariz::link`, join codes, the agent, health and tunnels, both directions, live Servers and map. | An in-process test joins an agent and reads its health; a second in CI over real sockets. |
-| **11.5** Installer, release | Section 6, `docs/panel.md`, CHANGELOG, `0.8.0-beta`. | Installed on a clean Linux VM in CI (manager job), release with the panel. |
+| **11.5** Installer, release (done) | Section 6, `docs/panel.md`, CHANGELOG, `0.8.0-beta`. | Installed on a clean Linux VM in CI (manager job), release with the panel. |

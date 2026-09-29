@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.8.0-beta - 2026-09-29
+
+The first release of the **web panel** (docs/panel.md, docs/PHASE11.md). It is a beta: a
+prerelease that GitHub's "latest release" does not pick, so `kariz-manager update` on a
+running server stays on 0.7.0 until a stable release. To try it:
+`kariz-manager install --version v0.8.0-beta`, then `kariz-manager panel install`.
+The tunnel core is the 0.7 one, with the same wire format; it works with v0.4 to v0.7 peers.
+
+### Added
+
+- **`kariz-panel`**, a second program in the release archives (all three architectures):
+  `serve` runs the panel, `agent` connects another server to it, `init`, `login-link`
+  and `reset-password` set it up and look after it. One static binary, SQLite inside, the
+  web app inside; nothing is fetched from the internet.
+- **The panel** answers only under a secret path over TLS (a self-signed certificate,
+  its fingerprint printed at install); any other address gets a plain nginx 404. Sign-in
+  with an Argon2id password and/or one-time links (60 minutes, work once, in the address
+  fragment so they never reach a log); sessions in the database (only hashes stored) with a
+  `__Host-` cookie, a CSRF header, a lockout after five failed tries, a list of sessions
+  you can revoke, and an audit log.
+- **The web app**, in the design of phase 9: a loader and a login scene that descends into
+  the dashboard, Persian (RTL) and English, Night and Dawn, low-power mode, `Ctrl+K`.
+  Map (the servers as wells, the tunnels as channels of water with their traffic), Servers
+  (CPU, memory and network of each, add and remove), Settings (password, login links,
+  sessions, appearance). About 280 KB compressed.
+- **Agents:** *Add server* makes a join code (works once, 10 minutes);
+  `kariz-manager --agent CODE` (or `kariz-panel agent --join CODE`) on the other server
+  connects it. The link is Kariz's own (`kariz::link`): the tunnels' handshake, encryption
+  and mux, so it resists DPI like a tunnel; the agent dials the panel, so the new server
+  opens no port. A leaked link token alone opens nothing: each agent also proves a key of its
+  own. Agents answer four fixed requests (hello, enroll, health, tunnels): there is no
+  remote shell, and tunnel tokens are never reported.
+- **What the panel shows of each server:** CPU, memory, network and uptime (from
+  `/proc`), and its Kariz tunnels: the config files, systemd's state and the running
+  daemon's `kariz status`. A tunnel whose entry and exit are both connected is drawn on the
+  map, in the state its daemon reports.
+- **kariz-manager:** `panel install [--port N] [--host H]` (settings, database,
+  certificate, service, then the address, the certificate's fingerprint and a login link),
+  `panel link`, `panel password`, `panel status`, `panel logs`, `panel uninstall`;
+  `--agent CODE`, `agent status | logs | remove`; a "Web panel and agent" entry in the menu
+  (`w`); `install` and `update` handle the panel binary and restart the panel and agent.
+- **`kariz::link`** in the core library (an authenticated mux session between two Kariz
+  programs); the tunnels do not use it.
+
+### Not yet (phase 12)
+
+Making and editing tunnels from the panel, logs, speed tests, updates and backups from the
+panel, sign-in with a second factor, Let's Encrypt, and an agent that the panel dials
+(instead of the agent dialing the panel).
+
 ## 0.7.0 - 2026-09-29
 
 Status for the coming web panel, and for people on the server (docs/PHASE10.md). Nothing

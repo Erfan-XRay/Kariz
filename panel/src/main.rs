@@ -44,6 +44,10 @@ enum Command {
         /// The join code from the panel.
         #[arg(long)]
         join: Option<String>,
+        /// Only write the settings from `--join`, then stop (the installer runs the
+        /// agent as a service).
+        #[arg(long, requires = "join")]
+        no_run: bool,
     },
     /// Make a one-time login link (valid for 60 minutes, works once).
     LoginLink {
@@ -80,7 +84,11 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Serve { config } => serve(Config::load(&config)?),
-        Command::Agent { config, join } => run_agent(&config, join.as_deref()),
+        Command::Agent {
+            config,
+            join,
+            no_run,
+        } => run_agent(&config, join.as_deref(), no_run),
         Command::LoginLink { config, host } => {
             let config = Config::load(&config)?;
             let db = Db::open(&config.database())?;
@@ -177,7 +185,7 @@ async fn shutdown_signal() {
     }
 }
 
-fn run_agent(path: &std::path::Path, join: Option<&str>) -> Result<()> {
+fn run_agent(path: &std::path::Path, join: Option<&str>, no_run: bool) -> Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
     let config = match join {
@@ -194,6 +202,9 @@ fn run_agent(path: &std::path::Path, join: Option<&str>) -> Result<()> {
         }
         None => AgentConfig::load(path)?,
     };
+    if no_run {
+        return Ok(());
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

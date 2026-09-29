@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/Erfan-XRay/Kariz/actions/workflows/ci.yml"><img src="https://github.com/Erfan-XRay/Kariz/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/Erfan-XRay/Kariz/releases"><img src="https://img.shields.io/badge/version-0.7.0-34d0c3" alt="Version 0.7.0"></a>
+  <a href="https://github.com/Erfan-XRay/Kariz/releases"><img src="https://img.shields.io/badge/version-0.8.0--beta-34d0c3" alt="Version 0.8.0-beta"></a>
   <img src="https://img.shields.io/badge/rust-1.80%2B-e9c46a?logo=rust" alt="Rust 1.80+">
   <img src="https://img.shields.io/badge/platform-linux-12365e?logo=linux&logoColor=white" alt="Linux">
 </p>
@@ -45,6 +45,7 @@ flowchart LR
 | **پروفایل‌ها** | `balanced`، `ultraspeed` برای بیشترین سرعت، و `gaming` برای تأخیر کم و پایدار |
 | **بازی** | FEC برای بازسازی بسته‌های گم‌شده، تکثیر بسته برای هر قانون، و علامت DSCP اختیاری |
 | **تست سرعت** | `kariz speedtest` سرعت دانلود و آپلود، تأخیر زیر بار و loss در UDP را از داخل تانل زنده و در هر دو حالت می‌سنجد ([مستندات](docs/speedtest.md)) |
+| **پنل وب (بتا)** | پنلی با نقشهٔ زندهٔ سرورها و تانل‌ها، ورود با رمز یا لینک یک‌بارمصرف، و agent که سرورهای دیگر را با یک دستور وصل می‌کند ([مستندات](docs/panel.md)) |
 | **وضعیت زنده** | `kariz status` روی هر دو سرور: سمت دیگر وصل است یا نه، زمان رفت‌وبرگشت، آخرین خطا و ترافیک هر پورت؛ با `--json` برای ابزارها ([مستندات](docs/status.md)) |
 | **آماده برای CDN** | early data یک رفت‌وبرگشت صرفه‌جویی می‌کند، pingها اتصال بیکار را زنده نگه می‌دارند، و هر درخواست دیگری صفحه‌ی 404 شبیه nginx می‌گیرد |
 | **اجرای آسان** | یک فایل اجرایی، یک فایل TOML برای هر سمت، `kariz check` برای بررسی، و سرویس systemd |
