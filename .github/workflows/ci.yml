@@ -61,6 +61,20 @@ jobs:
           sudo kariz-manager list
           curl -sf --max-time 5 http://127.0.0.1:18080/ >/dev/null
           curl -sf --max-time 5 http://127.0.0.1:18082/ >/dev/null
+      - name: Speed test through the daemons, both modes, and the exit side's refusal
+        run: |
+          # 'plain' is a reverse tcpmux pair, 'secure' a direct wss pair: both modes.
+          sudo kariz-manager speedtest plain --seconds 2 --streams 2 | tee reverse.txt
+          grep -q "download" reverse.txt && grep -q "UDP" reverse.txt
+          sudo kariz-manager speedtest secure --seconds 2 --streams 2 --no-udp | tee direct.txt
+          grep -q "download" direct.txt
+          # the exit side says where to run it, and does not run a test
+          if sudo kariz-manager speedtest secure-exit > exit.txt 2>&1; then
+            echo "the speed test ran on the exit side" >&2
+            exit 1
+          fi
+          cat exit.txt
+          grep -q "entry server" exit.txt
       - name: The menu and its wizard, with scripted answers
         run: |
           # menu: 2 = new tunnel, then the wizard's answers, Enter to return, 0 = exit
@@ -89,50 +103,6 @@ jobs:
           test ! -e /usr/local/bin/kariz
       - if: failure()
         run: sudo journalctl -u 'kariz@*' --no-pager -n 200
-
-  # TEMPORARY (phase 8.1), removed before merge: mimalloc against musl's own allocator,
-  # static musl builds, alternating runs.
-  bench-musl:
-    runs-on: ubuntu-latest
-    env:
-      TARGET: x86_64-unknown-linux-musl
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Build both binaries
-        run: |
-          cargo build --release --locked --target "$TARGET"
-          cp "target/$TARGET/release/kariz" kariz-mimalloc
-          cargo build --release --locked --target "$TARGET" --no-default-features --features quic,kcp
-          cp "target/$TARGET/release/kariz" kariz-musl
-          ls -l kariz-mimalloc kariz-musl
-      - name: Memory
-        run: |
-          # musl: 6.0 MiB idle. mimalloc untuned: 15.6 (MIMALLOC_ARENA_EAGER_COMMIT=0: 8.1).
-          # kariz-mimalloc now sets that option itself (src/allocator.rs); the two
-          # variants below compare the built-in setting with the environment variable.
-          run() {
-            label=$1; bin=$2; shift 2
-            echo "== $label"
-            env "$@" scripts/rss.sh tcpmux 100 "$bin" 2>&1 | grep "^transport"
-            env "$@" scripts/rss.sh tcpmux 1000 "$bin" udp 2>&1 | grep "^transport"
-          }
-          run "musl" ./kariz-musl X=1
-          run "mimalloc, built-in setting" ./kariz-mimalloc X=1
-          run "mimalloc, env variable set too" ./kariz-mimalloc MIMALLOC_ARENA_EAGER_COMMIT=0
-          run "mimalloc, arenas off too" ./kariz-mimalloc MIMALLOC_ARENA_EAGER_COMMIT=0 MIMALLOC_DISALLOW_ARENA_ALLOC=1
-      - name: Bulk throughput with the setting, alternating
-        run: |
-          for round in 1 2 3; do
-            for alloc in mimalloc musl; do
-              if [ "$alloc" = mimalloc ]; then feats=""; else feats="--no-default-features --features quic,kcp"; fi
-              echo "== $alloc, round $round"
-              cargo test --release --locked --target "$TARGET" $feats --test tunnel throughput                 -- --ignored --nocapture --exact 2>&1 | grep "each way" || true
-            done
-          done
 
   # nginx in front of the tunnel as a stand-in for a CDN: WebSocket proxying, TLS
   # termination and an idle timeout (tests/tunnel.rs, module `nginx`).

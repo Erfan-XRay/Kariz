@@ -4,8 +4,22 @@
 
 ### Added
 
+- **`kariz speedtest`:** measures download and upload speed, latency (idle and during
+  each transfer) and UDP loss and jitter, through the running tunnel's own sessions: the
+  same transport, encryption, mux and profile as users' traffic. It works in both
+  modes: the entry side's daemon serves a local control socket (`[control] socket`,
+  default next to the config file, owner only, Linux only) and runs the test over its
+  live sessions. Options: `--seconds`, `--streams`, `--no-udp`. The exit side answers
+  the test streams (`tunnel.speedtest = false` turns that off; at most 32 at once) and
+  must be v0.6 or newer. `kariz-manager speedtest NAME`, and option 6 of its menu.
+  See docs/speedtest.md.
 - **mimalloc** as the global allocator of the `kariz` binary (cargo feature
-  `mimalloc`, on by default).
+  `mimalloc`, on by default). Static musl builds run 34 % faster on average across 28
+  benchmark setups (25 to 100 % with mux, `wss`, `quic` and `kcp`; plain `tcp` is
+  unchanged), for about 2 MiB more memory idle (8.1 against 6.0 MiB): Kariz commits
+  mimalloc's arena on demand, which cut the idle 15.6 MiB of its default. Memory grows
+  more with many idle UDP flows (+6 to +9 MiB per 1,000, against +4). Build with
+  `--no-default-features --features quic,kcp` for the least memory.
 - **A startup banner and new log lines.** `kariz run` starts with the Kariz logo, the
   version, the author and a summary of this side's setup. On a terminal, log lines
   carry the local time, coloured level badges and highlighted fields. Under systemd

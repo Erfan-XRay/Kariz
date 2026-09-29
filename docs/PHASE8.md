@@ -23,6 +23,32 @@ x86_64, aarch64 and armv7, and mimalloc.
 - **Kept only if it pays.** mimalloc usually uses a little more memory. If the gain is
   small, it goes off by default and stays available.
 
+*Status after 8.1:* mimalloc is the binary's global allocator, feature `mimalloc`, on by
+default. Measured on GitHub Actions runners (2 vCPU, static musl builds, temporary CI job,
+removed): the throughput benchmark (28 setups, 3 alternating rounds each) and the memory
+script, with and without it.
+
+| | mimalloc | musl's allocator |
+|---|---|---|
+| Throughput, mean over the 28 setups | +34 % | |
+| With mux, `wss`, `quic`, `kcp` | +25 to +100 % | |
+| Plain `tcp`, `ws` without mux | -12 to +8 % | |
+| Idle memory | 15.6 MiB untuned, **8.1 MiB** tuned | 6.0 MiB |
+| 100 idle connections | +1 MiB | +1.7 to +5 MiB (varied between runs) |
+| 1,000 idle UDP flows | +6 to +9 MiB | +4 MiB |
+
+- **The gain pays**, so it stays the default, with its memory documented.
+- **The eager arena commit is the memory problem.** Setting
+  `MIMALLOC_ARENA_EAGER_COMMIT=0` takes the idle side from 15.6 to 8.1 MiB.
+  `kariz::allocator::tune` sets it first thing in `main` (the option is named by its
+  index in mimalloc v3, so `libmimalloc-sys` is pinned to an exact version); CI showed the
+  built-in setting gives the same 8.1 MiB as the environment variable. An explicit
+  `MIMALLOC_ARENA_EAGER_COMMIT` in the environment wins.
+- **Turning arenas off** too (`MIMALLOC_DISALLOW_ARENA_ALLOC=1`) gets the idle side to
+  6.5 MiB, but 1,000 UDP flows then cost as much as before; not adopted.
+- **The benchmarks use the same setting** (`tune()` at the top of `throughput` and
+  `udp_throughput`), so they measure what the binary runs.
+
 ## 3. More targets (8.2)
 
 | Target | Machines |

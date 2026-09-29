@@ -102,11 +102,15 @@ groups need the same rule.
 kariz-manager list                  # name, side, transport, state, address
 kariz-manager status main
 kariz-manager logs main             # follows the log; Ctrl-C to stop
+kariz-manager speedtest main        # speed, latency and UDP; on the entry server
 kariz-manager restart main          # also: start, stop
 kariz-manager edit main             # opens $EDITOR (nano by default)
 kariz-manager remove main
 ```
 
+- **`speedtest`** runs `kariz speedtest` for the tunnel (options pass through, e.g.
+  `--seconds 5`). It works on the entry server, while the tunnel runs; see
+  [Speed test](speedtest.md).
 - **`stop`** also disables the tunnel at boot; **`start`** turns it back on.
 - **`edit`** checks your change with `kariz check` before applying it. If the check fails,
   the tunnel keeps its old settings. After a good edit it restarts the tunnel.

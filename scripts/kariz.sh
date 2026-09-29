@@ -8,7 +8,7 @@
 # Without arguments it opens a menu. The same actions as commands (see `help`):
 #   kariz-manager install [--version vX.Y.Z] [--binary PATH]
 #   kariz-manager add NAME --role entry|exit --mode reverse|direct --transport T ...
-#   kariz-manager list | status NAME | start|stop|restart NAME | logs NAME
+#   kariz-manager list | status NAME | start|stop|restart NAME | logs NAME | speedtest NAME
 #   kariz-manager edit NAME | remove NAME [--yes] | update | uninstall [--yes]
 #
 # The repository is private for now: set GITHUB_TOKEN to a token that can read it.
@@ -629,6 +629,24 @@ cmd_remove() {
 
 # ---- Menu ----
 
+# The speed test runs on the entry side, through the running tunnel's own sessions.
+cmd_speedtest() {
+    need_root
+    need_kariz
+    local name=${1:-}
+    [[ -n "$name" ]] || die "speedtest: which tunnel?"
+    shift
+    need_tunnel "$name"
+    local conf role
+    conf=$(conf_of "$name")
+    role=$(sed -n 's/^role *= *"\(.*\)"/\1/p' "$conf")
+    [[ "$role" == entry ]] ||
+        die "Run the speed test on the entry server: 'kariz-manager speedtest $name' there."
+    systemctl is-active --quiet "kariz@$name" ||
+        die "The tunnel '$name' is not running (kariz-manager start $name)."
+    "$BIN" speedtest -c "$conf" "$@"
+}
+
 pick_tunnel() {
     cmd_list
     ask "Tunnel name" ""
@@ -652,9 +670,10 @@ menu() {
    ${C_TEAL}3${C_RESET}) List tunnels
    ${C_TEAL}4${C_RESET}) Start / stop / restart a tunnel
    ${C_TEAL}5${C_RESET}) Logs of a tunnel
-   ${C_TEAL}6${C_RESET}) Edit a tunnel
-   ${C_TEAL}7${C_RESET}) Remove a tunnel
-   ${C_TEAL}8${C_RESET}) Uninstall Kariz
+   ${C_TEAL}6${C_RESET}) Speed test a tunnel (on the entry side)
+   ${C_TEAL}7${C_RESET}) Edit a tunnel
+   ${C_TEAL}8${C_RESET}) Remove a tunnel
+   ${C_TEAL}9${C_RESET}) Uninstall Kariz
    ${C_TEAL}0${C_RESET}) Exit
 
 EOF
@@ -671,11 +690,12 @@ EOF
                 cmd_service "$action" "$name"
             ) || true ;;
             5) (cmd_service logs "$(pick_tunnel)") || true ;;
-            6) (cmd_edit "$(pick_tunnel)") || true ;;
-            7) (cmd_remove "$(pick_tunnel)") || true ;;
-            8) (cmd_uninstall) || true ;;
+            6) (cmd_speedtest "$(pick_tunnel)") || true ;;
+            7) (cmd_edit "$(pick_tunnel)") || true ;;
+            8) (cmd_remove "$(pick_tunnel)") || true ;;
+            9) (cmd_uninstall) || true ;;
             0 | q) exit 0 ;;
-            *) warn "Choose 0-8." ;;
+            *) warn "Choose 0-9." ;;
         esac
         read -r -u "$IN_FD" -p "  ${C_DIM}Enter to go back to the menu${C_RESET}" _ || exit 0
     done
@@ -695,6 +715,7 @@ usage() {
       --ws-path /PATH      ws / wss              --pin HEX   wss dialer
   list                                         all tunnels and their state
   start | stop | restart | status | logs NAME
+  speedtest NAME [--seconds N] [--streams N] [--no-udp]   speed and latency (entry side)
   edit NAME                                    edit, check and restart
   remove NAME [--yes]
   uninstall [--yes]                            also deletes the configs with --yes
@@ -712,6 +733,7 @@ main() {
         add) shift && cmd_add "$@" ;;
         list) cmd_list ;;
         start | stop | restart | status | logs) need_root && cmd_service "$1" "${2:-}" ;;
+        speedtest) shift && cmd_speedtest "$@" ;;
         edit) cmd_edit "${2:-}" ;;
         remove) cmd_remove "${2:-}" "${3:-}" ;;
         help | -h | --help) usage ;;

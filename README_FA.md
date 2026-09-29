@@ -30,7 +30,7 @@ flowchart LR
 
 <div dir="rtl">
 
-- 🪶 **سبک:** بدون Garbage Collector و با حدود ۵ مگابایت RAM برای هر سمت؛ روی ارزان‌ترین VPSها هم اجرا می‌شود.
+- 🪶 **سبک:** بدون Garbage Collector و با حدود ۸ مگابایت RAM برای هر سمت؛ روی ارزان‌ترین VPSها هم اجرا می‌شود.
 - 🔒 **امن:** احراز هویت دوطرفه با توکن مشترک، امنیت پیشرو با X25519، و رکوردهای رمزشده بدون هیچ بایت ثابت. از پشت CDN هم کار می‌کند.
 - ⚡ **سریع:** مسیر داده بدون dispatch پویا و سوکت‌های تنظیم‌شده؛ روی localhost حدود ۴ گیگابیت بر ثانیه رمزشده روی یک اتصال، و transportهایی که روی لینک پرتلفات هم سرعتشان را حفظ می‌کنند.
 
@@ -44,6 +44,7 @@ flowchart LR
 | **forward کردن UDP** | WireGuard، بازی، DNS و QUIC روی هر transportی؛ روی `quic` و `kcp` بسته‌ی گم‌شده چیز دیگری را معطل نمی‌کند |
 | **پروفایل‌ها** | `balanced`، `ultraspeed` برای بیشترین سرعت، و `gaming` برای تأخیر کم و پایدار |
 | **بازی** | FEC برای بازسازی بسته‌های گم‌شده، تکثیر بسته برای هر قانون، و علامت DSCP اختیاری |
+| **تست سرعت** | `kariz speedtest` سرعت دانلود و آپلود، تأخیر زیر بار و loss در UDP را از داخل تانل زنده و در هر دو حالت می‌سنجد ([مستندات](docs/speedtest.md)) |
 | **آماده برای CDN** | early data یک رفت‌وبرگشت صرفه‌جویی می‌کند، pingها اتصال بیکار را زنده نگه می‌دارند، و هر درخواست دیگری صفحه‌ی 404 شبیه nginx می‌گیرد |
 | **اجرای آسان** | یک فایل اجرایی، یک فایل TOML برای هر سمت، `kariz check` برای بررسی، و سرویس systemd |
 
@@ -78,6 +79,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/script
 ```bash
 kariz-manager list                  # every tunnel and its state
 kariz-manager logs main             # follow a tunnel's log
+kariz-manager speedtest main        # speed, latency and UDP through the tunnel
 kariz-manager restart main
 kariz-manager update                # new release, running tunnels restarted
 ```
@@ -194,7 +196,7 @@ sudo cp systemd/kariz.service /etc/systemd/system/ && sudo systemctl enable --no
 | `tcp` با AES-256-GCM روی localhost | ۳٫۸ تا ۴ گیگابیت بر ثانیه در هر جهت |
 | `tcpmux` با AES-256-GCM روی localhost | ۳٫۲ تا ۳٫۳ گیگابیت بر ثانیه |
 | UDP از داخل تانل | حدود ۱۴۰ هزار بسته در ثانیه در هر جهت |
-| حافظه در حالت بیکار | حدود ۵ تا ۶ مگابایت برای هر سمت |
+| حافظه در حالت بیکار | حدود ۸ مگابایت برای هر سمت (۶ مگابایت بدون mimalloc) |
 | مسیر ۶۰ میلی‌ثانیه با ۱٪ loss: `tcpmux` / `kcp` / `quic` (BBR) | ۲٫۳ / ۲۸٫۵ / ۴۷٫۴ مگابیت بر ثانیه |
 
 ## 📚 مستندات

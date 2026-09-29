@@ -22,15 +22,15 @@ use kariz::config::{mode_name, role_name, Config, LogColor};
 const AUTHOR: &str = "ErfanXRay";
 const REPOSITORY: &str = "github.com/Erfan-XRay/Kariz";
 
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-const TEAL: &str = "\x1b[38;5;43m";
-const AQUA: &str = "\x1b[38;5;86m";
-const SAND: &str = "\x1b[38;5;179m";
-const RED: &str = "\x1b[38;5;203m";
-const YELLOW: &str = "\x1b[38;5;221m";
-const BLUE: &str = "\x1b[38;5;111m";
+pub(crate) const RESET: &str = "\x1b[0m";
+pub(crate) const BOLD: &str = "\x1b[1m";
+pub(crate) const DIM: &str = "\x1b[2m";
+pub(crate) const TEAL: &str = "\x1b[38;5;43m";
+pub(crate) const AQUA: &str = "\x1b[38;5;86m";
+pub(crate) const SAND: &str = "\x1b[38;5;179m";
+pub(crate) const RED: &str = "\x1b[38;5;203m";
+pub(crate) const YELLOW: &str = "\x1b[38;5;221m";
+pub(crate) const BLUE: &str = "\x1b[38;5;111m";
 
 /// Where the log lines go, which decides their look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,7 +59,7 @@ impl Style {
         }
     }
 
-    fn paint(&self, code: &str, text: &str) -> String {
+    pub(crate) fn paint(&self, code: &str, text: &str) -> String {
         if self.color {
             format!("{code}{text}{RESET}")
         } else {

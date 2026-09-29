@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
@@ -14,11 +15,14 @@ use crate::channel::{self, Channel, Link};
 use crate::config::{Config, Mode, TransportKind, Tuning};
 use crate::crypto::{Crypto, ReplayFilter};
 use crate::mux::{MuxSession, SessionConfig, Side};
-use crate::proto::{self, Open, KIND_UDP, STATUS_DIAL_FAILED, STATUS_OK};
+use crate::proto::{
+    self, Open, KIND_SPEEDTEST, KIND_UDP, STATUS_DIAL_FAILED, STATUS_OK, STATUS_UNSUPPORTED,
+};
 use crate::relay::{relay, relay_stream};
 #[cfg(feature = "quic")]
 use crate::session::quic::{accept_sessions, QuicSession};
 use crate::session::{maintain, ResetReason, Session, SessionStream};
+use crate::speedtest::{self, Pipe};
 #[cfg(feature = "quic")]
 use crate::transport::quic::{QuicDialer, QuicListener, QuicSettings};
 use crate::transport::{tcp, Dialer, Listener, Settings};
@@ -27,9 +31,25 @@ use crate::udp;
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
 
+/// Speed test streams the exit serves at once.
+const SPEEDTEST_STREAMS: usize = 32;
+
 struct Exit {
     crypto: Crypto,
     tuning: Tuning,
+    /// Slots for speed test streams; `None` when `tunnel.speedtest` is off.
+    speedtest: Option<Arc<Semaphore>>,
+}
+
+impl Exit {
+    /// A slot for a speed test stream, or why there is none.
+    fn speedtest_slot(&self) -> Result<OwnedSemaphorePermit, ResetReason> {
+        let slots = self.speedtest.as_ref().ok_or(ResetReason::Unsupported)?;
+        slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ResetReason::Refused)
+    }
 }
 
 pub async fn run(config: Config) -> Result<()> {
@@ -39,6 +59,10 @@ pub async fn run(config: Config) -> Result<()> {
     let exit = Arc::new(Exit {
         crypto: Crypto::new(&config.tunnel.token, config.tunnel.encryption).with_mux(mux.enabled),
         tuning: tuning.clone(),
+        speedtest: config
+            .tunnel
+            .speedtest
+            .then(|| Arc::new(Semaphore::new(SPEEDTEST_STREAMS))),
     });
     let sessions = SessionConfig::new(&mux);
     let mut tasks = JoinSet::new();
@@ -285,6 +309,18 @@ async fn accept_direct(
 }
 
 async fn serve(exit: &Exit, mut tunnel: Link, open: Open) {
+    if open.kind == KIND_SPEEDTEST {
+        let Ok(_slot) = exit.speedtest_slot() else {
+            let _ = proto::write_status(&mut tunnel, STATUS_UNSUPPORTED).await;
+            return;
+        };
+        if proto::write_status(&mut tunnel, STATUS_OK).await.is_err() {
+            return;
+        }
+        let pipe = Pipe::from(Channel::Link(tunnel));
+        let _ = speedtest::serve(pipe, &open.target).await;
+        return;
+    }
     if open.kind == KIND_UDP {
         return serve_udp(exit, tunnel, open).await;
     }
@@ -327,6 +363,14 @@ async fn serve_stream(exit: &Exit, stream: SessionStream, syn: Bytes) {
             return stream.reset(ResetReason::Protocol);
         }
     };
+    if open.kind == KIND_SPEEDTEST {
+        let _slot = match exit.speedtest_slot() {
+            Ok(slot) => slot,
+            Err(reason) => return stream.reset(reason),
+        };
+        let _ = speedtest::serve(Pipe::Stream(stream), &open.target).await;
+        return;
+    }
     if open.kind == KIND_UDP {
         let socket = match udp::connect(&open.target, &exit.tuning).await {
             Ok(s) => s,

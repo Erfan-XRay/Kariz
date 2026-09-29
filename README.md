@@ -26,7 +26,7 @@ flowchart LR
     X --> T([Targets])
 ```
 
-- 🪶 **Light.** No garbage collector, about 5 MiB of RAM per side. It runs on the
+- 🪶 **Light.** No garbage collector, about 8 MiB of RAM per side. It runs on the
   cheapest VPS.
 - 🔒 **Private.** Mutual authentication with a shared token, X25519 forward secrecy,
   and AEAD records without fixed bytes. It works through CDNs.
@@ -43,6 +43,7 @@ flowchart LR
 | **UDP forwarding** | WireGuard, games, DNS, QUIC over any transport. Over `quic` and `kcp` a lost packet delays nothing else. |
 | **Profiles** | `balanced`, `ultraspeed` for the most speed, and `gaming` for low, steady latency. |
 | **Gaming** | FEC that rebuilds lost packets, per-rule packet duplication, and optional DSCP marks. |
+| **Speed test** | `kariz speedtest` measures download, upload, latency under load and UDP loss through the live tunnel, in either mode ([docs](docs/speedtest.md)). |
 | **CDN ready** | Early data saves a round trip, pings keep idle connections alive, and anything else gets an nginx-style `404`. |
 | **Easy to run** | One static binary, one TOML file per side, `kariz check` to validate, a systemd unit. |
 
@@ -76,6 +77,7 @@ its commands directly:
 ```bash
 kariz-manager list                  # every tunnel and its state
 kariz-manager logs main             # follow a tunnel's log
+kariz-manager speedtest main        # speed, latency and UDP through the tunnel
 kariz-manager restart main
 kariz-manager add main --role entry --mode reverse --transport tcpmux     --listen 0.0.0.0:3080 --forward 443=127.0.0.1:443
 kariz-manager update                # new release, running tunnels restarted
@@ -158,7 +160,7 @@ still arrive. See [docs/udp-and-games.md](docs/udp-and-games.md) and the
 | `tcp`, AES-256-GCM, localhost | 3.8-4.0 Gbit/s each way |
 | `tcpmux`, AES-256-GCM, localhost | 3.2-3.3 Gbit/s |
 | UDP through the tunnel | about 140,000 packets/s each way |
-| Memory, idle | about 5-6 MiB per side |
+| Memory, idle | about 8 MiB per side (6 MiB without mimalloc) |
 | 60 ms path, 1 % loss: `tcpmux` / `kcp` / `quic` (BBR) | 2.3 / 28.5 / 47.4 Mbit/s |
 
 Methods, tables and the benchmarks: [docs/performance.md](docs/performance.md).
@@ -169,6 +171,7 @@ Methods, tables and the benchmarks: [docs/performance.md](docs/performance.md).
 |---|---|
 | [Getting started](docs/getting-started.md) | install, token, first tunnel, systemd |
 | [Configuration reference](docs/configuration.md) | every setting, default and limit |
+| [Speed test](docs/speedtest.md) · [Manager script](docs/manager.md) | measuring and managing tunnels |
 | [Transports](docs/transports.md) · [Profiles](docs/profiles.md) | choosing and tuning |
 | [UDP and games](docs/udp-and-games.md) · [CDN](docs/CDN.md) | specific setups |
 | [Performance](docs/performance.md) · [Security](docs/security.md) · [Troubleshooting](docs/troubleshooting.md) | running it well |
