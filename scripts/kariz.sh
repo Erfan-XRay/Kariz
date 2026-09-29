@@ -927,7 +927,7 @@ cmd_service() {
         start) systemctl enable --now "kariz@$name" && ok "Started '$name'." ;;
         stop) systemctl disable --now "kariz@$name" && ok "Stopped '$name' (it stays off after a reboot)." ;;
         restart) systemctl restart "kariz@$name" && ok "Restarted '$name'." ;;
-        status) systemctl status "kariz@$name" --no-pager ;;
+        status) cmd_status "$name" ;;
         logs)
             info "Ctrl+C to stop following the log."
             journalctl -u "kariz@$name" -n 100 -f
@@ -982,6 +982,45 @@ cmd_remove() {
 }
 
 # ---- Menu ----
+
+# Whether this Kariz has `kariz status` (v0.7 and later).
+has_status() { "$BIN" status --help >/dev/null 2>&1; }
+
+# A tunnel's live status (connection, round trip, traffic per port) from `kariz status`,
+# or systemd's view when it is not running. Without a name: every tunnel.
+cmd_status() {
+    need_root
+    need_kariz
+    local name=${1:-}
+    if [[ -z "$name" ]]; then
+        cmd_status_all
+        return
+    fi
+    shift
+    need_tunnel "$name"
+    if systemctl is-active --quiet "kariz@$name" && has_status; then
+        "$BIN" status -c "$(conf_of "$name")" "$@"
+    else
+        systemctl status "kariz@$name" --no-pager
+    fi
+}
+
+cmd_status_all() {
+    shopt -s nullglob
+    local f name any=0
+    for f in "$CONF_DIR"/*.toml; do
+        any=1
+        name=$(basename "$f" .toml)
+        if ! systemctl is-active --quiet "kariz@$name"; then
+            printf '\n  %s▸%s tunnel %s · %sstopped%s\n' "$C_TEAL" "$C_RESET" "$name" "$C_YELLOW" "$C_RESET"
+        elif has_status; then
+            "$BIN" status -c "$f" || true
+        else
+            printf '\n  %s▸%s tunnel %s · running (update Kariz to see its status)\n' "$C_TEAL" "$C_RESET" "$name"
+        fi
+    done
+    ((any)) || info "No tunnels yet (option 2 adds one)."
+}
 
 # The speed test runs on the entry side, through the running tunnel's own sessions.
 cmd_speedtest() {
@@ -1088,7 +1127,7 @@ EOF
                     "start|start it, and at every boot" \
                     "stop|stop it, and not at boot" \
                     "restart|restart it" \
-                    "status|show its state"
+                    "status|its connection, round trip and traffic"
                 cmd_service "$action" "$name"
             ) || true ;;
             5) (pick_tunnel name && cmd_service logs "$name") || true ;;
@@ -1129,7 +1168,9 @@ usage() {
       --forward LISTEN=TARGET[/tcp|udp|tcp+udp] one rule in full, can repeat
       --ws-path /PATH      ws / wss              --pin HEX   wss dialer
   list                                         all tunnels and their state
-  start | stop | restart | status | logs NAME
+  status [NAME] [--watch]                      connection, round trip, traffic per port
+                                               (every tunnel without NAME)
+  start | stop | restart | logs NAME
   speedtest NAME [--seconds N] [--streams N] [--no-udp]   speed and latency (entry side)
   edit NAME                                    edit, check and restart
   remove NAME [--yes]
@@ -1147,7 +1188,8 @@ main() {
         uninstall) cmd_uninstall "${2:-}" ;;
         add) shift && cmd_add "$@" ;;
         list) cmd_list ;;
-        start | stop | restart | status | logs) need_root && cmd_service "$1" "${2:-}" ;;
+        start | stop | restart | logs) need_root && cmd_service "$1" "${2:-}" ;;
+        status) shift && cmd_status "$@" ;;
         speedtest) shift && cmd_speedtest "$@" ;;
         edit) cmd_edit "${2:-}" ;;
         remove) cmd_remove "${2:-}" "${3:-}" ;;

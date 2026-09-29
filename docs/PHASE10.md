@@ -178,6 +178,14 @@ checks a config before writing it, without a temporary file.
 **The manager script** gets a Status entry (and `kariz-manager status [NAME]`) that runs
 `kariz status` for one tunnel or all of them.
 
+*Status after 10.3:* `kariz status` (`--watch`, `--json`, exit code 3 when the daemon is
+not running) with its view in `src/status_view.rs`; `kariz check --json` with `key`,
+`line` and `column`; `-c -` for `check`. In the manager, `status [NAME] [--watch]` and
+the menu's "status" action run `kariz status` when the tunnel runs (systemd's view when
+it does not, or when the installed Kariz is older than 0.7). Tests: the view (rates from
+two readings, a missing peer, the exit's targets) and `check --json` (a good config, the
+setting at fault, no key when none is named, line and column of a syntax error).
+
 ## 5. Work breakdown
 
 | Step | Content | Done when |
@@ -185,5 +193,5 @@ checks a config before writing it, without a temporary file.
 | **10.0** Plan (done) | This document. | |
 | **10.1** Counters (done) | `Stats`, counting in entry, exit, relays and UDP; mux RTT from pings; QUIC RTT. | Unit tests for every counter; benchmark A/B within 1 %. |
 | **10.2** `status` (done) | Control socket on the exit side too; the `status` request; `docs/status.md`. | Tests: a tunnel in memory answers `status` on both sides with the right numbers. |
-| **10.3** CLI | `kariz status` (`--watch`, `--json`), `kariz check --json`, `-c -`, manager Status. | Tests for the output and the error cases; manager tty test covers Status. |
+| **10.3** CLI (done) | `kariz status` (`--watch`, `--json`), `kariz check --json`, `-c -`, manager Status. | Tests for the output and the error cases; manager tty test covers Status. |
 | **10.4** Release | README / docs, CHANGELOG, `0.7.0`. | CI green; release v0.7.0 with three archives. |

@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -9,9 +9,12 @@ use kariz::crypto::Cipher;
 use kariz::speedtest::Options;
 
 mod logging;
-// Shown only by `kariz speedtest`, which is Unix only (its tests run everywhere).
+// Shown only by `kariz speedtest` and `kariz status`, which are Unix only (their tests
+// run everywhere).
 #[cfg_attr(not(unix), allow(dead_code))]
 mod report;
+#[cfg_attr(not(unix), allow(dead_code))]
+mod status_view;
 
 /// musl's allocator is built for size, not speed; mimalloc is much faster on the
 /// many small allocations of the packet path (docs/PHASE8.md).
@@ -35,8 +38,24 @@ enum Command {
     },
     /// Validate a config file and print a summary.
     Check {
+        /// The config file, or `-` to read it from standard input.
         #[arg(short, long, default_value = "/etc/kariz/config.toml")]
         config: PathBuf,
+        /// Print one JSON document instead: the settings, or the error and where it is.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a running tunnel: whether the other side is connected, the round-trip time,
+    /// the last error, and the traffic of each forwarded port. Works on either side.
+    Status {
+        #[arg(short, long, default_value = "/etc/kariz/config.toml")]
+        config: PathBuf,
+        /// Redraw every second until Ctrl+C.
+        #[arg(long)]
+        watch: bool,
+        /// Print the daemon's status document (JSON) as is.
+        #[arg(long)]
+        json: bool,
     },
     /// Generate a random token for `tunnel.token`.
     Token,
@@ -67,11 +86,12 @@ fn main() -> Result<()> {
     kariz::allocator::tune();
     match Cli::parse().command {
         Command::Run { config } => run(Config::load(&config)?),
-        Command::Check { config } => {
-            let config = Config::load(&config)?;
-            print_summary(&config);
-            Ok(())
-        }
+        Command::Check { config, json } => check(&config, json),
+        Command::Status {
+            config,
+            watch,
+            json,
+        } => status(&config, watch, json),
         Command::Token => {
             let mut bytes = [0u8; 24];
             getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -99,6 +119,152 @@ fn main() -> Result<()> {
             speedtest(&Config::load(&config)?, options)
         }
     }
+}
+
+/// `kariz check`: validates a config (a file, or standard input for `-`) and prints its
+/// summary, or with `json` one document for tools (the web panel).
+fn check(path: &Path, json: bool) -> Result<()> {
+    let name = if path == Path::new("-") {
+        "standard input".to_string()
+    } else {
+        path.display().to_string()
+    };
+    let text = if path == Path::new("-") {
+        std::io::read_to_string(std::io::stdin()).context("failed to read standard input")
+    } else {
+        std::fs::read_to_string(path).with_context(|| format!("failed to read config file {name}"))
+    };
+    if !json {
+        let text = text?;
+        let config = Config::parse(&text).with_context(|| format!("invalid config file {name}"))?;
+        print_summary(&config);
+        return Ok(());
+    }
+    let doc = match text {
+        Err(e) => check_error(&e, None),
+        Ok(text) => match Config::parse(&text) {
+            Ok(config) => check_ok(&config),
+            Err(e) => check_error(&e, Some(&text)),
+        },
+    };
+    println!("{doc}");
+    if doc["ok"] == false {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `kariz check --json` for a valid config.
+fn check_ok(config: &Config) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "role": role_name(config.role),
+        "mode": mode_name(config.mode),
+        "profile": config.profile.name(),
+        "transport": config.tunnel.transport.name(),
+        "listen": config.tunnel.listen,
+        "remote": config.tunnel.remote,
+        "mux": config.mux().enabled,
+        "forwards": config.forward.iter().map(|f| serde_json::json!({
+            "listen": f.listen,
+            "target": f.target,
+            "protocol": f.protocol.name(),
+        })).collect::<Vec<_>>(),
+        "warnings": config.warnings(),
+    })
+}
+
+/// `kariz check --json` for an invalid config: the message, the setting it names (every
+/// validation message starts with one) and, for TOML syntax, where in the text it is.
+fn check_error(e: &anyhow::Error, text: Option<&str>) -> serde_json::Value {
+    let mut doc = serde_json::json!({ "ok": false, "error": format!("{e:#}") });
+    let root = e.root_cause().to_string();
+    let token: String = root
+        .trim_start_matches('[')
+        .chars()
+        .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.'))
+        .collect();
+    if token.contains('.') && !token.ends_with('.') {
+        doc["key"] = token.into();
+    }
+    if let Some(toml) = e.chain().find_map(|c| c.downcast_ref::<toml::de::Error>()) {
+        doc["error"] = toml.message().into();
+        if let (Some(span), Some(text)) = (toml.span(), text) {
+            let before = &text[..span.start.min(text.len())];
+            let line = before.matches('\n').count() + 1;
+            let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+            doc["line"] = line.into();
+            doc["column"] = column.into();
+        }
+    }
+    doc
+}
+
+/// `kariz status`: asks the running daemon of this config for its status and shows it.
+#[cfg(unix)]
+fn status(path: &Path, watch: bool, json: bool) -> Result<()> {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    let config = Config::load(path)?;
+    let socket = config
+        .control_socket()
+        .context("this config has no control socket")?;
+    let name = path
+        .file_stem()
+        .map_or("tunnel".into(), |s| s.to_string_lossy().into_owned());
+    let style = logging::Style::detect(config.log.color, logging::local_offset());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let ask = || {
+        runtime.block_on(async {
+            let connection = kariz::control::connect(&socket).await?;
+            kariz::control::status(connection).await
+        })
+    };
+    let first = match ask() {
+        Ok(status) => (status, Instant::now()),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            eprintln!(
+                "kariz status: {name} is not running (nothing answers on {}); \
+                 see `systemctl status kariz@{name}`",
+                socket.display()
+            );
+            std::process::exit(3);
+        }
+        Err(e) => return Err(e).context("could not read the status"),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&first.0)?);
+        return Ok(());
+    }
+    let mut before = first;
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let now = ask().context("could not read the status")?;
+        let secs = before.1.elapsed().as_secs_f64();
+        let view = status_view::render(&style, &name, &now, Some((&before.0, secs)));
+        if watch && style.color {
+            print!("\x1b[2J\x1b[H");
+        }
+        print!("\n{view}");
+        std::io::stdout().flush()?;
+        if !watch {
+            return Ok(());
+        }
+        before = (now, Instant::now());
+    }
+}
+
+#[cfg(not(unix))]
+fn status(_: &Path, _: bool, _: bool) -> Result<()> {
+    bail!("`kariz status` needs a Linux server: it talks to the running daemon over a Unix socket")
 }
 
 /// `kariz speedtest`: asks the running daemon of this config for a test and shows it.
@@ -345,5 +511,60 @@ fn print_summary(config: &Config) {
     }
     for warning in config.warnings() {
         println!("warning: {warning}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GOOD: &str = "role = \"entry\"\nmode = \"direct\"\n[tunnel]\ntransport = \"tcpmux\"\n\
+                        remote = \"203.0.113.1:3080\"\ntoken = \"test-token-0123456789\"\n\
+                        [[forward]]\nlisten = \"0.0.0.0:53\"\ntarget = \"127.0.0.1:53\"\n\
+                        protocol = \"udp\"\n";
+
+    #[test]
+    fn check_json_describes_a_good_config() {
+        let doc = check_ok(&Config::parse(GOOD).unwrap());
+        assert_eq!(doc["ok"], true);
+        assert_eq!(doc["role"], "entry");
+        assert_eq!(doc["transport"], "tcpmux");
+        assert_eq!(doc["remote"], "203.0.113.1:3080");
+        assert_eq!(doc["listen"], serde_json::Value::Null);
+        assert_eq!(doc["mux"], true);
+        assert_eq!(doc["forwards"][0]["protocol"], "udp");
+        assert!(doc["warnings"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn check_json_names_the_setting_at_fault() {
+        let bad = GOOD.replace("test-token-0123456789", "short");
+        let doc = check_error(&Config::parse(&bad).unwrap_err(), Some(&bad));
+        assert_eq!(doc["ok"], false);
+        assert_eq!(doc["key"], "tunnel.token");
+        assert!(
+            doc["error"].as_str().unwrap().contains("16 characters"),
+            "{doc}"
+        );
+        assert!(doc.get("line").is_none(), "{doc}");
+
+        let exit = GOOD.replace("role = \"entry\"", "role = \"exit\"");
+        let doc = check_error(&Config::parse(&exit).unwrap_err(), Some(&exit));
+        assert_eq!(doc["key"], "tunnel.listen", "{doc}");
+
+        // A message that names no setting has no key.
+        let bare = &GOOD[..GOOD.find("[[forward]]").unwrap()];
+        let doc = check_error(&Config::parse(bare).unwrap_err(), Some(bare));
+        assert!(doc["error"].as_str().unwrap().contains("[[forward]]"), "{doc}");
+        assert!(doc.get("key").is_none(), "{doc}");
+    }
+
+    #[test]
+    fn check_json_points_at_a_syntax_error() {
+        let broken = GOOD.replace("mode = \"direct\"", "mode = direct");
+        let doc = check_error(&Config::parse(&broken).unwrap_err(), Some(&broken));
+        assert_eq!(doc["ok"], false);
+        assert_eq!(doc["line"], 2, "{doc}");
+        assert_eq!(doc["column"], 8, "{doc}");
     }
 }
