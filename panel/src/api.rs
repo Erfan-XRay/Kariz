@@ -59,6 +59,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/update/check", post(update_check))
         .route("/api/update/settings", post(update_settings))
         .route("/api/update/apply", post(update_apply))
+        .route("/api/update/servers", post(update_servers))
         .route("/api/backup", post(backup))
         .route(
             "/api/restore",
@@ -1192,6 +1193,37 @@ async fn update_apply(
                 &format!("session {}", me.id),
                 &ip_of(&peer),
                 &format!("updated the panel to {target}"),
+            );
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => update_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ServersBody {
+    #[serde(default)]
+    restart_tunnels: bool,
+}
+
+/// Updates the servers whose agent is older than the panel, one at a time.
+async fn update_servers(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<ServersBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match crate::updater::start_servers(&state.hub, body.restart_tunnels) {
+        Ok(op) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                "updated the other servers",
             );
             reply(StatusCode::ACCEPTED, json!({ "op": op }))
         }

@@ -28,14 +28,91 @@ export function useUpdate(enabled: boolean): { status: UpdateStatus | null; relo
 }
 
 /** A small notice for the top bar: a newer release exists. */
-export function UpdatePill({ status, onOpen }: { status: UpdateStatus | null; onOpen: () => void }) {
+export function UpdatePill({ status, onOpen, onServers }: { status: UpdateStatus | null; onOpen: () => void; onServers: () => void }) {
+  const { t, num } = useApp();
+  if (!status) return null;
+  if (status.state === "newer" && status.latest) {
+    return (
+      <button className="update-pill" type="button" onClick={onOpen}>
+        <i aria-hidden="true" />
+        {t("upd.pill", { v: status.latest.version })}
+      </button>
+    );
+  }
+  if (status.outdated.length > 0) {
+    return (
+      <button className="update-pill" type="button" onClick={onServers}>
+        <i aria-hidden="true" />
+        {t("upd.pillServers", { n: num(status.outdated.length) })}
+      </button>
+    );
+  }
+  return null;
+}
+
+/** Updates the servers whose agent is behind the panel, one at a time. */
+export function ServersDialog({ status, onClose }: { status: UpdateStatus; onClose: () => void }) {
   const { t } = useApp();
-  if (!status || status.state !== "newer" || !status.latest) return null;
+  const [restart, setRestart] = useState(true);
+  const [id, setId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const op = useOp(id);
+  const names = new Map(status.outdated.map((s) => [s.id, s.name]));
+  const running = !!id && (!op || op.state === "running");
+  const go = async () => {
+    setError("");
+    try {
+      setId((await api.updateServers(restart)).op);
+    } catch (e) {
+      setError(e instanceof ApiError ? describeError(t, e.code) : String(e));
+    }
+  };
   return (
-    <button className="update-pill" type="button" onClick={onOpen}>
-      <i aria-hidden="true" />
-      {t("upd.pill", { v: status.latest.version })}
-    </button>
+    <Dialog
+      title={t("upd.serversTitle")}
+      onClose={running ? () => {} : onClose}
+      footer={
+        <>
+          <button className="btn btn-ghost btn-sm" type="button" disabled={running} onClick={onClose}>
+            {op?.state === "done" ? t("wz.close") : t("cancel")}
+          </button>
+          {!id && (
+            <button className="btn btn-primary btn-sm" type="button" disabled={status.outdated.length === 0 && !restart} onClick={() => void go()}>
+              {t("upd.serversGo")}
+            </button>
+          )}
+          {op?.state === "failed" && (
+            <button className="btn btn-primary btn-sm" type="button" onClick={() => setId(null)}>
+              {t("wz.retry")}
+            </button>
+          )}
+        </>
+      }
+    >
+      {!id && (
+        <>
+          <p className="muted small">{t("upd.serversText", { v: status.current })}</p>
+          {status.outdated.length === 0 ? (
+            <p className="muted small">{t("upd.serversNone")}</p>
+          ) : (
+            <ul className="addr-list">
+              {status.outdated.map((s) => (
+                <li key={s.id}>
+                  <b>{s.name}</b> <span className="muted mono">{s.version}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <label className="check">
+            <input type="checkbox" checked={restart} onChange={(e) => setRestart(e.target.checked)} /> {t("upd.restartTunnels")}
+          </label>
+        </>
+      )}
+      {error && <p className="err small">{error}</p>}
+      <Checklist op={op} />
+      {op?.state === "done" && <p className="ok small">{t("upd.serversDone")}</p>}
+      {op?.state === "failed" && <p className="err small">{t("tun.failed", { why: describeError(t, op.error ?? "", names) })}</p>}
+    </Dialog>
   );
 }
 
@@ -149,6 +226,7 @@ export function UpdatesSection({ status, reload }: { status: UpdateStatus | null
   const { t, toast } = useApp();
   const [checking, setChecking] = useState(false);
   const [dialog, setDialog] = useState(false);
+  const [servers, setServers] = useState(false);
   const row = (title: string, text: string, control: React.ReactNode) => (
     <div className="set-row">
       <div>
@@ -208,6 +286,13 @@ export function UpdatesSection({ status, reload }: { status: UpdateStatus | null
         </span>,
       )}
       {row(
+        t("upd.servers2"),
+        status.outdated.length > 0 ? t("upd.behind", { n: status.outdated.length, names: status.outdated.map((x) => x.name).join(", ") }) : t("upd.allCurrent"),
+        <button className="btn btn-ghost btn-sm" type="button" onClick={() => setServers(true)}>
+          {t("upd.serversGo")}
+        </button>,
+      )}
+      {row(
         t("upd.channel"),
         t("upd.channelText"),
         <Seg
@@ -234,6 +319,7 @@ export function UpdatesSection({ status, reload }: { status: UpdateStatus | null
       {status.last_result && !status.last_result.ok &&
         row(t("upd.lastFailed", { v: status.last_result.version }), status.last_result.rolled_back ? t("upd.rolled") : "", <span className="err small">{status.last_result.error}</span>)}
       {dialog && <UpdateDialog status={status} onClose={() => setDialog(false)} />}
+      {servers && <ServersDialog status={status} onClose={() => { setServers(false); reload(); }} />}
     </section>
   );
 }

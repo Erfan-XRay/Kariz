@@ -105,6 +105,22 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         wait: u64,
     },
+    /// What an agent runs, as a transient service, to swap in a new version (the agent
+    /// starts it itself).
+    #[command(hide = true)]
+    AgentUpdateApply {
+        #[arg(long)]
+        stage: PathBuf,
+        #[arg(long)]
+        version: String,
+        /// The file the agent touches each time it reaches the panel.
+        #[arg(long)]
+        stamp: PathBuf,
+        #[arg(long)]
+        panel_bin: PathBuf,
+        #[arg(long)]
+        kariz_bin: PathBuf,
+    },
     /// Private network links on this server, by hand (what the agent does when the panel
     /// asks; for debugging and for the tests). Needs root and Linux.
     Net {
@@ -159,6 +175,13 @@ fn main() -> Result<()> {
             kariz_bin,
             wait,
         } => update_apply(&stage, &version, &config, panel_bin, kariz_bin, wait),
+        Command::AgentUpdateApply {
+            stage,
+            version,
+            stamp,
+            panel_bin,
+            kariz_bin,
+        } => agent_update_apply(&stage, &version, stamp, panel_bin, kariz_bin),
         Command::ReleaseKey { out } => release_key(&out),
         Command::ReleaseSign { file, key_env } => release_sign(&file, &key_env),
         Command::ReleaseVerify { archive, key } => release_verify(&archive, key.as_deref()),
@@ -249,6 +272,37 @@ fn update_apply(
         };
         let _ = db.audit("update", None, &what);
     }
+    if outcome.ok {
+        Ok(())
+    } else {
+        anyhow::bail!(outcome.error.unwrap_or_default())
+    }
+}
+
+fn agent_update_apply(
+    stage: &std::path::Path,
+    version: &str,
+    stamp: PathBuf,
+    panel: PathBuf,
+    kariz: PathBuf,
+) -> Result<()> {
+    use kariz_panel::agent_update::{AgentHost, WAIT};
+    use kariz_panel::update::{self, Targets};
+    let host = AgentHost {
+        unit: "kariz-agent".into(),
+        stamp,
+        since: std::time::SystemTime::now(),
+    };
+    let outcome = update::apply(
+        stage,
+        &Targets { panel, kariz },
+        version,
+        &host,
+        WAIT,
+        std::time::Duration::from_secs(1),
+        auth::now(),
+    );
+    update::write_outcome(stage.parent().unwrap_or(stage), &outcome)?;
     if outcome.ok {
         Ok(())
     } else {

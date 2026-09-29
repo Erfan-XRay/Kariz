@@ -1,6 +1,7 @@
 //! The Kariz web panel (docs/PHASE11.md).
 
 pub mod agent;
+pub mod agent_update;
 pub mod api;
 pub mod auth;
 pub mod backup;

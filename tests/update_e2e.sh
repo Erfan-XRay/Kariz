@@ -111,3 +111,27 @@ test -x /usr/local/bin/kariz.previous
 # the session survived the restart (sessions are in the database)
 test "$(api "${base}api/update" | jq -r .current)" = 99.0.0
 echo "the update to 99.0.0 worked"
+
+# ---- the other servers: the agent (this same machine, connected as ci-agent) is still the
+# old program in memory; the panel sends it the release, it swaps, restarts and reconnects,
+# then the tunnels are restarted one at a time ----
+agent_version() { api "${base}api/servers" | jq -r '.servers[] | select(.local == false) | .version' | head -n1; }
+test "$(api "${base}api/update" | jq -r '.outdated | length')" = 1
+echo "the agent is $(agent_version), the panel 99.0.0"
+before=$(systemctl show kariz@plain -p ActiveEnterTimestampMonotonic --value)
+op=$(api -X POST "${base}api/update/servers" -d '{"restart_tunnels":true}' | jq -r .op)
+test -n "$op"
+for _ in $(seq 1 120); do
+    state=$(api "${base}api/op?id=$op" | jq -r .state)
+    [[ "$state" != running ]] && break
+    sleep 2
+done
+api "${base}api/op?id=$op" | jq -c '{state, error, steps: [.steps[].id]}'
+test "$state" = done
+test "$(agent_version)" = 99.0.0
+test "$(api "${base}api/update" | jq -r '.outdated | length')" = 0
+after=$(systemctl show kariz@plain -p ActiveEnterTimestampMonotonic --value)
+test "$before" != "$after"
+systemctl is-active --quiet kariz-agent
+systemctl is-active --quiet kariz@plain
+echo "the agent was updated over the link and its tunnels were restarted one at a time"

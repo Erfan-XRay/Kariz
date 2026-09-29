@@ -104,7 +104,20 @@ impl Hub {
             None => ("none", false),
         };
         let settings = self.update_settings.get();
+        // Servers whose agent is older than this panel (only they can be updated from here).
+        let outdated: Vec<Value> = self
+            .snapshot()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| {
+                !s.local && matches!(update::compare(&s.version, current), Step::Newer { .. })
+            })
+            .map(
+                |s| json!({ "id": s.id, "name": s.name, "version": s.version, "online": s.online }),
+            )
+            .collect();
         json!({
+            "outdated": outdated,
             "current": current,
             "configured": settings.is_some(),
             "channel": self.update_channel().name(),
@@ -216,4 +229,235 @@ fn handoff(s: &UpdateSettings, stage: &std::path::Path, version: &str) -> Result
     } else {
         bail!("no_systemd")
     }
+}
+
+// ---- the other servers ----
+
+use std::time::Duration;
+
+use crate::agent_update::CHUNK;
+use crate::hub::LOCAL;
+use crate::wire::{Ack, Request, TunnelInfo, UpdateFile};
+
+type Files = Vec<(String, Vec<u8>)>;
+
+/// This panel's release (the archive, its checksum and its signature): the ones kept by the
+/// update that brought the panel to this version, or, if they are gone, downloaded again
+/// (and checked as always).
+async fn release_files(s: &UpdateSettings) -> Result<Files> {
+    let version = crate::version();
+    let arch = update::arch_name().ok_or_else(|| anyhow!("no_build_for_this_cpu"))?;
+    let names = update::asset_names(&format!("v{version}"), arch);
+    let read = |dir: &std::path::Path| -> Option<Files> {
+        names
+            .iter()
+            .map(|n| Some((n.clone(), std::fs::read(dir.join(n)).ok()?)))
+            .collect()
+    };
+    if let Some(files) = read(&s.dir.join(version).join("release")) {
+        return Ok(files);
+    }
+    let api = s.api.clone();
+    let release = tokio::task::spawn_blocking(move || update::fetch_releases(&api))
+        .await
+        .map_err(|e| anyhow!("{e}"))??
+        .into_iter()
+        .find(|r| r.version == version)
+        .ok_or_else(|| anyhow!("no_release_for_this_version"))?;
+    let (dir, key) = (s.dir.clone(), s.key.clone());
+    let staged = tokio::task::spawn_blocking(move || {
+        update::download(&release, key.as_deref(), &dir, &|_| {})
+    })
+    .await
+    .map_err(|e| anyhow!("{e}"))??;
+    read(&staged.join("release")).ok_or_else(|| anyhow!("no_release_for_this_version"))
+}
+
+async fn ack_of(hub: &Hub, server: &str, request: &Request) -> Result<()> {
+    let ack: Ack = hub.ask_as(server, request).await?;
+    if ack.ok {
+        Ok(())
+    } else {
+        Err(anyhow!(ack.error.unwrap_or_else(|| "failed".into())))
+    }
+}
+
+/// Sends the release to one agent and tells it to apply it.
+async fn send_release(hub: &Arc<Hub>, server: &str, files: &Files) -> Result<()> {
+    let version = crate::version().to_owned();
+    let listing = files
+        .iter()
+        .map(|(n, d)| UpdateFile {
+            name: n.clone(),
+            size: d.len() as u64,
+        })
+        .collect();
+    ack_of(
+        hub,
+        server,
+        &Request::UpdateBegin {
+            version: version.clone(),
+            files: listing,
+        },
+    )
+    .await?;
+    // Several pieces at once: each is one request, and a slow link is not waited on one by one.
+    let gate = Arc::new(tokio::sync::Semaphore::new(6));
+    let mut set = tokio::task::JoinSet::new();
+    for (name, data) in files {
+        for (i, piece) in data.chunks(CHUNK as usize).enumerate() {
+            let permit = gate.clone().acquire_owned().await?;
+            let request = Request::UpdateChunk {
+                version: version.clone(),
+                name: name.clone(),
+                offset: i as u64 * CHUNK,
+                data: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, piece),
+            };
+            let (hub, server) = (hub.clone(), server.to_owned());
+            set.spawn(async move {
+                let _permit = permit;
+                ack_of(&hub, &server, &request).await
+            });
+        }
+    }
+    while let Some(done) = set.join_next().await {
+        done.map_err(|e| anyhow!("{e}"))??;
+    }
+    ack_of(hub, server, &Request::UpdateApply { version }).await
+}
+
+/// Waits for `server` to be connected again at this panel's version.
+async fn wait_back(hub: &Hub, server: &str) -> Result<()> {
+    for _ in 0..120 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if hub
+            .snapshot()?
+            .iter()
+            .any(|s| s.id == server && s.online && s.version == crate::version())
+        {
+            return Ok(());
+        }
+    }
+    bail!("not_back")
+}
+
+/// Restarts a server's tunnels one at a time, waiting for each to be connected again before
+/// the next, so a pair never loses both its sides at once.
+async fn restart_tunnels(hub: &Arc<Hub>, op: &str, server: &str, label: &str) -> Result<()> {
+    let tunnels: Vec<TunnelInfo> = hub.ask_as(server, &Request::Tunnels).await?;
+    for t in tunnels.into_iter().filter(|t| t.active == Some(true)) {
+        hub.ops.run(op, &format!("upd_tunnel:{label}/{}", t.name));
+        let request = Request::TunnelCtl {
+            name: t.name.clone(),
+            action: "restart".into(),
+        };
+        if let Err(e) = ack_of(hub, server, &request).await {
+            hub.ops.end(op, false, Some(format!("{e:#}")));
+            return Err(e);
+        }
+        let mut connected = false;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let now: Vec<TunnelInfo> = hub
+                .ask_as(server, &Request::Tunnels)
+                .await
+                .unwrap_or_default();
+            if now
+                .iter()
+                .find(|x| x.name == t.name)
+                .and_then(|x| x.status.as_ref())
+                .is_some_and(|st| st.peer.connected)
+            {
+                connected = true;
+                break;
+            }
+        }
+        if !connected {
+            hub.ops.end(op, false, Some("tunnel_not_back".into()));
+            bail!("tunnel_not_back:{}", t.name);
+        }
+        hub.ops.end(op, true, None);
+    }
+    Ok(())
+}
+
+/// Updates the servers whose agent is older than this panel, one at a time (and with
+/// `restart` their tunnels, one at a time), and the tunnels of the panel's own server. A
+/// server that fails stops the rest, which are left as they were.
+pub fn start_servers(hub: &Arc<Hub>, restart: bool) -> Result<String> {
+    let Some(settings) = hub.update_settings.get().cloned() else {
+        bail!("not_configured");
+    };
+    if !cfg!(target_os = "linux") && hub.snapshot()?.iter().any(|s| !s.local) {
+        bail!("no_systemd");
+    }
+    let id = hub.ops.begin("update_servers", "servers")?;
+    let (hub, op) = (hub.clone(), id.clone());
+    tokio::spawn(async move {
+        let error = run_servers(&hub, &op, &settings, restart)
+            .await
+            .err()
+            .map(|e| format!("{e:#}"));
+        hub.ops.finish(&op, error, None);
+    });
+    Ok(id)
+}
+
+async fn run_servers(hub: &Arc<Hub>, op: &str, s: &UpdateSettings, restart: bool) -> Result<()> {
+    let ops = &hub.ops;
+    let current = crate::version();
+    let behind: Vec<_> = hub
+        .snapshot()?
+        .into_iter()
+        .filter(|x| !x.local && matches!(update::compare(&x.version, current), Step::Newer { .. }))
+        .collect();
+    if let Some(off) = behind.iter().find(|x| !x.online) {
+        bail!("offline:{}", off.id);
+    }
+    let files = if behind.is_empty() {
+        Vec::new()
+    } else {
+        ops.run(op, "upd_release");
+        match release_files(s).await {
+            Ok(f) => {
+                ops.end(op, true, None);
+                f
+            }
+            Err(e) => {
+                ops.end(op, false, Some(format!("{e:#}")));
+                return Err(e);
+            }
+        }
+    };
+    for server in &behind {
+        let fail = |e: anyhow::Error| {
+            ops.end(op, false, Some(format!("{e:#}")));
+            anyhow!("{}: {e:#}", server.name)
+        };
+        ops.run(op, &format!("upd_send:{}", server.name));
+        if let Err(e) = send_release(hub, &server.id, &files).await {
+            return Err(fail(e));
+        }
+        ops.end(op, true, None);
+        ops.run(op, &format!("upd_back:{}", server.name));
+        if let Err(e) = wait_back(hub, &server.id).await {
+            return Err(fail(e));
+        }
+        ops.end(op, true, None);
+        if restart {
+            restart_tunnels(hub, op, &server.id, &server.name)
+                .await
+                .map_err(|e| anyhow!("{}: {e:#}", server.name))?;
+        }
+    }
+    if restart {
+        let local = hub
+            .snapshot()?
+            .into_iter()
+            .find(|x| x.local)
+            .map(|x| x.name)
+            .unwrap_or_else(|| "this server".to_owned());
+        restart_tunnels(hub, op, LOCAL, &local).await?;
+    }
+    Ok(())
 }
