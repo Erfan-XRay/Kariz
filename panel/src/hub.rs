@@ -71,6 +71,8 @@ struct Live {
     /// Bytes counted at the last reading of each tunnel, for the rates.
     last_bytes: HashMap<String, (u64, Instant)>,
     session: Option<Arc<MuxSession>>,
+    /// Whether each tunnel was connected at the last reading, to notice it changing.
+    connected: HashMap<String, bool>,
 }
 
 pub struct Hub {
@@ -82,6 +84,8 @@ pub struct Hub {
     services: Arc<dyn Services>,
     /// The running and recent tunnel operations (`crate::pair`).
     pub ops: crate::pair::Ops,
+    /// Charts and events.
+    pub history: crate::history::History,
     /// How long a new tunnel has to connect (shortened in tests).
     pub connect_wait: Duration,
 }
@@ -115,6 +119,7 @@ impl Hub {
             services: Default::default(),
         };
         Arc::new(Self {
+            history: crate::history::History::new(db.clone()),
             db,
             local: Agent::with_services(Path::new(""), config, services.clone()),
             services,
@@ -310,6 +315,7 @@ impl Hub {
             entry.version = hello.version.clone();
             entry.arch = hello.arch.clone();
         }
+        self.history.event("server_up", &id, "");
         let result = self.poll(&id, &session).await;
         let mut live = self.live();
         if let Some(entry) = live.get_mut(&id) {
@@ -321,6 +327,7 @@ impl Hub {
             {
                 entry.online = false;
                 entry.session = None;
+                self.history.event("server_down", &id, "");
             }
         }
         result
@@ -414,7 +421,29 @@ impl Hub {
         let mut live = self.live();
         let entry = live.entry(id.to_owned()).or_default();
         let t = Instant::now();
+        let at = now();
         entry.seen = Some(t);
+        if let Some(h) = &health {
+            let h_ = &self.history;
+            if let Some(v) = h.cpu_pct {
+                h_.record(&format!("srv:{id}:cpu"), at, v);
+            }
+            if let (Some(u), Some(total)) = (h.mem_used, h.mem_total) {
+                if total > 0 {
+                    h_.record(
+                        &format!("srv:{id}:mem"),
+                        at,
+                        u as f64 * 100.0 / total as f64,
+                    );
+                }
+            }
+            if let Some(v) = h.rx_bps {
+                h_.record(&format!("srv:{id}:rx"), at, v * 8.0 / 1e6);
+            }
+            if let Some(v) = h.tx_bps {
+                h_.record(&format!("srv:{id}:tx"), at, v * 8.0 / 1e6);
+            }
+        }
         entry.health = health;
         entry.tunnels = tunnels
             .into_iter()
@@ -435,6 +464,35 @@ impl Hub {
                     Some(b) => entry.last_bytes.insert(info.name.clone(), (b, t)),
                     None => entry.last_bytes.remove(&info.name),
                 };
+                if let Some(status) = &info.status {
+                    let up = status.peer.connected;
+                    // Changes worth telling; the first reading of a tunnel is not one.
+                    match entry.connected.insert(info.name.clone(), up) {
+                        Some(was) if was != up => self.history.event(
+                            if up { "tunnel_up" } else { "tunnel_down" },
+                            &info.name,
+                            &format!("{id} {}", info.role),
+                        ),
+                        _ => {}
+                    }
+                    // The entry side's numbers stand for the tunnel.
+                    if info.role == "entry" {
+                        let h_ = &self.history;
+                        h_.record(
+                            &format!("tun:{}:rate", info.name),
+                            at,
+                            if up { rate.unwrap_or(0.0) } else { 0.0 },
+                        );
+                        h_.record(
+                            &format!("tun:{}:conns", info.name),
+                            at,
+                            (status.totals.tcp_open + status.totals.udp_flows) as f64,
+                        );
+                        if let Some(rtt) = status.peer.rtt_ms {
+                            h_.record(&format!("tun:{}:rtt", info.name), at, rtt);
+                        }
+                    }
+                }
                 TunnelView {
                     info,
                     rate_mbps: rate,
@@ -446,7 +504,13 @@ impl Hub {
     /// The panel's own server, sampled here (no link).
     pub async fn run_local(self: Arc<Self>) {
         let mut sampler = Sampler::default();
+        let mut round = 0u32;
         loop {
+            // Old history goes about once an hour.
+            if round % 1800 == 0 {
+                let _ = self.history.prune();
+            }
+            round = round.wrapping_add(1);
             let health = sampler.sample();
             let tunnels = collect::tunnels(&self.kariz_dir, &*self.services).await;
             {

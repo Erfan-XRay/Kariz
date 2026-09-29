@@ -718,3 +718,9 @@ textarea.text { padding: var(--sp-3); min-height: 88px; resize: vertical; line-h
 .pick .radio { flex: none; }
 .wz-step .grid-2 { align-items: start; }
 @media (max-width: 767px) { .wz-step .grid-2 { grid-template-columns: 1fr !important; } }
+
+.chart-block { display: grid; gap: var(--sp-2); min-width: 0; }
+.chart-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); }
+.chart-head .label { font-size: var(--fs-sm); color: var(--text-2); }
+.chart { height: 150px; }
+.page-band .select, .page-band .search { min-height: 40px; }
