@@ -70,16 +70,17 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/script
 ```
 
 It installs Kariz for your CPU (x86_64, aarch64, armv7) and opens a menu. **New tunnel**
-asks a few questions, starts the tunnel as a systemd service, and prints the exact
-command to run on the other server. Later, `kariz-manager` brings the menu back, or use
-its commands directly:
+walks through six short steps with numbered choices: ports as a list
+(`443, 8080-8090, 2053=53`), IPv4 or IPv6 addresses, a summary before anything starts.
+It then runs the tunnel as a systemd service and prints the exact command to run on the
+other server. Later, `kariz-manager` brings the menu back, or use its commands directly:
 
 ```bash
 kariz-manager list                  # every tunnel and its state
 kariz-manager logs main             # follow a tunnel's log
 kariz-manager speedtest main        # speed, latency and UDP through the tunnel
 kariz-manager restart main
-kariz-manager add main --role entry --mode reverse --transport tcpmux     --listen 0.0.0.0:3080 --forward 443=127.0.0.1:443
+kariz-manager add main --role entry --mode reverse --transport tcpmux --listen 3080 --ports 443,8080-8090
 kariz-manager update                # new release, running tunnels restarted
 ```
 

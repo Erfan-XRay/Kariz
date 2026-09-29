@@ -36,27 +36,55 @@ one server can run several tunnels, each started at boot and restarted if it sto
 
 ## Add a tunnel
 
-In the menu, choose **New tunnel**. It asks, in this order:
+In the menu, choose **New tunnel**. It goes through six steps. Choices are numbered lists:
+type the number (or the word), or press Enter for the default in brackets. Ctrl+C at any
+point cancels and goes back to the menu, with nothing written.
 
-| Question | Notes |
+| Step | Asks |
 |---|---|
-| Name | letters, digits, `-` and `_` |
-| Entry or exit | the entry is the server users connect to |
-| Reverse or direct | who dials whom (see [Getting started](getting-started.md)) |
-| Transport, profile | with a one-line hint for each transport |
-| Port or the other server's address | the listening side asks for a port and its public IP, the dialing side for the other server's address |
-| Token | a new one, or paste the other server's |
-| WebSocket path | `ws` and `wss` only, random by default |
-| Certificate pin | `wss` dialers only |
-| Forward rules | entry only: `443=127.0.0.1:443`, or `51820=127.0.0.1:51820/udp` |
+| 1. Name | letters, digits, `-` and `_` |
+| 2. This server's side | entry (users connect here) or exit (reaches the targets); reverse (the exit connects to the entry) or direct |
+| 3. Transport and profile | with a one-line hint for each |
+| 4. Connection | the listening side: a port (checked to be free), IPv4 and IPv6 or IPv4 only, and the address the other server connects to (this server's IPv4 or IPv6, or another address or domain). The dialing side: the other server's address |
+| 5. Security | a new token, or paste the other server's; the WebSocket path (`ws` / `wss`); the certificate pin (`wss` dialers) |
+| 6. Ports to forward | entry only: the protocol, the target host as the exit reaches it (default `127.0.0.1`), and the ports. Repeat for another protocol or target |
 
-A forward rule is `LISTEN=TARGET[/tcp|udp|tcp+udp]`; a bare port listens on all
-addresses, and the target is dialed from the exit.
+Then it shows a summary and asks before creating anything.
+
+### Ports
+
+Ports are a list, separated by commas:
+
+| Write | Means |
+|---|---|
+| `443` | port 443 here, to port 443 on the target |
+| `443,8443,2083` | several ports |
+| `8080-8090` | a range: each port to the same port on the target |
+| `2053=53` (or `2053:53`) | users connect to 2053 here; the exit dials 53 |
+| `3000-3005=4000-4005` | a range onto another range of the same size |
+| `5000-5010=443` | many ports onto one |
+
+They mix: `443, 8080-8090, 2053=53`. The script checks that no port is listed twice and
+that none is already in use on the server. A tunnel can forward up to 1,000 ports; each
+becomes one `[[forward]]` rule in its config.
+
+### IPv4 and IPv6
+
+Everywhere an address is asked for, IPv4, IPv6 and domains all work, with or without a
+port: `203.0.113.5`, `203.0.113.5:3080`, `2001:db8::1`, `[2001:db8::1]:3080`,
+`tunnel.example.com`. Without a port, the tunnel's default 3080 is used. IPv6 addresses
+are written with brackets in the config.
+
+On a server with IPv6, the tunnel and the forwarded ports listen on `[::]` by default,
+which takes both IPv4 and IPv6. Choose "IPv4 only" (or `--ipv4-only`) to listen on
+`0.0.0.0` instead. The two servers can talk over IPv6 while users connect over IPv4, or
+the other way round.
+
+### The other server
 
 Before anything starts, the script writes the file and runs `kariz check` on it. If Kariz
-rejects it, the error is shown and nothing is changed.
-
-Then it prints the command for the other server, ready to paste:
+rejects it, the error is shown and nothing is changed. Then it prints the command for the
+other server, ready to paste:
 
 ```text
 On the other server, run:
@@ -70,7 +98,9 @@ Run that on the other server (after installing there) and the pair is up. The sa
 
 ```bash
 kariz-manager add main --role entry --mode reverse --transport tcpmux \
-    --listen 0.0.0.0:3080 --forward 443=127.0.0.1:443 --forward 8080=127.0.0.1:80
+    --listen 3080 --ports 443,8080-8090,2053=53
+kariz-manager add games --role entry --mode reverse --transport kcp --profile gaming \
+    --listen 3081 --ports 27015-27020 --protocol udp --to 10.0.0.5
 ```
 
 | Option | Meaning |
@@ -78,9 +108,13 @@ kariz-manager add main --role entry --mode reverse --transport tcpmux \
 | `--role entry\|exit`, `--mode reverse\|direct` | as in the config |
 | `--transport` | `tcp`, `tcpmux`, `ws`, `wss`, `quic` or `kcp` |
 | `--profile` | `balanced` (default), `ultraspeed` or `gaming` |
-| `--listen ADDR:PORT` / `--remote ADDR:PORT` | the listening side gives `--listen`, the dialing side `--remote` |
+| `--listen PORT` / `--remote ADDR[:PORT]` | the listening side gives `--listen` (a port, or `ADDR:PORT`), the dialing side `--remote` |
+| `--ports LIST` | entry only: ports as in [Ports](#ports); may repeat |
+| `--protocol tcp\|udp\|tcp+udp` | for `--ports` (default `tcp`) |
+| `--to HOST` | the target host for `--ports`, as the exit reaches it (default `127.0.0.1`) |
+| `--ipv4-only` | listen on IPv4 only |
+| `--forward LISTEN=TARGET[/tcp\|udp\|tcp+udp]` | one rule written in full, may repeat |
 | `--token` | default: a new random token |
-| `--forward` | entry only, may repeat |
 | `--ws-path`, `--pin` | `ws` / `wss`; `--pin` for a `wss` dialer |
 | `--public-ip` | the address to print in the other side's command (default: this server's) |
 
@@ -93,17 +127,20 @@ prints for the dialing side, so nothing has to be copied by hand.
 ### Open the port
 
 The script does not touch the firewall. It reminds you which port to open: TCP for
-`tcp`, `tcpmux`, `ws` and `wss`, UDP for `quic` and `kcp`. Cloud providers' security
-groups need the same rule.
+`tcp`, `tcpmux`, `ws` and `wss`, UDP for `quic` and `kcp`, and the forwarded ports on the
+entry. Cloud providers' security groups need the same rules.
 
 ## Manage tunnels
 
-In the menu, the actions on a tunnel (start and stop, logs, speed test, edit, remove)
-list the tunnels by number: type the number or the name. Ctrl-C leaves a log and returns
-to the menu.
+The top of the menu shows the installed version and how many tunnels run. The actions on
+a tunnel (start and stop, logs, speed test, edit, remove) list the tunnels by number:
+type the number or the name.
+
+**Ctrl+C** during an action (a question, a log, a speed test) goes straight back to the
+menu. At the menu itself, it leaves the manager (so does `0`).
 
 ```bash
-kariz-manager list                  # name, side, transport, state, address
+kariz-manager list                  # name, side, transport, ports, state, address
 kariz-manager status main
 kariz-manager logs main             # follows the log; Ctrl-C to stop
 kariz-manager speedtest main        # speed, latency and UDP; on the entry server

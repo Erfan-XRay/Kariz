@@ -7,7 +7,7 @@
 #
 # Without arguments it opens a menu. The same actions as commands (see `help`):
 #   kariz-manager install [--version vX.Y.Z] [--binary PATH]
-#   kariz-manager add NAME --role entry|exit --mode reverse|direct --transport T ...
+#   kariz-manager add NAME --role entry|exit --mode reverse|direct --transport T --ports 443,...
 #   kariz-manager list | status NAME | start|stop|restart NAME | logs NAME | speedtest NAME
 #   kariz-manager edit NAME | remove NAME [--yes] | update | uninstall [--yes]
 #
@@ -80,18 +80,36 @@ ask() {
     printf -v "$_var" '%s' "${_answer:-$_default}"
 }
 
-# Asks to pick one of the words in $3 (space separated), into the variable named $1.
+# Asks to pick one option from a numbered list; the answer is its number or its word.
+# Into the variable named $1. $2: the question, $3: the default word, then the options
+# as "word" or "word|description".
 choose() {
-    local _var=$1 _prompt=$2 _options=$3 _default=${4:-} _pick _o
+    local _var=$1 _prompt=$2 _default=$3 _pick _o _n=0 _def=""
+    shift 3
+    local _words=()
+    printf '  %s%s%s\n' "$C_BOLD" "$_prompt" "$C_RESET"
+    for _o in "$@"; do
+        _n=$((_n + 1))
+        _words+=("${_o%%|*}")
+        [[ "${_o%%|*}" == "$_default" ]] && _def=$_n
+        if [[ "$_o" == *"|"* ]]; then
+            printf '    %s%d)%s %-10s %s%s%s\n' "$C_TEAL" "$_n" "$C_RESET" "${_o%%|*}" "$C_DIM" "${_o#*|}" "$C_RESET"
+        else
+            printf '    %s%d)%s %s\n' "$C_TEAL" "$_n" "$C_RESET" "$_o"
+        fi
+    done
     while true; do
-        ask _pick "$_prompt (${_options// / | })" "$_default"
-        for _o in $_options; do
+        ask _pick "Choose" "$_def"
+        if [[ "$_pick" =~ ^[0-9]+$ ]] && ((_pick >= 1 && _pick <= _n)); then
+            _pick=${_words[$((_pick - 1))]}
+        fi
+        for _o in "${_words[@]}"; do
             if [[ "$_pick" == "$_o" ]]; then
                 printf -v "$_var" '%s' "$_pick"
                 return
             fi
         done
-        warn "Pick one of: $_options"
+        warn "Type a number from 1 to $_n."
     done
 }
 
@@ -294,14 +312,163 @@ cmd_uninstall() {
     rm -f "$MANAGER"
 }
 
-# ---- Tunnels ----
+# ---- Addresses and ports ----
 
-# The server's own address, as a default for the other side to dial.
-own_ip() {
-    ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1
+# At most this many forwarded ports per tunnel: a range becomes one rule per port.
+MAX_FORWARDS=1000
+
+# The server's own addresses, as defaults for the other side to dial (empty without).
+own_ip4() {
+    { ip -4 route get 1.1.1.1 2>/dev/null || true; } | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1
 }
 
-# "443=127.0.0.1:443/udp" -> listen, target, protocol. A bare port listens everywhere.
+own_ip6() {
+    { ip -6 route get 2606:4700:4700::1111 2>/dev/null || true; } | sed -n 's/.* src \([0-9a-fA-F:]*\).*/\1/p' | head -n 1
+}
+
+# Whether this server has IPv6. Listening on [::] then takes IPv4 as well.
+ipv6_on() {
+    [[ -e /proc/net/if_inet6 ]] && [[ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 0)" == 0 ]]
+}
+
+# The address to listen on: [::] (IPv4 and IPv6) where the server has IPv6.
+default_bind() {
+    if ipv6_on; then echo "::"; else echo "0.0.0.0"; fi
+}
+
+valid_port() {
+    [[ "$1" =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535))
+}
+
+# HOST and PORT as one address; an IPv6 host goes in brackets.
+host_port() {
+    if [[ "$1" == *:* && "$1" != \[* ]]; then
+        printf '[%s]:%s' "$1" "$2"
+    else
+        printf '%s:%s' "$1" "$2"
+    fi
+}
+
+# Splits an address as people type it into ADDR_HOST and ADDR_PORT (empty when not
+# given): 1.2.3.4, 1.2.3.4:3080, 2001:db8::1, [2001:db8::1]:3080, example.com:443.
+# Returns 1 on something else.
+split_addr() {
+    local a=${1// /}
+    local bracketed='^\[([0-9a-fA-F:.]+)\](:([0-9]+))?$' named='^([a-zA-Z0-9.-]+)(:([0-9]+))?$'
+    ADDR_HOST="" ADDR_PORT=""
+    if [[ "$a" =~ $bracketed ]]; then
+        ADDR_HOST=${BASH_REMATCH[1]} ADDR_PORT=${BASH_REMATCH[3]}
+    elif [[ "$a" =~ ^[0-9a-fA-F:.]+$ && "$a" == *:*:* ]]; then
+        ADDR_HOST=$a
+    elif [[ "$a" =~ $named ]]; then
+        ADDR_HOST=${BASH_REMATCH[1]} ADDR_PORT=${BASH_REMATCH[3]}
+        # a bare number is a mistyped port or address, not a host
+        [[ ! "$ADDR_HOST" =~ ^[0-9]+$ ]] || return 1
+    else
+        return 1
+    fi
+    [[ -z "$ADDR_PORT" ]] || valid_port "$ADDR_PORT"
+}
+
+# Ports in use on this server, as " 22/tcp 53/udp ... ".
+BUSY_PORTS=" "
+load_busy_ports() {
+    command -v ss >/dev/null || return 0
+    BUSY_PORTS=" $({
+        { ss -Hltn || true; } | awk '{ n = split($4, a, ":"); print a[n] "/tcp" }'
+        { ss -Hlun || true; } | awk '{ n = split($4, a, ":"); print a[n] "/udp" }'
+    } 2>/dev/null | sort -u | tr '\n' ' ') "
+}
+
+port_busy() {
+    [[ "$BUSY_PORTS" == *" $1/$2 "* ]]
+}
+
+proto_words() {
+    case $1 in
+        tcp) echo tcp ;;
+        udp) echo udp ;;
+        *) echo tcp udp ;;
+    esac
+}
+
+# "443" or "1000-2000" into the variables named $2 and $3 (first and last port).
+port_span() {
+    local a b
+    if [[ "$1" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        a=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]}
+    elif [[ "$1" =~ ^[0-9]+$ ]]; then
+        a=$1 b=$1
+    else
+        return 1
+    fi
+    valid_port "$a" && valid_port "$b" && ((10#$a <= 10#$b)) || return 1
+    printf -v "$2" '%d' $((10#$a))
+    printf -v "$3" '%d' $((10#$b))
+}
+
+# Turns a port list into forward rules and adds them to T_FORWARDS:
+#   443, 8443        the same port on both sides
+#   8080-8090        a range
+#   2053=53          users connect to 2053, the exit dials 53 (8443:443 works too)
+#   3000-3005=4000-4005   a range onto another range of the same size
+#   5000-5010=443    many ports onto one
+# $1: the list, $2: target host (as the exit sees it), $3: tcp, udp or tcp+udp,
+# $4: the host to listen on. Says what is wrong and returns 1 on a bad list, adding
+# nothing.
+expand_ports() {
+    local spec=${1// /} proto=$3 bind target
+    local items item from to lo hi tlo thi p t k rule new=() seen=" "
+    bind=$(host_port "$4" 0) && bind=${bind%:0}
+    target=$(host_port "$2" 0) && target=${target%:0}
+    IFS=, read -ra items <<<"$spec"
+    for rule in "${T_FORWARDS[@]}"; do
+        local listen=${rule%%=*} rp=tcp
+        [[ "$rule" == */* ]] && rp=${rule##*/}
+        for k in $(proto_words "$rp"); do seen+="${listen##*:}/$k "; done
+    done
+    for item in "${items[@]}"; do
+        [[ -n "$item" ]] || continue
+        item=${item//:/=}
+        from=${item%%=*} to=${item#*=}
+        if ! port_span "$from" lo hi || ! port_span "$to" tlo thi; then
+            warn "'$item' is not a port (443), a range (8080-8090) or a mapping (2053=53)."
+            return 1
+        fi
+        if ((thi - tlo != hi - lo && tlo != thi)); then
+            warn "'$item': a range maps onto a range of the same size, or onto one port."
+            return 1
+        fi
+        for ((p = lo; p <= hi; p++)); do
+            t=$((tlo == thi ? tlo : tlo + p - lo))
+            for k in $(proto_words "$proto"); do
+                if [[ "$seen" == *" $p/$k "* ]]; then
+                    warn "Port $p/$k is in the list twice."
+                    return 1
+                fi
+                if port_busy "$p" "$k"; then
+                    warn "Port $p/$k is already in use on this server."
+                    return 1
+                fi
+                seen+="$p/$k "
+            done
+            new+=("$bind:$p=$target:$t/$proto")
+            if ((${#T_FORWARDS[@]} + ${#new[@]} > MAX_FORWARDS)); then
+                warn "At most $MAX_FORWARDS ports per tunnel."
+                return 1
+            fi
+        done
+    done
+    if [[ ${#new[@]} -eq 0 ]]; then
+        warn "Give at least one port."
+        return 1
+    fi
+    T_FORWARDS+=("${new[@]}")
+}
+
+# ---- Tunnels ----
+
+# "443=127.0.0.1:443/udp" -> listen, target, protocol. A bare port listens on T_BIND.
 parse_forward() {
     local spec=$1 listen target proto=tcp
     [[ "$spec" == *=* ]] || die "Forward rules look like LISTEN=TARGET[/tcp|udp|tcp+udp], e.g. 443=127.0.0.1:443"
@@ -311,7 +478,7 @@ parse_forward() {
         proto=${target##*/}
         target=${target%/*}
     fi
-    [[ "$listen" == *:* ]] || listen="0.0.0.0:$listen"
+    [[ "$listen" == *:* ]] || listen=$(host_port "${T_BIND:-0.0.0.0}" "$listen")
     [[ "$proto" =~ ^(tcp|udp|tcp\+udp)$ ]] || die "Forward protocol must be tcp, udp or tcp+udp."
     printf '%s\t%s\t%s' "$listen" "$target" "$proto"
 }
@@ -350,9 +517,8 @@ write_tunnel() {
                 echo "pin_sha256 = \"$T_PIN\""
             fi
         fi
-        local f
+        local f listen target proto
         for f in "${T_FORWARDS[@]}"; do
-            local listen target proto
             IFS=$'\t' read -r listen target proto <<<"$(parse_forward "$f")"
             echo
             echo "[[forward]]"
@@ -371,6 +537,9 @@ write_tunnel() {
     mv "$tmp" "$conf"
     systemctl enable --now "kariz@$T_NAME" >/dev/null 2>&1 ||
         die "The tunnel did not start: kariz-manager logs $T_NAME"
+    sleep 1
+    systemctl is-active --quiet "kariz@$T_NAME" ||
+        die "The tunnel stopped right after starting: kariz-manager logs $T_NAME"
     ok "Tunnel '$T_NAME' is running ($T_ROLE, $T_MODE, $T_TRANSPORT)."
 }
 
@@ -393,15 +562,13 @@ peer_command() {
     local cmd="kariz-manager add $T_NAME --role $role --mode $T_MODE --transport $T_TRANSPORT"
     cmd+=" --profile $T_PROFILE --token $T_TOKEN"
     if [[ -n "$T_LISTEN" ]]; then
-        cmd+=" --remote ${T_PUBLIC:-SERVER_IP}:${T_LISTEN##*:}"
+        cmd+=" --remote $(host_port "${T_PUBLIC:-SERVER_IP}" "${T_LISTEN##*:}")"
     else
-        cmd+=" --listen 0.0.0.0:${T_REMOTE##*:}"
+        cmd+=" --listen ${T_REMOTE##*:}"
     fi
     [[ "$T_TRANSPORT" == ws || "$T_TRANSPORT" == wss ]] && cmd+=" --ws-path $T_WS_PATH"
     [[ -n "${T_PIN_OUT:-}" ]] && cmd+=" --pin $T_PIN_OUT"
-    if [[ "$role" == entry ]]; then
-        cmd+=" --forward LISTEN_PORT=TARGET:PORT"
-    fi
+    [[ "$role" == entry ]] && cmd+=" --ports PORTS"
     printf '%s' "$cmd"
 }
 
@@ -409,25 +576,28 @@ show_peer_command() {
     printf '\n  %sOn the other server, run:%s\n\n' "$C_BOLD" "$C_RESET"
     printf '    %s%s%s\n\n' "$C_SAND" "$(peer_command)" "$C_RESET"
     if [[ "$T_ROLE" == exit ]]; then
-        info "Replace LISTEN_PORT=TARGET:PORT with the entry's forward rules (--forward can repeat)."
+        info "Replace PORTS with the ports to forward, e.g. 443,8080-8090 (add --protocol udp for UDP)."
     fi
     [[ -n "$T_LISTEN" ]] && info "Open ${T_LISTEN##*:}/${T_PROTO_HINT} in this server's firewall."
+    [[ ${#T_FORWARDS[@]} -gt 0 ]] && info "Open the forwarded ports in this server's firewall too."
     return 0
 }
 
 reset_tunnel_vars() {
     T_NAME="" T_ROLE="" T_MODE="" T_TRANSPORT="" T_PROFILE=balanced T_LISTEN="" T_REMOTE=""
     T_TOKEN="" T_WS_PATH="" T_WS_HOST="" T_PIN="" T_PIN_OUT="" T_PUBLIC="" T_FORWARDS=()
+    T_BIND=$(default_bind)
+}
+
+# Whether this side listens (else it dials): the entry in reverse mode, the exit in direct.
+tunnel_listens() {
+    [[ "$T_ROLE" == entry && "$T_MODE" == reverse ]] || [[ "$T_ROLE" == exit && "$T_MODE" == direct ]]
 }
 
 # Fills in what the tunnel's settings imply: which side listens, a token, a ws path.
 finish_tunnel_vars() {
-    local listens=false
-    if [[ "$T_ROLE" == entry && "$T_MODE" == reverse ]] || [[ "$T_ROLE" == exit && "$T_MODE" == direct ]]; then
-        listens=true
-    fi
-    if $listens; then
-        [[ -n "$T_LISTEN" ]] || die "This side listens: give --listen ADDRESS:PORT."
+    if tunnel_listens; then
+        [[ -n "$T_LISTEN" ]] || die "This side listens: give --listen PORT (or ADDRESS:PORT)."
         T_REMOTE=""
     else
         [[ -n "$T_REMOTE" ]] || die "This side dials: give --remote ADDRESS:PORT."
@@ -438,7 +608,7 @@ finish_tunnel_vars() {
         [[ -n "$T_WS_PATH" ]] || T_WS_PATH="/$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     fi
     [[ "$T_ROLE" == exit && ${#T_FORWARDS[@]} -gt 0 ]] && die "Forward rules belong on the entry side."
-    [[ "$T_ROLE" == entry && ${#T_FORWARDS[@]} -eq 0 ]] && die "The entry side needs at least one --forward rule."
+    [[ "$T_ROLE" == entry && ${#T_FORWARDS[@]} -eq 0 ]] && die "The entry side needs ports to forward (--ports)."
     case $T_TRANSPORT in
         quic | kcp) T_PROTO_HINT=udp ;;
         *) T_PROTO_HINT=tcp ;;
@@ -455,7 +625,16 @@ cmd_add() {
     shift
     valid_name "$T_NAME"
     [[ -f "$(conf_of "$T_NAME")" ]] && die "A tunnel named '$T_NAME' exists already."
+    local ports=() proto=tcp to=127.0.0.1
     while [[ $# -gt 0 ]]; do
+        case $1 in
+            --ipv4-only)
+                T_BIND=0.0.0.0
+                shift
+                continue
+                ;;
+        esac
+        [[ $# -ge 2 ]] || die "add: $1 needs a value."
         case $1 in
             --role) T_ROLE=$2 ;;
             --mode) T_MODE=$2 ;;
@@ -465,6 +644,9 @@ cmd_add() {
             --remote) T_REMOTE=$2 ;;
             --token) T_TOKEN=$2 ;;
             --forward) T_FORWARDS+=("$2") ;;
+            --ports) ports+=("$2") ;;
+            --protocol) proto=$2 ;;
+            --to) to=$2 ;;
             --ws-path) T_WS_PATH=$2 ;;
             --pin) T_PIN=$2 ;;
             --public-ip) T_PUBLIC=$2 ;;
@@ -475,6 +657,21 @@ cmd_add() {
     [[ "$T_ROLE" =~ ^(entry|exit)$ ]] || die "add: --role entry or exit."
     [[ "$T_MODE" =~ ^(reverse|direct)$ ]] || die "add: --mode reverse or direct."
     [[ "$T_TRANSPORT" =~ ^(tcp|tcpmux|ws|wss|quic|kcp)$ ]] || die "add: --transport tcp, tcpmux, ws, wss, quic or kcp."
+    [[ "$proto" =~ ^(tcp|udp|tcp\+udp)$ ]] || die "add: --protocol tcp, udp or tcp+udp."
+    # --listen 3080 listens on every address; --remote takes IPv6 with or without brackets.
+    if [[ -n "$T_LISTEN" ]] && valid_port "$T_LISTEN"; then
+        T_LISTEN=$(host_port "$T_BIND" "$T_LISTEN")
+    fi
+    if [[ -n "$T_REMOTE" ]]; then
+        split_addr "$T_REMOTE" || die "add: --remote $T_REMOTE is not an address."
+        T_REMOTE=$(host_port "$ADDR_HOST" "${ADDR_PORT:-3080}")
+    fi
+    load_busy_ports
+    local spec
+    for spec in "${ports[@]}"; do
+        split_addr "$to" && [[ -z "$ADDR_PORT" ]] || die "add: --to takes a host without a port."
+        expand_ports "$spec" "$ADDR_HOST" "$proto" "$T_BIND" || die "add: bad --ports $spec"
+    done
     finish_tunnel_vars
     if [[ "$T_TRANSPORT" == wss ]]; then
         if [[ -n "$T_LISTEN" ]]; then
@@ -483,9 +680,15 @@ cmd_add() {
             [[ -n "$T_PIN" ]] || die "A wss dialer needs --pin (printed when the listening side was added)."
         fi
     fi
-    [[ -n "$T_PUBLIC" ]] || T_PUBLIC=$(own_ip)
+    [[ -n "$T_PUBLIC" ]] || T_PUBLIC=$(own_ip4)
+    [[ -n "$T_PUBLIC" ]] || T_PUBLIC=$(own_ip6)
     write_tunnel
     show_peer_command
+}
+
+# A heading for a step of the wizard.
+step() {
+    printf '\n  %s%s[%s/%s]%s %s%s%s\n' "$C_BOLD" "$C_TEAL" "$1" "$2" "$C_RESET" "$C_BOLD" "$3" "$C_RESET"
 }
 
 # The interactive version of `add`.
@@ -494,45 +697,98 @@ wizard_add() {
     need_kariz
     open_input
     reset_tunnel_vars
-    printf '\n  %sNew tunnel%s\n\n' "$C_BOLD" "$C_RESET"
-    info "Entry = the server users connect to. Exit = the server that reaches the targets."
-    info "Reverse = the exit dials the entry. Direct = the entry dials the exit."
-    echo
+    load_busy_ports
+    local steps=6
+    printf '\n  %sNew tunnel%s  %s(Ctrl+C cancels and goes back to the menu)%s\n' \
+        "$C_BOLD" "$C_RESET" "$C_DIM" "$C_RESET"
+
+    step 1 $steps "Name"
     while true; do
         ask T_NAME "Name for this tunnel" main
         if [[ ! "$T_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$ ]]; then
-            warn "Use letters, digits, - and _."
+            warn "Use letters, digits, - and _ (up to 32)."
         elif [[ -f "$(conf_of "$T_NAME")" ]]; then
             warn "A tunnel named '$T_NAME' exists already."
         else
             break
         fi
     done
-    choose T_ROLE "This server is the" "entry exit" entry
-    choose T_MODE "Mode" "reverse direct" reverse
-    info "tcpmux: most uses. wss: looks like HTTPS, works through CDNs. kcp: lossy links, games. quic: over UDP."
-    choose T_TRANSPORT "Transport" "tcp tcpmux ws wss quic kcp" tcpmux
-    choose T_PROFILE "Profile" "balanced ultraspeed gaming" balanced
-    local listens=false
-    if [[ "$T_ROLE" == entry && "$T_MODE" == reverse ]] || [[ "$T_ROLE" == exit && "$T_MODE" == direct ]]; then
-        listens=true
-    fi
-    if $listens; then
-        local port
+
+    step 2 $steps "This server's side"
+    choose T_ROLE "This server is the" entry \
+        "entry|users connect to this server" \
+        "exit|this server reaches the targets (the open internet)"
+    choose T_MODE "Who connects to whom" reverse \
+        "reverse|the exit connects to the entry" \
+        "direct|the entry connects to the exit"
+
+    step 3 $steps "Transport and profile"
+    choose T_TRANSPORT "Transport" tcpmux \
+        "tcpmux|TCP with mux: the best choice for most uses" \
+        "tcp|plain TCP, one connection per user" \
+        "ws|WebSocket: through HTTP proxies and CDNs" \
+        "wss|WebSocket over TLS: looks like HTTPS, works through CDNs" \
+        "kcp|over UDP: lossy links, games" \
+        "quic|QUIC over UDP"
+    choose T_PROFILE "Profile" balanced \
+        "balanced|good for everything" \
+        "ultraspeed|the most throughput, more memory" \
+        "gaming|the lowest latency, for games and calls"
+
+    step 4 $steps "Connection between the servers"
+    local port family
+    if tunnel_listens; then
+        info "This server waits for the other one to connect."
         while true; do
-            ask port "Port the other server connects to" 3080
-            [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535)) && break
-            warn "A port is a number from 1 to 65535."
+            ask port "Port for the tunnel" 3080
+            if ! valid_port "$port"; then
+                warn "A port is a number from 1 to 65535."
+            elif port_busy "$port" tcp || port_busy "$port" udp; then
+                warn "Port $port is already in use on this server."
+            else
+                break
+            fi
         done
-        T_LISTEN="0.0.0.0:$port"
-        ask T_PUBLIC "This server's public IP (for the other side)" "$(own_ip)"
+        if ipv6_on; then
+            choose family "Accept the other server over" both \
+                "both|IPv4 and IPv6" "ipv4|IPv4 only"
+            T_BIND=0.0.0.0
+            [[ "$family" == both ]] && T_BIND="::"
+        fi
+        T_LISTEN=$(host_port "$T_BIND" "$port")
+        local v4 v6 options=()
+        v4=$(own_ip4)
+        v6=$(own_ip6)
+        [[ -n "$v4" ]] && options+=("$v4|IPv4 of this server")
+        [[ -n "$v6" && "$T_BIND" == "::" ]] && options+=("$v6|IPv6 of this server")
+        options+=("other|another address or a domain")
+        choose T_PUBLIC "Address the other server connects to" "${v4:-other}" "${options[@]}"
+        while [[ "$T_PUBLIC" == other ]] || ! split_addr "$T_PUBLIC" || [[ -n "$ADDR_PORT" ]]; do
+            ask T_PUBLIC "This server's address (IPv4, IPv6 or domain, no port)"
+        done
     else
-        while [[ -z "$T_REMOTE" ]]; do
-            ask T_REMOTE "Other server's address (IP:PORT)"
+        info "This server connects to the other one."
+        while true; do
+            ask T_REMOTE "Other server's address (IPv4, IPv6 or domain; :PORT optional)"
+            if split_addr "$T_REMOTE"; then
+                break
+            fi
+            warn "Examples: 1.2.3.4   1.2.3.4:3080   2001:db8::1   [2001:db8::1]:3080   example.com"
         done
-        [[ "$T_REMOTE" == *:* ]] || T_REMOTE="$T_REMOTE:3080"
+        local host=$ADDR_HOST
+        port=$ADDR_PORT
+        while [[ -z "$port" ]] || ! valid_port "$port"; do
+            ask port "Port of the tunnel on the other server" 3080
+        done
+        T_REMOTE=$(host_port "$host" "$port")
     fi
-    if confirm "Generate a new token? (no: paste the other server's)" y; then
+
+    step 5 $steps "Security"
+    local how
+    choose how "Token (the shared secret; the same on both servers)" new \
+        "new|make a new one (on the first server you set up)" \
+        "paste|paste the other server's"
+    if [[ "$how" == new ]]; then
         T_TOKEN=$("$BIN" token)
     else
         while [[ -z "$T_TOKEN" ]]; do
@@ -542,32 +798,91 @@ wizard_add() {
     if [[ "$T_TRANSPORT" == ws || "$T_TRANSPORT" == wss ]]; then
         ask T_WS_PATH "WebSocket path (same on both sides)" "/$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     fi
-    if [[ "$T_TRANSPORT" == wss && $listens == false ]]; then
+    if [[ "$T_TRANSPORT" == wss ]] && ! tunnel_listens; then
         while [[ -z "$T_PIN" ]]; do
             ask T_PIN "Certificate pin (printed by the listening side)"
         done
     fi
+
+    step 6 $steps "Ports to forward"
     if [[ "$T_ROLE" == entry ]]; then
-        info "Forward rules: LISTEN=TARGET[/tcp|udp|tcp+udp]. The target is dialed from the exit."
-        info "Example: 443=127.0.0.1:443   or   51820=127.0.0.1:51820/udp"
+        info "Users connect to these ports on this server; the exit passes them on."
+        info "Write ports with commas: ${C_BOLD}443${C_RESET}   ${C_BOLD}443,8443${C_RESET}   ${C_BOLD}8080-8090${C_RESET} (range)   ${C_BOLD}2053=53${C_RESET} (2053 here, 53 on the target)"
+        if ! tunnel_listens && ipv6_on; then
+            choose family "Users connect over" both "both|IPv4 and IPv6" "ipv4|IPv4 only"
+            T_BIND=0.0.0.0
+            [[ "$family" == both ]] && T_BIND="::"
+        fi
         while true; do
-            local rule
-            ask rule "Forward rule (empty to finish)"
-            [[ -z "$rule" ]] && [[ ${#T_FORWARDS[@]} -gt 0 ]] && break
-            [[ -z "$rule" ]] && {
-                warn "Add at least one rule."
-                continue
-            }
-            (parse_forward "$rule" >/dev/null) && T_FORWARDS+=("$rule")
+            local spec proto target
+            choose proto "Protocol" tcp \
+                "tcp|TCP: web, V2Ray/Xray, most apps" \
+                "udp|UDP: games, WireGuard, DNS" \
+                "tcp+udp|both"
+            while true; do
+                ask target "Target host, as the exit server reaches it" 127.0.0.1
+                split_addr "$target" && [[ -z "$ADDR_PORT" ]] && break
+                warn "A host without a port: 127.0.0.1, ::1, 10.0.0.5 or a domain."
+            done
+            target=$ADDR_HOST
+            while true; do
+                ask spec "Ports"
+                local before=${#T_FORWARDS[@]}
+                if expand_ports "$spec" "$target" "$proto" "$T_BIND"; then
+                    ok "$((${#T_FORWARDS[@]} - before)) port(s) added: $spec -> $target ($proto)"
+                    break
+                fi
+            done
+            confirm "Add more ports (another protocol or target)?" n || break
         done
+    else
+        info "Nothing to do here: the entry server chooses the ports."
     fi
+
     finish_tunnel_vars
-    if [[ "$T_TRANSPORT" == wss && $listens == true ]]; then
+    summary
+    if ! confirm "Create this tunnel?" y; then
+        info "Cancelled; nothing was changed."
+        return 0
+    fi
+    if [[ "$T_TRANSPORT" == wss ]] && tunnel_listens; then
         T_PIN_OUT=$(make_certificate)
     fi
     echo
     write_tunnel
     show_peer_command
+}
+
+summary_row() {
+    printf '    %s%-12s%s %s\n' "$C_DIM" "$1" "$C_RESET" "$2"
+}
+
+summary() {
+    printf '\n  %sSummary%s\n' "$C_BOLD" "$C_RESET"
+    summary_row name "$T_NAME"
+    summary_row side "$T_ROLE, $T_MODE"
+    summary_row transport "$T_TRANSPORT, profile $T_PROFILE"
+    if [[ -n "$T_LISTEN" ]]; then
+        local both=""
+        [[ "$T_LISTEN" == "[::]:"* ]] && both=" (IPv4 and IPv6)"
+        summary_row listens "$T_LISTEN$both"
+        summary_row "peer dials" "$(host_port "$T_PUBLIC" "${T_LISTEN##*:}")"
+    else
+        summary_row connects "$T_REMOTE"
+    fi
+    if [[ ${#T_FORWARDS[@]} -gt 0 ]]; then
+        summary_row forwards "${#T_FORWARDS[@]} port(s)"
+        local f shown=0
+        for f in "${T_FORWARDS[@]}"; do
+            if ((shown == 5)); then
+                summary_row "" "..."
+                break
+            fi
+            summary_row "" "${f%%=*} -> ${f#*=}"
+            shown=$((shown + 1))
+        done
+    fi
+    echo
 }
 
 cmd_list() {
@@ -577,23 +892,25 @@ cmd_list() {
         info "No tunnels yet. Add one with: kariz-manager add (or the menu)."
         return
     fi
-    printf '\n  %s%-16s %-6s %-8s %-8s %-10s %s%s\n' "$C_DIM" NAME ROLE MODE TRANSPORT STATE ADDRESS "$C_RESET"
+    printf '\n  %s%-16s %-6s %-8s %-9s %-6s %-10s %s%s\n' "$C_DIM" NAME ROLE MODE TRANSPORT PORTS STATE ADDRESS "$C_RESET"
     local f
     for f in "${files[@]}"; do
-        local name role mode transport addr state color
+        local name role mode transport addr state color ports
         name=$(basename "$f" .toml)
         role=$(sed -n 's/^role *= *"\(.*\)"/\1/p' "$f")
         mode=$(sed -n 's/^mode *= *"\(.*\)"/\1/p' "$f")
         transport=$(sed -n 's/^transport *= *"\(.*\)"/\1/p' "$f")
         addr=$(sed -n 's/^\(listen\|remote\) *= *"\(.*\)"/\1 \2/p' "$f" | head -n 1)
+        ports=$(grep -c '^\[\[forward\]\]' "$f" || true)
+        [[ "$ports" == 0 ]] && ports=-
         state=$(systemctl is-active "kariz@$name" 2>/dev/null || true)
         case $state in
             active) color=$C_GREEN ;;
             failed) color=$C_RED ;;
             *) color=$C_YELLOW ;;
         esac
-        printf '  %-16s %-6s %-8s %-8s %s%-10s%s %s\n' "$name" "$role" "$mode" "${transport:-tcp}" \
-            "$color" "${state:-stopped}" "$C_RESET" "$addr"
+        printf '  %-16s %-6s %-8s %-9s %-6s %s%-10s%s %s\n' "$name" "$role" "$mode" "${transport:-tcp}" \
+            "$ports" "$color" "${state:-stopped}" "$C_RESET" "$addr"
     done
     echo
 }
@@ -690,9 +1007,8 @@ pick_tunnel() {
     [[ ${#_names[@]} -gt 0 ]] || die "No tunnels yet (option 2 adds one)."
     echo
     for _i in "${!_names[@]}"; do
-        printf '   %s%d%s) %s\n' "$C_TEAL" $((_i + 1)) "$C_RESET" "${_names[$_i]}"
+        printf '    %s%d)%s %s\n' "$C_TEAL" $((_i + 1)) "$C_RESET" "${_names[$_i]}"
     done
-    echo
     while true; do
         ask _pick "Tunnel (number or name)" "$([[ ${#_names[@]} -eq 1 ]] && echo 1)"
         if [[ "$_pick" =~ ^[0-9]+$ ]] && ((_pick >= 1 && _pick <= ${#_names[@]})); then
@@ -708,44 +1024,67 @@ pick_tunnel() {
     done
 }
 
+# Ctrl+C at the menu's own question leaves the manager. During an action (which runs in
+# a subshell, and so ends on it) it comes back to the menu at once.
+MENU_BUSY=0 INTERRUPTED=0
+on_interrupt() {
+    echo
+    if ((MENU_BUSY)); then
+        INTERRUPTED=1
+    else
+        exit 0
+    fi
+}
+
+# "Kariz v0.6.0 · 3 tunnels, 2 running" for the top of the menu.
+menu_status() {
+    if [[ ! -x "$BIN" ]]; then
+        warn "Kariz is not installed yet: choose 1."
+        return
+    fi
+    shopt -s nullglob
+    local files=("$CONF_DIR"/*.toml) running
+    running=$(systemctl list-units --type=service --state=active --plain --no-legend 'kariz@*' 2>/dev/null | wc -l)
+    info "$("$BIN" --version)  ${C_DIM}·${C_RESET}  ${#files[@]} tunnel(s), ${C_GREEN}$running running${C_RESET}"
+}
+
 menu() {
     need_root
     need_systemd
     open_input
-    # Ctrl+C (to leave a log) ends the action and comes back here; the actions run in
-    # subshells, which take the default action for it.
-    trap 'echo' INT
+    trap on_interrupt INT
     while true; do
         banner
-        if [[ -x "$BIN" ]]; then
-            info "Installed: $("$BIN" --version)"
-        else
-            warn "Kariz is not installed yet (option 1)."
-        fi
+        menu_status
         cat <<EOF
 
    ${C_TEAL}1${C_RESET}) Install or update Kariz
    ${C_TEAL}2${C_RESET}) New tunnel
    ${C_TEAL}3${C_RESET}) List tunnels
-   ${C_TEAL}4${C_RESET}) Start / stop / restart a tunnel
+   ${C_TEAL}4${C_RESET}) Start / stop / restart / status of a tunnel
    ${C_TEAL}5${C_RESET}) Logs of a tunnel
    ${C_TEAL}6${C_RESET}) Speed test a tunnel (on the entry side)
    ${C_TEAL}7${C_RESET}) Edit a tunnel
    ${C_TEAL}8${C_RESET}) Remove a tunnel
    ${C_TEAL}9${C_RESET}) Uninstall Kariz
-   ${C_TEAL}0${C_RESET}) Exit
+   ${C_TEAL}0${C_RESET}) Exit         ${C_DIM}(Ctrl+C: back to the menu, or out from here)${C_RESET}
 
 EOF
         local choice
         ask choice "Choose"
-        # Each action runs in a subshell, so an error returns to the menu.
+        MENU_BUSY=1 INTERRUPTED=0
+        # Each action runs in a subshell, so an error or Ctrl+C returns to the menu.
         case $choice in
             1) (if [[ -x "$BIN" ]]; then cmd_update; else cmd_install; fi) || true ;;
             2) (wizard_add) || true ;;
-            3) cmd_list ;;
+            3) (cmd_list) || true ;;
             4) (
                 pick_tunnel name
-                choose action "Action" "start stop restart status" restart
+                choose action "Action" restart \
+                    "start|start it, and at every boot" \
+                    "stop|stop it, and not at boot" \
+                    "restart|restart it" \
+                    "status|show its state"
                 cmd_service "$action" "$name"
             ) || true ;;
             5) (pick_tunnel name && cmd_service logs "$name") || true ;;
@@ -754,10 +1093,18 @@ EOF
             8) (pick_tunnel name && cmd_remove "$name") || true ;;
             9) (cmd_uninstall) || true ;;
             0 | q) exit 0 ;;
+            "") ;;
             *) warn "Choose 0-9." ;;
         esac
-        printf '\n  %sEnter to go back to the menu%s' "$C_DIM" "$C_RESET"
-        read -r -u "$IN_FD" _ || exit 0
+        # Wait for Enter before the menu hides what the action printed, unless it was
+        # left with Ctrl+C. The wait runs in a subshell too: Ctrl+C there returns at once.
+        if ((!INTERRUPTED)) && [[ -n "$choice" && "$choice" != 5 ]]; then
+            (
+                printf '\n  %sEnter: back to the menu%s' "$C_DIM" "$C_RESET"
+                read -r -u "$IN_FD" _
+            ) || true
+        fi
+        MENU_BUSY=0
     done
 }
 
@@ -769,9 +1116,13 @@ usage() {
   install [--version vX.Y.Z] [--binary PATH]   install Kariz (latest release by default)
   update  [--version vX.Y.Z]                   update Kariz and restart running tunnels
   add NAME --role entry|exit --mode reverse|direct --transport T [options]
-      --listen ADDR:PORT | --remote ADDR:PORT   the listening or the dialing side
+      --listen PORT | --remote ADDR[:PORT]      the listening or the dialing side
+                           ADDR: IPv4, IPv6 (brackets optional) or a domain
       --token TOKEN        default: a new one    --profile balanced|ultraspeed|gaming
-      --forward LISTEN=TARGET[/tcp|udp|tcp+udp] entry only, can repeat
+      --ports LIST         entry only: 443,8080-8090,2053=53,3000-3005=4000-4005
+      --protocol tcp|udp|tcp+udp  for --ports    --to HOST   target (127.0.0.1)
+      --ipv4-only          listen on IPv4 only (default: IPv4 and IPv6 where there is IPv6)
+      --forward LISTEN=TARGET[/tcp|udp|tcp+udp] one rule in full, can repeat
       --ws-path /PATH      ws / wss              --pin HEX   wss dialer
   list                                         all tunnels and their state
   start | stop | restart | status | logs NAME
