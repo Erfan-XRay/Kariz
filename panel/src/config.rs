@@ -28,6 +28,12 @@ pub struct Config {
     /// How tunnels are started: `systemd` (default) or `process`.
     #[serde(default)]
     pub services: crate::manage::ServiceKind,
+    /// Your own certificate (PEM chain) and key, instead of the self-signed one made at
+    /// install. Reloaded when the panel gets SIGHUP. Set both or neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_file: Option<PathBuf>,
 }
 
 fn default_kariz_dir() -> PathBuf {
@@ -65,6 +71,9 @@ impl Config {
                 anyhow::anyhow!("agent_listen must be an address with a port, like 0.0.0.0:29001")
             })?;
         }
+        if self.cert_file.is_some() != self.key_file.is_some() {
+            bail!("cert_file and key_file go together: set both or neither");
+        }
         Ok(())
     }
 
@@ -81,11 +90,34 @@ impl Config {
     }
 
     pub fn cert(&self) -> PathBuf {
-        self.data_dir.join("cert.pem")
+        self.cert_file
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("cert.pem"))
     }
 
     pub fn key(&self) -> PathBuf {
-        self.data_dir.join("key.pem")
+        self.key_file
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("key.pem"))
+    }
+
+    /// The certificate is the user's own, not the one the panel makes for itself.
+    pub fn own_cert(&self) -> bool {
+        self.cert_file.is_some()
+    }
+
+    /// Makes the panel's own certificate if it is used and missing; with the user's own it
+    /// only checks that the files are there. The certificate's fingerprint comes back.
+    pub fn ensure_cert(&self) -> Result<String> {
+        if self.own_cert() {
+            for f in [self.cert(), self.key()] {
+                if !f.exists() {
+                    bail!("{} does not exist", f.display());
+                }
+            }
+            return crate::cert::fingerprint(&self.cert());
+        }
+        crate::cert::ensure(&self.cert(), &self.key())
     }
 }
 

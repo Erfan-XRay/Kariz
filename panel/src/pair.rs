@@ -740,3 +740,36 @@ pub async fn logs(hub: &Hub, name: &str, lines: u32) -> Result<Vec<LogLine>> {
     let skip = all.len().saturating_sub(lines as usize);
     Ok(all.split_off(skip))
 }
+
+/// Runs the speed test of a tunnel on its entry side and returns what it printed.
+pub async fn speedtest(
+    hub: &Hub,
+    name: &str,
+    seconds: u32,
+    streams: u32,
+    udp: bool,
+) -> Result<TextReply> {
+    if !valid_name(name) {
+        bail!("bad_name");
+    }
+    let placement = place(hub, name)?;
+    let Some((server, _)) = placement.sides.iter().find(|(_, t)| t.role == "entry") else {
+        bail!("no_such_tunnel");
+    };
+    let seconds = seconds.clamp(1, 60);
+    let limit = Duration::from_secs(u64::from(seconds) * 3 + 50);
+    let raw = hub
+        .ask_within(
+            server,
+            &Request::Speedtest {
+                name: name.to_owned(),
+                seconds,
+                streams,
+                udp,
+            },
+            limit,
+        )
+        .await?;
+    serde_json::from_slice(&raw)
+        .map_err(|_| anyhow::anyhow!("the server's answer was not understood"))
+}

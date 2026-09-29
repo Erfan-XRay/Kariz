@@ -49,6 +49,12 @@ pub fn routes() -> Router<AppState> {
         .route("/api/history", get(history))
         .route("/api/events", get(events))
         .route("/api/logs", get(tunnel_logs))
+        .route("/api/tunnels/speedtest", post(tunnel_speedtest))
+        .route("/api/backup", post(backup))
+        .route(
+            "/api/restore",
+            post(restore).layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/revoke", post(revoke))
         .route("/api/password", post(password))
@@ -752,6 +758,130 @@ async fn tunnel_logs(
         Err(e) => match format!("{e:#}").as_str() {
             "no_such_tunnel" => error(StatusCode::NOT_FOUND, "no_such_tunnel"),
             "bad_name" => error(StatusCode::BAD_REQUEST, "bad_name"),
+            _ => internal(e),
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct SpeedBody {
+    name: String,
+    seconds: Option<u32>,
+    streams: Option<u32>,
+    udp: Option<bool>,
+}
+
+async fn tunnel_speedtest(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<SpeedBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    audit(
+        &state,
+        &format!("session {}", me.id),
+        &ip_of(&peer),
+        &format!("ran a speed test on {}", body.name),
+    );
+    match pair::speedtest(
+        &state.hub,
+        &body.name,
+        body.seconds.unwrap_or(10),
+        body.streams.unwrap_or(4),
+        body.udp.unwrap_or(true),
+    )
+    .await
+    {
+        Ok(r) => reply(
+            StatusCode::OK,
+            json!({ "ok": r.ok, "error": r.error, "text": r.text }),
+        ),
+        Err(e) => match format!("{e:#}").as_str() {
+            "no_such_tunnel" => error(StatusCode::NOT_FOUND, "no_such_tunnel"),
+            "bad_name" => error(StatusCode::BAD_REQUEST, "bad_name"),
+            _ => internal(e),
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct BackupBody {
+    passphrase: String,
+}
+
+/// The backup file, sealed with the passphrase, as base64 in JSON.
+async fn backup(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<BackupBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match crate::backup::export(&state.db, &body.passphrase) {
+        Ok(file) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                "downloaded a backup",
+            );
+            use base64::Engine;
+            reply(
+                StatusCode::OK,
+                json!({ "data": base64::engine::general_purpose::STANDARD.encode(file) }),
+            )
+        }
+        Err(e) if format!("{e:#}") == "short_passphrase" => {
+            error(StatusCode::BAD_REQUEST, "short_passphrase")
+        }
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RestoreBody {
+    passphrase: String,
+    data: String,
+    #[serde(default)]
+    replace: bool,
+}
+
+async fn restore(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<RestoreBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    use base64::Engine;
+    let Ok(file) = base64::engine::general_purpose::STANDARD.decode(body.data.trim()) else {
+        return error(StatusCode::BAD_REQUEST, "not_a_backup");
+    };
+    match crate::backup::import(&state.db, &body.passphrase, &file, body.replace) {
+        Ok(n) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("restored a backup ({n} servers)"),
+            );
+            reply(StatusCode::OK, json!({ "servers": n, "restart": true }))
+        }
+        Err(e) => match format!("{e:#}").as_str() {
+            code @ ("wrong_passphrase" | "not_a_backup" | "bad_backup") => {
+                error(StatusCode::BAD_REQUEST, code)
+            }
+            "not_empty" => error(StatusCode::CONFLICT, "not_empty"),
             _ => internal(e),
         },
     }

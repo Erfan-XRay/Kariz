@@ -5,6 +5,7 @@ import { pairTunnels, rateParts } from "./derive";
 import type { Tunnel } from "./derive";
 import { useApp } from "./store";
 import { Chart } from "./Chart";
+import { SpeedDialog } from "./Extras";
 import { Dialog, Icon } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { Wizard } from "./Wizard";
@@ -127,7 +128,7 @@ function Facts({ side, label }: { side: Tunnel["entry"]; label: string }) {
   );
 }
 
-type Action = "start" | "stop" | "restart" | "delete" | "rotate";
+type Action = "start" | "stop" | "restart" | "delete" | "rotate" | "speed";
 
 function Detail({ tunnel, onClose, onAct, onEdit }: { tunnel: Tunnel; onClose: () => void; onAct: (a: Action) => void; onEdit: () => void }) {
   const { t, num } = useApp();
@@ -142,6 +143,9 @@ function Detail({ tunnel, onClose, onAct, onEdit }: { tunnel: Tunnel; onClose: (
             {t("tun.delete")}
           </button>
           <span className="grow" />
+          <button className="btn btn-ghost btn-sm" type="button" onClick={() => onAct("speed")}>
+            {t("speed.run")}
+          </button>
           <button className="btn btn-ghost btn-sm" type="button" onClick={() => onAct("rotate")}>
             {t("tun.rotate")}
           </button>
@@ -290,7 +294,8 @@ export function TunnelsPage({ servers, onChanged }: { servers: ServerInfo[]; onC
           onEdit={() => setWizard({ edit: openTunnel })}
         />
       )}
-      {act && (
+      {act?.action === "speed" && <SpeedDialog name={act.name} onClose={() => setAct(null)} />}
+      {act && act.action !== "speed" && (
         <RunDialog
           key={`${act.name}-${act.action}`}
           title={t(act.action === "delete" ? "tun.deleteTitle" : act.action === "rotate" ? "tun.rotateTitle" : `tun.${act.action}`, { name: act.name })}
@@ -322,7 +327,7 @@ export function TunnelsPage({ servers, onChanged }: { servers: ServerInfo[]; onC
                 rotate: true,
               });
             }
-            return api.controlTunnel(act.name, act.action);
+            return api.controlTunnel(act.name, act.action as "start" | "stop" | "restart");
           }}
           onClose={() => {
             setAct(null);

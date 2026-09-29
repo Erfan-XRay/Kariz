@@ -724,3 +724,5 @@ textarea.text { padding: var(--sp-3); min-height: 88px; resize: vertical; line-h
 .chart-head .label { font-size: var(--fs-sm); color: var(--text-2); }
 .chart { height: 150px; }
 .page-band .select, .page-band .search { min-height: 40px; }
+
+.check { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--text-2); }

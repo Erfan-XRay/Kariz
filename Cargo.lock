@@ -821,6 +821,7 @@ dependencies = [
  "hyper-util",
  "kariz",
  "rcgen",
+ "ring",
  "rusqlite",
  "rust-embed",
  "serde",
