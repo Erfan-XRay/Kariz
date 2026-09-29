@@ -109,25 +109,21 @@ jobs:
           cargo build --release --locked --target "$TARGET" --no-default-features --features quic,kcp
           cp "target/$TARGET/release/kariz" kariz-musl
           ls -l kariz-mimalloc kariz-musl
-      - name: Throughput and UDP rate, alternating
+      - name: Memory, with mimalloc's own settings
         run: |
-          for round in 1 2; do
-            for alloc in mimalloc musl; do
-              if [ "$alloc" = mimalloc ]; then feats=""; else feats="--no-default-features --features quic,kcp"; fi
-              echo "== $alloc, round $round"
-              for bench in throughput udp_throughput; do
-                cargo test --release --locked --target "$TARGET" $feats --test tunnel "$bench" \
-                  -- --ignored --nocapture --exact 2>&1 | grep "each way" || true
-              done
-            done
-          done
-      - name: Memory
-        run: |
-          for alloc in mimalloc musl; do
-            echo "== $alloc"
-            scripts/rss.sh tcpmux 100 "./kariz-$alloc"
-            scripts/rss.sh tcpmux 1000 "./kariz-$alloc" udp
-          done
+          # Which settings shrink mimalloc's footprint? (musl: 6.0 MiB idle, 7.7 with 100
+          # connections; mimalloc: 13.6 and 21.6.)
+          run() {
+            label=$1; bin=$2; shift 2
+            echo "== $label"
+            env "$@" scripts/rss.sh tcpmux 100 "$bin" 2>&1 | grep "^transport"
+            env "$@" scripts/rss.sh tcpmux 1000 "$bin" udp 2>&1 | grep "^transport"
+          }
+          run "musl" ./kariz-musl X=1
+          run "mimalloc, default" ./kariz-mimalloc X=1
+          run "mimalloc, purge delay 0" ./kariz-mimalloc MIMALLOC_PURGE_DELAY=0
+          run "mimalloc, purge 0, no eager commit" ./kariz-mimalloc MIMALLOC_PURGE_DELAY=0 MIMALLOC_ARENA_EAGER_COMMIT=0
+          run "mimalloc, purge 0, no eager commit, no reserve" ./kariz-mimalloc MIMALLOC_PURGE_DELAY=0 MIMALLOC_ARENA_EAGER_COMMIT=0 MIMALLOC_RESERVE_OS_MEMORY=0 MIMALLOC_DISALLOW_ARENA_ALLOC=1
 
   # nginx in front of the tunnel as a stand-in for a CDN: WebSocket proxying, TLS
   # termination and an idle timeout (tests/tunnel.rs, module `nginx`).

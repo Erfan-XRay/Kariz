@@ -46,8 +46,7 @@ impl Style {
     /// Decides from `[log] color`, `NO_COLOR` and where stdout goes.
     pub fn detect(color: LogColor, offset: UtcOffset) -> Self {
         let terminal = std::io::stdout().is_terminal();
-        // systemd sets JOURNAL_STREAM for services whose output goes to the journal.
-        let journal = !terminal && std::env::var_os("JOURNAL_STREAM").is_some();
+        let journal = !terminal && stdout_is_journal();
         let color = match color {
             LogColor::Always => true,
             LogColor::Never => false,
@@ -67,6 +66,30 @@ impl Style {
             text.to_string()
         }
     }
+}
+
+/// Whether stdout is the journal. systemd sets `JOURNAL_STREAM=<device>:<inode>` for a
+/// service whose output goes there, but children inherit it (a CI runner, a shell started
+/// from a service) and they may have redirected stdout since. So stdout has to be that
+/// very stream.
+#[cfg(unix)]
+fn stdout_is_journal() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(var) = std::env::var("JOURNAL_STREAM") else {
+        return false;
+    };
+    std::fs::metadata("/proc/self/fd/1").is_ok_and(|m| same_stream(&var, m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn stdout_is_journal() -> bool {
+    false
+}
+
+/// Whether a `JOURNAL_STREAM` value names the stream with this device and inode.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn same_stream(var: &str, dev: u64, ino: u64) -> bool {
+    var == format!("{dev}:{ino}")
 }
 
 /// The local offset from UTC. Must be called while the process has one thread: the
@@ -305,6 +328,16 @@ mod tests {
         assert!(line(&style, Level::WARN, &f, (1, 2, 3)).starts_with("<4>"));
         assert!(line(&style, Level::INFO, &f, (1, 2, 3)).starts_with("<6>"));
         assert!(line(&style, Level::DEBUG, &f, (1, 2, 3)).starts_with("<7>"));
+    }
+
+    #[test]
+    fn only_the_named_stream_is_the_journal() {
+        assert!(same_stream("8:1234", 8, 1234));
+        // Inherited by a child whose stdout is something else.
+        assert!(!same_stream("8:1234", 8, 1235));
+        assert!(!same_stream("8:1234", 9, 1234));
+        assert!(!same_stream("", 8, 1234));
+        assert!(!same_stream("8:1234:5", 8, 1234));
     }
 
     #[test]
