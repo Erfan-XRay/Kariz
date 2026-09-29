@@ -10,7 +10,7 @@
 //! server.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -21,11 +21,13 @@ use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
+use crate::agent::{Agent, AgentConfig};
 use crate::auth::{hash_token, now};
 use crate::collect::{self, Sampler};
 use crate::config::random_hex;
 use crate::db::Db;
 use crate::join::{self, JoinCode, JOIN_TTL};
+use crate::manage::{Services, Systemd};
 use crate::wire::{Ack, Health, HelloReply, Request, TunnelInfo, MAX_REPLY};
 
 /// How often the panel asks an agent for its state.
@@ -75,16 +77,78 @@ pub struct Hub {
     db: Db,
     kariz_dir: PathBuf,
     live: Mutex<HashMap<String, Live>>,
+    /// The panel's own server, which answers the same requests as an agent, in-process.
+    local: Arc<Agent>,
+    services: Arc<dyn Services>,
+    /// The running and recent tunnel operations (`crate::pair`).
+    pub ops: crate::pair::Ops,
+    /// How long a new tunnel has to connect (shortened in tests).
+    pub connect_wait: Duration,
 }
 
 pub const LOCAL: &str = "local";
 
 impl Hub {
     pub fn new(db: Db, kariz_dir: PathBuf) -> Arc<Self> {
+        Self::with_services(db, kariz_dir, Arc::new(Systemd))
+    }
+
+    /// A hub whose own server runs its tunnels through `services`.
+    pub fn with_services(db: Db, kariz_dir: PathBuf, services: Arc<dyn Services>) -> Arc<Self> {
+        Self::with_options(db, kariz_dir, services, crate::pair::CONNECT_WAIT)
+    }
+
+    /// Also sets how long a new tunnel has to connect.
+    pub fn with_options(
+        db: Db,
+        kariz_dir: PathBuf,
+        services: Arc<dyn Services>,
+        connect_wait: Duration,
+    ) -> Arc<Self> {
+        let config = AgentConfig {
+            panel: String::new(),
+            link_token: String::new(),
+            join: None,
+            id: None,
+            key: None,
+            kariz_dir: kariz_dir.clone(),
+        };
         Arc::new(Self {
             db,
+            local: Agent::with_services(Path::new(""), config, services.clone()),
+            services,
+            ops: crate::pair::Ops::default(),
+            connect_wait,
             kariz_dir,
             live: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// One request to a server (the panel's own, or an agent that is connected), and its
+    /// raw answer.
+    pub async fn ask(&self, server: &str, request: &Request) -> Result<Vec<u8>> {
+        if server == LOCAL {
+            return Ok(self.local.handle(request.clone()).await);
+        }
+        let session = self
+            .live()
+            .get(server)
+            .filter(|l| l.online)
+            .and_then(|l| l.session.clone())
+            .ok_or_else(|| anyhow!("that server is not connected"))?;
+        request_on(&session, request).await
+    }
+
+    /// Like [`Hub::ask`], with the answer read as `T`.
+    pub async fn ask_as<T: serde::de::DeserializeOwned>(
+        &self,
+        server: &str,
+        request: &Request,
+    ) -> Result<T> {
+        let raw = self.ask(server, request).await?;
+        serde_json::from_slice(&raw).map_err(|_| match serde_json::from_slice::<Ack>(&raw) {
+            Ok(Ack { error: Some(e), .. }) => anyhow!(e),
+            _ => anyhow!("the server's answer was not understood"),
         })
     }
 
@@ -265,7 +329,7 @@ impl Hub {
     /// new one is registered with its join secret.
     async fn identify(&self, session: &Arc<MuxSession>) -> Result<(String, HelloReply)> {
         let challenge = random_hex(16)?;
-        let raw = request(
+        let raw = request_on(
             session,
             &Request::Hello {
                 challenge: challenge.clone(),
@@ -304,7 +368,7 @@ impl Hub {
             wanted
         };
         let (id, key, name) = self.register(&wanted, &hello)?;
-        let raw = request(
+        let raw = request_on(
             session,
             &Request::Enroll {
                 id: id.clone(),
@@ -330,9 +394,9 @@ impl Hub {
     async fn poll(&self, id: &str, session: &Arc<MuxSession>) -> Result<()> {
         loop {
             let health: Health =
-                serde_json::from_slice(&request(session, &Request::Health).await?)?;
+                serde_json::from_slice(&request_on(session, &Request::Health).await?)?;
             let tunnels: Vec<TunnelInfo> =
-                serde_json::from_slice(&request(session, &Request::Tunnels).await?)?;
+                serde_json::from_slice(&request_on(session, &Request::Tunnels).await?)?;
             self.update(id, Some(health), tunnels);
             let _ = self.db.conn().execute(
                 "UPDATE servers SET last_seen = ?2 WHERE id = ?1",
@@ -383,7 +447,7 @@ impl Hub {
         let mut sampler = Sampler::default();
         loop {
             let health = sampler.sample();
-            let tunnels = collect::tunnels(&self.kariz_dir).await;
+            let tunnels = collect::tunnels(&self.kariz_dir, &*self.services).await;
             {
                 let mut live = self.live();
                 let entry = live.entry(LOCAL.to_owned()).or_default();
@@ -454,7 +518,7 @@ impl Hub {
 
 /// One request to an agent: a stream with the request in its open bytes and the answer
 /// in what comes back.
-pub async fn request(session: &MuxSession, request: &Request) -> Result<Vec<u8>> {
+pub async fn request_on(session: &MuxSession, request: &Request) -> Result<Vec<u8>> {
     let syn = serde_json::to_vec(request)?;
     let ask = async {
         let stream = session.open(Bytes::from(syn))?;

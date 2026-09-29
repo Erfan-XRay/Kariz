@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use crate::collect::{self, Sampler};
 use crate::join::{self, JoinCode};
-use crate::manage;
+use crate::manage::{self, Services};
 use crate::wire::{Ack, HelloReply, Request, MAX_REQUEST};
 
 pub const DEFAULT_AGENT_CONFIG: &str = "/etc/kariz-panel/agent.toml";
@@ -123,14 +123,25 @@ pub struct Agent {
     path: PathBuf,
     config: Mutex<AgentConfig>,
     sampler: Mutex<Sampler>,
+    services: Arc<dyn Services>,
 }
 
 impl Agent {
     pub fn new(path: &Path, config: AgentConfig) -> Arc<Self> {
+        Self::with_services(path, config, Arc::new(manage::Systemd))
+    }
+
+    /// An agent that starts and stops tunnels through `services` (systemd by default).
+    pub fn with_services(
+        path: &Path,
+        config: AgentConfig,
+        services: Arc<dyn Services>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             path: path.to_path_buf(),
             config: Mutex::new(config),
             sampler: Mutex::new(Sampler::default()),
+            services,
         })
     }
 
@@ -189,7 +200,9 @@ impl Agent {
                     .sample();
                 to_json(&health)
             }
-            Request::Tunnels => to_json(&collect::tunnels(&self.config().kariz_dir).await),
+            Request::Tunnels => {
+                to_json(&collect::tunnels(&self.config().kariz_dir, &*self.services).await)
+            }
             Request::TunnelCheck { spec } => {
                 let dir = self.config().kariz_dir;
                 let owners = tokio::task::spawn_blocking(manage::ports)
@@ -199,7 +212,18 @@ impl Agent {
             }
             Request::TunnelPut { spec } => {
                 let dir = self.config().kariz_dir;
-                ack(manage::put(&dir, &spec))
+                to_json(&match manage::put(&dir, &spec) {
+                    Ok(pin) => crate::wire::PutReply {
+                        ok: true,
+                        error: None,
+                        pin,
+                    },
+                    Err(e) => crate::wire::PutReply {
+                        ok: false,
+                        error: Some(format!("{e:#}")),
+                        pin: None,
+                    },
+                })
             }
             Request::TunnelGet { name } => {
                 let dir = self.config().kariz_dir;
@@ -213,9 +237,9 @@ impl Agent {
             }
             Request::TunnelDelete { name } => {
                 let dir = self.config().kariz_dir;
-                ack(manage::delete(&dir, &name).await)
+                ack(manage::delete(&dir, &*self.services, &name).await)
             }
-            Request::TunnelCtl { name, action } => ack(manage::ctl(&name, &action).await),
+            Request::TunnelCtl { name, action } => ack(self.services.ctl(name, action).await),
             Request::Ports => to_json(
                 &tokio::task::spawn_blocking(manage::ports)
                     .await

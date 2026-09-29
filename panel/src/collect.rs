@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use kariz::config::{mode_name, role_name, Config};
 
+use crate::manage::Services;
 use crate::wire::{ForwardInfo, Health, TunnelInfo};
 
 /// This server's name.
@@ -156,7 +157,7 @@ impl Sampler {
 /// The tunnels configured in `dir` (`/etc/kariz`), with their state. Slow parts (systemd,
 /// the control sockets) are asked with short time limits, so a stuck daemon does not
 /// stall the report.
-pub async fn tunnels(dir: &Path) -> Vec<TunnelInfo> {
+pub async fn tunnels(dir: &Path, services: &dyn Services) -> Vec<TunnelInfo> {
     let mut files: Vec<_> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .filter_map(Result::ok)
@@ -172,12 +173,12 @@ pub async fn tunnels(dir: &Path) -> Vec<TunnelInfo> {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        out.push(tunnel(&name, &path).await);
+        out.push(tunnel(&name, &path, services).await);
     }
     out
 }
 
-async fn tunnel(name: &str, path: &Path) -> TunnelInfo {
+async fn tunnel(name: &str, path: &Path, services: &dyn Services) -> TunnelInfo {
     let config = match Config::load(path) {
         Ok(c) => c,
         Err(e) => {
@@ -214,7 +215,7 @@ async fn tunnel(name: &str, path: &Path) -> TunnelInfo {
                 protocol: f.protocol.name().to_owned(),
             })
             .collect(),
-        active: service_active(name).await,
+        active: services.active(name.to_owned()).await,
         status,
         error: None,
     }
@@ -236,24 +237,6 @@ async fn tunnel_status(config: &Config) -> Option<kariz::stats::Status> {
 
 #[cfg(not(unix))]
 async fn tunnel_status(_: &Config) -> Option<kariz::stats::Status> {
-    None
-}
-
-/// Whether `kariz@NAME` runs, from systemd; `None` where there is no systemd.
-#[cfg(target_os = "linux")]
-async fn service_active(name: &str) -> Option<bool> {
-    use std::time::Duration;
-    let run = tokio::process::Command::new("systemctl")
-        .args(["is-active", "--quiet", &format!("kariz@{name}")])
-        .status();
-    match tokio::time::timeout(Duration::from_secs(3), run).await {
-        Ok(Ok(status)) => Some(status.success()),
-        _ => None,
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn service_active(_: &str) -> Option<bool> {
     None
 }
 
@@ -333,7 +316,7 @@ mod tests {
         std::fs::write(dir.path().join("broken.toml"), "role = \"nobody\"\n").unwrap();
         std::fs::write(dir.path().join("notes.txt"), "ignored").unwrap();
 
-        let list = tunnels(dir.path()).await;
+        let list = tunnels(dir.path(), &crate::manage::Systemd).await;
         assert_eq!(
             list.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
             ["broken", "main"]
@@ -357,6 +340,10 @@ mod tests {
         assert!(!serde_json::to_string(&list)
             .unwrap()
             .contains("a-secret-token"));
-        assert!(tunnels(&dir.path().join("missing")).await.is_empty());
+        assert!(
+            tunnels(&dir.path().join("missing"), &crate::manage::Systemd)
+                .await
+                .is_empty()
+        );
     }
 }

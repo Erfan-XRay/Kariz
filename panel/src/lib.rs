@@ -11,6 +11,7 @@ pub mod http;
 pub mod hub;
 pub mod join;
 pub mod manage;
+pub mod pair;
 pub mod wire;
 
 use std::path::Path;

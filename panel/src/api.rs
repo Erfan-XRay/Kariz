@@ -14,7 +14,7 @@
 
 use std::net::SocketAddr;
 
-use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 
 use crate::auth::{self, Session};
 use crate::http::AppState;
+use crate::pair::{self, PairRequest};
 
 const COOKIE: &str = "__Host-kariz";
 const CSRF_HEADER: &str = "x-kariz-csrf";
@@ -37,6 +38,13 @@ pub fn routes() -> Router<AppState> {
         .route("/api/servers", get(servers))
         .route("/api/servers/join-code", post(join_code))
         .route("/api/servers/remove", post(remove_server))
+        .route("/api/tunnels/check", post(tunnel_check))
+        .route("/api/tunnels", post(tunnel_create))
+        .route("/api/tunnels/edit", post(tunnel_edit))
+        .route("/api/tunnels/control", post(tunnel_control))
+        .route("/api/tunnels/delete", post(tunnel_delete))
+        .route("/api/op", get(op_status))
+        .route("/api/ports", get(server_ports))
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/revoke", post(revoke))
         .route("/api/password", post(password))
@@ -470,5 +478,184 @@ async fn remove_server(
         }
         Ok(false) => error(StatusCode::NOT_FOUND, "no_such_server"),
         Err(e) => internal(e),
+    }
+}
+
+// ---- tunnels (docs/PHASE12.md) ----
+
+/// Turns a refusal from the pair code into a response.
+fn pair_error(e: anyhow::Error) -> Response {
+    let code = format!("{e:#}");
+    match code.as_str() {
+        "bad_name" | "same_server" | "bad_mode" | "bad_action" => {
+            error(StatusCode::BAD_REQUEST, &code)
+        }
+        "busy" => error(StatusCode::CONFLICT, "busy"),
+        _ => internal(e),
+    }
+}
+
+async fn tunnel_check(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PairRequest>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, true) {
+        return r;
+    }
+    match pair::check(&state.hub, &body).await {
+        Ok((entry, exit)) => reply(StatusCode::OK, json!({ "entry": entry, "exit": exit })),
+        Err(e) => pair_error(e),
+    }
+}
+
+async fn tunnel_create(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<PairRequest>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let name = body.name.clone();
+    match pair::create(&state.hub, body) {
+        Ok(op) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("made tunnel {name}"),
+            );
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => pair_error(e),
+    }
+}
+
+async fn tunnel_edit(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<PairRequest>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let what = format!(
+        "edited tunnel {}{}",
+        body.name,
+        if body.rotate { " (new token)" } else { "" }
+    );
+    match pair::edit(&state.hub, body) {
+        Ok(op) => {
+            audit(&state, &format!("session {}", me.id), &ip_of(&peer), &what);
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => pair_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ControlBody {
+    name: String,
+    action: String,
+}
+
+async fn tunnel_control(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<ControlBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match pair::control(&state.hub, &body.name, &body.action) {
+        Ok(op) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("{} tunnel {}", body.action, body.name),
+            );
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => pair_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct NameBody {
+    name: String,
+}
+
+async fn tunnel_delete(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<NameBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match pair::delete(&state.hub, &body.name) {
+        Ok(op) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("deleted tunnel {}", body.name),
+            );
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => pair_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct IdQuery {
+    id: String,
+}
+
+async fn op_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<IdQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match state.hub.ops.get(&q.id) {
+        Some(op) => reply(StatusCode::OK, json!(op)),
+        None => error(StatusCode::NOT_FOUND, "no_such_operation"),
+    }
+}
+
+#[derive(Deserialize)]
+struct ServerQuery {
+    server: String,
+}
+
+/// The listening ports of a server, for the wizard to show what is taken.
+async fn server_ports(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ServerQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match state
+        .hub
+        .ask_as::<Vec<crate::wire::PortOwner>>(&q.server, &crate::wire::Request::Ports)
+        .await
+    {
+        Ok(ports) => reply(StatusCode::OK, json!({ "ports": ports })),
+        Err(_) => error(StatusCode::NOT_FOUND, "server_offline"),
     }
 }
