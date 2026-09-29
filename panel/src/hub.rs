@@ -10,7 +10,7 @@
 //! server.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -21,11 +21,13 @@ use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
+use crate::agent::{Agent, AgentConfig};
 use crate::auth::{hash_token, now};
 use crate::collect::{self, Sampler};
 use crate::config::random_hex;
 use crate::db::Db;
 use crate::join::{self, JoinCode, JOIN_TTL};
+use crate::manage::{Services, Systemd};
 use crate::wire::{Ack, Health, HelloReply, Request, TunnelInfo, MAX_REPLY};
 
 /// How often the panel asks an agent for its state.
@@ -69,22 +71,100 @@ struct Live {
     /// Bytes counted at the last reading of each tunnel, for the rates.
     last_bytes: HashMap<String, (u64, Instant)>,
     session: Option<Arc<MuxSession>>,
+    /// Whether each tunnel was connected at the last reading, to notice it changing.
+    connected: HashMap<String, bool>,
 }
 
 pub struct Hub {
     db: Db,
     kariz_dir: PathBuf,
     live: Mutex<HashMap<String, Live>>,
+    /// The panel's own server, which answers the same requests as an agent, in-process.
+    local: Arc<Agent>,
+    services: Arc<dyn Services>,
+    /// The running and recent tunnel operations (`crate::pair`).
+    pub ops: crate::pair::Ops,
+    /// Charts and events.
+    pub history: crate::history::History,
+    /// How long a new tunnel has to connect (shortened in tests).
+    pub connect_wait: Duration,
 }
 
 pub const LOCAL: &str = "local";
 
 impl Hub {
     pub fn new(db: Db, kariz_dir: PathBuf) -> Arc<Self> {
+        Self::with_services(db, kariz_dir, Arc::new(Systemd))
+    }
+
+    /// A hub whose own server runs its tunnels through `services`.
+    pub fn with_services(db: Db, kariz_dir: PathBuf, services: Arc<dyn Services>) -> Arc<Self> {
+        Self::with_options(db, kariz_dir, services, crate::pair::CONNECT_WAIT)
+    }
+
+    /// Also sets how long a new tunnel has to connect.
+    pub fn with_options(
+        db: Db,
+        kariz_dir: PathBuf,
+        services: Arc<dyn Services>,
+        connect_wait: Duration,
+    ) -> Arc<Self> {
+        let config = AgentConfig {
+            panel: String::new(),
+            link_token: String::new(),
+            join: None,
+            id: None,
+            key: None,
+            kariz_dir: kariz_dir.clone(),
+            services: Default::default(),
+        };
         Arc::new(Self {
+            history: crate::history::History::new(db.clone()),
             db,
+            local: Agent::with_services(Path::new(""), config, services.clone()),
+            services,
+            ops: crate::pair::Ops::default(),
+            connect_wait,
             kariz_dir,
             live: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// One request to a server (the panel's own, or an agent that is connected), and its
+    /// raw answer.
+    pub async fn ask(&self, server: &str, request: &Request) -> Result<Vec<u8>> {
+        self.ask_within(server, request, REQUEST_TIMEOUT).await
+    }
+
+    /// Like [`Hub::ask`], for a request that is allowed to take up to `limit`.
+    pub async fn ask_within(
+        &self,
+        server: &str,
+        request: &Request,
+        limit: Duration,
+    ) -> Result<Vec<u8>> {
+        if server == LOCAL {
+            return Ok(self.local.handle(request.clone()).await);
+        }
+        let session = self
+            .live()
+            .get(server)
+            .filter(|l| l.online)
+            .and_then(|l| l.session.clone())
+            .ok_or_else(|| anyhow!("that server is not connected"))?;
+        request_within(&session, request, limit).await
+    }
+
+    /// Like [`Hub::ask`], with the answer read as `T`.
+    pub async fn ask_as<T: serde::de::DeserializeOwned>(
+        &self,
+        server: &str,
+        request: &Request,
+    ) -> Result<T> {
+        let raw = self.ask(server, request).await?;
+        serde_json::from_slice(&raw).map_err(|_| match serde_json::from_slice::<Ack>(&raw) {
+            Ok(Ack { error: Some(e), .. }) => anyhow!(e),
+            _ => anyhow!("the server's answer was not understood"),
         })
     }
 
@@ -245,6 +325,7 @@ impl Hub {
             entry.version = hello.version.clone();
             entry.arch = hello.arch.clone();
         }
+        self.history.event("server_up", &id, "");
         let result = self.poll(&id, &session).await;
         let mut live = self.live();
         if let Some(entry) = live.get_mut(&id) {
@@ -256,6 +337,7 @@ impl Hub {
             {
                 entry.online = false;
                 entry.session = None;
+                self.history.event("server_down", &id, "");
             }
         }
         result
@@ -265,7 +347,7 @@ impl Hub {
     /// new one is registered with its join secret.
     async fn identify(&self, session: &Arc<MuxSession>) -> Result<(String, HelloReply)> {
         let challenge = random_hex(16)?;
-        let raw = request(
+        let raw = request_on(
             session,
             &Request::Hello {
                 challenge: challenge.clone(),
@@ -304,7 +386,7 @@ impl Hub {
             wanted
         };
         let (id, key, name) = self.register(&wanted, &hello)?;
-        let raw = request(
+        let raw = request_on(
             session,
             &Request::Enroll {
                 id: id.clone(),
@@ -330,9 +412,9 @@ impl Hub {
     async fn poll(&self, id: &str, session: &Arc<MuxSession>) -> Result<()> {
         loop {
             let health: Health =
-                serde_json::from_slice(&request(session, &Request::Health).await?)?;
+                serde_json::from_slice(&request_on(session, &Request::Health).await?)?;
             let tunnels: Vec<TunnelInfo> =
-                serde_json::from_slice(&request(session, &Request::Tunnels).await?)?;
+                serde_json::from_slice(&request_on(session, &Request::Tunnels).await?)?;
             self.update(id, Some(health), tunnels);
             let _ = self.db.conn().execute(
                 "UPDATE servers SET last_seen = ?2 WHERE id = ?1",
@@ -349,7 +431,29 @@ impl Hub {
         let mut live = self.live();
         let entry = live.entry(id.to_owned()).or_default();
         let t = Instant::now();
+        let at = now();
         entry.seen = Some(t);
+        if let Some(h) = &health {
+            let h_ = &self.history;
+            if let Some(v) = h.cpu_pct {
+                h_.record(&format!("srv:{id}:cpu"), at, v);
+            }
+            if let (Some(u), Some(total)) = (h.mem_used, h.mem_total) {
+                if total > 0 {
+                    h_.record(
+                        &format!("srv:{id}:mem"),
+                        at,
+                        u as f64 * 100.0 / total as f64,
+                    );
+                }
+            }
+            if let Some(v) = h.rx_bps {
+                h_.record(&format!("srv:{id}:rx"), at, v * 8.0 / 1e6);
+            }
+            if let Some(v) = h.tx_bps {
+                h_.record(&format!("srv:{id}:tx"), at, v * 8.0 / 1e6);
+            }
+        }
         entry.health = health;
         entry.tunnels = tunnels
             .into_iter()
@@ -370,6 +474,35 @@ impl Hub {
                     Some(b) => entry.last_bytes.insert(info.name.clone(), (b, t)),
                     None => entry.last_bytes.remove(&info.name),
                 };
+                if let Some(status) = &info.status {
+                    let up = status.peer.connected;
+                    // Changes worth telling; the first reading of a tunnel is not one.
+                    match entry.connected.insert(info.name.clone(), up) {
+                        Some(was) if was != up => self.history.event(
+                            if up { "tunnel_up" } else { "tunnel_down" },
+                            &info.name,
+                            &format!("{id} {}", info.role),
+                        ),
+                        _ => {}
+                    }
+                    // The entry side's numbers stand for the tunnel.
+                    if info.role == "entry" {
+                        let h_ = &self.history;
+                        h_.record(
+                            &format!("tun:{}:rate", info.name),
+                            at,
+                            if up { rate.unwrap_or(0.0) } else { 0.0 },
+                        );
+                        h_.record(
+                            &format!("tun:{}:conns", info.name),
+                            at,
+                            (status.totals.tcp_open + status.totals.udp_flows) as f64,
+                        );
+                        if let Some(rtt) = status.peer.rtt_ms {
+                            h_.record(&format!("tun:{}:rtt", info.name), at, rtt);
+                        }
+                    }
+                }
                 TunnelView {
                     info,
                     rate_mbps: rate,
@@ -381,9 +514,15 @@ impl Hub {
     /// The panel's own server, sampled here (no link).
     pub async fn run_local(self: Arc<Self>) {
         let mut sampler = Sampler::default();
+        let mut round = 0u32;
         loop {
+            // Old history goes about once an hour.
+            if round % 1800 == 0 {
+                let _ = self.history.prune();
+            }
+            round = round.wrapping_add(1);
             let health = sampler.sample();
-            let tunnels = collect::tunnels(&self.kariz_dir).await;
+            let tunnels = collect::tunnels(&self.kariz_dir, &*self.services).await;
             {
                 let mut live = self.live();
                 let entry = live.entry(LOCAL.to_owned()).or_default();
@@ -454,7 +593,16 @@ impl Hub {
 
 /// One request to an agent: a stream with the request in its open bytes and the answer
 /// in what comes back.
-pub async fn request(session: &MuxSession, request: &Request) -> Result<Vec<u8>> {
+pub async fn request_on(session: &MuxSession, request: &Request) -> Result<Vec<u8>> {
+    request_within(session, request, REQUEST_TIMEOUT).await
+}
+
+/// Like [`request_on`], with its own time limit (a speed test takes a while).
+pub async fn request_within(
+    session: &MuxSession,
+    request: &Request,
+    limit: Duration,
+) -> Result<Vec<u8>> {
     let syn = serde_json::to_vec(request)?;
     let ask = async {
         let stream = session.open(Bytes::from(syn))?;
@@ -470,7 +618,7 @@ pub async fn request(session: &MuxSession, request: &Request) -> Result<Vec<u8>>
         }
         Ok(reply)
     };
-    tokio::time::timeout(REQUEST_TIMEOUT, ask)
+    tokio::time::timeout(limit, ask)
         .await
         .map_err(|_| anyhow!("the agent did not answer in time"))?
 }

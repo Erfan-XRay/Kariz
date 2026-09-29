@@ -14,6 +14,7 @@ use tracing::{info, warn};
 
 use crate::collect::{self, Sampler};
 use crate::join::{self, JoinCode};
+use crate::manage::{self, Services};
 use crate::wire::{Ack, HelloReply, Request, MAX_REQUEST};
 
 pub const DEFAULT_AGENT_CONFIG: &str = "/etc/kariz-panel/agent.toml";
@@ -38,6 +39,9 @@ pub struct AgentConfig {
     /// Where the Kariz tunnel configs are.
     #[serde(default = "default_kariz_dir")]
     pub kariz_dir: PathBuf,
+    /// How tunnels are started: `systemd` (default) or `process`.
+    #[serde(default)]
+    pub services: manage::ServiceKind,
 }
 
 fn default_kariz_dir() -> PathBuf {
@@ -54,6 +58,7 @@ impl AgentConfig {
             id: None,
             key: None,
             kariz_dir: default_kariz_dir(),
+            services: Default::default(),
         }
     }
 
@@ -72,7 +77,7 @@ impl AgentConfig {
     }
 }
 
-fn write_private(path: &Path, data: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     // Written beside the file and renamed, so a crash never leaves half a key.
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".new");
@@ -122,14 +127,25 @@ pub struct Agent {
     path: PathBuf,
     config: Mutex<AgentConfig>,
     sampler: Mutex<Sampler>,
+    services: Arc<dyn Services>,
 }
 
 impl Agent {
     pub fn new(path: &Path, config: AgentConfig) -> Arc<Self> {
+        Self::with_services(path, config, Arc::new(manage::Systemd))
+    }
+
+    /// An agent that starts and stops tunnels through `services` (systemd by default).
+    pub fn with_services(
+        path: &Path,
+        config: AgentConfig,
+        services: Arc<dyn Services>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             path: path.to_path_buf(),
             config: Mutex::new(config),
             sampler: Mutex::new(Sampler::default()),
+            services,
         })
     }
 
@@ -188,7 +204,61 @@ impl Agent {
                     .sample();
                 to_json(&health)
             }
-            Request::Tunnels => to_json(&collect::tunnels(&self.config().kariz_dir).await),
+            Request::Tunnels => {
+                to_json(&collect::tunnels(&self.config().kariz_dir, &*self.services).await)
+            }
+            Request::TunnelCheck { spec } => {
+                let dir = self.config().kariz_dir;
+                let owners = tokio::task::spawn_blocking(manage::ports)
+                    .await
+                    .unwrap_or_default();
+                to_json(&manage::check(&dir, &owners, &spec))
+            }
+            Request::TunnelPut { spec } => {
+                let dir = self.config().kariz_dir;
+                to_json(&match manage::put(&dir, &spec) {
+                    Ok(pin) => crate::wire::PutReply {
+                        ok: true,
+                        error: None,
+                        pin,
+                    },
+                    Err(e) => crate::wire::PutReply {
+                        ok: false,
+                        error: Some(format!("{e:#}")),
+                        pin: None,
+                    },
+                })
+            }
+            Request::TunnelGet { name } => {
+                let dir = self.config().kariz_dir;
+                match manage::get(&dir, &name) {
+                    Ok(spec) => to_json(&spec),
+                    Err(e) => to_json(&Ack {
+                        ok: false,
+                        error: Some(format!("{e:#}")),
+                    }),
+                }
+            }
+            Request::TunnelDelete { name } => {
+                let dir = self.config().kariz_dir;
+                ack(manage::delete(&dir, &*self.services, &name).await)
+            }
+            Request::TunnelCtl { name, action } => ack(self.services.ctl(name, action).await),
+            Request::Ports => to_json(
+                &tokio::task::spawn_blocking(manage::ports)
+                    .await
+                    .unwrap_or_default(),
+            ),
+            Request::Logs { name, lines } => to_json(&manage::logs(&name, lines).await),
+            Request::Speedtest {
+                name,
+                seconds,
+                streams,
+                udp,
+            } => {
+                let dir = self.config().kariz_dir;
+                to_json(&manage::speedtest(&dir, &name, seconds, streams, udp).await)
+            }
         }
     }
 
@@ -255,6 +325,19 @@ pub fn enroll_from_code(code_text: &str, path: &Path) -> Result<AgentConfig> {
     let config = AgentConfig::from_join(&code);
     config.save(path)?;
     Ok(config)
+}
+
+fn ack(result: Result<()>) -> Vec<u8> {
+    match result {
+        Ok(()) => to_json(&Ack {
+            ok: true,
+            error: None,
+        }),
+        Err(e) => to_json(&Ack {
+            ok: false,
+            error: Some(format!("{e:#}")),
+        }),
+    }
 }
 
 #[cfg(test)]

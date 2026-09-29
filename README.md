@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/Erfan-XRay/Kariz/actions/workflows/ci.yml"><img src="https://github.com/Erfan-XRay/Kariz/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/Erfan-XRay/Kariz/releases"><img src="https://img.shields.io/badge/version-0.8.0--beta-34d0c3" alt="Version 0.8.0-beta"></a>
+  <a href="https://github.com/Erfan-XRay/Kariz/releases"><img src="https://img.shields.io/badge/version-0.9.0-34d0c3" alt="Version 0.9.0"></a>
   <img src="https://img.shields.io/badge/rust-1.80%2B-e9c46a?logo=rust" alt="Rust 1.80+">
   <img src="https://img.shields.io/badge/platform-linux-12365e?logo=linux&logoColor=white" alt="Linux">
 </p>
@@ -44,7 +44,7 @@ flowchart LR
 | **Profiles** | `balanced`, `ultraspeed` for the most speed, and `gaming` for low, steady latency. |
 | **Gaming** | FEC that rebuilds lost packets, per-rule packet duplication, and optional DSCP marks. |
 | **Speed test** | `kariz speedtest` measures download, upload, latency under load and UDP loss through the live tunnel, in either mode ([docs](docs/speedtest.md)). |
-| **Web panel (beta)** | A panel with a live map of your servers and tunnels, sign-in by password or one-time link, and agents that connect other servers with one command ([docs](docs/panel.md)). |
+| **Web panel** | A panel with a live map of your servers and tunnels: make, edit and delete tunnels between two servers with a wizard that undoes itself if anything fails, charts, logs, speed test and backup; sign-in by password or one-time link; other servers join with one command ([docs](docs/panel.md)). |
 | **Live status** | `kariz status` on either server: is the other side connected, the round-trip time, the last error, and the traffic of each forwarded port; `--json` for tools ([docs](docs/status.md)). |
 | **CDN ready** | Early data saves a round trip, pings keep idle connections alive, and anything else gets an nginx-style `404`. |
 | **Easy to run** | One static binary, one TOML file per side, `kariz check` to validate, a systemd unit. |
