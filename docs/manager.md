@@ -98,13 +98,17 @@ groups need the same rule.
 
 ## Manage tunnels
 
+In the menu, the actions on a tunnel (start and stop, logs, speed test, edit, remove)
+list the tunnels by number: type the number or the name. Ctrl-C leaves a log and returns
+to the menu.
+
 ```bash
 kariz-manager list                  # name, side, transport, state, address
 kariz-manager status main
 kariz-manager logs main             # follows the log; Ctrl-C to stop
 kariz-manager speedtest main        # speed, latency and UDP; on the entry server
 kariz-manager restart main          # also: start, stop
-kariz-manager edit main             # opens $EDITOR (nano by default)
+kariz-manager edit main             # opens $EDITOR (nano, else vi)
 kariz-manager remove main
 ```
 
