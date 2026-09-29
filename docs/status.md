@@ -105,7 +105,7 @@ Readers must ignore fields they do not know: later versions add fields and raise
 | `connected_secs` | how long the oldest live session has been up (without mux: since the last success); `null` while not connected |
 | `rtt_ms` | round-trip time to the other side, averaged over the sessions: from mux pings (smoothed, 7/8 old + 1/8 new) or QUIC's own estimate. `null` without mux, and until the first ping is answered |
 | `handshakes_ok`, `handshakes_failed` | tunnel handshakes since start, both directions. On a listening side, failures include connections from scanners |
-| `last_error` | `{ "secs_ago": 12, "text": "authentication failed" }` for the last failed connect or handshake, or `null` |
+| `last_error` | `{ "secs_ago": 12, "text": "authentication failed" }` for the last failed connect or handshake, or `null`. A refused or unreachable other side shows at once; a token mismatch takes longer: the listening side keeps a failed connection open for a random 5-30 s before it gives up (so probes learn nothing), and the dialing side reports it when its handshake times out (`tuning.handshake_timeout_secs`, 10 s) |
 
 ### `totals` and `forwards`
 
