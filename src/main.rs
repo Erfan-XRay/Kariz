@@ -45,6 +45,7 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    kariz::allocator::tune();
     match Cli::parse().command {
         Command::Run { config } => run(Config::load(&config)?),
         Command::Check { config } => {

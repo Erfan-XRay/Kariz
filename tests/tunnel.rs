@@ -845,6 +845,7 @@ async fn mux_mismatch_is_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn throughput() {
+    kariz::allocator::tune();
     for &(name, setup) in ALL_SETUPS {
         let target = echo_server().await;
         let tunnel = start(setup, TOKEN, TOKEN, target).await;
@@ -1288,6 +1289,7 @@ async fn udp_latency_under_load() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn udp_throughput() {
+    kariz::allocator::tune();
     const CLIENTS: usize = 8;
     const WINDOW: usize = 32;
     let run = Duration::from_secs(3);
