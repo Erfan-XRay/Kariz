@@ -50,46 +50,55 @@ die() {
 }
 
 # Answers come from the terminal even when the script itself was piped in, or from the
-# file in KARIZ_INPUT (the tests). Opened once, in the parent shell, so the questions
-# asked from $(...) all read on from the same place.
+# file in KARIZ_INPUT (the tests). Opened once, in the parent shell, so every question
+# reads on from the same place. The braces keep the 2>/dev/null to the open itself: on a
+# bare `exec` it would silence the whole script, the questions included.
 IN_FD=""
 open_input() {
     [[ -n "$IN_FD" ]] && return 0
-    exec {IN_FD}<"${KARIZ_INPUT:-/dev/tty}" 2>/dev/null ||
+    { exec {IN_FD}<"${KARIZ_INPUT:-/dev/tty}"; } 2>/dev/null || IN_FD=""
+    [[ -n "$IN_FD" ]] ||
         die "This needs a terminal to ask questions; use the commands instead (kariz-manager help)."
 }
 
-# Asks a question; prints the answer. $1: prompt, $2: default (may be empty).
+# Asks a question and stores the answer in the variable named $1. Not run in $(...), so
+# a missing answer ends the script instead of looping. $2: prompt, $3: default (may be
+# empty).
 ask() {
-    local prompt=$1 default=${2:-} answer
-    if [[ -n "$default" ]]; then
-        read -r -u "$IN_FD" -p "  ${C_AQUA}?${C_RESET} $prompt ${C_DIM}[$default]${C_RESET}: " answer ||
-            die "No answer to: $prompt"
+    local _var=$1 _prompt=$2 _default=${3:-} _answer
+    open_input
+    if [[ -n "$_default" ]]; then
+        printf '  %s?%s %s %s[%s]%s: ' "$C_AQUA" "$C_RESET" "$_prompt" "$C_DIM" "$_default" "$C_RESET"
     else
-        read -r -u "$IN_FD" -p "  ${C_AQUA}?${C_RESET} $prompt: " answer || die "No answer to: $prompt"
+        printf '  %s?%s %s: ' "$C_AQUA" "$C_RESET" "$_prompt"
     fi
-    printf '%s' "${answer:-$default}"
+    if ! IFS= read -r -u "$IN_FD" _answer; then
+        echo
+        die "No answer to: $_prompt"
+    fi
+    _answer=${_answer%$'\r'}
+    printf -v "$_var" '%s' "${_answer:-$_default}"
 }
 
-# Asks to pick one of the words in $2 (space separated); prints it.
+# Asks to pick one of the words in $3 (space separated), into the variable named $1.
 choose() {
-    local prompt=$1 options=$2 default=${3:-} answer
+    local _var=$1 _prompt=$2 _options=$3 _default=${4:-} _pick _o
     while true; do
-        answer=$(ask "$prompt (${options// / | })" "$default")
-        for o in $options; do
-            [[ "$answer" == "$o" ]] && {
-                printf '%s' "$answer"
+        ask _pick "$_prompt (${_options// / | })" "$_default"
+        for _o in $_options; do
+            if [[ "$_pick" == "$_o" ]]; then
+                printf -v "$_var" '%s' "$_pick"
                 return
-            }
+            fi
         done
-        warn "Pick one of: $options"
+        warn "Pick one of: $_options"
     done
 }
 
 confirm() {
-    local answer
-    answer=$(ask "$1 (y/n)" "${2:-n}")
-    [[ "$answer" == y* || "$answer" == Y* ]]
+    local _yes
+    ask _yes "$1 (y/n)" "${2:-n}"
+    [[ "$_yes" == y* || "$_yes" == Y* ]]
 }
 
 # ---- Checks ----
@@ -490,7 +499,7 @@ wizard_add() {
     info "Reverse = the exit dials the entry. Direct = the entry dials the exit."
     echo
     while true; do
-        T_NAME=$(ask "Name for this tunnel" "main")
+        ask T_NAME "Name for this tunnel" main
         if [[ ! "$T_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$ ]]; then
             warn "Use letters, digits, - and _."
         elif [[ -f "$(conf_of "$T_NAME")" ]]; then
@@ -499,41 +508,51 @@ wizard_add() {
             break
         fi
     done
-    T_ROLE=$(choose "This server is the" "entry exit" entry)
-    T_MODE=$(choose "Mode" "reverse direct" reverse)
+    choose T_ROLE "This server is the" "entry exit" entry
+    choose T_MODE "Mode" "reverse direct" reverse
     info "tcpmux: most uses. wss: looks like HTTPS, works through CDNs. kcp: lossy links, games. quic: over UDP."
-    T_TRANSPORT=$(choose "Transport" "tcp tcpmux ws wss quic kcp" tcpmux)
-    T_PROFILE=$(choose "Profile" "balanced ultraspeed gaming" balanced)
+    choose T_TRANSPORT "Transport" "tcp tcpmux ws wss quic kcp" tcpmux
+    choose T_PROFILE "Profile" "balanced ultraspeed gaming" balanced
     local listens=false
     if [[ "$T_ROLE" == entry && "$T_MODE" == reverse ]] || [[ "$T_ROLE" == exit && "$T_MODE" == direct ]]; then
         listens=true
     fi
     if $listens; then
         local port
-        port=$(ask "Port the other server connects to" 3080)
+        while true; do
+            ask port "Port the other server connects to" 3080
+            [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535)) && break
+            warn "A port is a number from 1 to 65535."
+        done
         T_LISTEN="0.0.0.0:$port"
-        T_PUBLIC=$(ask "This server's public IP (for the other side)" "$(own_ip)")
+        ask T_PUBLIC "This server's public IP (for the other side)" "$(own_ip)"
     else
-        T_REMOTE=$(ask "Other server's address (IP:PORT)" "")
+        while [[ -z "$T_REMOTE" ]]; do
+            ask T_REMOTE "Other server's address (IP:PORT)"
+        done
         [[ "$T_REMOTE" == *:* ]] || T_REMOTE="$T_REMOTE:3080"
     fi
     if confirm "Generate a new token? (no: paste the other server's)" y; then
         T_TOKEN=$("$BIN" token)
     else
-        T_TOKEN=$(ask "Token" "")
+        while [[ -z "$T_TOKEN" ]]; do
+            ask T_TOKEN "Token"
+        done
     fi
     if [[ "$T_TRANSPORT" == ws || "$T_TRANSPORT" == wss ]]; then
-        T_WS_PATH=$(ask "WebSocket path (same on both sides)" "/$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')")
+        ask T_WS_PATH "WebSocket path (same on both sides)" "/$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     fi
     if [[ "$T_TRANSPORT" == wss && $listens == false ]]; then
-        T_PIN=$(ask "Certificate pin (printed by the listening side)" "")
+        while [[ -z "$T_PIN" ]]; do
+            ask T_PIN "Certificate pin (printed by the listening side)"
+        done
     fi
     if [[ "$T_ROLE" == entry ]]; then
         info "Forward rules: LISTEN=TARGET[/tcp|udp|tcp+udp]. The target is dialed from the exit."
         info "Example: 443=127.0.0.1:443   or   51820=127.0.0.1:51820/udp"
         while true; do
             local rule
-            rule=$(ask "Forward rule (empty to finish)" "")
+            ask rule "Forward rule (empty to finish)"
             [[ -z "$rule" ]] && [[ ${#T_FORWARDS[@]} -gt 0 ]] && break
             [[ -z "$rule" ]] && {
                 warn "Add at least one rule."
@@ -588,7 +607,10 @@ cmd_service() {
         stop) systemctl disable --now "kariz@$name" && ok "Stopped '$name' (it stays off after a reboot)." ;;
         restart) systemctl restart "kariz@$name" && ok "Restarted '$name'." ;;
         status) systemctl status "kariz@$name" --no-pager ;;
-        logs) journalctl -u "kariz@$name" -n 100 -f ;;
+        logs)
+            info "Ctrl+C to stop following the log."
+            journalctl -u "kariz@$name" -n 100 -f
+            ;;
     esac
 }
 
@@ -601,7 +623,18 @@ cmd_edit() {
     conf=$(conf_of "$name")
     tmp=$(mktemp --suffix=.toml)
     cp "$conf" "$tmp"
-    "${EDITOR:-nano}" "$tmp"
+    local editor=${EDITOR:-}
+    if [[ -z "$editor" ]]; then
+        editor="vi"
+        command -v nano >/dev/null && editor="nano"
+    fi
+    # The editor needs the terminal, also when this script itself was piped in.
+    if [[ -t 0 ]]; then
+        $editor "$tmp"
+    else
+        open_input
+        $editor "$tmp" <&"$IN_FD"
+    fi
     local check
     if ! check=$("$BIN" check -c "$tmp" 2>&1); then
         printf '%s\n' "$check" >&2
@@ -647,15 +680,41 @@ cmd_speedtest() {
     "$BIN" speedtest -c "$conf" "$@"
 }
 
+# Lists the tunnels and asks for one, by number or name, into the variable named $1.
 pick_tunnel() {
-    cmd_list
-    ask "Tunnel name" ""
+    local _var=$1 _names=() _f _pick _i
+    shopt -s nullglob
+    for _f in "$CONF_DIR"/*.toml; do
+        _names+=("$(basename "$_f" .toml)")
+    done
+    [[ ${#_names[@]} -gt 0 ]] || die "No tunnels yet (option 2 adds one)."
+    echo
+    for _i in "${!_names[@]}"; do
+        printf '   %s%d%s) %s\n' "$C_TEAL" $((_i + 1)) "$C_RESET" "${_names[$_i]}"
+    done
+    echo
+    while true; do
+        ask _pick "Tunnel (number or name)" "$([[ ${#_names[@]} -eq 1 ]] && echo 1)"
+        if [[ "$_pick" =~ ^[0-9]+$ ]] && ((_pick >= 1 && _pick <= ${#_names[@]})); then
+            _pick=${_names[$((_pick - 1))]}
+        fi
+        for _f in "${_names[@]}"; do
+            if [[ "$_pick" == "$_f" ]]; then
+                printf -v "$_var" '%s' "$_pick"
+                return
+            fi
+        done
+        warn "No tunnel '$_pick'."
+    done
 }
 
 menu() {
     need_root
     need_systemd
     open_input
+    # Ctrl+C (to leave a log) ends the action and comes back here; the actions run in
+    # subshells, which take the default action for it.
+    trap 'echo' INT
     while true; do
         banner
         if [[ -x "$BIN" ]]; then
@@ -678,26 +737,27 @@ menu() {
 
 EOF
         local choice
-        choice=$(ask "Choose" "")
+        ask choice "Choose"
         # Each action runs in a subshell, so an error returns to the menu.
         case $choice in
             1) (if [[ -x "$BIN" ]]; then cmd_update; else cmd_install; fi) || true ;;
             2) (wizard_add) || true ;;
             3) cmd_list ;;
             4) (
-                name=$(pick_tunnel)
-                action=$(choose "Action" "start stop restart status" restart)
+                pick_tunnel name
+                choose action "Action" "start stop restart status" restart
                 cmd_service "$action" "$name"
             ) || true ;;
-            5) (cmd_service logs "$(pick_tunnel)") || true ;;
-            6) (cmd_speedtest "$(pick_tunnel)") || true ;;
-            7) (cmd_edit "$(pick_tunnel)") || true ;;
-            8) (cmd_remove "$(pick_tunnel)") || true ;;
+            5) (pick_tunnel name && cmd_service logs "$name") || true ;;
+            6) (pick_tunnel name && cmd_speedtest "$name") || true ;;
+            7) (pick_tunnel name && cmd_edit "$name") || true ;;
+            8) (pick_tunnel name && cmd_remove "$name") || true ;;
             9) (cmd_uninstall) || true ;;
             0 | q) exit 0 ;;
             *) warn "Choose 0-9." ;;
         esac
-        read -r -u "$IN_FD" -p "  ${C_DIM}Enter to go back to the menu${C_RESET}" _ || exit 0
+        printf '\n  %sEnter to go back to the menu%s' "$C_DIM" "$C_RESET"
+        read -r -u "$IN_FD" _ || exit 0
     done
 }
 
@@ -741,7 +801,8 @@ main() {
     esac
 }
 
-# Not when sourced (the tests load the functions).
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+# Not when sourced (the tests load the functions). Piped into bash, there is no source
+# file at all.
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
     main "$@"
 fi
