@@ -140,7 +140,7 @@ fn serve(config: Config) -> Result<()> {
         .build()?;
     runtime.block_on(async move {
         let db = Db::open(&config.database())?;
-        kariz_panel::cert::ensure(&config.cert(), &config.key())?;
+        config.ensure_cert()?;
         let listener = tokio::net::TcpListener::bind(&config.listen)
             .await
             .with_context(|| format!("failed to listen on {}", config.listen))?;

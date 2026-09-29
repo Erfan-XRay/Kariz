@@ -153,8 +153,33 @@ fn mime_of(name: &str) -> &'static str {
 
 /// Serves `app` over TLS on `listener` until the task is dropped.
 pub async fn serve(listener: TcpListener, config: &Config, app: Router) -> Result<()> {
-    let acceptor = kariz::transport::tls::acceptor(&config.cert(), &config.key())
-        .context("failed to load the certificate")?;
+    let load = || {
+        kariz::transport::tls::acceptor(&config.cert(), &config.key())
+            .context("failed to load the certificate")
+    };
+    // The certificate can be replaced while the panel runs: SIGHUP loads it again, and
+    // the connections after that use the new one.
+    let acceptor = std::sync::Arc::new(std::sync::Mutex::new(load()?));
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut hup) = signal(SignalKind::hangup()) {
+            let (shared, cert, key) = (acceptor.clone(), config.cert(), config.key());
+            tokio::spawn(async move {
+                while hup.recv().await.is_some() {
+                    match kariz::transport::tls::acceptor(&cert, &key) {
+                        Ok(a) => {
+                            *shared.lock().unwrap_or_else(|e| e.into_inner()) = a;
+                            info!("the certificate was loaded again");
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "the new certificate was not loaded; keeping the old one")
+                        }
+                    }
+                }
+            });
+        }
+    }
     let local = listener.local_addr()?;
     info!(address = %local, path = %config.path, "the panel is listening");
     loop {
@@ -166,7 +191,8 @@ pub async fn serve(listener: TcpListener, config: &Config, app: Router) -> Resul
                 continue;
             }
         };
-        let (acceptor, app) = (acceptor.clone(), app.clone());
+        let acceptor = acceptor.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let app = app.clone();
         tokio::spawn(async move {
             serve_connection(acceptor, stream, peer, app).await;
         });

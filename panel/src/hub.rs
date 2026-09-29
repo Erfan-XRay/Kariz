@@ -133,6 +133,16 @@ impl Hub {
     /// One request to a server (the panel's own, or an agent that is connected), and its
     /// raw answer.
     pub async fn ask(&self, server: &str, request: &Request) -> Result<Vec<u8>> {
+        self.ask_within(server, request, REQUEST_TIMEOUT).await
+    }
+
+    /// Like [`Hub::ask`], for a request that is allowed to take up to `limit`.
+    pub async fn ask_within(
+        &self,
+        server: &str,
+        request: &Request,
+        limit: Duration,
+    ) -> Result<Vec<u8>> {
         if server == LOCAL {
             return Ok(self.local.handle(request.clone()).await);
         }
@@ -142,7 +152,7 @@ impl Hub {
             .filter(|l| l.online)
             .and_then(|l| l.session.clone())
             .ok_or_else(|| anyhow!("that server is not connected"))?;
-        request_on(&session, request).await
+        request_within(&session, request, limit).await
     }
 
     /// Like [`Hub::ask`], with the answer read as `T`.
@@ -584,6 +594,15 @@ impl Hub {
 /// One request to an agent: a stream with the request in its open bytes and the answer
 /// in what comes back.
 pub async fn request_on(session: &MuxSession, request: &Request) -> Result<Vec<u8>> {
+    request_within(session, request, REQUEST_TIMEOUT).await
+}
+
+/// Like [`request_on`], with its own time limit (a speed test takes a while).
+pub async fn request_within(
+    session: &MuxSession,
+    request: &Request,
+    limit: Duration,
+) -> Result<Vec<u8>> {
     let syn = serde_json::to_vec(request)?;
     let ask = async {
         let stream = session.open(Bytes::from(syn))?;
@@ -599,7 +618,7 @@ pub async fn request_on(session: &MuxSession, request: &Request) -> Result<Vec<u
         }
         Ok(reply)
     };
-    tokio::time::timeout(REQUEST_TIMEOUT, ask)
+    tokio::time::timeout(limit, ask)
         .await
         .map_err(|_| anyhow!("the agent did not answer in time"))?
 }

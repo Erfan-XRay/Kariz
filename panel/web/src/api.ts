@@ -206,5 +206,9 @@ export const api = {
   history: (key: string, range: string) => call<{ points: [number, number][] }>("GET", `history?key=${encodeURIComponent(key)}&range=${range}`),
   events: (limit = 100) => call<{ events: EventRow[] }>("GET", `events?limit=${limit}`),
   logs: (name: string, lines = 200) => call<{ lines: LogLine[] }>("GET", `logs?name=${encodeURIComponent(name)}&lines=${lines}`),
+  speedtest: (name: string, seconds: number, streams: number, udp: boolean) =>
+    call<{ ok: boolean; error: string | null; text: string }>("POST", "tunnels/speedtest", { name, seconds, streams, udp }),
+  backup: (passphrase: string) => call<{ data: string }>("POST", "backup", { passphrase }),
+  restore: (passphrase: string, data: string, replace: boolean) => call<{ servers: number; restart: boolean }>("POST", "restore", { passphrase, data, replace }),
   newLink: () => call<{ token: string; valid_for: number }>("POST", "links"),
 };

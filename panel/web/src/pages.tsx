@@ -6,6 +6,7 @@ import { paletteNow } from "./draw";
 import { startMap } from "./scene-map";
 import type { MapData, MapHit } from "./scene-map";
 import { useApp } from "./store";
+import { BackupDialog, RestoreDialog } from "./Extras";
 import { CodeBlock, Dialog, Icon, Odo, Seg, useAgo } from "./ui";
 
 // ---------------------------------------------------------------- the map
@@ -671,6 +672,7 @@ function Sessions() {
 export function SettingsPage({ hasPassword, onPasswordSet }: { hasPassword: boolean; onPasswordSet: () => void }) {
   const { t, lang, setLang, theme, setTheme, digits, setDigits, low, setLow, toast } = useApp();
   const [dialog, setDialog] = useState(false);
+  const [backup, setBackup] = useState<"save" | "restore" | null>(null);
   const row = (title: string, text: string, control: React.ReactNode) => (
     <div className="set-row">
       <div>
@@ -700,6 +702,25 @@ export function SettingsPage({ hasPassword, onPasswordSet }: { hasPassword: bool
       </section>
       <section className="stratum s2">
         <div className="stratum-head">
+          <h2>{t("set.backup")}</h2>
+        </div>
+        {row(
+          t("set.backupSave"),
+          t("set.backupSaveText"),
+          <button className="btn btn-ghost btn-sm" type="button" onClick={() => setBackup("save")}>
+            {t("bak.download")}
+          </button>,
+        )}
+        {row(
+          t("set.backupRestore"),
+          t("set.backupRestoreText"),
+          <button className="btn btn-ghost btn-sm" type="button" onClick={() => setBackup("restore")}>
+            {t("rst.go")}
+          </button>,
+        )}
+      </section>
+      <section className="stratum s3">
+        <div className="stratum-head">
           <h2>{t("set.look")}</h2>
         </div>
         {row(t("set.lang"), "", <Seg value={lang} options={[["fa", "فارسی"], ["en", "English"]]} onChange={setLang} />)}
@@ -707,6 +728,8 @@ export function SettingsPage({ hasPassword, onPasswordSet }: { hasPassword: bool
         {lang === "fa" && row(t("set.digits"), "", <Seg value={digits} options={[["fa", t("set.digitsFa")], ["latin", t("set.digitsLatin")]]} onChange={setDigits} />)}
         {row(t("set.motion"), "", <Seg value={low ? "low" : "full"} options={[["full", t("set.motionFull")], ["low", t("set.motionLow")]]} onChange={(v) => setLow(v === "low", true)} />)}
       </section>
+      {backup === "save" && <BackupDialog onClose={() => setBackup(null)} />}
+      {backup === "restore" && <RestoreDialog onClose={() => setBackup(null)} onDone={() => {}} />}
       {dialog && (
         <PasswordDialog
           hasPassword={hasPassword}
