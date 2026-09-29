@@ -209,6 +209,16 @@ jobs:
         run: |
           sudo kariz-manager net list | grep -q "No private network links"
           if sudo kariz-manager net status kz-nothere 2>/dev/null; then exit 1; fi
+      # Updating the panel from the panel, on this systemd host: a second panel is built that
+      # calls itself 99.0.0, a local server plays the releases (signed with a key made for the
+      # test), and the panel must roll back a release that does not come up and take a good one.
+      - name: Update the panel from the panel
+        run: |
+          shellcheck tests/update_e2e.sh
+          cp target/release/kariz-panel /tmp/kariz-panel-old
+          KARIZ_BUILD_VERSION=99.0.0 cargo build --release --locked -p kariz-panel
+          cp target/release/kariz-panel /tmp/kariz-panel-new
+          sudo bash tests/update_e2e.sh /tmp/kariz-panel-new target/release/kariz
       - name: Banner in the journal, priority prefixes understood
         run: |
           sudo journalctl -u kariz@plain -o cat --no-pager | tee journal.txt | head -20

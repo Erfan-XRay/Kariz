@@ -184,7 +184,7 @@ impl Agent {
                     proof,
                     join: c.join.clone(),
                     hostname: collect::hostname(),
-                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                    version: crate::version().to_owned(),
                     arch: std::env::consts::ARCH.to_owned(),
                 })
             }
