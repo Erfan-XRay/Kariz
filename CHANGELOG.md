@@ -1,9 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-09-29
+
+Works with v0.5 and v0.4 over every transport. `kariz speedtest` needs the exit side at
+v0.6 too (an older exit cannot answer the test streams).
 
 ### Added
 
+- **Releases for three architectures:** static musl builds for x86_64, aarch64 (ARM64
+  servers and boards, Raspberry Pi 4 and 5) and armv7 (32-bit ARM), one archive each,
+  `kariz-<version>-<arch>-linux.tar.gz` with its SHA-256. CI builds the ARM targets and
+  runs the library tests for them under QEMU on every change.
 - **`kariz speedtest`:** measures download and upload speed, latency (idle and during
   each transfer) and UDP loss and jitter, through the running tunnel's own sessions: the
   same transport, encryption, mux and profile as users' traffic. It works in both

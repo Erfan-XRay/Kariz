@@ -60,15 +60,33 @@ script, with and without it.
 - **Built with `cross`** (Docker images with the C cross-compilers that `ring` and
   mimalloc need), in a job matrix in `release.yml`. Each target becomes its own archive,
   `kariz-vX.Y.Z-<arch>-linux.tar.gz`, with its SHA-256.
-- **Checked on every PR:** a CI job cross-builds the three targets and runs the library
-  tests for aarch64 and armv7 under QEMU, so a target-specific break (32-bit atomics,
-  alignment) shows before a release.
+- **Checked on every PR:** a CI job cross-builds the ARM targets (x86_64 is built by the
+  ordinary jobs) and runs the library tests for aarch64 and armv7 under QEMU, so a
+  target-specific break (32-bit atomics, alignment) shows before a release.
+
+*Status after 8.2:* `release.yml` builds the three targets in a matrix (x86_64 natively
+with `musl-tools`, the ARM ones with `cross`), and a `publish` job collects the archives,
+checks that there are three and that each matches its SHA-256, and makes the release.
+The archives also carry `scripts/` and `assets/` now. The `cross` CI job passed for
+armv7, tests included. For aarch64 it built, and 193 of 194 library tests passed under
+QEMU; the one failure was `many_connections_on_one_listener`, which starts 20 KCP
+dialers at once: on the emulated CPU (the run took 110 s) the listener's socket buffer
+overflowed, a dialer's opening packet was lost, and its keep-alive ping (every second in
+that test) reached the listener before KCP's resend did. A ping for a conversation the
+listener does not know ends it by design (a restarted listener closes old conversations
+that way), so the dialer saw `ConnectionReset`. Not an ARM bug: the test now uses a long
+keep-alive, since pings are not what it is about.
 
 ## 4. Work breakdown
 
 | Step | Content | Done when |
 |---|---|---|
-| **8.0** Plan | This document. | |
-| **8.1** mimalloc | Global allocator behind a feature; musl measurements. | Numbers in this document; default decided. |
-| **8.2** Targets | `cross` builds for three targets in CI and in the release. | CI builds all three and tests two under QEMU. |
-| **8.3** Release | README / docs (downloads per architecture), CHANGELOG, `0.6.0`. | Release with three archives. |
+| **8.0** Plan (done) | This document. | |
+| **8.1** mimalloc (done) | Global allocator behind a feature; musl measurements. | Numbers in this document; default decided. |
+| **8.2** Targets (done) | `cross` builds for three targets in CI and in the release. | CI builds all three and tests two under QEMU. |
+| **8.3** Release (done) | README / docs (downloads per architecture), CHANGELOG, `0.6.0`. | Release with three archives. |
+
+Beyond the plan, v0.6.0 also carries what was asked for along the way: the manager
+script (`scripts/kariz.sh`), the startup banner and new log lines, `kariz speedtest`
+(docs/speedtest.md) and the `ultraspeed` profile name, mux settings and documentation of
+v0.5.1.

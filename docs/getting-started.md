@@ -36,8 +36,8 @@ See [The manager script](manager.md). The rest of this page is the same thing by
 
 ## 1. Install
 
-Download the static Linux binary (x86_64) from
-[Releases](https://github.com/Erfan-XRay/Kariz/releases), or build it with Rust 1.80 or
+Download the static Linux binary for your CPU (`x86_64`, `aarch64` or `armv7`; `uname -m`
+tells) from [Releases](https://github.com/Erfan-XRay/Kariz/releases), or build it with Rust 1.80 or
 newer:
 
 ```bash
