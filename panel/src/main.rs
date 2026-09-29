@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+use kariz_panel::auth;
 use kariz_panel::config::{Config, DEFAULT_CONFIG, DEFAULT_DATA_DIR};
 use kariz_panel::db::Db;
 use kariz_panel::http::{self, AppState};
@@ -34,6 +35,23 @@ enum Command {
         #[arg(long)]
         port: Option<u16>,
     },
+    /// Make a one-time login link (valid for 60 minutes, works once).
+    LoginLink {
+        #[arg(short, long, default_value = DEFAULT_CONFIG)]
+        config: PathBuf,
+        /// This server's address or domain, as the browser reaches it.
+        #[arg(long, default_value = "<this-server>")]
+        host: String,
+    },
+    /// Set a new admin password and sign every session out. Without --stdin, a random
+    /// password is made and shown.
+    ResetPassword {
+        #[arg(short, long, default_value = DEFAULT_CONFIG)]
+        config: PathBuf,
+        /// Read the new password from the first line of standard input.
+        #[arg(long)]
+        stdin: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -52,6 +70,46 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Serve { config } => serve(Config::load(&config)?),
+        Command::LoginLink { config, host } => {
+            let config = Config::load(&config)?;
+            let db = Db::open(&config.database())?;
+            let token = auth::create_link(&db, auth::now())?;
+            db.audit("cli", None, "made a login link")?;
+            let port = config
+                .listen
+                .rsplit(':')
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            let host = if host.contains(':') && !host.starts_with('[') {
+                format!("[{host}]")
+            } else {
+                host
+            };
+            println!("https://{host}:{port}/{}/#t={token}", config.path);
+            eprintln!("valid for 60 minutes; it works once");
+            Ok(())
+        }
+        Command::ResetPassword { config, stdin } => {
+            let config = Config::load(&config)?;
+            let db = Db::open(&config.database())?;
+            let (password, shown) = if stdin {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                (line.trim_end_matches(&['\r', '\n'][..]).to_owned(), false)
+            } else {
+                (kariz_panel::config::random_hex(10)?, true)
+            };
+            auth::set_password(&db, &password, None)?;
+            db.audit("cli", None, "reset the password")?;
+            if shown {
+                println!("{password}");
+                eprintln!("the new admin password (every session was signed out)");
+            } else {
+                eprintln!("password set (every session was signed out)");
+            }
+            Ok(())
+        }
     }
 }
 

@@ -1,5 +1,7 @@
 //! The Kariz web panel (docs/PHASE11.md).
 
+pub mod api;
+pub mod auth;
 pub mod cert;
 pub mod config;
 pub mod db;

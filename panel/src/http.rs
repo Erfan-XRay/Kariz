@@ -50,6 +50,7 @@ fn not_found() -> Response<Body> {
 pub fn router(path: &str, state: AppState) -> Router {
     let inner = Router::new()
         .route("/api/version", get(version))
+        .merge(crate::api::routes())
         .route("/api/{*rest}", get(|| async { not_found() }))
         .fallback(get(asset))
         .with_state(state);
@@ -166,8 +167,12 @@ async fn serve_connection(
         Ok(tls) => tls,
         Err(e) => return debug!(%peer, error = %e, "TLS handshake failed"),
     };
-    let service = hyper::service::service_fn(move |request: axum::http::Request<Incoming>| {
+    let service = hyper::service::service_fn(move |mut request: axum::http::Request<Incoming>| {
         let mut app = app.clone();
+        // The handlers see who is asking (for the lockout and the session list).
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(peer));
         async move { app.call(request).await }
     });
     if let Err(e) = Builder::new(TokioExecutor::new())
