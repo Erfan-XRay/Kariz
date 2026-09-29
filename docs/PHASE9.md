@@ -75,6 +75,29 @@ surfaces of its theme (measured, table in the design document). The fonts are
 self-hosted in `design/fonts/` with their licences: 180 KB in all, most of it Estedad,
 which phase 11 will subset.
 
+*Status after 9.2:* the prototype is in [design/prototype/](../design/prototype/): plain
+HTML, CSS and JavaScript with no dependencies, served by any static server from the
+repository root (`python -m http.server`, then `/design/prototype/`). It has:
+
+- the boot: the logo draws itself and its channel fills, then the login;
+- the login scene on a canvas: stars that twinkle, a shooting star now and then, dunes
+  with a little parallax, three wells and the channel with flowing water; a wrong password
+  shakes the field and ripples the water red; the right one (`kariz` in the prototype)
+  runs the descent into the dashboard;
+- a one-time link: `#t=...` in the address signs in by itself, and the fragment is
+  removed from the address bar at once; the "I have a one-time link" button shows the
+  same flow with the qanat loader;
+- the dashboard: the side rail (a bottom bar on phones), the sky strip with `Ctrl+K`, the
+  live map (five servers, five tunnels: flowing, broken with a pulse at the break, and
+  stopped), key numbers that roll like an odometer, and the tunnel table with sparklines;
+  switching a tunnel off drains its channel, on fills it;
+- Night and Dawn, Persian (RTL, Persian digits) and English (LTR), the low-power switch
+  (also on with the browser's reduced-motion setting), the command palette, toasts.
+
+Checked at 1440, 800 and 375 px wide in both themes and both languages: no horizontal
+scroll, labels at the map's edges stay on screen. Other pages show the loader and a note
+that they come in 9.3.
+
 ## 3. The panel plan (phases 10 to 13)
 
 ### Architecture
