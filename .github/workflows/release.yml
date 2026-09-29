@@ -42,21 +42,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # The panel's web app is built first; the binary embeds panel/web/dist.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: panel/web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: panel/web
       - if: ${{ !matrix.cross }}
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - if: ${{ !matrix.cross }}
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p kariz -p kariz-panel
       - if: ${{ matrix.cross }}
         uses: taiki-e/install-action@v2
         with:
           tool: cross
       - if: ${{ matrix.cross }}
-        run: cross build --release --locked --target ${{ matrix.target }}
+        run: cross build --release --locked --target ${{ matrix.target }} -p kariz -p kariz-panel
       - name: Package
         run: |
           name="kariz-$GITHUB_REF_NAME-${{ matrix.arch }}-linux"
           mkdir "$name"
-          cp "target/${{ matrix.target }}/release/kariz" README.md README_FA.md CHANGELOG.md "$name/"
+          cp "target/${{ matrix.target }}/release/kariz" "target/${{ matrix.target }}/release/kariz-panel" README.md README_FA.md CHANGELOG.md "$name/"
           cp -r configs systemd scripts assets "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"

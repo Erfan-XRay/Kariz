@@ -24,6 +24,17 @@ jobs:
       - run: cargo clippy --lib --bins --no-default-features --features quic -- -D warnings
       - run: cargo clippy --lib --bins --no-default-features --features kcp -- -D warnings
       - run: cargo test
+      # The web panel (panel/): its web app is built first and embedded in the binary
+      # (without it, the binary embeds a placeholder page), then the same checks.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: panel/web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: panel/web
+      - run: cargo clippy -p kariz-panel --all-targets -- -D warnings
+      - run: cargo test -p kariz-panel
 
   # The release targets, built the way the release builds them (`cross` for the ARM ones:
   # Docker images with the C cross-compilers that ring and mimalloc need). The ARM
@@ -42,11 +53,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: panel/web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: panel/web
       - uses: taiki-e/install-action@v2
         with:
           tool: cross
-      - run: cross build --release --locked --target ${{ matrix.target }}
-      - run: ls -l target/${{ matrix.target }}/release/kariz
+      - run: cross build --release --locked --target ${{ matrix.target }} -p kariz -p kariz-panel
+      - run: ls -l target/${{ matrix.target }}/release/kariz target/${{ matrix.target }}/release/kariz-panel
       - name: Library tests under QEMU
         run: cross test --locked --target ${{ matrix.target }} --lib
 
