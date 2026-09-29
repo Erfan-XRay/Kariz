@@ -38,6 +38,10 @@ impl QuicSession {
         match *self {}
     }
 
+    pub fn rtt(&self) -> Option<std::time::Duration> {
+        match *self {}
+    }
+
     pub fn close_reason(&self) -> Option<String> {
         match *self {}
     }
