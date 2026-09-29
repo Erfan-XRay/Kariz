@@ -186,4 +186,4 @@ Each phase gets its own plan document when it starts.
 | **9.0** Plan (done) | This document. | |
 | **9.1** Design system (done) | Tokens (colour for both themes, type, spacing, radius, motion), fonts, RTL rules, in `design/`. | Document and `tokens.css` in the repository. |
 | **9.2** Prototype (done) | Interactive HTML: loader, login, the map with live-looking traffic, both themes, both languages. | Approved. |
-| **9.3** Screens | Servers, tunnels, the pair wizard, tunnel detail, logs, settings, mobile. | Approved. |
+| **9.3** Screens (done) | Servers, tunnels, the pair wizard, tunnel detail, logs, settings, mobile. | Approved. |
