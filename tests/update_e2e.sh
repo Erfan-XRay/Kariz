@@ -58,8 +58,10 @@ base=${link%%#*}
 token=${link##*#t=}
 curl -skf -c "$WORK/jar" -H 'Content-Type: application/json' -d "{\"token\":\"$token\"}" "${base}api/link" >"$WORK/signin.json"
 csrf=$(sed -n 's/.*"csrf":"\([0-9a-f]*\)".*/\1/p' "$WORK/signin.json")
-api() { curl -sk -b "$WORK/jar" -H "X-Kariz-CSRF: $csrf" -H 'Content-Type: application/json' "$@"; }
-version() { curl -sk "${base}api/version" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'; }
+# While the panel restarts these get "connection refused": that is not a failure of the
+# test, the loops below just ask again.
+api() { curl -sk -b "$WORK/jar" -H "X-Kariz-CSRF: $csrf" -H 'Content-Type: application/json' "$@" || true; }
+version() { { curl -sk "${base}api/version" || true; } | sed -n 's/.*"version":"\([^"]*\)".*//p'; }
 original=$(version)
 echo "the panel is $original"
 
