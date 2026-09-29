@@ -147,6 +147,17 @@ pub async fn run(config: Config) -> Result<()> {
         source,
     });
 
+    // `kariz speedtest` reaches the live sessions through this (Unix only).
+    #[cfg(unix)]
+    if let Some(socket) = config.control_socket() {
+        let entry = entry.clone();
+        let open = move |open: Bytes| {
+            let entry = entry.clone();
+            async move { entry.open_channel(&open).await }
+        };
+        tasks.spawn(crate::control::serve(socket, open));
+    }
+
     for forward in &config.forward {
         if forward.protocol.has_tcp() {
             let listener = TcpListener::bind(&forward.listen)

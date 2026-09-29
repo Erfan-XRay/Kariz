@@ -1,7 +1,8 @@
 //! Messages exchanged over an authenticated tunnel connection before relaying starts.
 //!
 //! ```text
-//! entry -> exit : kind (1) | target_len (2, big-endian) | target      kind: 1 TCP, 2 UDP
+//! entry -> exit : kind (1) | target_len (2, big-endian) | target      kind: 1 TCP, 2 UDP,
+//!                                                                      4 speed test
 //!                 [ | copies (1) | gap_ms (1) ]                        kind 3: UDP with
 //!                                                                      duplication
 //! exit  -> entry: status (1)                                           (not with mux)
@@ -24,6 +25,10 @@ pub const KIND_UDP: u8 = 2;
 /// A UDP flow with packet duplication (v0.5); decoded as [`KIND_UDP`] with
 /// [`Open::duplicate`] set.
 const KIND_UDP_DUPLICATED: u8 = 3;
+/// A speed test stream (v0.6): the exit side does not dial anything, it produces,
+/// consumes or echoes data as the target says (`down`, `up`, `echo`, `udp`), see
+/// `src/speedtest.rs`. Older exits reject it as an unknown kind.
+pub const KIND_SPEEDTEST: u8 = 4;
 
 /// Packet duplication of a UDP flow: each packet is sent `copies` times in all,
 /// `gap_ms` apart, in both directions.
@@ -63,6 +68,15 @@ impl Open {
             kind: KIND_UDP,
             target: target.into(),
             duplicate,
+        }
+    }
+
+    /// A speed test stream; `command` is what the exit side does on it.
+    pub fn speedtest(command: impl Into<String>) -> Self {
+        Self {
+            kind: KIND_SPEEDTEST,
+            target: command.into(),
+            duplicate: None,
         }
     }
 
@@ -136,7 +150,10 @@ fn options_len(kind: u8) -> usize {
 }
 
 fn check_kind(kind: u8) -> io::Result<()> {
-    if matches!(kind, KIND_TCP | KIND_UDP | KIND_UDP_DUPLICATED) {
+    if matches!(
+        kind,
+        KIND_TCP | KIND_UDP | KIND_UDP_DUPLICATED | KIND_SPEEDTEST
+    ) {
         Ok(())
     } else {
         Err(io::Error::new(
@@ -237,6 +254,16 @@ mod tests {
         assert_eq!(Open::decode(&buf).unwrap(), open);
         buf[0] = 9;
         assert!(Open::decode(&buf).is_err());
+    }
+
+    #[tokio::test]
+    async fn speedtest_open_roundtrip() {
+        let open = Open::speedtest("down");
+        let mut buf = Vec::new();
+        open.encode(&mut buf);
+        assert_eq!(buf[0], KIND_SPEEDTEST);
+        assert_eq!(Open::decode(&buf).unwrap(), open);
+        assert_eq!(Open::read(&mut &buf[..]).await.unwrap(), open);
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ prints the values in effect and lists warnings. Then read the logs:
 
 ```bash
 journalctl -u kariz -f                      # with systemd
+journalctl -u kariz -p warning              # warnings and errors only
 RUST_LOG=kariz=debug kariz run -c ...       # more detail
 ```
 

@@ -1,11 +1,23 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use kariz::config::{mode_name, role_name, Config, Dscp, Encryption, TransportKind};
 use kariz::crypto::Cipher;
+use kariz::speedtest::Options;
+
+mod logging;
+// Shown only by `kariz speedtest`, which is Unix only (its tests run everywhere).
+#[cfg_attr(not(unix), allow(dead_code))]
+mod report;
+
+/// musl's allocator is built for size, not speed; mimalloc is much faster on the
+/// many small allocations of the packet path (docs/PHASE8.md).
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser)]
 #[command(name = "kariz", version, about = "High-performance tunnel core")]
@@ -34,9 +46,25 @@ enum Command {
         /// The certificate file (`tunnel.tls.cert` of the listening side).
         cert: PathBuf,
     },
+    /// Measure a running tunnel's speed and latency, through its own sessions. Run it
+    /// on the entry side, in either mode, while the tunnel is up.
+    Speedtest {
+        #[arg(short, long, default_value = "/etc/kariz/config.toml")]
+        config: PathBuf,
+        /// Seconds each of the download and upload phases lasts (1-60).
+        #[arg(long, default_value_t = 10)]
+        seconds: u64,
+        /// Parallel streams in those phases (1-16).
+        #[arg(long, default_value_t = 4)]
+        streams: usize,
+        /// Skip the UDP test.
+        #[arg(long)]
+        no_udp: bool,
+    },
 }
 
 fn main() -> Result<()> {
+    kariz::allocator::tune();
     match Cli::parse().command {
         Command::Run { config } => run(Config::load(&config)?),
         Command::Check { config } => {
@@ -57,13 +85,84 @@ fn main() -> Result<()> {
             println!("{}", kariz::transport::tls::pin_of_file(&cert)?);
             Ok(())
         }
+        Command::Speedtest {
+            config,
+            seconds,
+            streams,
+            no_udp,
+        } => {
+            let options = Options {
+                seconds,
+                streams,
+                udp: !no_udp,
+            };
+            speedtest(&Config::load(&config)?, options)
+        }
     }
 }
 
+/// `kariz speedtest`: asks the running daemon of this config for a test and shows it.
+#[cfg(unix)]
+fn speedtest(config: &Config, options: Options) -> Result<()> {
+    use std::io::Write;
+
+    use anyhow::Context;
+    use kariz::config::Role;
+
+    if config.role != Role::Entry {
+        bail!(
+            "run the speed test on the entry side (this is the exit side): the entry is where \
+             users connect, and it is the one that can open test streams through the tunnel"
+        );
+    }
+    options.validate()?;
+    let socket = config
+        .control_socket()
+        .context("this config has no control socket")?;
+    let style = logging::Style::detect(config.log.color, logging::local_offset());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let live = style.color;
+    let report = runtime.block_on(async {
+        let connection = kariz::control::connect(&socket).await?;
+        kariz::control::request(connection, options, |line| {
+            // One line, rewritten, on a terminal.
+            if live {
+                print!("\r\x1b[2K  {} {line}", style.paint(logging::TEAL, "⋯"));
+                let _ = std::io::stdout().flush();
+            } else {
+                println!("  ⋯ {line}");
+            }
+        })
+        .await
+    });
+    if live {
+        print!("\r\x1b[2K");
+    }
+    let report = report.context("the speed test failed")?;
+    print!("{}", report::render(&style, config, &report));
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn speedtest(_: &Config, _: Options) -> Result<()> {
+    bail!(
+        "`kariz speedtest` needs a Linux server: it talks to the running daemon over a Unix \
+         socket"
+    )
+}
+
 fn run(config: Config) -> Result<()> {
+    // Still one thread here: the only time the local offset can be read.
+    let style = logging::Style::detect(config.log.color, logging::local_offset());
+    print!("{}", logging::banner(&style, &config));
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log.level));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .event_format(logging::Pretty(style))
+        .init();
     for warning in config.warnings() {
         tracing::warn!("{warning}");
     }

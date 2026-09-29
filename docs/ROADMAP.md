@@ -35,7 +35,7 @@ supported for every transport.
 | 6 | Full `gaming` profile: unreliable datagram path over KCP, packet duplication, DSCP, measured defaults; plan in [PHASE6.md](PHASE6.md) | **done (v0.5.0)** |
 | 7 | User-settable mux settings (`[tunnel.mux]`: coalescing, ping interval, datagram buffers, unsent-data limit) | **done (v0.5.1)** |
 | - | (`stealth` profile, active-probe fallback) | dropped |
-| 8 | Release builds (static musl for x86_64 / aarch64 / armv7, mimalloc) | planned |
+| 8 | Release builds (static musl for x86_64 / aarch64 / armv7), mimalloc, the manager script, `kariz speedtest`, new log lines; plan in [PHASE8.md](PHASE8.md) | **done (v0.6.0)** |
 
 ## Protocol (v2)
 

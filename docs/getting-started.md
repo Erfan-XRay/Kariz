@@ -23,10 +23,21 @@ Which side opens the tunnel is the **mode**:
 
 The dialing side sets `tunnel.remote`, the other side `tunnel.listen`.
 
+## The quick way
+
+The manager script does every step below for you, including a systemd service per
+tunnel and the command to run on the other server:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh)
+```
+
+See [The manager script](manager.md). The rest of this page is the same thing by hand.
+
 ## 1. Install
 
-Download the static Linux binary (x86_64) from
-[Releases](https://github.com/Erfan-XRay/Kariz/releases), or build it with Rust 1.80 or
+Download the static Linux binary for your CPU (`x86_64`, `aarch64` or `armv7`; `uname -m`
+tells) from [Releases](https://github.com/Erfan-XRay/Kariz/releases), or build it with Rust 1.80 or
 newer:
 
 ```bash

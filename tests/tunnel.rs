@@ -11,6 +11,11 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 const TOKEN: &str = "test-token-0123456789abcdef";
 
+/// The tunnel runs inside this process, so the benchmarks use the binary's allocator.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// A port free for both TCP and UDP: tunnel ports of UDP transports and `tcp+udp`
 /// forward ports need both.
 fn free_port() -> u16 {
@@ -103,6 +108,10 @@ struct Setup {
     duplicate: (u8, u8),
     /// `profile`, on both sides; empty keeps the default.
     profile: &'static str,
+    /// The entry side serves a control socket (`[control] socket`), for `kariz speedtest`.
+    control: bool,
+    /// `tunnel.speedtest = false`.
+    no_speedtest: bool,
 }
 
 impl Setup {
@@ -125,6 +134,24 @@ impl Setup {
             kcp_options: "",
             duplicate: (0, 0),
             profile: "",
+            control: false,
+            no_speedtest: false,
+        }
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    const fn control(self) -> Self {
+        Self {
+            control: true,
+            ..self
+        }
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    const fn no_speedtest(self) -> Self {
+        Self {
+            no_speedtest: true,
+            ..self
         }
     }
 
@@ -266,8 +293,15 @@ impl Setup {
     /// Transport lines and sub-tables of `[tunnel]` for the listening or dialing side.
     fn tunnel_options(&self, listening: bool) -> String {
         let mut options = format!(
-            "transport = \"{}\"\nencryption = \"{}\"\n[tunnel.mux]\nenabled = {}\n",
-            self.transport, self.encryption, self.mux
+            "transport = \"{}\"\nencryption = \"{}\"\n{}[tunnel.mux]\nenabled = {}\n",
+            self.transport,
+            self.encryption,
+            if self.no_speedtest {
+                "speedtest = false\n"
+            } else {
+                ""
+            },
+            self.mux
         );
         if self.mux_connections > 0 {
             options += &format!("connections = {}\n", self.mux_connections);
@@ -414,6 +448,9 @@ struct Tunnel {
     _entry: Side,
     exit: Option<Side>,
     exit_config: String,
+    /// The entry side's control socket, when the setup asked for one.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    control: Option<std::path::PathBuf>,
 }
 
 impl Tunnel {
@@ -477,6 +514,12 @@ async fn start_via(
     let entry_listens = mode == "reverse";
     let options = setup.tunnel_options(entry_listens);
     let exit_options = exit_setup.tunnel_options(!entry_listens);
+    let control = setup
+        .control
+        .then(|| std::env::temp_dir().join(format!("kariz-e2e-{user_port}.sock")));
+    let control_table = control.as_ref().map_or(String::new(), |path| {
+        format!("[control]\nsocket = {:?}", path.display().to_string())
+    });
     let duplicate = match setup.duplicate {
         (0, _) => String::new(),
         (copies, gap) => format!("duplicate = {copies}\nduplicate_gap_ms = {gap}"),
@@ -500,6 +543,7 @@ async fn start_via(
         {entry_tunnel}
         token = "{entry_token}"
         {options}
+        {control_table}
         "#
     );
     let exit = format!(
@@ -530,6 +574,7 @@ async fn start_via(
         _entry: entry_side,
         exit: Some(exit_side),
         exit_config: exit,
+        control,
     }
 }
 
@@ -840,6 +885,7 @@ async fn mux_mismatch_is_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn throughput() {
+    kariz::allocator::tune();
     for &(name, setup) in ALL_SETUPS {
         let target = echo_server().await;
         let tunnel = start(setup, TOKEN, TOKEN, target).await;
@@ -1283,6 +1329,7 @@ async fn udp_latency_under_load() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn udp_throughput() {
+    kariz::allocator::tune();
     const CLIENTS: usize = 8;
     const WINDOW: usize = 32;
     let run = Duration::from_secs(3);
@@ -1872,6 +1919,112 @@ async fn game_traffic() {
             }
         }
     }
+}
+
+/// `kariz speedtest` through real daemons (Unix only: the control socket is a Unix
+/// socket): speed in both directions, latency, and UDP where the tunnel has mux, in both
+/// modes and over the transports.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn speedtest_through_the_daemon() {
+    use kariz::speedtest::Options;
+    let setups = [
+        (
+            "tcpmux direct",
+            Setup::tcp("direct").transport("tcpmux").mux(),
+        ),
+        (
+            "tcpmux reverse",
+            Setup::tcp("reverse").transport("tcpmux").mux(),
+        ),
+        ("tcp direct, no mux", Setup::tcp("direct")),
+        ("tcp reverse, no mux", Setup::tcp("reverse")),
+        ("kcp direct", Setup::kcp("direct")),
+        ("quic reverse", Setup::quic("reverse")),
+    ];
+    let runs = setups.map(|(name, setup)| {
+        tokio::spawn(async move {
+            let setup = setup.control();
+            let target = echo_server().await;
+            let tunnel = start(setup, TOKEN, TOKEN, target).await;
+            let socket = tunnel.control.clone().expect("a control socket");
+            // The daemon binds its socket a moment after it starts.
+            let mut connection = None;
+            for _ in 0..50 {
+                match kariz::control::connect(&socket).await {
+                    Ok(c) => {
+                        connection = Some(c);
+                        break;
+                    }
+                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                }
+            }
+            let options = Options {
+                seconds: 1,
+                streams: 2,
+                udp: true,
+            };
+            let report = kariz::control::request(
+                connection.unwrap_or_else(|| panic!("{name}: no control socket")),
+                options,
+                |_| {},
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(report.download.mbps > 0.0, "{name}: {report:?}");
+            assert!(report.upload.mbps > 0.0, "{name}: {report:?}");
+            assert!(report.idle.received > 0, "{name}: {report:?}");
+            assert!(report.download_latency.received > 0, "{name}: {report:?}");
+            if setup.mux {
+                let udp = report
+                    .udp
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{name}: no UDP"));
+                assert!(udp.received > 0, "{name}: {report:?}");
+            } else {
+                assert!(report.udp.is_none(), "{name}");
+                assert!(report.notes.iter().any(|n| n.contains("mux")), "{name}");
+            }
+        })
+    });
+    for run in runs {
+        run.await.unwrap();
+    }
+}
+
+/// An exit with `speedtest = false` refuses the test streams, and the client says why.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn speedtest_can_be_turned_off_on_the_exit() {
+    use kariz::speedtest::Options;
+    let entry = Setup::tcp("direct").transport("tcpmux").mux().control();
+    let exit = Setup::tcp("direct")
+        .transport("tcpmux")
+        .mux()
+        .no_speedtest();
+    let target = echo_server().await;
+    let tunnel = start_pair(entry, exit, TOKEN, TOKEN, target).await;
+    let socket = tunnel.control.clone().unwrap();
+    let mut connection = None;
+    for _ in 0..50 {
+        if let Ok(c) = kariz::control::connect(&socket).await {
+            connection = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let err = kariz::control::request(
+        connection.expect("a control socket"),
+        Options {
+            seconds: 1,
+            streams: 1,
+            udp: false,
+        },
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("speedtest = false"), "{err}");
 }
 
 /// Game-like traffic (100-byte packets every 10 ms, echoed) over a link that drops 10 %

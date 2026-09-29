@@ -21,9 +21,35 @@ Mbit/s. QUIC and KCP handle every packet in user space.
 UDP through `tcpmux` (8 clients, 32 packets in flight each): about 140,000 packets per
 second each way. An idle tunnel adds about 90 µs to a UDP round trip.
 
-Memory (RSS, release build): about 5-6 MiB per side idle over TCP transports, 6.5-7.5 MiB
-over `quic` / `kcp`. 100 idle user connections over mux add under 1 MiB; 1,000 idle UDP
-flows about 3-4.5 MiB.
+Memory (RSS, static musl release build with mimalloc): about 8 MiB per side idle over
+`tcpmux`. 100 idle user connections over mux add about 1 MiB; 1,000 idle UDP flows about
+5-9 MiB. Without mimalloc (see below) an idle side takes about 6 MiB.
+
+### The allocator
+
+Release builds use [mimalloc](https://github.com/microsoft/mimalloc) as the global
+allocator: musl's own is built for size, not speed, and the packet path allocates a lot.
+Measured on GitHub Actions runners (2 vCPU), static musl builds, with and without it, 28
+setups of the throughput benchmark, 3 alternating rounds each:
+
+| | mimalloc | musl's allocator |
+|---|---|---|
+| Throughput, mean over the 28 setups | **+34 %** | |
+| Throughput with mux, `wss`, `quic`, `kcp` | +25 to +100 % | |
+| Throughput of plain `tcp` and `ws` without mux | within 12 % either way | |
+| Memory, idle | 8.1 MiB | 6.0 MiB |
+| Memory, 100 idle connections | +1 MiB | +1.7 to +5 MiB (varied) |
+| Memory, 1,000 idle UDP flows | +6 to +9 MiB | +4 MiB |
+
+mimalloc commits its first arena eagerly by default, which took an idle side to 15.6 MiB;
+Kariz turns that off at startup (`MIMALLOC_ARENA_EAGER_COMMIT=0`, set in
+`src/allocator.rs` unless the environment sets it), which is where the 8.1 MiB comes from.
+
+For the least memory instead, build without it:
+
+```bash
+cargo build --release --no-default-features --features quic,kcp
+```
 
 ## Over a lossy path
 

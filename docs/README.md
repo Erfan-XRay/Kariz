@@ -1,12 +1,14 @@
 # Kariz documentation
 
-For Kariz **v0.5.1**. Start with [Getting started](getting-started.md); come back to the
+For Kariz **v0.6.0**. Start with [Getting started](getting-started.md); come back to the
 reference pages when you need a specific setting.
 
 | Page | What it covers |
 |---|---|
 | [Getting started](getting-started.md) | Install, a token, a first tunnel in reverse or direct mode, systemd |
+| [The manager script](manager.md) | One-line install, a menu, and commands to add and run tunnels |
 | [Configuration reference](configuration.md) | Every setting, its default and its limits |
+| [Speed test](speedtest.md) | `kariz speedtest`: speed, latency and UDP through the live tunnel, in either mode |
 | [Transports](transports.md) | `tcp`, `tcpmux`, `ws`, `wss`, `quic`, `kcp`: how each works and when to pick it |
 | [Profiles](profiles.md) | `balanced`, `ultraspeed`, `gaming`, and overriding their values |
 | [UDP forwarding and games](udp-and-games.md) | UDP rules, the datagram path, packet duplication, DSCP |

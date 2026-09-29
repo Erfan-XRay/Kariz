@@ -1,6 +1,8 @@
 //! Kariz: a high-performance, resource-efficient tunnel core.
 
+pub mod allocator;
 pub mod config;
+pub mod control;
 pub mod crypto;
 pub mod mux;
 pub mod proto;
@@ -11,6 +13,7 @@ mod channel;
 mod entry;
 mod exit;
 mod relay;
+pub mod speedtest;
 mod udp;
 
 use config::{Config, Role};
