@@ -860,8 +860,8 @@ impl Config {
         Ok(config)
     }
 
-    /// Where the entry side's control socket is: `[control] socket`, else next to the
-    /// config file it was loaded from; `None` for a config that came from elsewhere.
+    /// Where the control socket is: `[control] socket`, else next to the config file it
+    /// was loaded from; `None` for a config that came from elsewhere.
     pub fn control_socket(&self) -> Option<PathBuf> {
         self.control
             .socket

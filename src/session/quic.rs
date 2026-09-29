@@ -212,6 +212,10 @@ impl QuicSession {
         self.shared.streams.load(Ordering::SeqCst)
     }
 
+    pub fn rtt(&self) -> Option<Duration> {
+        Some(self.shared.conn.rtt())
+    }
+
     pub fn close_reason(&self) -> Option<String> {
         self.shared.conn.close_reason().map(|e| e.to_string())
     }
@@ -636,16 +640,20 @@ pub async fn accept_sessions(
     listener: crate::transport::quic::QuicListener,
     config: SessionConfig,
     open_timeout: Duration,
+    link: Arc<crate::stats::Peer>,
     on_session: impl Fn(QuicSession, std::net::SocketAddr) + Send + Sync + 'static,
 ) {
     let on_session = Arc::new(on_session);
     while let Some(accepting) = listener.accept().await {
         let peer = accepting.remote_address();
-        let (config, on_session) = (config.clone(), on_session.clone());
+        let (config, on_session, link) = (config.clone(), on_session.clone(), link.clone());
         tokio::spawn(async move {
             match accepting.establish().await {
                 Ok(conn) => on_session(QuicSession::new(conn, &config, open_timeout), peer),
-                Err(e) => tracing::warn!(%peer, error = %e, "QUIC handshake failed"),
+                Err(e) => {
+                    link.failed(&e);
+                    tracing::warn!(%peer, error = %e, "QUIC handshake failed")
+                }
             }
         });
     }

@@ -34,7 +34,9 @@ use crate::config::{Tuning, UdpTuning};
 use crate::crypto::datagram::ReplayWindow;
 use crate::mux::Transport;
 use crate::proto::{self, Duplicate, MAX_DATAGRAM};
+use crate::relay::Counters;
 use crate::session::{ResetReason, SessionStream};
+use crate::stats::{ForwardStats, Tally};
 
 /// Receive buffer for one packet: the largest UDP payload fits.
 const PACKET_BUFFER: usize = 64 * 1024;
@@ -151,13 +153,15 @@ impl Copies {
 /// Moves packets between `channel` and the local side until the flow has seen no packet
 /// in either direction for `idle`, or either side ends it. Ends the tunnel side cleanly
 /// (`FIN` or shutdown) so the peer ends its side too. `duplicate`: the flow's packet
-/// duplication, as both sides know it from the open request.
+/// duplication, as both sides know it from the open request. `counters.read` counts the
+/// bytes of packets from the local side, `counters.written` those delivered to it.
 pub async fn relay<Src, Snk>(
     channel: Channel,
     mut source: Src,
     sink: Snk,
     idle: Duration,
     duplicate: Option<Duplicate>,
+    counters: Counters<'_>,
 ) -> io::Result<()>
 where
     Src: PacketSource,
@@ -175,7 +179,8 @@ where
             sleep(idle - quiet).await;
         }
     };
-    let deliver = |packet: Bytes| {
+    let deliver = |packet: Bytes, tally: &mut Tally<'_>| {
+        tally.add(packet.len());
         let sink = &sink;
         async move {
             if let Err(e) = sink.send(&packet).await {
@@ -187,6 +192,7 @@ where
     match channel {
         Channel::Stream(stream) => {
             let up = async {
+                let mut tally = Tally::new(counters.read);
                 let (mut numbering, mut copies) = (Numbering::default(), Copies::default());
                 loop {
                     let due = copies.next_due();
@@ -201,6 +207,7 @@ where
                         return Ok(());
                     };
                     touch();
+                    tally.add(packet.len());
                     let Some(duplicate) = duplicate else {
                         // A full session queue drops the packet (counted by the session).
                         stream.send_datagram(packet);
@@ -216,6 +223,7 @@ where
                 }
             };
             let down = async {
+                let mut tally = Tally::new(counters.written);
                 let mut dedup = duplicate.map(|_| Dedup::default());
                 loop {
                     match stream.recv_datagram().await {
@@ -228,7 +236,7 @@ where
                                 },
                                 None => packet,
                             };
-                            deliver(packet).await;
+                            deliver(packet, &mut tally).await;
                         }
                         Ok(None) => return Ok(()),
                         // v0.2 peers reset UDP opens as a protocol error.
@@ -250,6 +258,7 @@ where
         Channel::Link(link) => {
             let (mut reader, mut writer) = link.into_halves();
             let up = async {
+                let mut tally = Tally::new(counters.read);
                 let mut batch = Vec::with_capacity(WRITE_BATCH);
                 // Numbered like any flow with duplication, but a channel loses nothing,
                 // so nothing is copied.
@@ -259,6 +268,7 @@ where
                     batch.clear();
                     let mut next = Some(packet);
                     while let Some(mut packet) = next {
+                        tally.add(packet.len());
                         if let Some(numbering) = &mut numbering {
                             packet = numbering.number(&packet);
                         }
@@ -278,6 +288,7 @@ where
                 Ok(())
             };
             let down = async {
+                let mut tally = Tally::new(counters.written);
                 let mut dedup = duplicate.map(|_| Dedup::default());
                 while let Some(packet) = proto::read_datagram(&mut reader).await? {
                     touch();
@@ -288,7 +299,7 @@ where
                         },
                         None => packet,
                     };
-                    deliver(packet).await;
+                    deliver(packet, &mut tally).await;
                 }
                 Ok(())
             };
@@ -539,6 +550,7 @@ pub async fn serve<O, F>(
     udp: UdpTuning,
     target: String,
     duplicate: Option<Duplicate>,
+    stats: Arc<ForwardStats>,
     open: O,
 ) -> io::Result<()>
 where
@@ -567,7 +579,7 @@ where
                 Err(PushError::Full) => continue,
                 // The flow just ended; start a new one.
                 Err(PushError::Closed(p)) => {
-                    let rule = (&udp, target.as_str(), duplicate);
+                    let rule = (&udp, target.as_str(), duplicate, &stats);
                     start_flow(table, client, p, &socket, rule, &flows, &open);
                     continue;
                 }
@@ -585,26 +597,26 @@ where
             }
             continue;
         }
-        let rule = (&udp, target.as_str(), duplicate);
+        let rule = (&udp, target.as_str(), duplicate, &stats);
         start_flow(table, client, packet, &socket, rule, &flows, &open);
     }
 }
 
 /// Starts a flow for `client` with `packet` as its first packet. `rule`: the rule's
-/// tuning, target and duplication.
+/// tuning, target, duplication and counters.
 fn start_flow<O, F>(
     table: &mut Flows,
     client: SocketAddr,
     packet: Bytes,
     socket: &Arc<UdpSocket>,
-    rule: (&UdpTuning, &str, Option<Duplicate>),
+    rule: (&UdpTuning, &str, Option<Duplicate>, &Arc<ForwardStats>),
     flows: &Arc<Mutex<Flows>>,
     open: &Arc<O>,
 ) where
     O: Fn() -> F + Send + Sync + 'static,
     F: Future<Output = io::Result<Channel>> + Send + 'static,
 {
-    let (udp, target, duplicate) = rule;
+    let (udp, target, duplicate, stats) = rule;
     if matches!(table.map.get(&client), Some(FlowState::Active { .. })) {
         table.active -= 1;
     }
@@ -617,16 +629,22 @@ fn start_flow<O, F>(
     table.active += 1;
 
     let (socket, flows, open) = (socket.clone(), flows.clone(), open.clone());
-    let (idle, target) = (udp.timeout, target.to_owned());
+    let (idle, target, stats) = (udp.timeout, target.to_owned(), stats.clone());
     tokio::spawn(async move {
         debug!(%client, %target, "UDP flow opened");
+        let _open = stats.udp_flow();
         let mut opened = false;
         let result = async {
             // Boxed: opening (dial, handshake, waiting for a session) needs far more state
             // than relaying, and an unboxed future would reserve that for the flow's life.
             let channel = Box::pin(open()).await?;
             opened = true;
-            relay(channel, rx, ReplyTo { socket, client }, idle, duplicate).await
+            let counters = Counters {
+                read: &stats.traffic.up,
+                written: &stats.traffic.down,
+            };
+            let sink = ReplyTo { socket, client };
+            relay(channel, rx, sink, idle, duplicate, counters).await
         }
         .await;
         let open_failed = match &result {
@@ -653,6 +671,9 @@ fn start_flow<O, F>(
                 false
             }
         };
+        if open_failed {
+            stats.open_failed();
+        }
         flows
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -696,6 +717,7 @@ mod tests {
             tuning(max_flows),
             "target".into(),
             None,
+            ForwardStats::new("127.0.0.1:0", "target", "udp"),
             opener,
         ));
         (addr, calls)
