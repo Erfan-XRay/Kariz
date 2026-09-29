@@ -44,6 +44,8 @@ export interface ServerInfo {
   version: string;
   arch: string;
   hostname: string;
+  /** The address other servers reach it at (private networks), if set. */
+  addr: string | null;
   seen_secs: number | null;
   health: Health | null;
   tunnels: TunnelInfo[];
@@ -80,6 +82,8 @@ export interface PairRequest {
   tls_sni?: string;
   forwards: ForwardSpec[];
   rotate?: boolean;
+  /** Direct mode: run over this private GRE network (its id). */
+  network?: string;
 }
 
 /** One side of a tunnel as an agent keeps it (never with its token). */
@@ -142,6 +146,27 @@ export interface LogLine {
   server: string;
   role: string;
   text: string;
+}
+
+export interface Network {
+  id: string;
+  name: string;
+  cidr: string;
+  created: number;
+  links: number;
+  capacity: number;
+}
+
+export interface Link {
+  id: string;
+  network: string;
+  a: string;
+  b: string;
+  subnet: string;
+  addr_a: string;
+  addr_b: string;
+  gre_key: number;
+  ifname: string;
 }
 
 export class ApiError extends Error {
@@ -210,5 +235,11 @@ export const api = {
     call<{ ok: boolean; error: string | null; text: string }>("POST", "tunnels/speedtest", { name, seconds, streams, udp }),
   backup: (passphrase: string) => call<{ data: string }>("POST", "backup", { passphrase }),
   restore: (passphrase: string, data: string, replace: boolean) => call<{ servers: number; restart: boolean }>("POST", "restore", { passphrase, data, replace }),
+  networks: () => call<{ networks: Network[]; links: Link[] }>("GET", "networks"),
+  createNetwork: (name: string, cidr: string) => call<Network>("POST", "networks", { name, cidr }),
+  deleteNetwork: (id: string) => call<object>("POST", "networks/delete", { id }),
+  createLinks: (network: string, servers: string[], hub?: string) => call<{ op: string }>("POST", "networks/links", { network, servers, hub }),
+  deleteLink: (id: string) => call<object>("POST", "networks/links/delete", { id }),
+  setAddress: (id: string, addr: string) => call<object>("POST", "servers/address", { id, addr }),
   newLink: () => call<{ token: string; valid_for: number }>("POST", "links"),
 };
