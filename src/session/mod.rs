@@ -92,6 +92,14 @@ impl Session {
         }
     }
 
+    /// Round-trip time to the peer: from pings (kmux) or QUIC's own estimate.
+    pub fn rtt(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Kmux(s) => s.rtt(),
+            Self::Quic(s) => s.rtt(),
+        }
+    }
+
     /// Why the session closed, once it has.
     pub fn close_reason(&self) -> Option<String> {
         match self {
