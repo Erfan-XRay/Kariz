@@ -44,6 +44,7 @@ flowchart LR
 | **Profiles** | `balanced`, `ultraspeed` for the most speed, and `gaming` for low, steady latency. |
 | **Gaming** | FEC that rebuilds lost packets, per-rule packet duplication, and optional DSCP marks. |
 | **Speed test** | `kariz speedtest` measures download, upload, latency under load and UDP loss through the live tunnel, in either mode ([docs](docs/speedtest.md)). |
+| **Live status** | `kariz status` on either server: is the other side connected, the round-trip time, the last error, and the traffic of each forwarded port; `--json` for tools ([docs](docs/status.md)). |
 | **CDN ready** | Early data saves a round trip, pings keep idle connections alive, and anything else gets an nginx-style `404`. |
 | **Easy to run** | One static binary, one TOML file per side, `kariz check` to validate, a systemd unit. |
 
