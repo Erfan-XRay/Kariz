@@ -48,6 +48,9 @@ fn serve(files: HashMap<String, Vec<u8>>) -> String {
     format!("http://127.0.0.1:{}", addr.port())
 }
 
+/// A change to the served files, to break a release in one particular way.
+type Tweak = Box<dyn FnOnce(&mut HashMap<String, Vec<u8>>)>;
+
 fn archive() -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     for (name, data) in [
@@ -160,7 +163,7 @@ async fn a_release_that_is_not_the_one_the_key_signed_is_refused_and_nothing_is_
     let code = |r: anyhow::Result<std::path::PathBuf>| format!("{:#}", r.unwrap_err());
     let arch = arch_name().unwrap();
     let names = update::asset_names("v99.0.0", arch);
-    let tries: Vec<(&str, Box<dyn FnOnce(&mut HashMap<String, Vec<u8>>)>, &str)> = vec![
+    let tries: Vec<(&str, Tweak, &str)> = vec![
         (
             "a changed archive",
             Box::new({
