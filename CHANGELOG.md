@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Changed (kariz-manager)
+
+- **A friendlier New tunnel wizard:** six numbered steps; every choice is a numbered
+  list with a hint per option (type the number or the word, Enter for the default); a
+  summary before anything is created. It checks ports, addresses and that a port is not
+  already in use.
+- **Ports as a list:** `443, 8080-8090, 2053=53, 3000-3005=4000-4005, 5000-5010=443`
+  (single ports, ranges, mappings, many onto one), per protocol and target host, several
+  groups per tunnel, up to 1,000 ports. On the command line: `--ports`, `--protocol`,
+  `--to`. `--forward` still takes one rule in full.
+- **IPv6 everywhere:** addresses are IPv4, IPv6 (with or without brackets) or domains,
+  with an optional port. On servers with IPv6, the tunnel and the forwarded ports listen
+  on `[::]` (IPv4 and IPv6); the wizard asks, and `--ipv4-only` keeps IPv4. The address
+  printed for the other server can be this server's IPv6. `--listen` takes a bare port.
+- **Ctrl+C** during an action goes straight back to the menu, with no Enter; at the menu
+  it leaves.
+- The menu shows the version and how many tunnels run; `list` shows each tunnel's number
+  of forwarded ports. A tunnel that stops right after starting is reported.
+
 ### Fixed
 
 - **kariz-manager's menu did not show its questions.** Opening the terminal for input
