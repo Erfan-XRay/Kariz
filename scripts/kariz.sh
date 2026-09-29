@@ -1184,7 +1184,7 @@ panel_install() {
         cmd_install "${version[@]}"
     fi
     [[ -x "$PANEL_BIN" ]] ||
-        die "This Kariz release has no web panel. Install a 0.8 release: kariz-manager install --version v0.8.0-beta"
+        die "This Kariz release has no web panel. Install 0.8 or later: kariz-manager update"
     local init_args=(-c "$PANEL_CONF" --data-dir "$PANEL_DATA")
     if [[ -n "$port" ]]; then
         init_args+=(--port "$port")
@@ -1270,7 +1270,7 @@ agent_join() {
         cmd_install "${version[@]}"
     fi
     [[ -x "$PANEL_BIN" ]] ||
-        die "This Kariz release has no agent. Install a 0.8 release: kariz-manager --agent CODE --version v0.8.0-beta"
+        die "This Kariz release has no agent. Install 0.8 or later: kariz-manager update, then --agent CODE"
     mkdir -p "$PANEL_DIR"
     chmod 700 "$PANEL_DIR"
     "$PANEL_BIN" agent --join "$code" --no-run -c "$AGENT_CONF"

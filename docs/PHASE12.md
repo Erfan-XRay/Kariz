@@ -82,10 +82,18 @@ systemd could use later. `panel/tests/pair.rs` (Linux) makes a pair between the 
 server and a real agent with real daemons, sends traffic through it, edits, rotates the token,
 stops, deletes, and checks that a tunnel that cannot connect leaves nothing on either side.
 
+*Status after 12.3 to 12.6:* the wizard (`Wizard.tsx`) and the tunnels page (`Tunnels.tsx`)
+follow an operation's steps by polling `GET /api/op`; charts (`Chart.tsx`), the Logs page
+(`Logs.tsx`) and the speed test, backup and restore dialogs (`Extras.tsx`) use the endpoints
+`/api/history`, `/api/events`, `/api/logs`, `/api/tunnels/speedtest`, `/api/backup` and
+`/api/restore`. History is `panel/src/history.rs`, the backup `panel/src/backup.rs`. Released
+as 0.9.0.
+
 ## 4. Live monitoring
 
-- **Live:** `/api/live` (server-sent events) pushes health, tunnel status and counters every
-  second; the map, the Servers page and the tunnel page all read it.
+- **Live:** the servers are asked every 2 seconds and the browser asks the panel every 2.5
+  seconds; the map, the Servers page and the tunnel page all read that. (Server-sent events were
+  planned and dropped: they need another dependency and gain a fraction of a second.)
 - **History:** the hub keeps the last hour per server and per tunnel in memory (2 s samples)
   and writes 5-minute averages to SQLite, kept 30 days, for the charts (1 h, 24 h, 7 d, 30 d).
 - **Events:** a tunnel going down or up, a server going offline or back, and every change
@@ -98,8 +106,9 @@ stops, deletes, and checks that a tunnel that cannot connect leaves nothing on e
   SIGHUP). Automatic Let's Encrypt is left out: it needs port 80 or DNS access and an ACME
   client, which is a lot of surface for a panel that is usually reached by IP. Revisit if asked.
 - **Backup:** *Download backup* gives one encrypted file (the passphrase is asked): the
-  panel's servers, tunnel specs and tokens, and settings; not the sessions. *Restore* reads it
-  on a fresh panel and the agents reconnect by themselves (their keys are in it).
+  panel's servers with their keys, and the link token; not the sessions, and not tunnels (the
+  panel keeps none: they live on the servers). *Restore* reads it on a fresh panel; after a
+  restart of the panel the agents connect again (the link token is in the file).
 - **Password reset and links** stay as they are.
 
 ## 6. Work breakdown
@@ -109,7 +118,7 @@ stops, deletes, and checks that a tunnel that cannot connect leaves nothing on e
 | **12.0** Plan | This document. | |
 | **12.1** Agent (done) | The requests of section 2 with their validation, the spec renderer, port ownership; unit tests for every parser and rule. | A test drives each request against a real agent and checks the file written. |
 | **12.2** The pair (done) | The plan of section 3 in the hub, with undo; API for create, edit, control, delete. | CI: a pair is made through the API on one host, carries traffic, is edited and deleted; a failure at each step leaves nothing behind. |
-| **12.3** Wizard and pages | The wizard, tunnel detail (state of both sides, edit, token rotation), Tunnels page actions, both languages and themes. | A tunnel made from the browser works. |
-| **12.4** Monitoring | `/api/live`, history and charts, events, the Logs page. | Charts fill in the driven browser; history survives a panel restart. |
-| **12.5** Speed test and backup | The speed test from the tunnel page, backup and restore, own certificate. | CI: back up, wipe, restore, agents come back. |
-| **12.6** Release | Docs (`panel.md`), CHANGELOG, `0.9.0`. | CI green; release. |
+| **12.3** Wizard and pages (done) | The wizard, tunnel detail (state of both sides, edit, token rotation), Tunnels page actions, both languages and themes. | A tunnel made from the browser works. |
+| **12.4** Monitoring (done) | `/api/live`, history and charts, events, the Logs page. | Charts fill in the driven browser; history survives a panel restart. |
+| **12.5** Speed test and backup (done) | The speed test from the tunnel page, backup and restore, own certificate. | CI: back up, wipe, restore, agents come back. |
+| **12.6** Release (done) | Docs (`panel.md`), CHANGELOG, `0.9.0`. | CI green; release. |
