@@ -555,7 +555,10 @@ mod tests {
         // A message that names no setting has no key.
         let bare = &GOOD[..GOOD.find("[[forward]]").unwrap()];
         let doc = check_error(&Config::parse(bare).unwrap_err(), Some(bare));
-        assert!(doc["error"].as_str().unwrap().contains("[[forward]]"), "{doc}");
+        assert!(
+            doc["error"].as_str().unwrap().contains("[[forward]]"),
+            "{doc}"
+        );
         assert!(doc.get("key").is_none(), "{doc}");
     }
 
