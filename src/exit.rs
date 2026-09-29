@@ -79,6 +79,14 @@ pub async fn run(config: Config) -> Result<()> {
     let sessions = SessionConfig::new(&mux);
     let mut tasks = JoinSet::new();
 
+    // `kariz status` reads the counters through this (Unix only).
+    #[cfg(unix)]
+    if let Some(socket) = config.control_socket() {
+        let serve =
+            crate::control::serve(socket, None::<crate::control::NoOpen>, exit.stats.clone());
+        tasks.spawn(serve);
+    }
+
     if transport.kind == TransportKind::Quic {
         run_quic(&config, &exit, &sessions, &mut tasks).await?;
     } else {

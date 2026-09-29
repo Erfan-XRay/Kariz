@@ -108,7 +108,8 @@ struct Setup {
     duplicate: (u8, u8),
     /// `profile`, on both sides; empty keeps the default.
     profile: &'static str,
-    /// The entry side serves a control socket (`[control] socket`), for `kariz speedtest`.
+    /// Both sides serve a control socket (`[control] socket`), for `kariz speedtest` and
+    /// `kariz status`.
     control: bool,
     /// `tunnel.speedtest = false`.
     no_speedtest: bool,
@@ -451,6 +452,9 @@ struct Tunnel {
     /// The entry side's control socket, when the setup asked for one.
     #[cfg_attr(not(unix), allow(dead_code))]
     control: Option<std::path::PathBuf>,
+    /// The exit side's control socket, when the setup asked for one.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    exit_control: Option<std::path::PathBuf>,
 }
 
 impl Tunnel {
@@ -517,9 +521,15 @@ async fn start_via(
     let control = setup
         .control
         .then(|| std::env::temp_dir().join(format!("kariz-e2e-{user_port}.sock")));
-    let control_table = control.as_ref().map_or(String::new(), |path| {
-        format!("[control]\nsocket = {:?}", path.display().to_string())
-    });
+    let exit_control = setup
+        .control
+        .then(|| std::env::temp_dir().join(format!("kariz-e2e-{user_port}-exit.sock")));
+    let socket_table = |path: &Option<std::path::PathBuf>| {
+        path.as_ref().map_or(String::new(), |path| {
+            format!("[control]\nsocket = {:?}", path.display().to_string())
+        })
+    };
+    let (control_table, exit_control_table) = (socket_table(&control), socket_table(&exit_control));
     let duplicate = match setup.duplicate {
         (0, _) => String::new(),
         (copies, gap) => format!("duplicate = {copies}\nduplicate_gap_ms = {gap}"),
@@ -555,6 +565,7 @@ async fn start_via(
         {exit_tunnel}
         token = "{exit_token}"
         {exit_options}
+        {exit_control_table}
         "#
     );
     // Start the listening side first so the dialing side connects right away.
@@ -575,6 +586,7 @@ async fn start_via(
         exit: Some(exit_side),
         exit_config: exit,
         control,
+        exit_control,
     }
 }
 
@@ -1990,6 +2002,104 @@ async fn speedtest_through_the_daemon() {
     for run in runs {
         run.await.unwrap();
     }
+}
+
+/// Asks the daemon behind a control socket for its status; the daemon binds its socket a
+/// moment after it starts.
+#[cfg(unix)]
+async fn status_of(socket: &std::path::Path) -> kariz::stats::Status {
+    for _ in 0..50 {
+        if let Ok(c) = kariz::control::connect(socket).await {
+            return kariz::control::status(c).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("no control socket at {}", socket.display());
+}
+
+/// `status` on both sides counts what went through, and says the other side is there.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn status_counts_traffic_on_both_sides() {
+    let setups = [
+        (
+            "tcpmux reverse",
+            Setup::tcp("reverse").transport("tcpmux").mux(),
+        ),
+        ("tcp direct, no mux", Setup::tcp("direct")),
+        ("quic reverse", Setup::quic("reverse")),
+        ("kcp direct", Setup::kcp("direct")),
+    ];
+    let runs = setups.map(|(name, setup)| {
+        tokio::spawn(async move {
+            let target = echo_server().await;
+            let tunnel = start(setup.control(), TOKEN, TOKEN, target).await;
+            let payload = pattern(1 << 20);
+            for _ in 0..3 {
+                let got = echo_roundtrip(tunnel.user_port, &payload).await.unwrap();
+                assert_eq!(got.len(), payload.len(), "{name}");
+            }
+            let sock = udp_client(tunnel.user_port).await;
+            let echoed = udp_roundtrip(&sock, &[5; 700], Duration::from_secs(5)).await;
+            assert!(echoed.is_some(), "{name}: UDP");
+
+            // A connection's counters close a moment after its user sees the end.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let entry = status_of(tunnel.control.as_ref().unwrap()).await;
+            assert_eq!(entry.role, "entry", "{name}");
+            assert!(entry.peer.connected, "{name}: {entry:?}");
+            let rule = &entry.forwards[0];
+            assert_eq!(rule.tcp_total, 3, "{name}: {rule:?}");
+            assert_eq!(rule.tcp_open, 0, "{name}: {rule:?}");
+            assert_eq!(rule.udp_total, 1, "{name}: {rule:?}");
+            // 3 MiB each way over TCP, and the UDP packet.
+            assert_eq!(rule.bytes_up, 3 * (1 << 20) + 700, "{name}: {rule:?}");
+            assert_eq!(rule.bytes_down, 3 * (1 << 20) + 700, "{name}: {rule:?}");
+            if setup.mux {
+                assert!(entry.peer.sessions.unwrap() >= 1, "{name}: {entry:?}");
+                assert!(entry.peer.rtt_ms.is_some(), "{name}: {entry:?}");
+            } else {
+                assert_eq!(entry.peer.sessions, None, "{name}");
+            }
+
+            let exit = status_of(tunnel.exit_control.as_ref().unwrap()).await;
+            assert_eq!(exit.role, "exit", "{name}");
+            assert!(exit.peer.connected, "{name}: {exit:?}");
+            let served = exit.exit.as_ref().unwrap();
+            assert_eq!(served.streams_total, 4, "{name}: {exit:?}");
+            assert_eq!(served.dial_failures, 0, "{name}: {exit:?}");
+            assert_eq!(
+                exit.totals.bytes_up,
+                3 * (1 << 20) + 700,
+                "{name}: {exit:?}"
+            );
+            assert_eq!(
+                exit.totals.bytes_down,
+                3 * (1 << 20) + 700,
+                "{name}: {exit:?}"
+            );
+        })
+    });
+    for run in runs {
+        run.await.unwrap();
+    }
+}
+
+/// With different tokens nothing connects, and `status` says why on both sides.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn status_shows_why_the_other_side_is_missing() {
+    let setup = Setup::tcp("reverse").transport("tcpmux").mux().control();
+    let target = echo_server().await;
+    let tunnel = start(setup, TOKEN, "another-token-0123456789", target).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let entry = status_of(tunnel.control.as_ref().unwrap()).await;
+    assert!(!entry.peer.connected, "{entry:?}");
+    assert!(entry.peer.handshakes_failed > 0, "{entry:?}");
+    assert!(entry.peer.last_error.is_some(), "{entry:?}");
+    let exit = status_of(tunnel.exit_control.as_ref().unwrap()).await;
+    assert!(!exit.peer.connected, "{exit:?}");
+    assert!(exit.peer.last_error.is_some(), "{exit:?}");
 }
 
 /// An exit with `speedtest = false` refuses the test streams, and the client says why.

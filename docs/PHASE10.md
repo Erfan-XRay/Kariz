@@ -133,6 +133,15 @@ second). The document is the full format reference, in `docs/status.md`.
 touch the tunnel. The panel asks every second; many clients at once are fine (unlike
 `speedtest`, which runs one at a time).
 
+*Status after 10.2:* both sides open the control socket; the exit's refuses speed tests
+with "run the speed test on the entry side". `status` answers `---` and the document on
+one line; `kariz::control::status` is the client. `docs/status.md` describes every
+field. Tests: the request parser, a status answer read back into a `Status`, the exit's
+refusal, and (Linux, in CI) two tunnel tests: traffic counted exactly on both sides for
+tcpmux reverse, tcp direct without mux, quic reverse and kcp direct (3 MiB each way and a
+UDP packet, round trips measured with mux), and a token mismatch showing up as "not
+connected" with the last error on both sides.
+
 ## 4. `kariz status` and `kariz check --json` (10.3)
 
 **`kariz status [-c CONFIG]`** asks the running daemon of that config and shows, on
@@ -175,6 +184,6 @@ checks a config before writing it, without a temporary file.
 |---|---|---|
 | **10.0** Plan (done) | This document. | |
 | **10.1** Counters (done) | `Stats`, counting in entry, exit, relays and UDP; mux RTT from pings; QUIC RTT. | Unit tests for every counter; benchmark A/B within 1 %. |
-| **10.2** `status` | Control socket on the exit side too; the `status` request; `docs/status.md`. | Tests: a tunnel in memory answers `status` on both sides with the right numbers. |
+| **10.2** `status` (done) | Control socket on the exit side too; the `status` request; `docs/status.md`. | Tests: a tunnel in memory answers `status` on both sides with the right numbers. |
 | **10.3** CLI | `kariz status` (`--watch`, `--json`), `kariz check --json`, `-c -`, manager Status. | Tests for the output and the error cases; manager tty test covers Status. |
 | **10.4** Release | README / docs, CHANGELOG, `0.7.0`. | CI green; release v0.7.0 with three archives. |

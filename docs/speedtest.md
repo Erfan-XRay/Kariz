@@ -81,6 +81,7 @@ A whole test takes about `2 + 2 x seconds + 7` seconds.
   the command says so. `tunnel.speedtest = false` on the exit turns the answering off.
   The exit serves at most 32 test streams at once and ends each one after two minutes.
 - **The control socket** is a Unix socket next to the config file
-  (`/etc/kariz/main.toml` gives `/etc/kariz/main.sock`), readable only by its owner.
+  (`/etc/kariz/main.toml` gives `/etc/kariz/main.sock`), readable only by its owner. Both
+  sides have one since v0.7, for `kariz status`; the exit's answers no speed tests.
   `[control] socket = "..."` puts it elsewhere. If it cannot be made, the tunnel runs on
   without it and logs a warning. It exists on Linux only.

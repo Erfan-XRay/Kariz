@@ -1,5 +1,6 @@
-//! The control socket: a local socket on the entry side through which tools use the
-//! running daemon's live sessions. Today that is `kariz speedtest`.
+//! The control socket: a local socket through which tools talk to the running daemon.
+//! Both sides answer `status` (its counters, docs/status.md); the entry side also runs
+//! `kariz speedtest` through its live sessions.
 //!
 //! Why a socket and not a second process that dials the exit itself: in reverse mode the
 //! exit dials the entry, and the daemon owns the port it dials; and a test through the
@@ -8,6 +9,9 @@
 //! Wire format, one request per connection:
 //!
 //! ```text
+//! client -> daemon   status\n
+//! daemon -> client   ---\n <the status, JSON> \n   or   ! error text \n
+//!
 //! client -> daemon   speedtest seconds=10 streams=4 udp=1 \n
 //! daemon -> client   # progress text \n        (any number)
 //!                    ---\n <the report, TOML>   or   ! error text \n
@@ -26,6 +30,7 @@ use tokio::sync::{mpsc, Mutex};
 use crate::channel::Channel;
 use crate::proto::Open;
 use crate::speedtest::{self, Options, Pipe, Report};
+use crate::stats::{Stats, Status};
 
 /// Longest request line the daemon reads.
 const MAX_REQUEST: u64 = 1024;
@@ -44,12 +49,28 @@ pub fn format_request(options: &Options) -> String {
     )
 }
 
-fn parse_request(line: &str) -> io::Result<Options> {
+/// What a client asks for.
+#[derive(Debug, PartialEq)]
+enum Request {
+    Status,
+    Speedtest(Options),
+}
+
+fn parse_request(line: &str) -> io::Result<Request> {
     let mut words = line.split_whitespace();
-    if words.next() != Some("speedtest") {
-        return Err(invalid(
-            "unknown request (this daemon only knows `speedtest`)",
-        ));
+    match words.next() {
+        Some("status") => {
+            return match words.next() {
+                None => Ok(Request::Status),
+                Some(word) => Err(invalid(format!("status takes no settings ({word:?})"))),
+            }
+        }
+        Some("speedtest") => {}
+        _ => {
+            return Err(invalid(
+                "unknown request (this daemon knows `status` and `speedtest`)",
+            ))
+        }
     }
     let mut options = Options::default();
     for word in words {
@@ -69,13 +90,22 @@ fn parse_request(line: &str) -> io::Result<Options> {
         }
     }
     options.validate()?;
-    Ok(options)
+    Ok(Request::Speedtest(options))
 }
 
-/// Serves one connection: reads the request, runs the test through `open` (which opens
-/// a channel to the exit side for an encoded open request) and writes progress and the
-/// report back. One test at a time (`busy`): a test uses the tunnel's bandwidth.
-pub async fn handle<S, O, F>(stream: S, open: &O, busy: &Mutex<()>) -> io::Result<()>
+/// A daemon without speed tests (the exit side) serves with `None::<NoOpen>`.
+pub type NoOpen = fn(Bytes) -> std::future::Ready<io::Result<Channel>>;
+
+/// Serves one connection: reads the request and answers it. `status` reads `stats`. A
+/// speed test runs through `open` (which opens a channel to the exit side for an
+/// encoded open request; `None` on the exit side) and writes progress and the report
+/// back; one test at a time (`busy`): a test uses the tunnel's bandwidth.
+pub async fn handle<S, O, F>(
+    stream: S,
+    open: Option<&O>,
+    busy: &Mutex<()>,
+    stats: &Stats,
+) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     O: Fn(Bytes) -> F,
@@ -87,8 +117,20 @@ where
         .read_line(&mut line)
         .await?;
     let options = match parse_request(&line) {
-        Ok(options) => options,
+        Ok(Request::Speedtest(options)) => options,
+        Ok(Request::Status) => {
+            let doc = serde_json::to_string(&stats.snapshot()).map_err(io::Error::other)?;
+            writer.write_all(format!("---\n{doc}\n").as_bytes()).await?;
+            return writer.flush().await;
+        }
         Err(e) => return reply_error(&mut writer, &e.to_string()).await,
+    };
+    let Some(open) = open else {
+        return reply_error(
+            &mut writer,
+            "run the speed test on the entry side (this is the exit side)",
+        )
+        .await;
     };
     let Ok(_running) = busy.try_lock() else {
         return reply_error(&mut writer, "another speed test is already running").await;
@@ -170,6 +212,31 @@ where
     ))
 }
 
+/// Asks a daemon for its status over `stream`.
+pub async fn status<S>(stream: S) -> io::Result<Status>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
+    writer.write_all(b"status\n").await?;
+    writer.flush().await?;
+    let mut lines = BufReader::new(reader).lines();
+    while let Some(line) = lines.next_line().await? {
+        if let Some(error) = line.strip_prefix("! ") {
+            return Err(io::Error::other(error.to_string()));
+        }
+        if line == "---" {
+            let doc = lines.next_line().await?.unwrap_or_default();
+            return serde_json::from_str(&doc)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()));
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        "the daemon closed the connection without an answer",
+    ))
+}
+
 #[cfg(unix)]
 pub use unix::{connect, serve};
 
@@ -185,14 +252,14 @@ mod unix {
     use tokio::sync::Mutex;
     use tracing::{info, warn};
 
-    use super::{handle, Channel, Future};
+    use super::{handle, Channel, Future, Stats};
 
     /// Connects to a daemon's control socket.
     pub async fn connect(path: &Path) -> io::Result<UnixStream> {
         UnixStream::connect(path).await.map_err(|e| {
             let hint = match e.kind() {
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
-                    ": is this tunnel running? (the entry side has to be)"
+                    ": is this tunnel running?"
                 }
                 io::ErrorKind::PermissionDenied => ": run it as the user that runs Kariz",
                 _ => "",
@@ -209,19 +276,24 @@ mod unix {
 
     /// Runs the control socket for the daemon's whole life. It never returns: a problem
     /// with it (an unwritable directory) is logged, and the tunnel goes on without it.
-    pub async fn serve<O, F>(path: PathBuf, open: O) -> anyhow::Result<()>
+    /// `open`: how speed tests reach the exit side; `None` on the exit side.
+    pub async fn serve<O, F>(
+        path: PathBuf,
+        open: Option<O>,
+        stats: Arc<Stats>,
+    ) -> anyhow::Result<()>
     where
         O: Fn(Bytes) -> F + Send + Sync + 'static,
         F: Future<Output = io::Result<Channel>> + Send + 'static,
     {
-        if let Err(e) = listen(&path, open).await {
-            warn!(socket = %path.display(), error = %e, "no control socket (kariz speedtest will not work)");
+        if let Err(e) = listen(&path, open, stats).await {
+            warn!(socket = %path.display(), error = %e, "no control socket (kariz status and speedtest will not work)");
         }
         std::future::pending::<()>().await;
         Ok(())
     }
 
-    async fn listen<O, F>(path: &Path, open: O) -> io::Result<()>
+    async fn listen<O, F>(path: &Path, open: Option<O>, stats: Arc<Stats>) -> io::Result<()>
     where
         O: Fn(Bytes) -> F + Send + Sync + 'static,
         F: Future<Output = io::Result<Channel>> + Send + 'static,
@@ -246,9 +318,9 @@ mod unix {
         let busy = Arc::new(Mutex::new(()));
         loop {
             let (connection, _) = listener.accept().await?;
-            let (open, busy) = (open.clone(), busy.clone());
+            let (open, busy, stats) = (open.clone(), busy.clone(), stats.clone());
             tokio::spawn(async move {
-                let _ = handle(connection, &*open, &busy).await;
+                let _ = handle(connection, (*open).as_ref(), &busy, &stats).await;
             });
         }
     }
@@ -262,6 +334,70 @@ mod tests {
     use super::*;
     use crate::session::SessionStream;
     use crate::speedtest::tests::tunnel;
+
+    /// The counters of a side with one forward rule.
+    fn stats(role: &str) -> Stats {
+        let forward = if role == "entry" {
+            "[[forward]]\nlisten = \"127.0.0.1:1\"\ntarget = \"127.0.0.1:2\""
+        } else {
+            ""
+        };
+        let text = format!(
+            "role = \"{role}\"\nmode = \"direct\"\n{forward}\n[tunnel]\ntransport = \"tcpmux\"\n\
+             {}\ntoken = \"0123456789abcdef0123\"\n",
+            if role == "entry" {
+                "remote = \"127.0.0.1:3\""
+            } else {
+                "listen = \"127.0.0.1:3\""
+            }
+        );
+        Arc::into_inner(Stats::new(&crate::config::Config::parse(&text).unwrap())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn status_answers_with_the_counters() {
+        let stats = Arc::new(stats("entry"));
+        stats.forwards[0].traffic.add_up(1234);
+        let _connection = stats.forwards[0].tcp_connection();
+        let (client_end, daemon_end) = tokio::io::duplex(1 << 16);
+        let s = stats.clone();
+        let busy = Mutex::new(());
+        tokio::spawn(async move { handle(daemon_end, Some(&opener()), &busy, &s).await });
+        let status = status(client_end).await.unwrap();
+        assert_eq!(status.role, "entry");
+        assert_eq!(status.forwards[0].bytes_up, 1234);
+        assert_eq!(status.totals.tcp_open, 1);
+        assert_eq!(status.kariz, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn the_exit_answers_status_but_no_speed_test() {
+        let stats = Arc::new(stats("exit"));
+        let ask = |line: &'static str| {
+            let stats = stats.clone();
+            async move {
+                let (mut client, daemon_end) = tokio::io::duplex(1 << 16);
+                let busy = Mutex::new(());
+                tokio::spawn(
+                    async move { handle(daemon_end, None::<&NoOpen>, &busy, &stats).await },
+                );
+                client.write_all(line.as_bytes()).await.unwrap();
+                let mut answer = String::new();
+                client.read_to_string(&mut answer).await.unwrap();
+                answer
+            }
+        };
+        let answer = ask("status\n").await;
+        let doc = answer.strip_prefix("---\n").expect(&answer);
+        let status: Status = serde_json::from_str(doc.trim()).unwrap();
+        assert_eq!(status.role, "exit");
+        assert!(status.exit.is_some() && status.forwards.is_empty());
+        let refused = ask("speedtest\n").await;
+        assert!(
+            refused.starts_with("! run the speed test on the entry side"),
+            "{refused}"
+        );
+    }
 
     /// Opens channels on the in-memory tunnel of the speed test's tests.
     fn opener() -> impl Fn(Bytes) -> std::future::Ready<io::Result<Channel>> + Send + Sync {
@@ -282,8 +418,15 @@ mod tests {
             streams: 3,
             udp: false,
         };
-        assert_eq!(parse_request(&format_request(&options)).unwrap(), options);
-        assert_eq!(parse_request("speedtest\n").unwrap(), Options::default());
+        assert_eq!(
+            parse_request(&format_request(&options)).unwrap(),
+            Request::Speedtest(options)
+        );
+        assert_eq!(
+            parse_request("speedtest\n").unwrap(),
+            Request::Speedtest(Options::default())
+        );
+        assert_eq!(parse_request("status\n").unwrap(), Request::Status);
         for bad in [
             "",
             "rm -rf /",
@@ -292,6 +435,7 @@ mod tests {
             "speedtest seconds=0",
             "speedtest streams=99",
             "speedtest color=red",
+            "status now",
         ] {
             assert!(parse_request(bad).is_err(), "{bad:?}");
         }
@@ -300,8 +444,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_client_gets_progress_and_the_report() {
         let (client_end, daemon_end) = tokio::io::duplex(1 << 16);
-        let (open, busy) = (opener(), Mutex::new(()));
-        let daemon = tokio::spawn(async move { handle(daemon_end, &open, &busy).await });
+        let (open, busy, stats) = (opener(), Mutex::new(()), stats("entry"));
+        let daemon =
+            tokio::spawn(async move { handle(daemon_end, Some(&open), &busy, &stats).await });
         let options = Options {
             seconds: 1,
             streams: 1,
@@ -325,10 +470,11 @@ mod tests {
     async fn only_one_test_runs_at_a_time_and_bad_requests_get_an_error() {
         let open = Arc::new(opener());
         let busy = Arc::new(Mutex::new(()));
+        let stats = Arc::new(stats("entry"));
         let start = |line: &'static str| {
             let (mut client, daemon_end) = tokio::io::duplex(1 << 16);
-            let (open, busy) = (open.clone(), busy.clone());
-            tokio::spawn(async move { handle(daemon_end, &*open, &busy).await });
+            let (open, busy, stats) = (open.clone(), busy.clone(), stats.clone());
+            tokio::spawn(async move { handle(daemon_end, Some(&*open), &busy, &stats).await });
             async move {
                 client.write_all(line.as_bytes()).await.unwrap();
                 let mut answer = String::new();

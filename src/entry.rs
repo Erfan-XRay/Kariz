@@ -162,7 +162,8 @@ pub async fn run(config: Config) -> Result<()> {
         stats: stats.clone(),
     });
 
-    // `kariz speedtest` reaches the live sessions through this (Unix only).
+    // `kariz status` reads the counters and `kariz speedtest` reaches the live sessions
+    // through this (Unix only).
     #[cfg(unix)]
     if let Some(socket) = config.control_socket() {
         let entry = entry.clone();
@@ -170,7 +171,7 @@ pub async fn run(config: Config) -> Result<()> {
             let entry = entry.clone();
             async move { entry.open_channel(&open).await }
         };
-        tasks.spawn(crate::control::serve(socket, open));
+        tasks.spawn(crate::control::serve(socket, Some(open), stats.clone()));
     }
 
     for (forward, counters) in config.forward.iter().zip(&stats.forwards) {
