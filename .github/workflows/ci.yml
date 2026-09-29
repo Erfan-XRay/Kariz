@@ -109,6 +109,10 @@ jobs:
           sudo kariz-manager list | tee list.txt
           grep -q "wiz .*active" list.txt
           sudo grep -q 'listen = "0.0.0.0:18083"' /etc/kariz/wiz.toml
+      - name: The menu through a real terminal, installed and piped in
+        run: |
+          sudo python3 tests/manager_tty.py kariz-manager
+          sudo python3 tests/manager_tty.py bash -c 'cat scripts/kariz.sh | bash'
       - name: Update restarts running tunnels
         run: |
           out=$(sudo kariz-manager update --binary target/release/kariz)

@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **kariz-manager's menu did not show its questions.** Opening the terminal for input
+  also sent the script's error output to `/dev/null`, and the questions, warnings and
+  errors went with it: *New tunnel* seemed to take no input. Every question now shows,
+  and an answer that never comes ends the script instead of repeating the question.
+- **The menu's tunnel actions** (start / stop, logs, speed test, edit, remove) took the
+  printed list of tunnels for the tunnel's name. They now list the tunnels by number and
+  take the number or the name.
+- Ctrl-C in a tunnel's log returns to the menu instead of ending it.
+- `kariz-manager edit` opens the editor on the terminal also when the script was piped
+  in, and falls back to `vi` without `nano`.
+- The script runs when piped into bash (`curl ... | bash`); it used to exit silently.
+- The wizard checks the port, and asks again for an empty address, token or pin.
+- CI drives the menu through a real terminal (tests/manager_tty.py), installed and piped
+  in; the scripted answers of the other tests could not catch the hidden questions.
+
 ## 0.6.0 - 2026-09-29
 
 Works with v0.5 and v0.4 over every transport. `kariz speedtest` needs the exit side at
