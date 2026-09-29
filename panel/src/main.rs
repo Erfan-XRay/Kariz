@@ -66,6 +66,27 @@ enum Command {
         #[arg(long)]
         stdin: bool,
     },
+    /// Make a release signing key pair. The private key goes to a file (keep it secret: it
+    /// becomes the repository secret KARIZ_SIGNING_KEY); the public key is printed.
+    ReleaseKey {
+        /// Where to write the private key (must not exist).
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Sign a release's `.sha256` file: writes the `.sig` beside it (the archive's name
+    /// with `.sig`). The private key is read from the environment variable.
+    ReleaseSign {
+        file: PathBuf,
+        #[arg(long, default_value = "KARIZ_SIGNING_KEY")]
+        key_env: String,
+    },
+    /// Check a downloaded archive against its `.sha256` and `.sig` beside it.
+    ReleaseVerify {
+        archive: PathBuf,
+        /// The public key (hex), instead of the one built in.
+        #[arg(long)]
+        key: Option<String>,
+    },
     /// Private network links on this server, by hand (what the agent does when the panel
     /// asks; for debugging and for the tests). Needs root and Linux.
     Net {
@@ -112,6 +133,9 @@ fn main() -> Result<()> {
         }
         Command::Serve { config } => serve(Config::load(&config)?),
         Command::Net { command } => net_command(command),
+        Command::ReleaseKey { out } => release_key(&out),
+        Command::ReleaseSign { file, key_env } => release_sign(&file, &key_env),
+        Command::ReleaseVerify { archive, key } => release_verify(&archive, key.as_deref()),
         Command::Agent {
             config,
             join,
@@ -158,6 +182,68 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn release_key(out: &std::path::Path) -> Result<()> {
+    use kariz_panel::sign;
+    if out.exists() {
+        anyhow::bail!("{} exists already; it would be overwritten", out.display());
+    }
+    let (private, public) = sign::generate()?;
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(out)?
+            .write_all(private.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(out, &private)?;
+    println!("private key written to {} (keep it secret)", out.display());
+    println!("public key (hex): {}", sign::hex(&public));
+    println!("{}", sign::public_pem(&public));
+    Ok(())
+}
+
+fn release_sign(file: &std::path::Path, key_env: &str) -> Result<()> {
+    let key = std::env::var(key_env).map_err(|_| {
+        anyhow::anyhow!("the signing key is not in the environment variable {key_env}")
+    })?;
+    let message = std::fs::read(file)?;
+    let signature = kariz_panel::sign::sign(&key, &message)?;
+    let name = file
+        .to_str()
+        .and_then(|n| n.strip_suffix(".sha256"))
+        .ok_or_else(|| anyhow::anyhow!("give the .sha256 file of a release"))?;
+    std::fs::write(format!("{name}.sig"), signature)?;
+    println!("signed {}", file.display());
+    Ok(())
+}
+
+fn release_verify(archive: &std::path::Path, key: Option<&str>) -> Result<()> {
+    use kariz_panel::sign;
+    let public = sign::release_key(key)?;
+    let name = archive
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("no archive name"))?;
+    let read = |suffix: &str| {
+        let p = format!("{}{suffix}", archive.display());
+        std::fs::read(&p).map_err(|e| anyhow::anyhow!("cannot read {p}: {e}"))
+    };
+    sign::verify_archive(
+        &public,
+        name,
+        &std::fs::read(archive)?,
+        &read(".sha256")?,
+        &read(".sig")?,
+    )?;
+    println!("{name}: the signature and the checksum are good");
+    Ok(())
 }
 
 fn net_command(command: NetCommand) -> Result<()> {

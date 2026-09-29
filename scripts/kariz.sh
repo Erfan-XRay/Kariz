@@ -166,6 +166,48 @@ arch() {
     esac
 }
 
+# The key releases are signed with (docs/PHASE14.md). Only the release workflow has the
+# private half. It is checked with openssl (1.1.1 or later, or 3).
+RELEASE_KEY_PEM='-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAWGxcNhmewk/DsktXLy2UgJ5ZOLS0fktw7D2/obNvjTs=
+-----END PUBLIC KEY-----'
+# A user can pin a key of their own (a fork, or a test): KARIZ_RELEASE_KEY_PEM.
+RELEASE_KEY_PEM=${KARIZ_RELEASE_KEY_PEM:-$RELEASE_KEY_PEM}
+
+# Checks the signature of a downloaded archive: $1 the directory with the archive, its
+# .sha256 and its .sig, $2 the archive's name, $3 the version. Releases before 0.11 were not
+# signed: they are accepted with a warning; from 0.11 on a missing or wrong signature stops
+# the installation.
+verify_signature() {
+    local dir=$1 name=$2 version=$3
+    local file="$dir/$name.tar.gz"
+    if [[ ! -s "$file.sig" ]]; then
+        if version_lt "${version#v}" "0.11.0"; then
+            warn "This release is not signed (releases before 0.11 were not): only its checksum was checked."
+            return 0
+        fi
+        die "This release has no signature: it will not be installed."
+    fi
+    if ! command -v openssl >/dev/null; then
+        die "Checking the signature needs openssl (apt install openssl). Nothing was installed."
+    fi
+    printf '%s\n' "$RELEASE_KEY_PEM" >"$dir/release-key.pem"
+    openssl pkeyutl -verify -pubin -inkey "$dir/release-key.pem" -rawin \
+        -in "$file.sha256" -sigfile "$file.sig" >/dev/null 2>&1 ||
+        die "The signature does not match: this download is not from the Kariz release key. Nothing was installed."
+    # The signed checksum file must name this archive, so a signed archive of another CPU
+    # cannot be put in its place.
+    [[ "$(awk '{print $2}' "$file.sha256" | sed 's/^\*//')" == "$name.tar.gz" ]] ||
+        die "The signed checksum is for another file. Nothing was installed."
+    ok "The release signature is good."
+}
+
+# 0 if version $1 is lower than $2 (plain numbers, x.y.z; a suffix after a dash is ignored).
+version_lt() {
+    local a=${1%%-*} b=${2%%-*}
+    [[ "$a" != "$b" && "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n1)" == "$a" ]]
+}
+
 # curl or wget, with the token for a private repository. $1: URL, $2: output file or
 # - for stdout, $3: extra header (optional).
 fetch() {
@@ -318,8 +360,12 @@ cmd_install() {
         tmp=$(mktemp -d)
         download_asset "$version" "$name.tar.gz" "$tmp/$name.tar.gz"
         download_asset "$version" "$name.tar.gz.sha256" "$tmp/$name.tar.gz.sha256"
+        # The signature is optional to download (releases before 0.11 have none).
+        (download_asset "$version" "$name.tar.gz.sig" "$tmp/$name.tar.gz.sig") 2>/dev/null ||
+            rm -f "$tmp/$name.tar.gz.sig"
         (cd "$tmp" && sha256sum -c --quiet "$name.tar.gz.sha256") ||
             die "Checksum mismatch: the download is damaged."
+        verify_signature "$tmp" "$name" "$version"
         tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
         install -m 0755 "$tmp/$name/kariz" "$BIN"
         # Releases from 0.8 carry the web panel and its agent in the same archive.
