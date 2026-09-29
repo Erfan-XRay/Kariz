@@ -167,6 +167,7 @@ async fn a_pair_is_made_edited_stopped_deleted_and_a_failure_leaves_nothing() {
             protocol: "tcp".into(),
         }],
         rotate: false,
+        network: None,
     };
 
     // ---- a check names a taken port ----
