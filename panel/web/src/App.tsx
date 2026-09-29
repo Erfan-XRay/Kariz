@@ -55,6 +55,8 @@ export function App() {
   const [info, setInfo] = useState<SessionInfo | null>(null);
   const [page, setPage] = useState<PageId>("map");
   const [servers, setServers] = useState<ServerInfo[]>([]);
+  const [agentsOn, setAgentsOn] = useState(false);
+  const [reload, setReload] = useState(0);
   const [rising, setRising] = useState(false);
   const [loginKey, setLoginKey] = useState(0);
   const autoLink = useRef<string | null>(null);
@@ -103,21 +105,25 @@ export function App() {
     const load = () =>
       api
         .servers()
-        .then((r) => alive && setServers(r.servers))
+        .then((r) => {
+          if (!alive) return;
+          setServers(r.servers);
+          setAgentsOn(r.agents);
+        })
         .catch((e) => {
           if (e instanceof ApiError && e.status === 401) signOut();
         });
     void load();
-    const id = setInterval(load, 5000);
+    const id = setInterval(load, 2500);
     return () => {
       alive = false;
       clearInterval(id);
     };
-  }, [screen, signOut]);
+  }, [screen, signOut, reload]);
 
   const subtitle =
     page === "map"
-      ? t("page.mapSub", { s: num(servers.length), t: num(0) })
+      ? t("page.mapSub", { s: num(servers.length), t: num(new Set(servers.flatMap((x) => x.tunnels.map((y) => y.name))).size) })
       : page === "servers"
         ? t("srv.sub", { n: num(servers.length) })
         : page === "settings"
@@ -155,7 +161,7 @@ export function App() {
           onMakeLink={() => setPage("settings")}
         >
           {page === "map" && <MapPage servers={servers} />}
-          {page === "servers" && <ServersPage servers={servers} />}
+          {page === "servers" && <ServersPage servers={servers} agentsOn={agentsOn} onChanged={() => setReload((n) => n + 1)} />}
           {page === "tunnels" && <Later phase="12" />}
           {page === "logs" && <Later phase="12" />}
           {page === "settings" && <SettingsPage hasPassword={info?.has_password ?? false} onPasswordSet={() => setInfo((i) => (i ? { ...i, has_password: true } : i))} />}

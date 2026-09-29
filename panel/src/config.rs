@@ -19,6 +19,16 @@ pub struct Config {
     /// The database and the certificate live here.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+    /// Where agents connect (`0.0.0.0:29001`); without it, no server can be added.
+    #[serde(default)]
+    pub agent_listen: Option<String>,
+    /// Where this server's Kariz tunnel configs are.
+    #[serde(default = "default_kariz_dir")]
+    pub kariz_dir: PathBuf,
+}
+
+fn default_kariz_dir() -> PathBuf {
+    PathBuf::from("/etc/kariz")
 }
 
 fn default_data_dir() -> PathBuf {
@@ -47,7 +57,20 @@ impl Config {
         self.listen.parse::<std::net::SocketAddr>().map_err(|_| {
             anyhow::anyhow!("listen must be an address with a port, like 0.0.0.0:28443")
         })?;
+        if let Some(listen) = &self.agent_listen {
+            listen.parse::<std::net::SocketAddr>().map_err(|_| {
+                anyhow::anyhow!("agent_listen must be an address with a port, like 0.0.0.0:29001")
+            })?;
+        }
         Ok(())
+    }
+
+    /// The port agents dial, if the panel takes agents.
+    pub fn agent_port(&self) -> Option<u16> {
+        self.agent_listen
+            .as_deref()
+            .and_then(|l| l.parse::<std::net::SocketAddr>().ok())
+            .map(|a| a.port())
     }
 
     pub fn database(&self) -> PathBuf {

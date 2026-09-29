@@ -37,9 +37,7 @@ async fn start() -> Running {
     let addr = listener.local_addr().unwrap();
     let app = http::router(
         &config.path,
-        AppState {
-            db: Db::open(&config.database()).unwrap(),
-        },
+        AppState::new(Db::open(&config.database()).unwrap()),
     );
     let served = config.clone();
     let task = tokio::spawn(async move {

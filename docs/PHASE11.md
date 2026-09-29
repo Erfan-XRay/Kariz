@@ -189,6 +189,54 @@ the animations): the login page, the lockout message, sign-in by link and its de
 map, servers and settings pages, English with the Dawn theme, the palette, a phone width,
 and the whole password path (set a password, sign out, sign in with it).
 
+*Status after 11.4:* agents work end to end. What was built:
+
+- **`kariz::link`** (the core): `Acceptor` and `Dialer` make an authenticated, encrypted
+  mux session with the tunnels' own handshake and records (transport `tcpmux`), and
+  which end dials is independent of which end opens streams. The tunnel code does not use
+  it. Tests: streams in both directions, and a wrong token never connects.
+- **The protocol** (`wire.rs`): four requests, `hello`, `enroll`, `health`, `tunnels`,
+  each one mux stream (the request as JSON in the open bytes, one JSON answer). There is no
+  request that names a command, a path or a file. The tunnel report never carries a
+  token (a test checks the serialized report).
+- **Identity** (`hub.rs`, `agent.rs`, `join.rs`): a join code is `kz1_` and the base64 of
+  the panel's address, its link token and a one-time join secret (10 minutes, stored as
+  a hash, spent in one statement). A new agent shows the secret; the panel makes it an id
+  and a 32-byte key, sends them over the link (`enroll`), and the agent saves them
+  (`agent.toml`, mode 600, written beside the file and renamed). A registered agent
+  answers a random challenge with `blake3::keyed_hash(key, challenge)`, compared in
+  constant time. A second use of a code, a forged key and a second `enroll` are all
+  refused (tested over real sockets).
+- **Collecting** (`collect.rs`): CPU share, memory, network rates (loopback excluded),
+  uptime and load from `/proc` (parsers tested on sample files; nothing is reported
+  where there is no `/proc`), and each `*.toml` in the Kariz directory with systemd's
+  state (`is-active kariz@NAME`) and, when the daemon runs, its `status` from the control
+  socket of phase 10. The panel does the same for its own server, in process.
+- **The panel** polls every agent every 2 s and keeps the latest; rates come from two
+  readings of the entry side's byte counters. API: `GET /api/servers` (health and
+  tunnels of every server), `POST /api/servers/join-code`, `POST /api/servers/remove`
+  (the server leaves the panel and its link closes; nothing is deleted on it). Config:
+  `agent_listen` (set by `init` to a random port) and `kariz_dir`.
+- **The web app:** *Servers* with health meters, the state of each server, *Add server*
+  (a name, the panel's address as the new server sees it, the join code, a countdown, and a
+  wait that turns to "connected" when the server appears) and *Remove*. The map draws the
+  tunnels whose two sides are both known (an entry and an exit with the same name), in
+  the state the entry's daemon reports (flowing, broken, stopped); the four numbers and
+  the tunnel table come from the same data. One-sided tunnels are listed as such.
+- **Checked by hand,** with two real processes and a real browser: *Add server* made a
+  code, `kariz-panel agent --join CODE` connected, the server appeared, and after a
+  restart the agent came back with the same id and no code; the map drew the tunnel
+  between the panel's server and `istanbul-1`.
+- **Bug found on the way:** the panel opened each request stream and never finished its
+  own side, so the agent's dropping the stream after its answer reset it; the request now
+  finishes its side at once.
+- **Not in this step:** *the panel dials the agent* (an agent behind a firewall that only
+  allows inbound connections). Agents dial the panel, which needs no open port on the
+  new server; the reverse is left for phase 12. The manager script's `--agent` line is
+  step 11.5, so the dialog shows `kariz-panel agent --join CODE` for now. Updates are
+  polled every 2 s rather than pushed (server-sent events), which is enough for a handful
+  of servers.
+
 ## 7. Work breakdown
 
 | Step | Content | Done when |
@@ -197,5 +245,5 @@ and the whole password path (set a password, sign out, sign in with it).
 | **11.1** Skeleton (done) | Workspace, `panel/` crate, config, SQLite schema, axum on TLS under the secret path, the embedded app (or placeholder), CLI; `panel/web` scaffold; CI builds and tests both; the release carries `kariz-panel`. | `kariz-panel serve` answers on HTTPS; CI green. |
 | **11.2** Sign-in (done) | Section 3, API and tests. | Tests for every rule in the table. |
 | **11.3** Web app (done) | Section 5. | Build under the budget; the prototype's screens in the real app, both languages and themes. |
-| **11.4** Agents | Section 4: `kariz::link`, join codes, the agent, health and tunnels, both directions, live Servers and map. | An in-process test joins an agent and reads its health; a second in CI over real sockets. |
+| **11.4** Agents (done) | Section 4: `kariz::link`, join codes, the agent, health and tunnels, both directions, live Servers and map. | An in-process test joins an agent and reads its health; a second in CI over real sockets. |
 | **11.5** Installer, release | Section 6, `docs/panel.md`, CHANGELOG, `0.8.0-beta`. | Installed on a clean Linux VM in CI (manager job), release with the panel. |

@@ -30,6 +30,22 @@ struct Assets;
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
+    pub hub: std::sync::Arc<crate::hub::Hub>,
+    /// Where agents connect, if the panel takes them (for the join codes).
+    pub agent_port: Option<u16>,
+}
+
+impl AppState {
+    /// A panel with no agent listener and no tunnels of its own directory (tests, and
+    /// panels set up before agents existed).
+    pub fn new(db: Db) -> Self {
+        let hub = crate::hub::Hub::new(db.clone(), std::path::PathBuf::from("/etc/kariz"));
+        Self {
+            db,
+            hub,
+            agent_port: None,
+        }
+    }
 }
 
 /// The nginx 404 page.
@@ -190,12 +206,7 @@ mod tests {
     use tower::ServiceExt;
 
     async fn get_path(path: &str) -> (StatusCode, String, Option<String>) {
-        let app = router(
-            "k-7f3a9c",
-            AppState {
-                db: Db::in_memory().unwrap(),
-            },
-        );
+        let app = router("k-7f3a9c", AppState::new(Db::in_memory().unwrap()));
         let response = app
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
             .await
