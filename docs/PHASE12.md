@@ -47,6 +47,13 @@ takes a command or a path from the panel.
 agent inside the encrypted link, and written 0600. The panel keeps it (encrypted with a key
 in `/var/lib/kariz-panel`) only to edit and to rotate; it is never in an API answer.
 
+*Status after 12.1:* the requests are in `panel/src/manage.rs` and the agent's handler; the
+spec is `wire::Spec`. Every text field of a spec must be one plain line (no control
+characters): a test found that a newline inside `listen` was accepted, escaped into a
+multi-line string, and it is now refused. `tunnel_check` names the owner of each port a spec
+wants, except the ports the tunnel of the same name already holds. The `hello` list of
+understood requests moves to phase 14, where it is first needed.
+
 ## 3. Making a pair, safely
 
 The panel does this as an ordered plan and stops at the first failure, undoing what it did:
@@ -86,7 +93,7 @@ starts, and each step's result after (a progress dialog, as designed).
 | Step | Content | Done when |
 |---|---|---|
 | **12.0** Plan | This document. | |
-| **12.1** Agent | The requests of section 2 with their validation, the spec renderer, port ownership; unit tests for every parser and rule. | A test drives each request against a real agent and checks the file written. |
+| **12.1** Agent (done) | The requests of section 2 with their validation, the spec renderer, port ownership; unit tests for every parser and rule. | A test drives each request against a real agent and checks the file written. |
 | **12.2** The pair | The plan of section 3 in the hub, with undo; API for create, edit, control, delete. | CI: a pair is made through the API on one host, carries traffic, is edited and deleted; a failure at each step leaves nothing behind. |
 | **12.3** Wizard and pages | The wizard, tunnel detail (state of both sides, edit, token rotation), Tunnels page actions, both languages and themes. | A tunnel made from the browser works. |
 | **12.4** Monitoring | `/api/live`, history and charts, events, the Logs page. | Charts fill in the driven browser; history survives a panel restart. |

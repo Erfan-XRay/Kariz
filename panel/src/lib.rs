@@ -10,6 +10,7 @@ pub mod db;
 pub mod http;
 pub mod hub;
 pub mod join;
+pub mod manage;
 pub mod wire;
 
 use std::path::Path;
