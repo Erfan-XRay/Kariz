@@ -98,6 +98,9 @@ const MIGRATIONS: &[&str] = &[
      );",
     // 6: the public address of each server, as the others reach it (GRE needs both ends).
     "CREATE TABLE server_addrs (server TEXT PRIMARY KEY, addr TEXT NOT NULL);",
+    // 7: the server a join code registered, until its agent confirms the identity (a link
+    // that drops during enrollment tries again with the same identity).
+    "ALTER TABLE joins ADD COLUMN server TEXT;",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a
