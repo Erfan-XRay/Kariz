@@ -1,0 +1,176 @@
+---
+import Base from "../layouts/Base.astro";
+import TunnelDiagram from "./TunnelDiagram.astro";
+import Chooser from "./Chooser.astro";
+import { REPO, VERSION, href, num } from "../lib/site";
+import type { Lang } from "../lib/site";
+
+const { lang } = Astro.props as { lang: Lang };
+const n = (x: string | number) => num(lang, x);
+const T = {
+  en: {
+    kicker: `Version ${VERSION}`,
+    lead: "A fast, light tunnel between two servers, in Rust. Six transports, TCP and UDP, games and CDNs, and a web panel with a live map.",
+    start: "Get started",
+    scroll: "scroll: down the well",
+    s1: "What Kariz is",
+    l1: "Kariz (کاریز) is the ancient Persian underground channel: wells dug from the surface, water carried in the dark. It links two servers with an encrypted tunnel. Users connect to the entry; Kariz carries their TCP and UDP traffic to the exit, which reaches the real targets.",
+    nums: [
+      [`~${n(8)} MiB`, "of RAM per side, idle"],
+      [`${n(4)} Gbit/s`, "encrypted on one connection, on localhost"],
+      [n(6), "transports: tcp, tcpmux, ws, wss, quic, kcp"],
+      [`${n(69)} ms`, "p99 game round trip at 1 % loss (169 over tcpmux)"],
+    ],
+    feats: [
+      ["Light", "No garbage collector. It runs on the cheapest VPS, as one static binary and one TOML file per side."],
+      ["Private", "Mutual authentication with a shared token, X25519 forward secrecy, AEAD records without fixed bytes. It works through CDNs."],
+      ["Fast", "A statically dispatched hot path and tuned sockets, and transports that keep their speed on lossy links."],
+      ["UDP and games", "WireGuard, DNS, games over any transport. FEC rebuilds lost packets; packets can be duplicated per rule."],
+      ["Web panel", "A live map of your servers and tunnels, a wizard that undoes itself, charts, logs, backups, private networks and updates."],
+      ["Signed releases", "Every release is signed; the panel, the agents and the install script verify it before anything runs."],
+    ],
+    s2: "How a tunnel works",
+    l2: "Switch who dials. The water is the traffic: many user connections over a few long-lived ones.",
+    more: "Read more",
+    s3: "Which transport?",
+    l3: "Answer four questions; the chooser gives the transport and the two lines of config.",
+    s4: "The panel",
+    l4: "The real panel's screens with sample data, in your browser. The password is kariz; nothing is sent anywhere.",
+    try: "Open it full screen",
+    s5: "Install in one line",
+    l5: "As root, on each server. It installs Kariz for your CPU (x86_64, aarch64, armv7), checks the signature, and opens a menu.",
+    cmd: "bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh)",
+    panelCmd: "Then, for the panel, on the server that will hold it:",
+    next: "Documentation",
+    gh: "Source on GitHub",
+    frameTitle: "Kariz panel demo",
+    notes: `Version ${VERSION}`,
+  },
+  fa: {
+    kicker: `نسخهٔ ${n(VERSION)}`,
+    lead: "تانلی سریع و سبک بین دو سرور، با Rust. شش ترنسپورت، TCP و UDP، بازی و CDN، و پنل وب با نقشهٔ زنده.",
+    start: "شروع کار",
+    scroll: "اسکرول: پایین چاه",
+    s1: "کاریز چیست",
+    l1: "کاریز همان مجرای زیرزمینی آب در ایران قدیم است: چاه‌هایی از سطح زمین، و آبی که در تاریکی می‌رود. این برنامه دو سرور را با یک تانل رمزشده به هم وصل می‌کند. کاربرها به entry وصل می‌شوند؛ کاریز ترافیک TCP و UDP‌شان را به exit می‌رساند و exit به مقصدهای واقعی می‌رسد.",
+    nums: [
+      [`~${n(8)} MiB`, "حافظه برای هر طرف، در حالت بیکار"],
+      [`${n(4)} Gbit/s`, "رمزشده روی یک اتصال، روی localhost"],
+      [n(6), "ترنسپورت: tcp، tcpmux، ws، wss، quic، kcp"],
+      [`${n(69)} ms`, "p99 رفت‌وبرگشت بازی با ۱٪ اتلاف (۱۶۹ با tcpmux)"],
+    ],
+    feats: [
+      ["سبک", "بدون garbage collector. روی ارزان‌ترین VPS هم اجرا می‌شود؛ یک باینری ایستا و یک فایل TOML برای هر طرف."],
+      ["خصوصی", "احراز هویت دوطرفه با توکن مشترک، محرمانگی پیشرو با X25519، رکوردهای AEAD بدون بایت ثابت. از پشت CDN هم کار می‌کند."],
+      ["سریع", "مسیر داغ با dispatch ایستا و سوکت‌های تنظیم‌شده، و ترنسپورت‌هایی که روی لینک پرتلفات سرعتشان را نگه می‌دارند."],
+      ["UDP و بازی", "WireGuard، DNS و بازی روی هر ترنسپورت. FEC بسته‌های گم‌شده را می‌سازد؛ بسته‌ها را برای هر قانون می‌شود دوبل کرد."],
+      ["پنل وب", "نقشهٔ زندهٔ سرورها و تانل‌ها، ویزاردی که خودش را برمی‌گرداند، نمودار، لاگ، پشتیبان، شبکهٔ خصوصی و به‌روزرسانی."],
+      ["انتشار امضاشده", "هر انتشار امضا می‌شود؛ پنل، agentها و اسکریپت نصب پیش از اجرای هر چیزی آن را راستی‌آزمایی می‌کنند."],
+    ],
+    s2: "تانل چطور کار می‌کند",
+    l2: "کلید «چه کسی وصل می‌شود» را عوض کنید. آب همان ترافیک است: اتصال‌های زیاد کاربرها روی چند اتصال بلندمدت.",
+    more: "بیشتر بخوانید",
+    s3: "کدام ترنسپورت؟",
+    l3: "به چهار پرسش جواب بدهید؛ انتخابگر ترنسپورت و دو خط کانفیگ را می‌دهد.",
+    s4: "پنل",
+    l4: "صفحه‌های پنل واقعی با داده‌های نمونه، در مرورگر شما. رمز kariz است؛ چیزی جایی فرستاده نمی‌شود.",
+    try: "باز کردن تمام‌صفحه",
+    s5: "نصب با یک خط",
+    l5: "با root، روی هر سرور. کاریز را برای CPU شما نصب می‌کند (x86_64، aarch64، armv7)، امضا را بررسی می‌کند و منو را باز می‌کند.",
+    cmd: "bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh)",
+    panelCmd: "",
+    next: "مستندات",
+    gh: "سورس در گیت‌هاب",
+    frameTitle: "دموی پنل کاریز",
+    notes: "",
+  },
+}[lang];
+---
+
+<Base lang={lang} title="Kariz" description={T.lead} path="/" current="home">
+  <section class="hero" data-hero aria-labelledby="hero-title">
+    <div class="hero-stick">
+      <div class="nojs-sky" aria-hidden="true"></div>
+      <canvas data-hero-canvas aria-hidden="true"></canvas>
+      <div class="hero-text" data-fade>
+        <p class="kicker">{T.kicker}</p>
+        <h1 id="hero-title">Kariz</h1>
+        <p class="lead">{T.lead}</p>
+        <div class="actions">
+          <a class="btn primary" href={href(lang, "/docs/getting-started/")}>{T.start}</a>
+          <a class="btn" href={href(lang, "/try/")}>{lang === "fa" ? "پنل را امتحان کنید" : "Try the panel"}</a>
+        </div>
+      </div>
+      <div class="hero-cue" data-fade aria-hidden="true"><span>{T.scroll} ↓</span></div>
+    </div>
+  </section>
+
+  <section class="stratum" aria-labelledby="s1">
+    <span class="depth" aria-hidden="true">−{n(4)} m</span>
+    <div class="wrap">
+      <h2 id="s1">{T.s1}</h2>
+      <p class="lead">{T.l1}</p>
+      <div class="numbers">
+        {T.nums.map(([big, small]) => <div><b>{big}</b><span>{small}</span></div>)}
+      </div>
+      <div class="feats">
+        {T.feats.map(([h, p]) => <article><h3>{h}</h3><p>{p}</p></article>)}
+      </div>
+    </div>
+  </section>
+
+  <section class="stratum alt" aria-labelledby="s2">
+    <span class="depth" aria-hidden="true">−{n(12)} m</span>
+    <div class="wrap">
+      <h2 id="s2">{T.s2}</h2>
+      <p class="lead">{T.l2}</p>
+      <TunnelDiagram lang={lang} />
+      <p><a href={href(lang, "/docs/how-it-works/")}>{T.more} →</a></p>
+    </div>
+  </section>
+
+  <section class="stratum" aria-labelledby="s3">
+    <span class="depth" aria-hidden="true">−{n(25)} m</span>
+    <div class="wrap">
+      <h2 id="s3">{T.s3}</h2>
+      <p class="lead">{T.l3}</p>
+      <Chooser lang={lang} />
+      <p><a href={href(lang, "/docs/transports/")}>{T.more} →</a></p>
+    </div>
+  </section>
+
+  <section class="stratum alt" aria-labelledby="s4">
+    <span class="depth" aria-hidden="true">−{n(40)} m</span>
+    <div class="wrap">
+      <h2 id="s4">{T.s4}</h2>
+      <p class="lead">{T.l4}</p>
+      <div class="frame">
+        <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span>kariz-panel · demo</span></div>
+        <iframe title={T.frameTitle} src={`${import.meta.env.BASE_URL}demo/index.html?lang=${lang}`} loading="lazy"></iframe>
+      </div>
+      <p style="margin-top:var(--sp-4)"><a class="btn" href={href(lang, "/try/")}>{T.try}</a></p>
+    </div>
+  </section>
+
+  <section class="stratum" aria-labelledby="s5">
+    <span class="depth" aria-hidden="true">−{n(60)} m</span>
+    <div class="wrap">
+      <h2 id="s5">{T.s5}</h2>
+      <p class="lead">{T.l5}</p>
+      <div class="install">
+        <div class="prose cmd" dir="ltr"><pre tabindex="0"><code>{T.cmd}</code></pre></div>
+      </div>
+      <p style="margin-top:var(--sp-5)">
+        <a class="btn primary" href={href(lang, "/docs/")}>{T.next}</a>
+        <a class="btn" href={REPO}>{T.gh}</a>
+      </p>
+    </div>
+  </section>
+</Base>
+
+<script>
+  import { startHero } from "../scripts/hero";
+  const section = document.querySelector<HTMLElement>("[data-hero]");
+  const canvas = document.querySelector<HTMLCanvasElement>("[data-hero-canvas]");
+  if (section && canvas) startHero(canvas, section, [...document.querySelectorAll<HTMLElement>("[data-fade]")]);
+</script>
