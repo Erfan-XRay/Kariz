@@ -451,7 +451,7 @@ panel_show() {
         printf '  %s             %s (self-signed: the browser warns; compare this fingerprint)\n' "$C_DIM" "$C_RESET"
     fi
     if [[ -n "$agent" ]]; then
-        printf '  %s agents      %s port %s (open it in the firewall for the servers you add)\n' "$C_TEAL" "$C_RESET" "${agent##*:}"
+        printf '  %s agents      %s port %s, TCP and UDP (open both in the firewall for the servers you add)\n' "$C_TEAL" "$C_RESET" "${agent##*:}"
     fi
     printf '  %s sign in     %s ' "$C_TEAL" "$C_RESET"
     "$PANEL_BIN" login-link -c "$PANEL_CONF" --host "$host" 2>/dev/null

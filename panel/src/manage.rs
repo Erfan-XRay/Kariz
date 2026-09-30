@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use kariz::config::{mode_name, role_name, Config, Role};
 
-use crate::wire::{CheckReply, ForwardInfo, PortOwner, Spec, TextReply};
+use crate::wire::{CheckReply, ForwardInfo, PortOwner, Spec, SpeedReply, TextReply};
 
 const PLACEHOLDER_TOKEN: &str = "0000000000000000000000000000000000000000000000000000";
 
@@ -656,37 +656,65 @@ pub fn kariz_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/usr/local/bin/kariz"))
 }
 
-pub async fn speedtest(dir: &Path, name: &str, seconds: u32, streams: u32, udp: bool) -> TextReply {
+/// Runs the tunnel's speed test through its running daemon (the control socket, as
+/// `kariz speedtest` does) and returns the numbers.
+pub async fn speedtest(
+    dir: &Path,
+    name: &str,
+    seconds: u32,
+    streams: u32,
+    udp: bool,
+) -> SpeedReply {
+    let failed = |error: String| SpeedReply {
+        ok: false,
+        error: Some(error),
+        text: String::new(),
+        report: None,
+    };
     let path = match config_path(dir, name) {
         Ok(p) => p,
-        Err(e) => return text_failed(format!("{e:#}")),
+        Err(e) => return failed(format!("{e:#}")),
     };
-    match Config::load(&path) {
-        Ok(c) if c.role == Role::Entry => {}
-        Ok(_) => return text_failed("the speed test runs on the entry side".into()),
-        Err(e) => return text_failed(format!("{e:#}")),
-    }
-    let mut args = vec![
-        "speedtest".to_owned(),
-        "-c".to_owned(),
-        path.display().to_string(),
-        "--seconds".to_owned(),
-        seconds.clamp(1, 60).to_string(),
-        "--streams".to_owned(),
-        streams.clamp(1, 16).to_string(),
-    ];
-    if !udp {
-        args.push("--no-udp".to_owned());
-    }
-    let limit = Duration::from_secs(u64::from(seconds.clamp(1, 60)) * 3 + 40);
-    match run(&kariz_binary().to_string_lossy(), &args, limit).await {
-        Ok((ok, text)) => TextReply {
-            ok,
-            error: (!ok).then(|| "the speed test failed".to_owned()),
-            text,
+    let config = match Config::load(&path) {
+        Ok(c) if c.role == Role::Entry => c,
+        Ok(_) => return failed("the speed test runs on the entry side".into()),
+        Err(e) => return failed(format!("{e:#}")),
+    };
+    let options = kariz::speedtest::Options {
+        seconds: u64::from(seconds.clamp(1, 60)),
+        streams: streams.clamp(1, 16) as usize,
+        udp,
+    };
+    let limit = Duration::from_secs(options.seconds * 3 + 40);
+    match tokio::time::timeout(limit, measure(&config, options)).await {
+        Ok(Ok(report)) => SpeedReply {
+            ok: true,
+            error: None,
+            text: String::new(),
+            report: Some(report),
         },
-        Err(e) => text_failed(format!("{e:#}")),
+        Ok(Err(e)) => failed(format!("{e:#}")),
+        Err(_) => failed("the speed test took too long".into()),
     }
+}
+
+#[cfg(unix)]
+async fn measure(
+    config: &Config,
+    options: kariz::speedtest::Options,
+) -> Result<kariz::speedtest::Report> {
+    let socket = config
+        .control_socket()
+        .context("this tunnel has no control socket")?;
+    let connection = kariz::control::connect(&socket)
+        .await
+        .context("the tunnel is not running")?;
+    Ok(kariz::control::request(connection, options, |_: &str| {}).await?)
+}
+
+#[cfg(not(unix))]
+async fn measure(_: &Config, _: kariz::speedtest::Options) -> Result<kariz::speedtest::Report> {
+    bail!("the speed test needs a Linux server")
 }
 
 #[cfg(test)]

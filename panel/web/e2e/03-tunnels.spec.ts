@@ -151,6 +151,9 @@ test.describe("the tunnel", () => {
     expect(await echoes(front, "after starting again")).toBe(true);
 
     await page.getByRole("button", { name: "Delete" }).click();
+    // deleting waits for the tunnel's name to be typed
+    await expect(page.locator(".dialog .btn-danger")).toBeDisabled();
+    await page.locator("#run-confirm").fill("demo");
     await page.locator(".dialog .btn-danger").click();
     await expect(page.locator(".dialog p.ok")).toContainText(/Done/i, { timeout: 60_000 });
     await closeDialog(page);

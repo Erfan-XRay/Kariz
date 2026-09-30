@@ -36,6 +36,41 @@ export interface TunnelInfo {
   rate_mbps: number | null;
 }
 
+export interface Latency {
+  sent: number;
+  received: number;
+  p50_ms: number;
+  p99_ms: number;
+  jitter_ms: number;
+}
+
+export interface Rate {
+  mbps: number;
+  peak_mbps: number;
+  bytes: number;
+}
+
+/** What a speed test measured (`kariz::speedtest::Report`). */
+export interface SpeedReport {
+  seconds: number;
+  streams: number;
+  idle: Latency;
+  download: Rate;
+  download_latency: Latency;
+  upload: Rate;
+  upload_latency: Latency;
+  udp: Latency | null;
+  notes: string[];
+}
+
+/** A speed test's answer; an older agent sends only `text`. */
+export interface SpeedResult {
+  ok: boolean;
+  error: string | null;
+  text: string;
+  report?: SpeedReport | null;
+}
+
 export interface ServerInfo {
   id: string;
   name: string;
@@ -47,6 +82,8 @@ export interface ServerInfo {
   /** The address other servers reach it at (private networks), if set. */
   addr: string | null;
   seen_secs: number | null;
+  /** The transport its agent's link uses now (tcpmux or kcp). */
+  link?: string | null;
   health: Health | null;
   tunnels: TunnelInfo[];
 }
@@ -248,7 +285,7 @@ export const api = {
   events: (limit = 100) => call<{ events: EventRow[] }>("GET", `events?limit=${limit}`),
   logs: (name: string, lines = 200) => call<{ lines: LogLine[] }>("GET", `logs?name=${encodeURIComponent(name)}&lines=${lines}`),
   speedtest: (name: string, seconds: number, streams: number, udp: boolean) =>
-    call<{ ok: boolean; error: string | null; text: string }>("POST", "tunnels/speedtest", { name, seconds, streams, udp }),
+    call<SpeedResult>("POST", "tunnels/speedtest", { name, seconds, streams, udp }),
   backup: (passphrase: string) => call<{ data: string }>("POST", "backup", { passphrase }),
   restore: (passphrase: string, data: string, replace: boolean) => call<{ servers: number; restart: boolean }>("POST", "restore", { passphrase, data, replace }),
   networks: () => call<{ networks: Network[]; links: Link[] }>("GET", "networks"),
