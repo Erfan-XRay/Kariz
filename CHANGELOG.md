@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 - 2026-09-30
+
+The panel has a new look, servers can join over IPv6 or with a transport you choose (now also
+`wss`), and signing in with a link no longer flashes the form.
 
 ### Added
 
