@@ -14,7 +14,31 @@
   certificate works. *Auto* now tries `tcpmux`, `kcp`, then `wss`. Open TCP on the agents
   port + 1 for it.
 
+### Changed
+
+- **The panel has a new look.** Cards on a calmer page, a sidebar with names next to the
+  icons, and a top bar that says whether the panel is answering (and a notice when it stops,
+  with the last numbers kept). The map page is now an overview: the key numbers with a line
+  of the last minutes' throughput, the map, the tunnels with their rate, a *Needs attention*
+  list (broken tunnels, offline servers, a busy CPU, servers behind on the version) and each
+  server's load. Servers are cards with their CPU, memory, network, uptime and link;
+  Settings has a list of its sections. Pages show placeholders while the first numbers come,
+  and say what to do when they are empty.
+- The address follows the page (`#/tunnels/main`): Back works, and a reload stays where it
+  was. **Ctrl+K** also opens a tunnel by its name. Clicking a tunnel on the map opens it.
+- Signing in has tabs for the password and the one-time link, warns about Caps Lock, and
+  keeps the form in place while it checks.
+
 ### Fixed
+
+- Opening a one-time link showed the sign-in form for a moment, with the "no password yet"
+  hint in red as if something had failed, before the dashboard. The link now signs in on
+  the loading screen, and the form appears only if the link is refused.
+- The rate on the map's channels stayed at its first value (and so did a tunnel's state and
+  its flow of particles) until the window was resized; it now follows every reading.
+- The CPU and memory figures of the servers had no labels (two style rules clashed), a
+  chart's hover picked the mirrored point in Persian, and a dialog opened during the page's
+  entrance could be cut off.
 
 - An agent drops a link on which the panel has asked nothing for 20 s (it asks every 2 s),
   so a stalled TCP path is given up and KCP tried in about 40 s. 1.2.0 waited for the

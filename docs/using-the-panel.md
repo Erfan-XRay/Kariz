@@ -46,8 +46,14 @@ step failed and why. You cannot end with half a tunnel.
 
 ## 4. See what is happening
 
-- **Map:** each server is a well; each tunnel is a channel. Flowing water is traffic, a dashed
-  empty channel is a stopped tunnel, a red pulse is a broken one. Hover for details.
+- **Map:** the overview. The key numbers (throughput, with a line of the last minutes),
+  then the map: each server is a well; each tunnel is a channel, with its name and its rate
+  now. Flowing water is traffic, a dashed empty channel is a stopped tunnel, a red pulse is a
+  broken one. Hover for details, click a tunnel to open it. Under the map: the tunnels,
+  **Needs attention** (a broken tunnel, an offline server, a busy CPU, servers behind on the
+  version, each with a button to go there) and every server's load.
+- **The top bar** says *Live* while the panel answers. If it stops answering, a notice says
+  so and the page keeps the last numbers until it is back.
 - **Tunnels:** click a row. You see both sides, live charts of throughput and round trip (1 hour to
   30 days), and the ports it forwards with their traffic.
 - **Logs:** pick a tunnel and read both sides interleaved by time. Filter by level or text.
@@ -83,7 +89,9 @@ checked, and put back if it does not come up). The panel never updates by itself
 
 ## Handy things
 
-- **Ctrl+K** opens a search for pages and commands.
+- **Ctrl+K** opens a search for pages, commands and tunnels (type a tunnel's name to open it).
+- The address follows the page, so the browser's Back button works and a bookmark opens the
+  same page.
 - The top bar switches **Persian / English**, **Night / Dawn**, and a **low-power** mode that
   stops the animation (also on when your browser asks for less motion).
 - Everything works on a phone.
