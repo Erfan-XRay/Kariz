@@ -93,7 +93,7 @@ impl Link {
     }
 }
 
-/// The datagram path beside a KCP link (docs/PHASE6.md, sections 2 and 3): mux frames
+/// The datagram path beside a KCP link: mux frames
 /// sealed with keys from the handshake and sent as KCP datagrams, unreliably.
 pub struct DatagramPath {
     kcp: KcpDatagrams,
@@ -693,7 +693,7 @@ mod tests {
         assert!(answer.starts_with("HTTP/1.1 404 Not Found\r\n"), "{answer}");
     }
 
-    /// Mux sessions over a KCP link and its datagram path (docs/PHASE6.md, section 2).
+    /// Mux sessions over a KCP link and its datagram path.
     #[cfg(feature = "kcp")]
     mod datagram_path {
         use super::*;

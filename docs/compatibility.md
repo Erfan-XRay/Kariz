@@ -13,7 +13,7 @@ This page says what "works" covers, and what is left free.
 | **Tunnel configuration** (`/etc/kariz/*.toml`) | A config that is valid for 1.0 is valid for every 1.x, and means the same. New settings are optional and have defaults that keep today's behaviour. A setting is renamed only by keeping the old name working (as `throughput` still works for `ultraspeed`), and removed only in 2.0, after `kariz check` has warned about it for at least one release. |
 | **The tunnel protocol** (handshake, records, mux, transports) | Any 1.x entry works with any 1.x exit, in either direction, on every transport. A new feature that needs both sides (a new transport, a new option of the wire) is used only when both sides have it. |
 | **The status document** (`kariz status --json`, the control socket) | `status_version` stays `1`: fields are only added, never renamed or removed. Read it by name and ignore what you do not know. |
-| **`kariz-manager`** | Its commands and options keep their names and meanings; the menu may change. The configs and services it makes (`/etc/kariz/NAME.toml`, `kariz@NAME`, `kariz-panel`, `kariz-agent`) keep their names and places. |
+| **`kariz-manager`** | Its commands (`install`, `update`, `uninstall`, `panel ...`, `agent ...`, `--agent`) and options keep their names and meanings; the menu may change. Tunnels are made in the web panel, not in the manager. The configs and services it makes (`/etc/kariz/NAME.toml`, `kariz@NAME`, `kariz-panel`, `kariz-agent`) keep their names and places. |
 | **The panel and its agents** | An agent of any 1.x connects to a panel of any 1.x. What a panel asks that an older agent does not know is answered with "unknown request", and the panel shows that server as needing an update (which the panel can then do: every 1.x agent can update itself). The panel's own database is migrated forward by each version, so a newer panel opens an older database. |
 | **Releases** | Archives keep their names (`kariz-vX.Y.Z-ARCH-linux.tar.gz`), their checksum file and their signature, and the release key stays the same for all of 1.x. |
 
@@ -21,7 +21,7 @@ This page says what "works" covers, and what is left free.
 
 - **The panel's HTTP API** (`/api/...`) is not a public interface: the web app and the panel are
   released together and the API changes with them. Do not build tools on it. (If you need to
-  automate, use `kariz-manager` and the tunnel configs, which are stable.)
+  automate, use the tunnel configs, which are stable.)
 - **Going back.** A newer panel migrates its database forward; an older one cannot read it. To go
   back, restore a backup made before updating.
 - **Log lines and messages** are for people and change without notice. The status document and

@@ -2,7 +2,7 @@
 
 [English](../troubleshooting.md) · **فارسی**
 
-روی هر دو سمت با `kariz check -c /etc/kariz/config.toml` شروع کنید: فایل را بررسی می‌کند، مقدارهای مؤثر را چاپ می‌کند و هشدارها را می‌گوید. روی تانلِ در حال اجرا، `kariz status -c ...` می‌گوید سمت دیگر وصل هست یا نه و اگر نه، آخرین خطا چه بوده ([Status](../status.md)). بعد لاگ‌ها را بخوانید:
+روی هر دو سمت با `kariz check -c /etc/kariz/config.toml` شروع کنید: فایل را بررسی می‌کند، مقدارهای مؤثر را چاپ می‌کند و هشدارها را می‌گوید. روی تانلِ در حال اجرا، `kariz status -c ...` می‌گوید سمت دیگر وصل هست یا نه و اگر نه، آخرین خطا چه بوده ([Status](status.md)). بعد لاگ‌ها را بخوانید:
 
 ```bash
 journalctl -u kariz -f                      # with systemd
@@ -34,9 +34,9 @@ RUST_LOG=kariz=debug kariz run -c ...       # more detail
 
 - **روی مسیر پرافت** ترنسپورت‌های مبتنی بر TCP فرو می‌ریزند؛ `kcp` یا `quic` با `congestion = "bbr"` را امتحان کنید.
 - **روی مسیر تمیز** یک stream در هر رفت‌وبرگشت به یک window محدود است: `profile = "ultraspeed"` بگذارید یا `tunnel.mux.stream_window` را بالا ببرید.
-- [Performance](../performance.md#tuning-for-speed) را ببینید (انگلیسی).
+- [Performance](performance.md#تنظیم-برای-سرعت) را ببینید (انگلیسی).
 
-**بازی زیر بار لگ می‌کند.** روی هر دو سمت `profile = "gaming"` و `kcp` بگذارید. ترنسپورت‌های مبتنی بر TCP بستهٔ بازی را منتظر هر segmentِ گم‌شده نگه می‌دارند. [UDP و بازی](../udp-and-games.md) (انگلیسی) را ببینید.
+**بازی زیر بار لگ می‌کند.** روی هر دو سمت `profile = "gaming"` و `kcp` بگذارید. ترنسپورت‌های مبتنی بر TCP بستهٔ بازی را منتظر هر segmentِ گم‌شده نگه می‌دارند. [UDP و بازی](udp-and-games.md) را ببینید.
 
 **پشت CDN، اتصال‌ها بعد از حدود ۱۰۰ ثانیه بی‌کاری قطع می‌شوند.** `tunnel.mux.ping_interval_secs` (یا `tuning.keepalive_secs`) را ۹۰ یا کمتر نگه دارید.
 

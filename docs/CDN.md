@@ -3,9 +3,8 @@
 A CDN hides the tunnel server behind the CDN's own IP addresses. The DPI only sees a
 TLS connection to a CDN edge, with the SNI of an ordinary website, carrying a
 WebSocket. This page covers Cloudflare (tested first) and has notes for ArvanCloud.
-The manual checklist at the end is the acceptance test for step 2.6 of
-[PHASE2.md](PHASE2.md): nginx stands in for the CDN in CI, but a real CDN has to be
-checked by hand.
+The manual checklist at the end is the acceptance test: nginx stands in for the CDN in CI,
+but a real CDN has to be checked by hand.
 
 ## Which side sits behind the CDN
 

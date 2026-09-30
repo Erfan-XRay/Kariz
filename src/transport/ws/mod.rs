@@ -10,8 +10,6 @@
 //! * [`WsReader`] / [`WsWriter`]: binary frames in both directions, as independent
 //!   halves. Pings are answered, a close frame reads as end of stream, and shutting the
 //!   writer down sends a close frame.
-//!
-//! See `docs/PHASE2.md`, section 6.
 
 pub mod frame;
 pub mod upgrade;

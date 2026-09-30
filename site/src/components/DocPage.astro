@@ -16,7 +16,7 @@ const translated = await hasTranslation(slug, lang);
 const { prev, next } = await neighbours(slug);
 const title = h1(doc.entry.body) || slug;
 const source =
-  slug === "changelog"
+  slug === "changelog" && doc.written === "en"
     ? "CHANGELOG.md"
     : `docs/${doc.written === "fa" ? "fa/" : ""}${doc.entry.filePath?.split("/").pop() ?? `${slug}.md`}`;
 // A page written in English inside the Persian site stays left to right.
@@ -25,7 +25,7 @@ const pageLang = doc.written;
 ---
 
 <DocsShell lang={lang} title={title} description={summary(doc.entry.body)} path={`/docs/${slug}/`} slug={slug} headings={headings}>
-  <article class="prose" data-pagefind-body data-pagefind-weight={/^phase\d+$/.test(slug) ? "0.2" : undefined} dir={pageDir} lang={pageLang}>
+  <article class="prose" data-pagefind-body data-pagefind-weight={slug === "changelog" || slug === "roadmap" ? "0.3" : undefined} dir={pageDir} lang={pageLang}>
     {!translated && <p class="notice" dir={dirOf(lang)} lang={lang} data-pagefind-ignore>{t.notTranslated}</p>}
     <Content />
     <p data-pagefind-ignore><a class="edit" href={`${REPO}/edit/main/${source}`}>{t.editOnGithub}</a></p>

@@ -102,82 +102,30 @@ class Session:
 def main():
     s = Session(sys.argv[1:] or ["kariz-manager"])
 
-    # 2: a new tunnel through the wizard, with a few wrong answers on the way.
+    # A wrong number is said so, and the menu stays.
+    s.expect(MENU)
+    s.answer("Choose", "9")
+    s.expect("Choose 0-3")
+
+    # 2: the web panel's submenu, a numbered choice by name: its status.
     s.expect(MENU)
     s.answer("Choose", "2")
-    s.answer("Name for this tunnel", "tty")
-    s.pick("This server is the", "1")
-    s.pick("Who connects to whom", "reverse")
-    s.pick("Transport", "9")
-    s.answer("Type a number from 1 to", "tcpmux")
-    s.pick("Profile", "")
-    s.answer("Port for the tunnel", "99999")
-    s.expect("A port is a number")
-    s.send("3091")
-    which, _ = s.expect_any("Accept the other server over", "Address the other server connects to")
-    if which.startswith("Accept"):
-        s.answer("Choose", "")
-        s.expect("Address the other server connects to")
-    s.answer("Choose", "other")
-    s.answer("This server's address", "2001:db8::1")
-    s.pick("Token", "")
-    s.pick("Protocol", "tcp")
-    s.answer("Target host", "")
-    s.answer("Ports", "443x")
-    s.expect("is not a port")
-    s.send("18084,18085-18086=18081")
-    s.expect("3 port(s) added")
-    s.answer("Add more ports", "y")
-    s.pick("Protocol", "udp")
-    s.answer("Target host", "::1")
-    s.answer("Ports", "18087")
-    s.expect("1 port(s) added")
-    s.answer("Add more ports", "")
-    s.expect("Summary")
-    s.expect("[2001:db8::1]:3091")
-    s.answer("Create this tunnel", "")
-    s.expect("Tunnel 'tty' is running")
-    s.expect("--remote [2001:db8::1]:3091")
-    s.answer("Enter: back to the menu", "")
+    s.pick("Web panel", "status")
+    s.expect("Enter: back to the menu")
+    s.send("")
 
-    # Ctrl+C in the middle of the wizard: straight back to the menu, nothing written.
+    # Ctrl+C inside the submenu: straight back to the menu, no Enter in between.
     s.expect(MENU)
     s.answer("Choose", "2")
-    s.answer("Name for this tunnel", "cancelled")
-    s.expect("This server is the")
-    s.ctrl_c()
-    s.back_in_menu()
-    if os.path.exists("/etc/kariz/cancelled.toml"):
-        s.fail("the cancelled wizard wrote a tunnel")
-
-    # 4: pick the tunnel by its number, restart it.
-    s.answer("Choose", "4")
-    listing = s.expect("Tunnel (number or name)")
-    number = re.search(r"(\d+)\) tty\s", listing)
-    if not number:
-        s.fail("the tunnel 'tty' is not in the list")
-    s.send(number.group(1))
-    s.pick("Action", "restart")
-    s.expect("Restarted 'tty'")
-    s.answer("Enter: back to the menu", "")
-
-    # 5: follow the log, leave it with Ctrl+C, and land back in the menu at once.
-    s.expect(MENU)
-    s.answer("Choose", "5")
-    s.answer("Tunnel (number or name)", "tty")
-    s.expect("Ctrl+C to stop following the log")
+    s.expect("Web panel")
     s.ctrl_c()
     s.back_in_menu()
 
-    # 8: remove it, confirming by hand.
-    s.answer("Choose", "8")
-    s.answer("Tunnel (number or name)", "tty")
-    s.answer("Remove tunnel 'tty'", "y")
-    s.expect("Removed 'tty'")
-    s.answer("Enter: back to the menu", "")
+    # The old tunnel entries are gone: tunnels are made in the panel.
+    if b"New tunnel" in s.seen:
+        s.fail("the menu still offers tunnels")
 
     # Ctrl+C at the menu itself leaves the manager.
-    s.expect(MENU)
     s.expect("Choose")
     s.ctrl_c()
     code = s.wait()

@@ -101,18 +101,14 @@ export interface Section {
   pages: string[];
 }
 
-/** The map of the docs (PHASE16 §3). A slug is the file name of a page in `docs/`, lower case. */
+/** The map of the docs. A slug is the file name of a page in `docs/`, lower case. */
 export const SECTIONS: Section[] = [
-  { id: "start", title: { en: "Get started", fa: "شروع کار" }, pages: ["getting-started", "manager", "panel"] },
+  { id: "start", title: { en: "Get started", fa: "شروع کار" }, pages: ["getting-started", "using-the-panel", "tour", "manager", "panel"] },
   { id: "concepts", title: { en: "Concepts", fa: "مفاهیم" }, pages: ["how-it-works", "transports", "profiles", "udp-and-games", "cdn"] },
   { id: "guides", title: { en: "Guides", fa: "راهنماها" }, pages: ["networks", "troubleshooting", "speedtest", "performance"] },
   { id: "reference", title: { en: "Reference", fa: "مرجع" }, pages: ["configuration", "status", "compatibility", "accessibility"] },
   { id: "security", title: { en: "Security", fa: "امنیت" }, pages: ["security", "security-review"] },
-  {
-    id: "project",
-    title: { en: "Project", fa: "پروژه" },
-    pages: ["changelog", "roadmap", "phase2", "phase3", "phase4", "phase6", "phase8", "phase9", "phase10", "phase11", "phase12", "phase13", "phase14", "phase15", "phase16"],
-  },
+  { id: "project", title: { en: "Project", fa: "پروژه" }, pages: ["changelog", "roadmap"] },
 ];
 
 /** Short names for the sidebar; a page not listed uses its own heading. */
@@ -120,6 +116,8 @@ export const LABELS: Record<string, Record<Lang, string>> = {
   "getting-started": { en: "Getting started", fa: "شروع کار" },
   manager: { en: "The manager script", fa: "اسکریپت مدیر" },
   panel: { en: "The web panel", fa: "پنل وب" },
+  "using-the-panel": { en: "Using the panel", fa: "کار با پنل" },
+  tour: { en: "Guided tour", fa: "تور راهنما" },
   "how-it-works": { en: "How it works", fa: "چطور کار می‌کند" },
   transports: { en: "Transports", fa: "ترنسپورت‌ها" },
   profiles: { en: "Profiles", fa: "پروفایل‌ها" },
@@ -136,16 +134,11 @@ export const LABELS: Record<string, Record<Lang, string>> = {
   security: { en: "Security", fa: "امنیت" },
   "security-review": { en: "Security review", fa: "بازبینی امنیتی" },
   changelog: { en: "Changelog", fa: "تغییرات" },
-  roadmap: { en: "Roadmap", fa: "نقشهٔ راه" },
+  roadmap: { en: "Design and protocol", fa: "طراحی و پروتکل" },
 };
 
 /** Pages made by the site itself (not a file of docs/): they exist in both languages. */
-export const OWN_PAGES = new Set(["how-it-works"]);
-
-export const phaseLabel = (slug: string, lang: Lang) => {
-  const n = slug.replace("phase", "");
-  return lang === "fa" ? `فاز ${num(lang, n)}` : `Phase ${n}`;
-};
+export const OWN_PAGES = new Set(["how-it-works", "tour"]);
 
 export const sectionOf = (slug: string) => SECTIONS.find((s) => s.pages.includes(slug));
 

@@ -92,6 +92,9 @@ img, svg, canvas { max-width: 100%; }
 .crumbs { font-size: var(--fs-sm); color: var(--text-3); margin-bottom: var(--sp-3); }
 .crumbs a { color: var(--text-3); }
 
+.docs.wide { grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 821px) { .docs.wide .side { display: none; } }
+
 /* ---- Prose ---- */
 .prose { min-width: 0; max-width: 78ch; }
 .prose > :first-child { margin-top: 0; }

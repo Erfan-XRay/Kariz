@@ -1,4 +1,4 @@
-//! The Kariz web panel (docs/PHASE11.md).
+//! The Kariz web panel.
 
 pub mod agent;
 pub mod agent_update;

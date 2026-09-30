@@ -1,5 +1,5 @@
 //! Sign-in: the admin password, one-time login links, sessions and the lockout after
-//! failed tries (docs/PHASE11.md, section 3).
+//! failed tries.
 //!
 //! Everything here takes `now` (unix seconds) so tests can move time, and returns plain
 //! values; the HTTP side is in `api.rs`.

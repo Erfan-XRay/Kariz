@@ -1,6 +1,5 @@
 //! A backup of the panel: the servers it knows (with the keys they prove themselves with)
-//! and the link token they dial with, in one file locked with a passphrase
-//! (docs/PHASE12.md, section 5).
+//! and the link token they dial with, in one file locked with a passphrase.
 //!
 //! Tunnels are not in it: they live on the servers, in their own files, and the panel
 //! reads them from there. Sessions and login links are not in it either.
