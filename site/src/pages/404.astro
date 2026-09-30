@@ -1,0 +1,13 @@
+---
+import Base from "../layouts/Base.astro";
+import { href, ui } from "../lib/site";
+const t = ui.en;
+---
+
+<Base lang="en" title={t.notFound} path="/" hasOther={false}>
+  <div class="wrap" style="padding-block:var(--sp-8)">
+    <h1>{t.notFound}</h1>
+    <p style="color:var(--text-2)">{t.notFoundText}</p>
+    <p><a class="btn primary" href={href("en", "/docs/")}>{t.docs}</a> <a class="btn" href={href("en")}>{t.backHome}</a></p>
+  </div>
+</Base>

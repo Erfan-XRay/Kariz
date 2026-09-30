@@ -1,0 +1,12 @@
+---
+import DocPage from "../../components/DocPage.astro";
+import { OWN_PAGES } from "../../lib/site";
+import { slugs } from "../../lib/docs";
+
+export async function getStaticPaths() {
+  return (await slugs()).filter((s) => !OWN_PAGES.has(s)).map((slug) => ({ params: { slug } }));
+}
+const { slug } = Astro.params;
+---
+
+<DocPage lang="en" slug={slug!} />

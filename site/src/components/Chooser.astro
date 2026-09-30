@@ -1,0 +1,122 @@
+---
+// Which transport to pick: the flow chart of docs/transports.md as a few questions.
+import type { Lang } from "../lib/site";
+
+const { lang } = Astro.props as { lang: Lang };
+const T = {
+  en: {
+    q: {
+      cdn: "Is there a CDN or reverse proxy between the two servers?",
+      udp: "Does UDP reach the other server reliably?",
+      lossy: "Is the path long or lossy (international, throttled)?",
+      games: "Is it for games or voice?",
+      https: "Should it look like an HTTPS site?",
+    },
+    yes: "Yes",
+    no: "No",
+    unsure: "No, or not sure",
+    pick: "Use",
+    conf: "In the config",
+    v: {
+      cdn: ["wss", "A CDN only carries HTTP, so the tunnel rides a WebSocket. Use `ws` if the CDN talks plain HTTP to your server.", "Through a CDN or reverse proxy"],
+      "udp-games": ["kcp", "Games and voice want low, steady latency on a path where UDP works. FEC rebuilds lost packets without a resend.", "UDP works, for games or voice"],
+      "udp-lossy": ["kcp", "TCP halves its rate on every loss; KCP keeps its speed. `quic` with BBR is the other choice.", "UDP works, the path is lossy"],
+      "udp-clean": ["tcpmux", "The fastest choice on a clean path: a few long-lived connections carry every user. `quic` also fits.", "UDP works, the path is clean"],
+      "noudp-https": ["wss", "The tunnel looks like a browser talking to an HTTPS site; anything else gets a stock 404.", "No UDP, and it should look like HTTPS"],
+      "noudp-games": ["tcpmux", "UDP is not an option, so tcpmux with the gaming profile is the next best for latency.", "No UDP, for games or voice"],
+      noudp: ["tcpmux", "Fewer connections between the servers, all user connections over a few long-lived ones.", "No UDP, a plain path"],
+    },
+    note: "Same on both sides: the transport is one line, and it must match.",
+  },
+  fa: {
+    q: {
+      cdn: "بین دو سرور CDN یا reverse proxy هست؟",
+      udp: "UDP به‌طور قابل‌اعتماد به سرور دیگر می‌رسد؟",
+      lossy: "مسیر طولانی یا پرتلفات است (بین‌المللی، محدودشده)؟",
+      games: "برای بازی یا صدا است؟",
+      https: "باید شبیه یک سایت HTTPS باشد؟",
+    },
+    yes: "بله",
+    no: "نه",
+    unsure: "نه، یا مطمئن نیستم",
+    pick: "استفاده کنید از",
+    conf: "در کانفیگ",
+    v: {
+      cdn: ["wss", "CDN فقط HTTP می‌برد، پس تانل روی WebSocket سوار می‌شود. اگر CDN با سرور شما ساده HTTP حرف می‌زند، `ws` را بگذارید.", "از پشت CDN یا reverse proxy"],
+      "udp-games": ["kcp", "بازی و صدا تأخیر کم و پایدار می‌خواهند و UDP کار می‌کند. FEC بسته‌های گم‌شده را بدون ارسال دوباره می‌سازد.", "UDP کار می‌کند، برای بازی یا صدا"],
+      "udp-lossy": ["kcp", "TCP با هر اتلاف سرعتش را نصف می‌کند؛ KCP سرعتش را نگه می‌دارد. گزینهٔ دیگر `quic` با BBR است.", "UDP کار می‌کند، مسیر پرتلفات است"],
+      "udp-clean": ["tcpmux", "سریع‌ترین انتخاب روی مسیر تمیز: چند اتصال بلندمدت همهٔ کاربرها را می‌برند. `quic` هم می‌خورد.", "UDP کار می‌کند، مسیر تمیز است"],
+      "noudp-https": ["wss", "تانل مثل مرورگری به نظر می‌رسد که با یک سایت HTTPS حرف می‌زند؛ هر چیز دیگر یک ۴۰۴ معمولی می‌گیرد.", "بدون UDP، و باید شبیه HTTPS باشد"],
+      "noudp-games": ["tcpmux", "UDP گزینه نیست، پس tcpmux با پروفایل gaming بهترین گزینهٔ بعدی برای تأخیر است.", "بدون UDP، برای بازی یا صدا"],
+      noudp: ["tcpmux", "اتصال کمتر بین دو سرور؛ همهٔ اتصال‌های کاربرها روی چند اتصال بلندمدت.", "بدون UDP، مسیر ساده"],
+    },
+    note: "روی هر دو طرف یکسان: ترنسپورت یک خط است و باید یکی باشد.",
+  },
+}[lang];
+const keys = Object.keys(T.v) as (keyof typeof T.v)[];
+const snippet = (k: string, transport: string) =>
+  k === "udp-games" || k === "noudp-games" ? `profile = "gaming"\n\n[tunnel]\ntransport = "${transport}"` : `[tunnel]\ntransport = "${transport}"`;
+const q = (name: keyof typeof T.q, opts: [string, string][], checked: string) => ({ name, text: T.q[name], opts, checked });
+const questions = [
+  q("cdn", [["yes", T.yes], ["no", T.no]], "no"),
+  q("udp", [["yes", T.yes], ["no", T.unsure]], "yes"),
+  q("lossy", [["yes", T.yes], ["no", T.no]], "yes"),
+  q("games", [["yes", T.yes], ["no", T.no]], "no"),
+  q("https", [["yes", T.yes], ["no", T.no]], "no"),
+];
+---
+
+<div class="diagram chooser" data-chooser>
+  {questions.map((qq) => (
+    <fieldset data-q={qq.name}>
+      <legend>{qq.text}</legend>
+      <div class="opts">
+        {qq.opts.map(([val, label]) => (
+          <label><input type="radio" name={`ch-${qq.name}`} value={val} checked={val === qq.checked} />{label}</label>
+        ))}
+      </div>
+    </fieldset>
+  ))}
+  <div aria-live="polite">
+    {keys.map((k) => (
+      <div class="verdict" data-key={k}>
+        <small>{T.v[k][2]}</small>
+        <p style="margin:2px 0 8px;color:var(--text)">{T.pick} <code>{T.v[k][0]}</code></p>
+        <p>{T.v[k][1].split("`").map((part, i) => (i % 2 ? <code class="vc">{part}</code> : part))}</p>
+        <pre class="snippet" dir="ltr"><code>{snippet(k, T.v[k][0])}</code></pre>
+      </div>
+    ))}
+  </div>
+  <p style="margin:0;color:var(--text-3);font-size:var(--fs-sm)">{T.note}</p>
+</div>
+
+<style>
+  .vc { background: transparent; border: 0; padding: 0; color: var(--text); font-weight: 600; font-size: inherit; }
+  .verdict small { color: var(--text-3); font-size: var(--fs-xs); }
+  .snippet { margin: 10px 0 0; padding: 10px 12px; background: var(--earth); border: 1px solid var(--line); border-radius: var(--r-2); font-family: var(--font-mono); font-size: var(--fs-sm); overflow-x: auto; text-align: left; color: var(--text); }
+  .snippet code { background: none; border: 0; padding: 0; color: inherit; font-size: inherit; }
+</style>
+
+<script>
+  document.querySelectorAll<HTMLElement>("[data-chooser]").forEach((box) => {
+    const val = (n: string) => box.querySelector<HTMLInputElement>(`input[name="ch-${n}"]:checked`)?.value;
+    const fs = (n: string) => box.querySelector<HTMLFieldSetElement>(`[data-q="${n}"]`)!;
+    const update = () => {
+      const cdn = val("cdn") === "yes";
+      const udp = val("udp") === "yes";
+      const lossy = val("lossy") === "yes";
+      const games = val("games") === "yes";
+      const https = val("https") === "yes";
+      // A question that does not change the answer is set aside, not hidden.
+      fs("udp").disabled = cdn;
+      fs("lossy").disabled = cdn || !udp;
+      fs("games").disabled = cdn;
+      fs("https").disabled = cdn || udp;
+      for (const n of ["udp", "lossy", "games", "https"]) fs(n).style.opacity = fs(n).disabled ? "0.45" : "1";
+      const key = cdn ? "cdn" : udp ? (games ? "udp-games" : lossy ? "udp-lossy" : "udp-clean") : https ? "noudp-https" : games ? "noudp-games" : "noudp";
+      box.querySelectorAll<HTMLElement>("[data-key]").forEach((v) => (v.hidden = v.dataset.key !== key));
+    };
+    box.addEventListener("change", update);
+    update();
+  });
+</script>

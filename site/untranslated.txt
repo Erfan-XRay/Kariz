@@ -1,0 +1,27 @@
+# English pages of docs/ that have no Persian version yet.
+# scripts/check-translations.mjs keeps this list true.
+accessibility
+cdn
+compatibility
+configuration
+performance
+phase10
+phase11
+phase12
+phase13
+phase14
+phase15
+phase16
+phase2
+phase3
+phase4
+phase6
+phase8
+phase9
+profiles
+roadmap
+security-review
+speedtest
+status
+transports
+udp-and-games

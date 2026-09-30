@@ -1,0 +1,20 @@
+---
+import { BASE, REPO, VERSION, href, num, ui } from "../lib/site";
+import type { Lang } from "../lib/site";
+
+const { lang } = Astro.props as { lang: Lang };
+const t = ui[lang];
+---
+
+<footer class="foot">
+  <div class="wrap">
+    <p>{t.footer} · {t.version} {num(lang, VERSION)}</p>
+    <ul>
+      <li><a href={href(lang, "/docs/")}>{t.docs}</a></li>
+      <li><a href={href(lang, "/try/")}>{t.tryPanel}</a></li>
+      <li><a href={`${REPO}/releases`}>Releases</a></li>
+      <li><a href={REPO}>{t.github}</a></li>
+      <li><a href={`${BASE}/sitemap-index.xml`}>Sitemap</a></li>
+    </ul>
+  </div>
+</footer>

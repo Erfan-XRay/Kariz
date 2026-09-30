@@ -1,0 +1,20 @@
+---
+import Base from "../layouts/Base.astro";
+import { href, ui } from "../lib/site";
+import type { Lang } from "../lib/site";
+
+const { lang } = Astro.props as { lang: Lang };
+const t = ui[lang];
+const src = `${import.meta.env.BASE_URL}demo/index.html?lang=${lang}`;
+---
+
+<Base lang={lang} title={t.demoTitle} description={t.demoLead} path="/try/" current="try">
+  <div class="wrap demo-page">
+    <h1>{t.demoTitle}</h1>
+    <p style="color:var(--text-2);max-width:66ch">{t.demoLead} <a href={src}>{t.demoOpen}</a> · <a href={href(lang, "/docs/panel/")}>{lang === "fa" ? "مستندات پنل" : "Panel docs"}</a></p>
+    <div class="frame">
+      <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span>kariz-panel · demo · {t.demoNote}</span></div>
+      <iframe title={t.demoTitle} src={src}></iframe>
+    </div>
+  </div>
+</Base>
