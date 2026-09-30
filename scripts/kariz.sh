@@ -630,20 +630,24 @@ ensure_certbot() {
         fi
     done
     info "This needs certbot $CERTBOT_MIN or later; installing it in $CERTBOT_VENV (python, pip)."
-    if ! command -v python3 >/dev/null || ! python3 -c 'import venv, ensurepip' 2>/dev/null; then
+    # Try first: many systems have python with venv already. Where the venv module is a
+    # separate package (Debian, Ubuntu), the failure is what tells us so.
+    if ! { command -v python3 >/dev/null && rm -rf "$CERTBOT_VENV" && python3 -m venv "$CERTBOT_VENV"; }; then
+        info "Installing python with venv and pip."
         if command -v apt-get >/dev/null; then
-            apt-get install -y python3 python3-venv
+            apt-get install -y python3 python3-venv python3-pip
         elif command -v dnf >/dev/null; then
-            dnf install -y python3
+            dnf install -y python3 python3-pip
         elif command -v yum >/dev/null; then
-            yum install -y python3
+            yum install -y python3 python3-pip
         elif command -v apk >/dev/null; then
-            apk add python3
+            apk add python3 py3-pip
         else
             die "Install python3 (with venv) yourself, then run this again."
         fi
+        rm -rf "$CERTBOT_VENV"
+        python3 -m venv "$CERTBOT_VENV" || die "Could not make a python virtualenv in $CERTBOT_VENV (see above)."
     fi
-    python3 -m venv "$CERTBOT_VENV" || die "Could not make a python virtualenv in $CERTBOT_VENV."
     "$CERTBOT_VENV/bin/pip" install --quiet --upgrade pip certbot ||
         die "pip could not install certbot."
     certbot_ok "$CERTBOT_VENV/bin/certbot" ||
