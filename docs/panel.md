@@ -94,7 +94,7 @@ panel within seconds.
   *Auto*, an agent tries them in that order, moves on after two links in a row that carry no
   requests (it drops a link the panel has been quiet on for 20 s), and remembers the one
   that worked in `/etc/kariz-panel/link-transport`. Pick *TCP*, *KCP* or *WSS* instead to
-  make the code use only that one (the agent must be 1.3 or newer). *Servers* shows which
+  make the code use only that one (the agent must be 1.4 or newer). *Servers* shows which
   one each server uses.
 - **A code works once**, for 10 minutes. It carries a token, so keep it as secret as a
   password until it is used.
