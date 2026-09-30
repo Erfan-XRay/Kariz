@@ -671,8 +671,9 @@ EOF
             *) warn "Choose 0-3." ;;
         esac
         # Wait for Enter before the menu hides what the action printed, unless it was
-        # left with Ctrl+C. The wait runs in a subshell too: Ctrl+C there returns at once.
-        if ((!INTERRUPTED)) && [[ -n "$choice" ]]; then
+        # left with Ctrl+C or was no action at all (a wrong number shows the menu again).
+        # The wait runs in a subshell too: Ctrl+C there returns at once.
+        if ((!INTERRUPTED)) && [[ "$choice" =~ ^[1-3]$ ]]; then
             (
                 printf '\n  %sEnter: back to the menu%s' "$C_DIM" "$C_RESET"
                 read -r -u "$IN_FD" _
