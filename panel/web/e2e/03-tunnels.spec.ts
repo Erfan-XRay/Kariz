@@ -54,6 +54,12 @@ async function refuses(port: number): Promise<boolean> {
   return false;
 }
 
+/** The Close button of the wizard's footer or of a dialog (the corner cross has the same name). */
+async function closeDialog(page: Page) {
+  const footer = page.locator(".wz-foot, .dialog footer").getByRole("button", { name: "Close" });
+  await footer.click();
+}
+
 async function next(page: Page) {
   await page.locator(".wz-foot .btn-primary").click();
 }
@@ -102,7 +108,7 @@ test.describe("the tunnel", () => {
     await page.locator(".wz-foot .btn-primary").click(); // Build
     await expect(page.locator(".wz-step p.ok")).toContainText(/Done/i, { timeout: 60_000 });
     for (const li of await page.locator(".checklist li").all()) await expect(li).toHaveClass(/ok/);
-    await page.getByRole("button", { name: /Close/i }).click();
+    await closeDialog(page);
     expect(await echoes(front, "through the wizard's tunnel")).toBe(true);
 
     // it shows up as up, and its page opens
@@ -118,7 +124,7 @@ test.describe("the tunnel", () => {
     await next(page);
     await page.locator(".wz-foot .btn-primary").click(); // Save
     await expect(page.locator(".wz-step p.ok")).toContainText(/Done/i, { timeout: 60_000 });
-    await page.getByRole("button", { name: /Close/i }).click();
+    await closeDialog(page);
     expect(await echoes(newFront, "after the edit")).toBe(true);
     expect(await refuses(front), "the old port is closed").toBe(true);
     front = newFront;
@@ -134,21 +140,21 @@ test.describe("the tunnel", () => {
     await page.getByRole("button", { name: "Stop", exact: true }).click();
     await page.locator(".dialog .btn-primary").click();
     await expect(page.locator(".dialog p.ok")).toContainText(/Done/i, { timeout: 60_000 });
-    await page.getByRole("button", { name: /Close/i }).click();
+    await closeDialog(page);
     expect(await refuses(front), "a stopped tunnel listens nowhere").toBe(true);
 
     await open();
     await page.getByRole("button", { name: "Start", exact: true }).click();
     await page.locator(".dialog .btn-primary").click();
     await expect(page.locator(".dialog p.ok")).toContainText(/Done/i, { timeout: 60_000 });
-    await page.getByRole("button", { name: /Close/i }).click();
+    await closeDialog(page);
     expect(await echoes(front, "after starting again")).toBe(true);
 
     await open();
     await page.getByRole("button", { name: "Delete" }).click();
     await page.locator(".dialog .btn-danger").click();
     await expect(page.locator(".dialog p.ok")).toContainText(/Done/i, { timeout: 60_000 });
-    await page.getByRole("button", { name: /Close/i }).click();
+    await closeDialog(page);
     await expect(page.locator(".tunnels tr", { hasText: "demo" })).toHaveCount(0, { timeout: 30_000 });
     expect(await refuses(front), "a deleted tunnel listens nowhere").toBe(true);
   });
@@ -163,7 +169,7 @@ test.describe("the tunnel", () => {
     await expect(page.locator(".wz-step p.err").first()).toBeVisible({ timeout: 80_000 });
     await expect(page.locator(".wz-step")).toContainText(/removed/i);
     expect(await refuses(front2), "nothing was left listening").toBe(true);
-    await page.getByRole("button", { name: /Close/i }).click();
+    await closeDialog(page);
     await expect(page.locator(".tunnels tr", { hasText: "lost" })).toHaveCount(0, { timeout: 30_000 });
   });
 });
