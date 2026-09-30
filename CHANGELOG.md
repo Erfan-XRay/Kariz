@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The agents' link picks its transport by itself.** The panel's agents port now takes
+  `tcpmux` over TCP and `kcp` over UDP (the same port number: open both in the firewall). An
+  agent starts with `tcpmux`; after two links in a row that connect but carry no requests
+  (networks that let TCP connect and then stall it, as on some Iranian routes) it moves to
+  `kcp`, and back, and remembers the one that worked (`/etc/kariz-panel/link-transport`).
+  *Servers* shows which transport each server uses.
+- **A tunnel has a page of its own** instead of a dialog: the channel between its two
+  servers, what is wrong when it is broken or stopped and how to fix it, live numbers,
+  traffic charts, its ports and both sides, and every action. The list has filters by
+  state, a search and an on/off switch per tunnel. Deleting asks for the tunnel's name.
+- **A new speed test** on the tunnel's page: water runs through the channel in the
+  direction being measured, the steps (latency, download, upload, UDP) tick off, and a gauge
+  fills to the measured download and upload, with peak rates, latency idle and under load,
+  jitter and UDP loss. The agent now returns the numbers themselves (an older agent's printed
+  report is still shown).
+
+### Fixed
+
+- A join code is no longer used up when the agent's link drops while it is being
+  registered: the half-made server is removed and the code works again (it used to leave a
+  server that stayed offline and an agent that was refused for ever).
+- Why the panel refused an agent (a used code, an unknown identity, no answer) is now logged
+  at `warn`, not only at `debug`.
+
 ## 1.1.0 - 2026-09-30
 
 Everything about servers and tunnels is now done in the web panel, and Kariz has a license.

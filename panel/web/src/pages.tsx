@@ -400,6 +400,7 @@ export function ServersPage({ servers, agentsOn, onChanged }: { servers: ServerI
                 <div className="srv-sub">
                   {t("srv.version", { v: s.version })} · {s.arch}
                   {h?.uptime_secs != null && ` · ${t("srv.up")} ${digitsOf(Math.floor(h.uptime_secs / 86400) > 0 ? `${Math.floor(h.uptime_secs / 86400)} d` : `${Math.floor(h.uptime_secs / 3600)} h`)}`}
+                  {s.link && ` · ${t("srv.via", { t: s.link })}`}
                 </div>
               </div>
               <div className="c-link">

@@ -3,8 +3,10 @@
 //! the mux), so it resists DPI like a tunnel does. The web panel uses it to talk to its
 //! agents; nothing in the tunnel core uses it.
 //!
-//! The transport is `tcpmux`. Which side dials and which opens streams are independent:
-//! an agent dials the panel, but the panel is the one that opens streams (requests).
+//! The transport is `tcpmux` or `kcp` ([`LINK_TRANSPORTS`]): a panel listens on both (TCP
+//! and UDP, the same port number), and an agent uses the one that gets through. Which side
+//! dials and which opens streams are independent: an agent dials the panel, but the panel
+//! is the one that opens streams (requests).
 
 use std::io;
 use std::net::SocketAddr;
@@ -14,10 +16,26 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use crate::channel;
-use crate::config::{Config, Tuning};
+use crate::config::{Config, TransportKind, Tuning};
 use crate::crypto::{Crypto, ReplayFilter};
 use crate::mux::{MuxSession, SessionConfig, Side};
 use crate::transport::{Dialer as TransportDialer, Incoming, Listener, Settings};
+
+/// The transports a management link can use, in the order an agent tries them. Some
+/// networks let a TCP connection open and then stall it; KCP (over UDP) often gets
+/// through those.
+pub const LINK_TRANSPORTS: [TransportKind; 2] = [TransportKind::Tcpmux, TransportKind::Kcp];
+
+fn check(kind: TransportKind) -> io::Result<()> {
+    if LINK_TRANSPORTS.contains(&kind) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("a management link cannot use {}", kind.name()),
+        ))
+    }
+}
 
 /// What both ends share, worked out once from a small synthetic config so the link
 /// follows the same defaults as a `tcpmux` tunnel.
@@ -42,6 +60,7 @@ fn common(toml: String) -> io::Result<Common> {
 
 /// The listening end.
 pub struct Acceptor {
+    kind: TransportKind,
     listener: Listener,
     replay: Arc<ReplayFilter>,
     common: Arc<Common>,
@@ -50,16 +69,29 @@ pub struct Acceptor {
 impl Acceptor {
     /// Listens on `addr`; only a peer that knows `token` gets a session.
     pub async fn bind(addr: &str, token: &str) -> io::Result<Self> {
+        Self::bind_via(addr, token, TransportKind::Tcpmux).await
+    }
+
+    /// Like [`Acceptor::bind`], over `kind` (one of [`LINK_TRANSPORTS`]).
+    pub async fn bind_via(addr: &str, token: &str, kind: TransportKind) -> io::Result<Self> {
+        check(kind)?;
         let toml = format!(
-            "role = \"exit\"\nmode = \"direct\"\n[tunnel]\ntransport = \"tcpmux\"\nlisten = {addr:?}\ntoken = {token:?}\n"
+            "role = \"exit\"\nmode = \"direct\"\n[tunnel]\ntransport = \"{}\"\nlisten = {addr:?}\ntoken = {token:?}\n",
+            kind.name()
         );
         let common = common(toml)?;
         let listener = Listener::bind(&common.settings, addr, &common.tuning).await?;
         Ok(Self {
+            kind,
             listener,
             replay: Arc::new(ReplayFilter::default()),
             common: Arc::new(common),
         })
+    }
+
+    /// The transport it takes links over.
+    pub fn kind(&self) -> TransportKind {
+        self.kind
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -117,8 +149,15 @@ pub struct Dialer {
 impl Dialer {
     /// Dials `addr` with `token`.
     pub fn new(addr: &str, token: &str) -> io::Result<Self> {
+        Self::via(addr, token, TransportKind::Tcpmux)
+    }
+
+    /// Like [`Dialer::new`], over `kind` (one of [`LINK_TRANSPORTS`]).
+    pub fn via(addr: &str, token: &str, kind: TransportKind) -> io::Result<Self> {
+        check(kind)?;
         let toml = format!(
-            "role = \"exit\"\nmode = \"reverse\"\n[tunnel]\ntransport = \"tcpmux\"\nremote = {addr:?}\ntoken = {token:?}\n"
+            "role = \"exit\"\nmode = \"reverse\"\n[tunnel]\ntransport = \"{}\"\nremote = {addr:?}\ntoken = {token:?}\n",
+            kind.name()
         );
         let common = common(toml)?;
         let dialer = TransportDialer::new(&common.settings, addr, &common.tuning)?;
@@ -164,6 +203,34 @@ mod tests {
             opened.recv().await.unwrap().unwrap(),
             Bytes::from_static(b"pong")
         );
+    }
+
+    #[cfg(feature = "kcp")]
+    #[tokio::test]
+    async fn a_link_works_over_kcp_too() {
+        let acceptor = Acceptor::bind_via("127.0.0.1:0", TOKEN, TransportKind::Kcp)
+            .await
+            .unwrap();
+        let addr = acceptor.local_addr().unwrap().to_string();
+        let dialer = Dialer::via(&addr, TOKEN, TransportKind::Kcp).unwrap();
+        let (dialed, accepted) = tokio::join!(dialer.connect(Side::Server), async {
+            let pending = acceptor.accept().await.unwrap();
+            pending.establish(Side::Client).await
+        });
+        let (dialed, accepted) = (dialed.unwrap(), accepted.unwrap());
+        for round in 0..3u8 {
+            let opened = accepted.open(Bytes::from(vec![round; 3])).unwrap();
+            opened.finish().unwrap();
+            let (stream, syn) = dialed.accept().await.unwrap();
+            assert_eq!(&syn[..], &[round; 3]);
+            stream.send(Bytes::from_static(b"pong")).await.unwrap();
+            stream.finish().unwrap();
+            assert_eq!(
+                opened.recv().await.unwrap().unwrap(),
+                Bytes::from_static(b"pong")
+            );
+        }
+        assert!(Dialer::via(&addr, TOKEN, TransportKind::Ws).is_err());
     }
 
     #[tokio::test]
