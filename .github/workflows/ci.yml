@@ -249,6 +249,17 @@ jobs:
       - run: cargo build -p kariz -p kariz-panel
       - run: sudo bash tests/gre_ns.sh target/debug/kariz-panel target/debug/kariz
 
+  # Known vulnerabilities in the dependencies (RustSec's advisory database). It runs on the
+  # lock file, so it also catches an advisory published after the last change.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+
   # nginx in front of the tunnel as a stand-in for a CDN: WebSocket proxying, TLS
   # termination and an idle timeout (tests/tunnel.rs, module `nginx`).
   cdn:
