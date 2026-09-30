@@ -25,6 +25,7 @@ fn agent(kariz_dir: &std::path::Path) -> std::sync::Arc<Agent> {
         kariz_dir: kariz_dir.to_path_buf(),
         services: Default::default(),
         release_key: None,
+        transport: None,
     };
     Agent::new(&kariz_dir.join("agent.toml"), config)
 }

@@ -71,6 +71,9 @@ export interface SpeedResult {
   report?: SpeedReport | null;
 }
 
+/** How an agent reaches the panel: `auto` tries every transport in turn. */
+export type LinkTransport = "auto" | "tcpmux" | "kcp" | "wss";
+
 export interface ServerInfo {
   id: string;
   name: string;
@@ -266,7 +269,9 @@ export const api = {
   loginWithLink: (token: string) => call<{ csrf: string }>("POST", "link", { token }),
   logout: () => call<object>("POST", "logout"),
   servers: () => call<{ servers: ServerInfo[]; agents: boolean }>("GET", "servers"),
-  joinCode: (name: string | undefined, host: string) => call<{ code: string; valid_for: number }>("POST", "servers/join-code", { name, host }),
+  joinCode: (name: string | undefined, host: string, transport: LinkTransport) =>
+    call<{ code: string; valid_for: number }>("POST", "servers/join-code", { name, host, transport }),
+  panelAddresses: () => call<{ v4: string | null; v6: string | null; agent_port: number | null }>("GET", "servers/panel-addresses"),
   removeServer: (id: string) => call<object>("POST", "servers/remove", { id }),
   sessions: () => call<{ sessions: SessionRow[] }>("GET", "sessions"),
   revoke: (id: number) => call<object>("POST", "sessions/revoke", { id }),
