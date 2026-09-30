@@ -635,9 +635,9 @@ ensure_certbot() {
     if ! { command -v python3 >/dev/null && rm -rf "$CERTBOT_VENV" && python3 -m venv "$CERTBOT_VENV"; }; then
         info "Installing python with venv and pip."
         if command -v apt-get >/dev/null; then
-            apt-get install -y python3 python3-venv python3-pip
+            apt-get install -y --no-install-recommends python3 python3-venv
         elif command -v dnf >/dev/null; then
-            dnf install -y python3 python3-pip
+            dnf install -y --setopt=install_weak_deps=False python3 python3-pip
         elif command -v yum >/dev/null; then
             yum install -y python3 python3-pip
         elif command -v apk >/dev/null; then
