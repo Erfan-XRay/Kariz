@@ -158,6 +158,24 @@ impl Agent {
         services: Arc<dyn Services>,
         exec: Arc<dyn crate::net::Exec>,
     ) -> Arc<Self> {
+        Self::with_launcher(
+            path,
+            config,
+            services,
+            exec,
+            Box::new(crate::agent_update::SystemdRun),
+        )
+    }
+
+    /// Like [`Agent::with_exec`], and the update helper is started through `launcher` (the
+    /// tests record it instead of running systemd).
+    pub fn with_launcher(
+        path: &Path,
+        config: AgentConfig,
+        services: Arc<dyn Services>,
+        exec: Arc<dyn crate::net::Exec>,
+        launcher: Box<dyn crate::agent_update::Launcher>,
+    ) -> Arc<Self> {
         let config_key = config.release_key.clone();
         Arc::new(Self {
             path: path.to_path_buf(),
@@ -177,7 +195,7 @@ impl Agent {
                 std::env::current_exe()
                     .unwrap_or_default()
                     .with_file_name("kariz"),
-                Box::new(crate::agent_update::SystemdRun),
+                launcher,
             ),
         })
     }
@@ -315,12 +333,30 @@ impl Agent {
             let agent = self.clone();
             tokio::spawn(async move {
                 let reply = match serde_json::from_slice::<Request>(&syn) {
-                    Ok(request) if syn.len() <= MAX_REQUEST => agent.handle(request).await,
-                    _ => serde_json::to_vec(&Ack {
-                        ok: false,
-                        error: Some("unknown request".into()),
-                    })
-                    .unwrap_or_default(),
+                    Ok(request) if syn.len() <= MAX_REQUEST => {
+                        // A request that panics is answered with an error (and logged), not
+                        // left to reset its stream.
+                        let doing = agent.clone();
+                        match tokio::spawn(async move { doing.handle(request).await }).await {
+                            Ok(reply) => reply,
+                            Err(e) => {
+                                warn!(error = %e, "a request failed inside the agent");
+                                serde_json::to_vec(&Ack {
+                                    ok: false,
+                                    error: Some("internal error".into()),
+                                })
+                                .unwrap_or_default()
+                            }
+                        }
+                    }
+                    _ => {
+                        warn!(bytes = syn.len(), "an unknown or oversized request");
+                        serde_json::to_vec(&Ack {
+                            ok: false,
+                            error: Some("unknown request".into()),
+                        })
+                        .unwrap_or_default()
+                    }
                 };
                 if stream.send(Bytes::from(reply)).await.is_ok() {
                     let _ = stream.finish();

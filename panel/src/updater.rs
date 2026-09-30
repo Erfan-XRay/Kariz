@@ -242,7 +242,8 @@ use crate::agent_update::CHUNK;
 use crate::hub::LOCAL;
 use crate::wire::{Ack, Request, TunnelInfo, UpdateFile};
 
-type Files = Vec<(String, Vec<u8>)>;
+/// A release as it is sent: each file's name and bytes.
+pub type Files = Vec<(String, Vec<u8>)>;
 
 /// This panel's release (the archive, its checksum and its signature): the ones kept by the
 /// update that brought the panel to this version, or, if they are gone, downloaded again
@@ -286,8 +287,13 @@ async fn ack_of(hub: &Hub, server: &str, request: &Request) -> Result<()> {
 }
 
 /// Sends the release to one agent and tells it to apply it.
-async fn send_release(hub: &Arc<Hub>, server: &str, files: &Files) -> Result<()> {
-    let version = crate::version().to_owned();
+pub async fn send_release(
+    hub: &Arc<Hub>,
+    server: &str,
+    version: &str,
+    files: &Files,
+) -> Result<()> {
+    let version = version.to_owned();
     let listing = files
         .iter()
         .map(|(n, d)| UpdateFile {
@@ -438,7 +444,7 @@ async fn run_servers(hub: &Arc<Hub>, op: &str, s: &UpdateSettings, restart: bool
             anyhow!("{}: {e:#}", server.name)
         };
         ops.run(op, &format!("upd_send:{}", server.name));
-        if let Err(e) = send_release(hub, &server.id, &files).await {
+        if let Err(e) = send_release(hub, &server.id, crate::version(), &files).await {
             return Err(fail(e));
         }
         ops.end(op, true, None);
