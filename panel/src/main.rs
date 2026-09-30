@@ -104,6 +104,10 @@ enum Command {
         /// Seconds the new panel has to answer.
         #[arg(long, default_value_t = 30)]
         wait: u64,
+        /// Seconds to wait before starting, so the panel can still answer the browser
+        /// that the hand-over went well.
+        #[arg(long, default_value_t = 0)]
+        delay: u64,
     },
     /// What an agent runs, as a transient service, to swap in a new version (the agent
     /// starts it itself).
@@ -120,6 +124,9 @@ enum Command {
         panel_bin: PathBuf,
         #[arg(long)]
         kariz_bin: PathBuf,
+        /// Seconds to wait before starting, so the agent can still answer the panel.
+        #[arg(long, default_value_t = 0)]
+        delay: u64,
     },
     /// Private network links on this server, by hand (what the agent does when the panel
     /// asks; for debugging and for the tests). Needs root and Linux.
@@ -174,14 +181,22 @@ fn main() -> Result<()> {
             panel_bin,
             kariz_bin,
             wait,
-        } => update_apply(&stage, &version, &config, panel_bin, kariz_bin, wait),
+            delay,
+        } => {
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+            update_apply(&stage, &version, &config, panel_bin, kariz_bin, wait)
+        }
         Command::AgentUpdateApply {
             stage,
             version,
             stamp,
             panel_bin,
             kariz_bin,
-        } => agent_update_apply(&stage, &version, stamp, panel_bin, kariz_bin),
+            delay,
+        } => {
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+            agent_update_apply(&stage, &version, stamp, panel_bin, kariz_bin)
+        }
         Command::ReleaseKey { out } => release_key(&out),
         Command::ReleaseSign { file, key_env } => release_sign(&file, &key_env),
         Command::ReleaseVerify { archive, key } => release_verify(&archive, key.as_deref()),
