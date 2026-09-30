@@ -205,7 +205,7 @@ pub struct TextReply {
     pub text: String,
 }
 
-/// The answer to [`Request::Speedtest`]: what was measured. An agent older than 1.1
+/// The answer to [`Request::Speedtest`]: what was measured. An agent older than 1.2
 /// answers with `text` (the printed report) and no `report`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpeedReply {

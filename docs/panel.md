@@ -14,20 +14,20 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/script
 kariz-manager panel install
 ```
 
-`panel install` writes the settings, makes the database and a certificate, starts the
-service `kariz-panel`, and prints:
+`panel install` first asks how you will open the panel and gets a certificate for it (below),
+then writes the settings, makes the database, starts the service `kariz-panel`, and prints:
 
 ```text
   address       https://203.0.113.5:28443/k-7f3a9c2e/
-  certificate   SHA-256 9f2c41e0...
+  certificate   /etc/letsencrypt/live/kariz-panel-203-0-113-5/fullchain.pem
   agents        port 22230, TCP and UDP (open both in the firewall for the servers you add)
   sign in       https://203.0.113.5:28443/k-7f3a9c2e/#t=...
 ```
 
 - **The address** has a secret path: the panel answers only there. Any other address gets
   the plain "404 Not Found" page of an nginx, so a scanner finds nothing.
-- **The certificate** is self-signed, so the browser warns on the first visit. Compare
-  the fingerprint it shows with the one printed here, then continue.
+- **The certificate** is a real one from Let's Encrypt, so the browser shows no warning (and
+  Safari keeps the sign-in cookie). See *The certificate* below.
 - **The sign-in link** works once, for 60 minutes. Open it in the browser: it signs you in
   and disappears from the address bar. Make another any time with
   `kariz-manager panel link`.
@@ -37,6 +37,37 @@ service `kariz-panel`, and prints:
 Set a password in *Settings* if you want to sign in without a link (10 characters or
 more). Or from the server: `kariz-manager panel password` (makes a random one and shows
 it; `--stdin` reads yours).
+
+## The certificate
+
+The panel is served only over a certificate the browser trusts, from Let's Encrypt. The installer
+asks which of two you want:
+
+- **A domain name** that points at this server (an A record). The certificate lasts 90 days.
+- **The server's own public IP address**, if you have no domain. Let's Encrypt issues these for
+  6 days at a time, so they are renewed more often. The address must be public (not `10.x`,
+  `192.168.x` and so on).
+
+```bash
+kariz-manager panel install --domain panel.example.com      # or: --ip 203.0.113.5
+kariz-manager panel cert --domain other.example.com         # change it later; --ip ADDRESS too
+```
+
+`panel cert` (also in the manager's menu) gets the new certificate, points the panel at it and
+removes the old one; run it any time to change the domain, or to move from an IP address to a
+domain. Add `--email you@example.com` to be told before a certificate expires.
+
+- **Renewal is automatic:** a timer (`kariz-cert-renew.timer`) checks twice a day, and the panel
+  loads the new certificate without a restart.
+- **Port 80.** Let's Encrypt has to reach port 80 for a few seconds, at the first request and at
+  each renewal. If a service holds it (nginx, a tunnel...), the manager says which one, asks to
+  stop it for a moment and starts it again right after; the same happens at each renewal by
+  itself. A process that is not a systemd service (a Docker container) cannot be stopped for you:
+  free the port yourself. Open port 80 in the firewall.
+- **certbot 5.4 or later** does this (IP address certificates need it). If the system has none
+  that new, the manager installs one for itself in `/opt/kariz-certbot` with pip.
+- **A certificate of your own:** `kariz-manager panel cert --cert-file F --key-file K` (Kariz does
+  not renew it).
 
 ## Connect another server
 
@@ -186,8 +217,9 @@ key_file  = "/etc/ssl/panel.key"
 systemctl kill -s HUP kariz-panel    # loads the new files for the next connections
 ```
 
-A file that cannot be read is refused and the old certificate stays. Automatic Let's Encrypt
-is not built in; use your own tool (certbot, acme.sh) and the reload above after each renewal.
+A file that cannot be read is refused and the old certificate stays. `kariz-manager panel cert`
+does all of this for Let's Encrypt, with renewal (see *The certificate* above); with your own
+tool (certbot, acme.sh) reload as above after each renewal.
 
 ## A host without systemd
 

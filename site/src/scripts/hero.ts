@@ -9,13 +9,19 @@
 // What does not move (the strata, their texture, the shafts, the tunnel) is drawn once into an
 // offscreen canvas; each frame blits it and draws the light, the water and the small things.
 // It runs only while it is on screen, and holds still under reduced motion or low power.
-import { clamp, fitCanvas, lerp, paletteNow, rgba, rng, smooth } from "./panel/draw";
+//
+// Speed: the cost is filling pixels, not the script. So the canvas holds at most PIXELS of its
+// own (the scene is soft and the browser scales it up), the resolution steps down by itself
+// when frames come slow, and while nobody scrolls the water moves at half the frame rate.
+import { clamp, lerp, paletteNow, rgba, rng, smooth } from "./panel/draw";
 import type { Palette } from "./panel/draw";
 
 const TAU = Math.PI * 2;
 const root = document.documentElement;
 const reduced = matchMedia("(prefers-reduced-motion: reduce)");
 const isStill = () => root.dataset.low === "1" || reduced.matches;
+/** The most pixels the canvas holds, whatever the screen's density. */
+const PIXELS = 2e6;
 
 /** An ease with no jolt at either end, over the part of the scroll between a and b. */
 const ease = (x: number, a: number, b: number) => 0.5 - 0.5 * Math.cos(Math.PI * clamp((x - a) / (b - a), 0, 1));
@@ -440,7 +446,7 @@ function build(ctx: CanvasRenderingContext2D, W: number, H: number, dpr: number,
 function paintGround(w: World, P: Palette, gx0: number, gx1: number, gy1: number, dpr: number, r: () => number) {
   const { L, u, G, th, bound } = w;
   const ww = gx1 - gx0;
-  const k = Math.min(dpr, Math.sqrt(7.5e6 / (ww * gy1)));
+  const k = Math.min(dpr, Math.sqrt(4e6 / (ww * gy1)));
   const c = w.ground.c;
   c.width = Math.ceil(ww * k);
   c.height = Math.ceil(gy1 * k);
@@ -710,6 +716,39 @@ export function startHero(canvas: HTMLCanvasElement, section: HTMLElement, fade:
   let w: World | null = null;
   let last = 0;
   let shoot: { x: number; y: number; t0: number } | null = null;
+  // The canvas's size in CSS pixels, read on resize rather than every frame.
+  let cssW = 1;
+  let cssH = 1;
+  const measure = () => {
+    const r = canvas.getBoundingClientRect();
+    cssW = Math.max(1, r.width);
+    cssH = Math.max(1, r.height);
+  };
+  measure();
+  new ResizeObserver(measure).observe(canvas);
+  // Lowered, a step at a time, when the device cannot keep up; never raised again.
+  let quality = 1;
+  const slow: number[] = [];
+  let lastFrame = 0;
+  let lastScroll = 0;
+  let lastDrawn = 0;
+
+  const fit = () => {
+    const dev = Math.min(devicePixelRatio || 1, 2);
+    const res = Math.max(0.5, Math.min(dev, Math.sqrt(PIXELS / (cssW * cssH))) * quality);
+    const bw = Math.max(1, Math.round(cssW * res));
+    const bh = Math.max(1, Math.round(cssH * res));
+    if (canvas.width !== bw || canvas.height !== bh) {
+      canvas.width = bw;
+      canvas.height = bh;
+    }
+    const ctx = canvas.getContext("2d")!;
+    return { ctx, W: cssW, H: cssH, dpr: bw / cssW };
+  };
+
+  // What the page shows in its words, written only when it changes.
+  let shownT = -1;
+  let shownY = "";
 
   addEventListener(
     "pointermove",
@@ -744,10 +783,10 @@ export function startHero(canvas: HTMLCanvasElement, section: HTMLElement, fade:
 
   const draw = (now: number) => {
     const P = paletteNow();
-    const { ctx, W, H } = fitCanvas(canvas);
-    const dpr = canvas.width / W;
+    const { ctx, W, H, dpr } = fit();
     const fa = root.lang === "fa";
-    const key = `${W}x${H}|${root.dataset.theme}|${fa}|${dpr}`;
+    // Not the resolution: when it steps down, the ground already painted is simply drawn smaller.
+    const key = `${W}x${H}|${root.dataset.theme}|${fa}`;
     if (!w || w.key !== key) {
       w = build(ctx, W, H, dpr, P, fa);
       w.key = key;
@@ -765,12 +804,19 @@ export function startHero(canvas: HTMLCanvasElement, section: HTMLElement, fade:
     const dy = cam.y - w.cam0.y;
 
     // The words above the horizon rise a little and fade as the camera goes down.
-    const t = 1 - smooth(0.015, 0.14, p);
-    for (const el of fade) {
-      el.style.opacity = String(t);
-      el.toggleAttribute("inert", t < 0.4);
+    const t = Math.round((1 - smooth(0.015, 0.14, p)) * 100) / 100;
+    if (t !== shownT) {
+      shownT = t;
+      for (const el of fade) {
+        el.style.opacity = String(t);
+        el.toggleAttribute("inert", t < 0.4);
+      }
     }
-    fade[0].style.transform = dy > 0.5 ? `translate3d(0,${(-dy * 0.35).toFixed(1)}px,0)` : "";
+    const ty = dy > 0.5 && t > 0 ? `translate3d(0,${(-dy * 0.35).toFixed(0)}px,0)` : "";
+    if (ty !== shownY) {
+      shownY = ty;
+      fade[0].style.transform = ty;
+    }
 
     /** Draws in world coordinates, for a layer that moves f times as fast as the ground. */
     const layer = (f = 1) => {
@@ -1173,8 +1219,29 @@ export function startHero(canvas: HTMLCanvasElement, section: HTMLElement, fade:
 
   const loop = (now: number) => {
     raf = 0;
-    if (!visible || document.hidden) return;
-    draw(now);
+    if (!visible || document.hidden) {
+      lastFrame = 0;
+      return;
+    }
+    // Is the device keeping up? Judged over the last 40 frames, after the first build.
+    if (lastFrame && w) {
+      slow.push(now - lastFrame);
+      if (slow.length > 40) slow.shift();
+      if (slow.length === 40 && quality > 0.55) {
+        const sorted = [...slow].sort((a, b) => a - b);
+        if (sorted[20] > 24) {
+          quality *= 0.8;
+          slow.length = 0;
+        }
+      }
+    }
+    lastFrame = now;
+    // Nobody scrolling: the water flows on at half the rate, which the eye does not miss.
+    const idle = now - lastScroll > 250;
+    if (!idle || now - lastDrawn > 30) {
+      draw(now);
+      lastDrawn = now;
+    }
     if (!isStill()) raf = requestAnimationFrame(loop);
   };
   const kick = () => {
@@ -1192,7 +1259,14 @@ export function startHero(canvas: HTMLCanvasElement, section: HTMLElement, fade:
     else kick();
   };
   addEventListener("resize", redraw);
-  addEventListener("scroll", redraw, { passive: true });
+  addEventListener(
+    "scroll",
+    () => {
+      lastScroll = performance.now();
+      redraw();
+    },
+    { passive: true },
+  );
   new MutationObserver(redraw).observe(root, { attributes: true, attributeFilter: ["data-theme", "data-low"] });
   reduced.addEventListener("change", redraw);
   section.classList.add("ready");

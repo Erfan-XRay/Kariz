@@ -9,9 +9,8 @@ in the browser. Try the same screens first, with sample data and nothing to inst
 ## 1. Sign in
 
 On the server that holds the panel, the manager printed an address and a one-time link. Open the
-link: it signs you in and vanishes from the address bar. The browser warns about the certificate
-on the first visit (it is self-signed): compare the fingerprint it shows with the one printed on
-the server, then continue.
+link: it signs you in and vanishes from the address bar. The certificate is a real Let's Encrypt one, so
+the browser shows no warning.
 
 - Want a password instead of links? *Settings*, set one (10 characters or more).
 - Lost the link? On the server, `kariz-manager panel link` makes another.
