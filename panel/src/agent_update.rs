@@ -94,6 +94,11 @@ impl AgentUpdate {
 
     /// A release is about to arrive: three files, with these sizes.
     pub fn begin(&self, version: &str, files: &[UpdateFile]) -> Result<()> {
+        self.begin_inner(version, files)
+            .inspect_err(|e| tracing::warn!(version, error = %e, "a release was refused"))
+    }
+
+    fn begin_inner(&self, version: &str, files: &[UpdateFile]) -> Result<()> {
         let dir = self.version_dir(version)?;
         if !matches!(
             update::compare(crate::version(), version),
@@ -187,6 +192,12 @@ impl AgentUpdate {
 
     /// Checks what arrived, unpacks it, and hands over to the helper.
     pub fn apply(&self, version: &str) -> Result<()> {
+        self.apply_inner(version)
+            .inspect(|()| tracing::info!(version, "a release was checked and handed to the helper"))
+            .inspect_err(|e| tracing::warn!(version, error = %e, "a release could not be applied"))
+    }
+
+    fn apply_inner(&self, version: &str) -> Result<()> {
         let dir = self.version_dir(version)?;
         if !self.complete(version) {
             bail!("incomplete");
