@@ -5,7 +5,7 @@ import { pairTunnels, rateParts } from "./derive";
 import type { Tunnel, TunnelState } from "./derive";
 import { useApp } from "./store";
 import { Chart } from "./Chart";
-import { Dialog, Icon, Seg } from "./ui";
+import { Card, Dialog, Empty, Icon, Seg, Skeleton, Stat } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { RouteScene } from "./RouteScene";
 import { SpeedTest } from "./SpeedTest";
@@ -82,8 +82,8 @@ function RunDialog({
 function StateBadge({ state }: { state: TunnelState }) {
   const { t } = useApp();
   return (
-    <span className={`state ${state}`}>
-      <i className={`dot ${state}`} />
+    <span className={`pill ${state}`}>
+      <i className={`dot ${state}`} aria-hidden="true" />
       {t(stateKey[state])}
     </span>
   );
@@ -167,23 +167,22 @@ function TunnelPage({ tunnel, onBack, onAct, onEdit }: { tunnel: Tunnel; onBack:
   const moved = bytes(status ? status.totals.bytes_up + status.totals.bytes_down : 0);
   const mode = tunnel.entry?.tunnel.mode ?? tunnel.exit?.tunnel.mode ?? "";
 
-  useEffect(() => {
-    document.querySelector(".main")?.scrollTo({ top: 0 });
-  }, [tunnel.name]);
-
   return (
     <div className="page is-on tunnel-page">
-      <div className="hero-route">
+      <section className="card hero-route">
         <div className="head">
-          <button className="btn btn-ghost btn-sm td-back" type="button" onClick={onBack}>
+          <button className="icon-square td-back" type="button" onClick={onBack} aria-label={t("td.back")} title={t("td.back")}>
             <Icon name="back" size={18} />
-            {t("td.back")}
           </button>
-          <h2 className="td-name mono">{tunnel.name}</h2>
-          <StateBadge state={tunnel.state} />
-          <span className="tag">{tunnel.transport}</span>
-          <span className="tag">{tunnel.profile}</span>
-          {mode && <span className="tag">{t(`td.mode.${mode}`)}</span>}
+          <div className="td-title">
+            <h2 className="td-name mono">{tunnel.name}</h2>
+            <div className="td-tags">
+              <StateBadge state={tunnel.state} />
+              <span className="tag">{tunnel.transport}</span>
+              <span className="tag">{tunnel.profile}</span>
+              {mode && <span className="tag">{t(`td.mode.${mode}`)}</span>}
+            </div>
+          </div>
           <span className="grow" />
           <div className="row-actions">
             <button className="btn btn-ghost btn-sm" type="button" disabled={!up} onClick={() => speed.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
@@ -198,13 +197,14 @@ function TunnelPage({ tunnel, onBack, onAct, onEdit }: { tunnel: Tunnel; onBack:
               <Icon name={tunnel.state === "off" ? "play" : "pause"} size={18} />
               {t(tunnel.state === "off" ? "tun.start" : "tun.stop")}
             </button>
-            <button className="btn btn-ghost btn-sm" type="button" disabled={!tunnel.paired} onClick={() => onAct("rotate")}>
-              <Icon name="key" size={18} />
-              {t("tun.rotate")}
-            </button>
             <button className="btn btn-ghost btn-sm" type="button" disabled={!tunnel.paired} title={tunnel.paired ? undefined : t("wz.oneSide")} onClick={onEdit}>
               <Icon name="edit" size={18} />
               {t("tun.edit")}
+            </button>
+            <span className="actions-sep" aria-hidden="true" />
+            <button className="btn btn-quiet btn-sm" type="button" disabled={!tunnel.paired} onClick={() => onAct("rotate")}>
+              <Icon name="key" size={18} />
+              {t("tun.rotate")}
             </button>
             <button className="btn btn-danger btn-sm" type="button" onClick={() => onAct("delete")}>
               <Icon name="trash" size={18} />
@@ -213,16 +213,18 @@ function TunnelPage({ tunnel, onBack, onAct, onEdit }: { tunnel: Tunnel; onBack:
           </div>
         </div>
         <RouteScene tunnel={tunnel} />
-      </div>
+      </section>
 
       {tunnel.state === "down" && (
         <div className="diagnosis" role="alert">
-          <div className="diag-icon">!</div>
+          <div className="diag-icon">
+            <Icon name="alert" size={18} />
+          </div>
           <div>
             <h3>{t("td.diagDown")}</h3>
             <p>{t("td.diagText")}</p>
             {tunnel.error && (
-              <p className="mono small" dir="auto">
+              <p className="mono small diag-err" dir="auto">
                 {t("td.diagLast", { e: tunnel.error })}
               </p>
             )}
@@ -254,103 +256,80 @@ function TunnelPage({ tunnel, onBack, onAct, onEdit }: { tunnel: Tunnel; onBack:
           </button>
         </div>
       )}
-      {!tunnel.paired && <p className="td-note muted small">{t("td.oneSide")}</p>}
+      {!tunnel.paired && (
+        <div className="banner info">
+          <Icon name="info" size={18} />
+          <span>{t("td.oneSide")}</span>
+        </div>
+      )}
 
-      <div className="stratum s1">
-        <div className="facts">
-          <div className="fact">
-            <div className="label">{t("td.rate")}</div>
-            <div className="value">
-              {up ? num(r.value, r.decimals) : "—"}
-              {up && <small>{r.unit}</small>}
-            </div>
-          </div>
-          <div className="fact">
-            <div className="label">{t("tun.rtt")}</div>
-            <div className="value">
-              {up && tunnel.rtt != null ? num(tunnel.rtt, 0) : "—"}
-              {up && tunnel.rtt != null && <small>ms</small>}
-            </div>
-          </div>
-          <div className="fact">
-            <div className="label">{t("tun.conns")}</div>
-            <div className="value">{up ? num(tunnel.connections) : "—"}</div>
-          </div>
-          <div className="fact">
-            <div className="label">{t("tun.sessions")}</div>
-            <div className="value">{status?.peer.sessions != null ? num(status.peer.sessions) : "—"}</div>
-          </div>
-          <div className="fact">
-            <div className="label">{t("td.moved")}</div>
-            <div className="value">
-              {status ? num(moved.value, moved.decimals) : "—"}
-              {status && <small>{moved.unit}</small>}
-            </div>
-          </div>
+      <div className="stats five">
+        <div className="card stat-card">
+          <Stat label={t("td.rate")} icon="pulse" tone="water" value={up ? num(r.value, r.decimals) : "—"} unit={up ? r.unit : undefined} />
+        </div>
+        <div className="card stat-card">
+          <Stat label={t("tun.rtt")} icon="clock" value={up && tunnel.rtt != null ? num(tunnel.rtt, 0) : "—"} unit={up && tunnel.rtt != null ? "ms" : undefined} />
+        </div>
+        <div className="card stat-card">
+          <Stat label={t("tun.conns")} icon="link" value={up ? num(tunnel.connections) : "—"} />
+        </div>
+        <div className="card stat-card">
+          <Stat label={t("tun.sessions")} icon="tunnels" value={status?.peer.sessions != null ? num(status.peer.sessions) : "—"} />
+        </div>
+        <div className="card stat-card">
+          <Stat label={t("td.moved")} icon="download" value={status ? num(moved.value, moved.decimals) : "—"} unit={status ? moved.unit : undefined} />
         </div>
       </div>
 
-      <div className="stratum s2 td-speed" ref={speed}>
-        <div className="stratum-head">
-          <h2>{t("sp.title")}</h2>
-        </div>
-        <SpeedTest tunnel={tunnel} />
+      <div className="td-speed" ref={speed}>
+        <Card title={t("sp.title")} sub={t("sp.sub")}>
+          <SpeedTest tunnel={tunnel} />
+        </Card>
       </div>
 
       {tunnel.entry && (
-        <div className="stratum s1">
-          <div className="stratum-head">
-            <h2>{t("td.traffic")}</h2>
-          </div>
+        <Card title={t("td.traffic")} sub={t("td.trafficSub")}>
           <div className="grid-3">
             <Chart series={`tun:${tunnel.name}:rate`} unit="Mbps" />
             <Chart series={`tun:${tunnel.name}:rtt`} unit="ms" decimals={0} />
             <Chart series={`tun:${tunnel.name}:conns`} unit="" decimals={0} />
           </div>
-        </div>
+        </Card>
       )}
 
-      <div className="stratum s2">
-        <div className="grid-2">
-          <div>
-            <div className="stratum-head">
-              <h2>{t("tun.forwards")}</h2>
-            </div>
-            {forwards.length === 0 ? (
-              <p className="muted small">—</p>
-            ) : (
-              <table className="plain-table">
-                <thead>
-                  <tr>
-                    <th>{t("td.listen")}</th>
-                    <th>{t("td.target")}</th>
-                    <th>{t("td.proto")}</th>
+      <div className="grid-2">
+        <Card title={t("tun.forwards")} sub={forwards.length ? t("td.portsSub", { n: num(forwards.length) }) : undefined} flush>
+          {forwards.length === 0 ? (
+            <p className="muted small pad">—</p>
+          ) : (
+            <table className="plain-table">
+              <thead>
+                <tr>
+                  <th>{t("td.listen")}</th>
+                  <th>{t("td.target")}</th>
+                  <th>{t("td.proto")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {forwards.map((f) => (
+                  <tr key={`${f.listen}-${f.target}-${f.protocol}`}>
+                    <td className="mono">{f.listen}</td>
+                    <td className="mono">{f.target}</td>
+                    <td>
+                      <span className="tag">{f.protocol}</span>
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {forwards.map((f) => (
-                    <tr key={`${f.listen}-${f.target}-${f.protocol}`}>
-                      <td className="mono">{f.listen}</td>
-                      <td className="mono">{f.target}</td>
-                      <td>
-                        <span className="tag">{f.protocol}</span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Card>
+        <Card title={t("td.sides")}>
+          <div className="td-sides">
+            <SideFacts side={tunnel.entry} label={t("tun.side.entry")} />
+            <SideFacts side={tunnel.exit} label={t("tun.side.exit")} />
           </div>
-          <div>
-            <div className="stratum-head">
-              <h2>{t("td.sides")}</h2>
-            </div>
-            <div className="td-sides">
-              <SideFacts side={tunnel.entry} label={t("tun.side.entry")} />
-              <SideFacts side={tunnel.exit} label={t("tun.side.exit")} />
-            </div>
-          </div>
-        </div>
+        </Card>
       </div>
     </div>
   );
@@ -358,22 +337,34 @@ function TunnelPage({ tunnel, onBack, onAct, onEdit }: { tunnel: Tunnel; onBack:
 
 type Filter = "all" | TunnelState;
 
-export function TunnelsPage({ servers, onChanged }: { servers: ServerInfo[]; onChanged: () => void }) {
+export function TunnelsPage({
+  servers,
+  loaded,
+  open,
+  setOpen,
+  onChanged,
+}: {
+  servers: ServerInfo[];
+  loaded: boolean;
+  open: string | null;
+  setOpen: (name: string | null) => void;
+  onChanged: () => void;
+}) {
   const { t, num } = useApp();
   const tunnels = pairTunnels(servers);
   const online = servers.filter((s) => s.online);
   const [wizard, setWizard] = useState<{ edit?: Tunnel } | null>(null);
-  const [open, setOpen] = useState<string | null>(null);
   const [act, setAct] = useState<{ name: string; action: Action } | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const openTunnel = tunnels.find((x) => x.name === open) ?? null;
   const count = (s: TunnelState) => tunnels.filter((x) => x.state === s).length;
+  const maxRate = Math.max(1, ...tunnels.map((x) => x.rate));
 
   // A tunnel that was deleted (here or elsewhere) takes the page back to the list.
   useEffect(() => {
-    if (open && servers.length && !openTunnel && !act) setOpen(null);
-  }, [open, openTunnel, servers.length, act]);
+    if (open && loaded && !openTunnel && !act) setOpen(null);
+  }, [open, openTunnel, loaded, act]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const q = query.trim().toLowerCase();
   const rows = tunnels.filter(
@@ -392,7 +383,7 @@ export function TunnelsPage({ servers, onChanged }: { servers: ServerInfo[]; onC
         <RunDialog
           key={`${act.name}-${act.action}`}
           title={t(act.action === "delete" ? "tun.deleteTitle" : act.action === "rotate" ? "tun.rotateTitle" : `tun.${act.action}`, { name: act.name })}
-          text={act.action === "delete" ? t("tun.deleteText") : act.action === "rotate" ? t("tun.rotateText") : `${act.name}`}
+          text={act.action === "delete" ? t("tun.deleteText") : act.action === "rotate" ? t("tun.rotateText") : t(`tun.${act.action}Text`, { name: act.name })}
           danger={act.action === "delete"}
           confirm={act.action === "delete" ? act.name : undefined}
           label={t(act.action === "delete" ? "tun.delete" : act.action === "rotate" ? "tun.rotate" : `tun.${act.action}`)}
@@ -462,7 +453,7 @@ export function TunnelsPage({ servers, onChanged }: { servers: ServerInfo[]; onC
       <div className="page-band">
         <Seg
           value={filter}
-          options={(["all", "up", "down", "off"] as Filter[]).map((f) => [f, `${f === "all" ? t("tl.all") : t(stateKey[f])} ${num(f === "all" ? tunnels.length : count(f))}`] as [Filter, string])}
+          options={(["all", "up", "down", "off"] as Filter[]).map((f) => [f, `${f === "all" ? t("tl.all") : t(stateKey[f])} · ${num(f === "all" ? tunnels.length : count(f))}`] as [Filter, string])}
           onChange={setFilter}
         />
         <label className="search">
@@ -476,19 +467,33 @@ export function TunnelsPage({ servers, onChanged }: { servers: ServerInfo[]; onC
           {t("tun.new")}
         </button>
       </div>
-      <div className="stratum s1">
-        {tunnels.length === 0 ? (
-          <p className="muted" style={{ margin: 0, maxWidth: 640 }}>
-            {online.length < 2 ? t("tun.needTwo") : t("tun.empty")}
-          </p>
-        ) : (
+      {!loaded ? (
+        <div className="card">
+          <Skeleton rows={4} height={44} />
+        </div>
+      ) : tunnels.length === 0 ? (
+        <div className="card">
+          <Empty
+            icon="tunnels"
+            title={t("t.emptyTitle")}
+            text={online.length < 2 ? t("tun.needTwo") : t("tun.empty")}
+            action={
+              online.length >= 2 && (
+                <button className="btn btn-primary btn-sm" type="button" onClick={() => setWizard({})}>
+                  <Icon name="plus" size={18} />
+                  {t("tun.new")}
+                </button>
+              )
+            }
+          />
+        </div>
+      ) : (
+        <div className="card flush">
           <table className="tunnels">
             <thead>
               <tr>
                 <th>{t("t.name")}</th>
-                <th>{t("t.route")}</th>
                 <th>{t("t.transport")}</th>
-                <th className="hide-sm">{t("t.mode")}</th>
                 <th className="hide-sm">{t("t.ports")}</th>
                 <th>{t("t.state")}</th>
                 <th>{t("t.rate")}</th>
@@ -500,7 +505,7 @@ export function TunnelsPage({ servers, onChanged }: { servers: ServerInfo[]; onC
             <tbody>
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="muted" style={{ textAlign: "center", padding: "var(--sp-7)" }}>
+                  <td colSpan={6} className="muted" style={{ textAlign: "center", padding: "var(--sp-7)" }}>
                     {t("tl.none")}
                   </td>
                 </tr>
@@ -509,36 +514,52 @@ export function TunnelsPage({ servers, onChanged }: { servers: ServerInfo[]; onC
                 const r = rateParts(x.rate);
                 const mode = x.entry?.tunnel.mode ?? x.exit?.tunnel.mode ?? "";
                 return (
-                  <tr key={x.name} className="clickable" onClick={() => setOpen(x.name)}>
+                  <tr key={x.name} className={`clickable st-${x.state}`} onClick={() => setOpen(x.name)}>
                     <td>
-                      <button className="linklike t-name" type="button" onClick={() => setOpen(x.name)}>
-                        {x.name}
-                      </button>
-                    </td>
-                    <td>
-                      <span className="t-route">
-                        {x.paired ? (
-                          <>
-                            <span>{x.entry!.server.name}</span>
-                            <Icon name="arrow" size={16} />
-                            <span>{x.exit!.server.name}</span>
-                          </>
-                        ) : (
-                          <span>
-                            {(x.entry ?? x.exit)!.server.name} · {t("t.oneSide")}
+                      <div className="t-cell">
+                        <span className={`t-mark ${x.state}`} aria-hidden="true" />
+                        <div>
+                          <button className="linklike t-name" type="button" onClick={() => setOpen(x.name)}>
+                            {x.name}
+                          </button>
+                          <span className="t-route">
+                            {x.paired ? (
+                              <>
+                                <span>{x.entry!.server.name}</span>
+                                <Icon name="arrow" size={14} />
+                                <span>{x.exit!.server.name}</span>
+                              </>
+                            ) : (
+                              <span>
+                                {(x.entry ?? x.exit)!.server.name} · {t("t.oneSide")}
+                              </span>
+                            )}
                           </span>
-                        )}
-                      </span>
+                        </div>
+                      </div>
                     </td>
                     <td className="c-transport">
                       <span className="tag">{x.transport}</span> <span className="tag">{x.profile}</span>
+                      {mode && <span className="tag soft hide-sm">{t(`td.mode.${mode}`)}</span>}
                     </td>
-                    <td className="c-transport hide-sm">{mode ? t(`td.mode.${mode}`) : "—"}</td>
                     <td className="c-transport num hide-sm">{num((x.entry ?? x.exit)?.tunnel.forwards.length ?? 0)}</td>
                     <td>
                       <StateBadge state={x.state} />
                     </td>
-                    <td className="rate num">{x.state === "up" ? `${num(r.value, r.decimals)} ${r.unit}` : "—"}</td>
+                    <td className="rate num">
+                      {x.state === "up" ? (
+                        <div className="rate-cell">
+                          <span dir="ltr">
+                            {num(r.value, r.decimals)} <small>{r.unit}</small>
+                          </span>
+                          <span className="t-bar" aria-hidden="true">
+                            <i style={{ width: `${Math.max(2, (x.rate / maxRate) * 100)}%` }} />
+                          </span>
+                        </div>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td>
                       <button
                         className="switch"
@@ -557,8 +578,8 @@ export function TunnelsPage({ servers, onChanged }: { servers: ServerInfo[]; onC
               })}
             </tbody>
           </table>
-        )}
-      </div>
+        </div>
+      )}
       {dialogs}
     </div>
   );
