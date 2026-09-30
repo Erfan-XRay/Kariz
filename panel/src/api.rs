@@ -37,6 +37,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/logout", post(logout))
         .route("/api/servers", get(servers))
         .route("/api/servers/join-code", post(join_code))
+        .route("/api/servers/panel-addresses", get(panel_addresses))
         .route("/api/servers/remove", post(remove_server))
         // A tunnel with many ports is a bigger body than the other calls take.
         .route(
@@ -445,6 +446,22 @@ struct JoinBody {
     name: Option<String>,
     /// The address the browser reached the panel by: what the new server should dial.
     host: String,
+    /// The one link transport the agent is to use; none or `auto`: all of them in turn.
+    transport: Option<String>,
+}
+
+/// The panel's own public addresses, to offer in *Add server*, and its agents ports.
+async fn panel_addresses(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    let (v4, v6) = tokio::task::spawn_blocking(crate::join::own_addresses)
+        .await
+        .unwrap_or((None, None));
+    reply(
+        StatusCode::OK,
+        json!({ "v4": v4, "v6": v6, "agent_port": state.agent_port }),
+    )
 }
 
 async fn join_code(
@@ -466,7 +483,15 @@ async fn join_code(
         .as_deref()
         .map(str::trim)
         .filter(|n| !n.is_empty());
-    if !crate::join::valid_host(host) || name.is_some_and(|n| !crate::join::valid_name(n)) {
+    let transport = body
+        .transport
+        .as_deref()
+        .map(str::trim)
+        .filter(|x| !x.is_empty() && *x != "auto");
+    if !crate::join::valid_host(host)
+        || name.is_some_and(|n| !crate::join::valid_name(n))
+        || transport.is_some_and(|x| !crate::join::valid_transport(x))
+    {
         return error(StatusCode::BAD_REQUEST, "bad_input");
     }
     let host = if host.contains(':') && !host.starts_with('[') {
@@ -474,7 +499,10 @@ async fn join_code(
     } else {
         host.to_owned()
     };
-    match state.hub.create_join(name, &format!("{host}:{port}")) {
+    match state
+        .hub
+        .create_join_via(name, &format!("{host}:{port}"), transport)
+    {
         Ok(code) => {
             audit(
                 &state,

@@ -463,15 +463,39 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
         let mut state = AppState::new(db);
         state.hub = hub.clone();
         if let Some(listen) = &config.agent_listen {
-            // Every link transport on the same port number (TCP for tcpmux, UDP for kcp):
-            // an agent uses the one that gets through its network.
+            // Every link transport, so an agent can use the one that gets through its
+            // network: tcpmux and kcp on the agents port (TCP and UDP), wss on the next.
+            let token = hub.link_token()?;
+            let (cert, key) = (config.cert(), config.key());
+            let wss = kariz::link::wss_addr(listen)?;
             for kind in kariz::link::LINK_TRANSPORTS {
-                let acceptor = kariz::link::Acceptor::bind_via(listen, &hub.link_token()?, kind)
-                    .await
-                    .with_context(|| {
-                        format!("failed to listen for agents on {listen} ({})", kind.name())
-                    })?;
-                tokio::spawn(hub.clone().serve_agents(acceptor));
+                let wss_kind = kind == kariz::config::TransportKind::Wss;
+                let addr = if wss_kind { &wss } else { listen };
+                let mut bound = 0;
+                let mut last = None;
+                for one in dual_stack(addr) {
+                    let made = if wss_kind {
+                        kariz::link::Acceptor::bind_wss(&one, &token, &cert, &key).await
+                    } else {
+                        kariz::link::Acceptor::bind_via(&one, &token, kind).await
+                    };
+                    match made {
+                        Ok(acceptor) => {
+                            tracing::info!(address = %one, transport = kind.name(), "listening for agents");
+                            tokio::spawn(hub.clone().serve_agents(acceptor));
+                            bound += 1;
+                        }
+                        Err(e) => last = Some(e),
+                    }
+                }
+                if bound == 0 {
+                    let e = last.map(|e| e.to_string()).unwrap_or_default();
+                    // tcpmux is what every agent can use: without it no server joins.
+                    if kind == kariz::config::TransportKind::Tcpmux {
+                        anyhow::bail!("failed to listen for agents on {addr}: {e}");
+                    }
+                    tracing::warn!(address = %addr, transport = kind.name(), error = %e, "agents cannot use this transport");
+                }
             }
             state.agent_port = config.agent_port();
         }
@@ -484,6 +508,16 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
             }
         }
     })
+}
+
+/// The addresses to listen on for `addr`: an address for every IPv4 one (`0.0.0.0:P`) is
+/// also taken on IPv6 (`[::]:P`), so servers can join over either. Where the IPv6 socket
+/// takes IPv4 too (Linux), the IPv4 one is refused as in use, which is fine.
+fn dual_stack(addr: &str) -> Vec<String> {
+    match addr.strip_prefix("0.0.0.0:") {
+        Some(port) => vec![format!("[::]:{port}"), addr.to_owned()],
+        None => vec![addr.to_owned()],
+    }
 }
 
 async fn shutdown_signal() {
