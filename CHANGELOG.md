@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.11.0 - 2026-09-30
+
+**Updating from the panel, and signed releases** (docs/panel.md, docs/PHASE14.md). Backward
+compatibility is not kept before 1.0. Servers on 0.10 or older have to be updated once by hand
+(`kariz-manager update`); from 0.11 on they can be updated from the panel.
+
+### Added
+
+- **Releases are signed.** Each archive has a `.sha256` and a `.sig` (an Ed25519 signature of the
+  checksum file, which names the archive). The release workflow signs with a repository secret and
+  checks every signature with the key built into the program before it publishes. `kariz-manager
+  install|update` checks the signature with `openssl` and the key in the script (a release without
+  one is refused from 0.11), `kariz-panel release-verify` checks a download by hand, and
+  `release_key` pins a key of your own.
+- **Update the panel from the panel:** a notice in the top bar and *Settings, Updates* when a newer
+  release is out (a check once a day, or *Check now*; stable or beta channel). One button downloads
+  the release once, checks its signature and checksum, and hands over to a helper that swaps the
+  programs, restarts the panel and waits for it to answer as the new version, **putting the old
+  programs back if it does not within 30 seconds**. No downgrades, and a new major version asks for
+  confirmation. Tested for real on a systemd host in CI: a release that does not come up is rolled
+  back, and a good one takes.
+- **Update the other servers:** the panel sends the release it downloaded over the link to each
+  agent that is behind, in pieces, one server at a time. Each agent checks the signature again with
+  its own key, swaps its programs, restarts, and reaches the panel again (or is put back). Their
+  tunnels can be restarted afterwards **one at a time**, each waited for, so a pair never loses both
+  sides together. Also tested for real in CI.
+- `release_api`, `release_key` in `panel.toml` and `release_key` in `agent.toml`.
+
+### Fixed
+
+- An agent could reset the stream of a request it had answered if the answer was quick (a stream
+  dropped before the panel's end-of-stream frame arrived). It now waits for that frame, and a request
+  that fails inside the agent is answered with an error and logged.
+
+### Changed
+
+- Web app: 116 KB compressed script.
+
 ## 0.10.0 - 2026-09-30
 
 **Private networks with GRE** (docs/networks.md, docs/PHASE13.md). Backward compatibility is
