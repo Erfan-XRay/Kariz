@@ -81,7 +81,14 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
 
   // Editing: what the two servers hold now.
   useEffect(() => {
-    if (!edit?.entry || !edit.exit) return;
+    if (!edit?.entry || !edit.exit) {
+      // A tunnel seen from one side only cannot be edited as a pair: say so instead of waiting.
+      if (edit) {
+        setError(t("wz.oneSide"));
+        setLoading(false);
+      }
+      return;
+    }
     let alive = true;
     void Promise.all([api.tunnelSpec(edit.entry.server.id, edit.name), api.tunnelSpec(edit.exit.server.id, edit.name)])
       .then(([a, b]) => {
