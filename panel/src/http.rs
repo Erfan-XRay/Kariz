@@ -2,6 +2,8 @@
 //! gets the same 404 page a plain nginx gives, so a scanner learns nothing.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
@@ -11,11 +13,12 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use hyper::body::Incoming;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder;
 use rust_embed::RustEmbed;
 use serde_json::json;
 use tokio::net::TcpListener;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower::Service;
 use tracing::{debug, info};
 
@@ -79,6 +82,53 @@ pub fn router(path: &str, state: AppState) -> Router {
         )
         .nest(&format!("/{path}"), inner)
         .fallback(|| async { not_found() })
+        // The front page is served by the outer router, so the headers go on all of it.
+        .layer(axum::middleware::from_fn(security_headers))
+}
+
+/// Headers every answer of the panel carries (an answer that sets one itself keeps its own).
+/// The plain 404 of an unknown address is left alone: it must look like nginx's.
+async fn security_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response<Body> {
+    let mut response = next.run(request).await;
+    if response
+        .headers()
+        .get(header::SERVER)
+        .is_some_and(|v| v == "nginx")
+    {
+        return response;
+    }
+    let headers = response.headers_mut();
+    let mut put = |name: header::HeaderName, value: &'static str| {
+        if !headers.contains_key(&name) {
+            headers.insert(name, HeaderValue::from_static(value));
+        }
+    };
+    // Answers of the API are never kept, and are never a page.
+    put(header::CACHE_CONTROL, "no-store");
+    put(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    put(header::REFERRER_POLICY, "no-referrer");
+    put(header::X_FRAME_OPTIONS, "DENY");
+    put(
+        header::CONTENT_SECURITY_POLICY,
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    );
+    put(header::STRICT_TRANSPORT_SECURITY, "max-age=31536000");
+    put(
+        header::HeaderName::from_static("cross-origin-opener-policy"),
+        "same-origin",
+    );
+    put(
+        header::HeaderName::from_static("cross-origin-resource-policy"),
+        "same-origin",
+    );
+    put(
+        header::HeaderName::from_static("permissions-policy"),
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()",
+    );
+    response
 }
 
 async fn version(State(_): State<AppState>) -> impl IntoResponse {
@@ -121,8 +171,10 @@ async fn asset(uri: Uri) -> Response<Body> {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; \
-             frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+            "default-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self'; \
+             img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; \
+             worker-src 'none'; manifest-src 'none'; frame-ancestors 'none'; base-uri 'none'; \
+             form-action 'self'",
         ),
     );
     headers.insert(
@@ -151,8 +203,39 @@ fn mime_of(name: &str) -> &'static str {
     }
 }
 
+/// How much a connection may cost the panel before it has said anything useful. Someone
+/// who opens connections and sends nothing must not be able to use up the panel's sockets.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// The TLS handshake must be done in this long.
+    pub handshake: Duration,
+    /// A request's headers must arrive in this long.
+    pub headers: Duration,
+    /// At most this many connections at once; another is closed at once.
+    pub connections: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            handshake: Duration::from_secs(10),
+            headers: Duration::from_secs(15),
+            connections: 512,
+        }
+    }
+}
+
 /// Serves `app` over TLS on `listener` until the task is dropped.
 pub async fn serve(listener: TcpListener, config: &Config, app: Router) -> Result<()> {
+    serve_with(listener, config, app, Limits::default()).await
+}
+
+pub async fn serve_with(
+    listener: TcpListener,
+    config: &Config,
+    app: Router,
+    limits: Limits,
+) -> Result<()> {
     let load = || {
         kariz::transport::tls::acceptor(&config.cert(), &config.key())
             .context("failed to load the certificate")
@@ -182,6 +265,7 @@ pub async fn serve(listener: TcpListener, config: &Config, app: Router) -> Resul
     }
     let local = listener.local_addr()?;
     info!(address = %local, path = %config.path, "the panel is listening");
+    let room = Arc::new(Semaphore::new(limits.connections));
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -191,10 +275,14 @@ pub async fn serve(listener: TcpListener, config: &Config, app: Router) -> Resul
                 continue;
             }
         };
+        let Ok(permit) = room.clone().try_acquire_owned() else {
+            debug!(%peer, "too many connections; this one is closed");
+            continue;
+        };
         let acceptor = acceptor.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let app = app.clone();
         tokio::spawn(async move {
-            serve_connection(acceptor, stream, peer, app).await;
+            serve_connection(acceptor, stream, peer, app, limits, permit).await;
         });
     }
 }
@@ -204,10 +292,13 @@ async fn serve_connection(
     stream: tokio::net::TcpStream,
     peer: SocketAddr,
     app: Router,
+    limits: Limits,
+    _permit: OwnedSemaphorePermit,
 ) {
-    let tls = match acceptor.accept(stream).await {
-        Ok(tls) => tls,
-        Err(e) => return debug!(%peer, error = %e, "TLS handshake failed"),
+    let tls = match tokio::time::timeout(limits.handshake, acceptor.accept(stream)).await {
+        Ok(Ok(tls)) => tls,
+        Ok(Err(e)) => return debug!(%peer, error = %e, "TLS handshake failed"),
+        Err(_) => return debug!(%peer, "TLS handshake took too long"),
     };
     let service = hyper::service::service_fn(move |mut request: axum::http::Request<Incoming>| {
         let mut app = app.clone();
@@ -217,10 +308,17 @@ async fn serve_connection(
             .insert(axum::extract::ConnectInfo(peer));
         async move { app.call(request).await }
     });
-    if let Err(e) = Builder::new(TokioExecutor::new())
-        .serve_connection(TokioIo::new(tls), service)
-        .await
-    {
+    let mut builder = Builder::new(TokioExecutor::new());
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(limits.headers);
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .keep_alive_interval(Some(Duration::from_secs(30)))
+        .keep_alive_timeout(Duration::from_secs(20));
+    if let Err(e) = builder.serve_connection(TokioIo::new(tls), service).await {
         debug!(%peer, error = %e, "connection ended with an error");
     }
 }
@@ -246,6 +344,72 @@ mod tests {
             .await
             .unwrap();
         (status, String::from_utf8_lossy(&bytes).into_owned(), cache)
+    }
+
+    async fn headers_of(path: &str) -> (StatusCode, axum::http::HeaderMap) {
+        let app = router("k-7f3a9c", AppState::new(Db::in_memory().unwrap()));
+        let response = app
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        (response.status(), response.headers().clone())
+    }
+
+    #[tokio::test]
+    async fn every_answer_under_the_secret_path_is_hardened_and_the_404_stays_nginx() {
+        for path in [
+            "/k-7f3a9c/api/version",
+            "/k-7f3a9c/api/session",
+            "/k-7f3a9c/",
+        ] {
+            let (status, h) = headers_of(path).await;
+            assert!(status.is_success(), "{path} {status}");
+            let get = |n: &str| h.get(n).map(|v| v.to_str().unwrap().to_owned());
+            assert_eq!(
+                get("x-content-type-options").as_deref(),
+                Some("nosniff"),
+                "{path}"
+            );
+            assert_eq!(get("x-frame-options").as_deref(), Some("DENY"), "{path}");
+            assert_eq!(
+                get("referrer-policy").as_deref(),
+                Some("no-referrer"),
+                "{path}"
+            );
+            assert!(get("strict-transport-security").is_some(), "{path}");
+            assert_eq!(
+                get("cross-origin-opener-policy").as_deref(),
+                Some("same-origin")
+            );
+            assert!(get("permissions-policy").unwrap().contains("camera=()"));
+            let csp = get("content-security-policy").unwrap();
+            assert!(csp.contains("frame-ancestors 'none'"), "{path}: {csp}");
+        }
+        // The API is never cached; a page never gets a script from anywhere else.
+        let (_, h) = headers_of("/k-7f3a9c/api/version").await;
+        assert_eq!(h.get("cache-control").unwrap(), "no-store");
+        assert!(h
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("default-src 'none'"));
+        let (_, h) = headers_of("/k-7f3a9c/").await;
+        let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
+        for part in [
+            "script-src 'self'",
+            "connect-src 'self'",
+            "object-src 'none'",
+            "frame-ancestors 'none'",
+        ] {
+            assert!(csp.contains(part), "{csp}");
+        }
+        // Anything else is the plain nginx 404, with nothing that gives the panel away.
+        let (status, h) = headers_of("/admin").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(h.get("server").unwrap(), "nginx");
+        assert!(h.get("strict-transport-security").is_none());
+        assert!(h.get("x-frame-options").is_none());
     }
 
     #[tokio::test]
