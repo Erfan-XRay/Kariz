@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A server whose enrollment is cut off (the agent got its identity but the answer was lost,
+  or never got it) is no longer deleted by the panel: the join code gives the same identity
+  again until it expires, so the agent comes back as that server. 1.2.0 deleted it, and an
+  agent that had kept the identity was then refused for ever.
+
 ## 1.2.0 - 2026-09-30
 
 The panel reaches servers on networks that stall TCP, and each tunnel has a page of its own

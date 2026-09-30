@@ -173,3 +173,107 @@ fn join_codes_carry_the_link_token_and_a_secret_that_is_not_stored_as_it_is() {
     assert_eq!(code.n.as_deref(), Some("a"));
     assert_eq!(code.j.len(), 32);
 }
+
+/// One link of a hand-driven agent: answers Hello with `hello`, then answers Enroll (or,
+/// with `drop_enroll`, receives it and drops the link without an answer, as a path that
+/// stalls does). Returns the identity the panel sent.
+async fn enroll_once(
+    addr: &str,
+    token: &str,
+    hello: impl Fn(&str) -> kariz_panel::wire::HelloReply,
+    drop_enroll: bool,
+) -> Option<(String, String)> {
+    use bytes::Bytes;
+    use kariz_panel::wire::{Ack, Request};
+    let dialer = kariz::link::Dialer::new(addr, token).unwrap();
+    let session = dialer.connect(kariz::mux::Side::Server).await.unwrap();
+    let mut got = None;
+    while let Ok(Some((stream, syn))) =
+        tokio::time::timeout(Duration::from_secs(5), session.accept()).await
+    {
+        let answer = match serde_json::from_slice::<Request>(&syn).unwrap() {
+            Request::Hello { challenge } => serde_json::to_vec(&hello(&challenge)).unwrap(),
+            Request::Enroll { id, key } => {
+                got = Some((id, key));
+                if drop_enroll {
+                    session.close();
+                    return got;
+                }
+                serde_json::to_vec(&Ack {
+                    ok: true,
+                    error: None,
+                })
+                .unwrap()
+            }
+            _ => break,
+        };
+        stream.send(Bytes::from(answer)).await.unwrap();
+        stream.finish().unwrap();
+        if got.is_some() {
+            // let the answer go out before the link is dropped
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            break;
+        }
+    }
+    session.close();
+    got
+}
+
+#[tokio::test]
+async fn an_enrollment_cut_short_is_finished_later_with_the_same_identity() {
+    use kariz_panel::wire::HelloReply;
+    let panel_dir = tempfile::tempdir().unwrap();
+    let (hub, addr) = start_hub(panel_dir.path()).await;
+    let token = hub.link_token().unwrap();
+    let code = kariz_panel::join::decode(&hub.create_join(Some("cut"), &addr).unwrap()).unwrap();
+    let new_agent = |_: &str| HelloReply {
+        id: None,
+        proof: None,
+        join: Some(code.j.clone()),
+        hostname: "h".into(),
+        version: "1".into(),
+        arch: "x".into(),
+    };
+
+    // The Enroll arrives, but its answer never gets back.
+    let (id, key) = enroll_once(&addr, &token, new_agent, true)
+        .await
+        .expect("an Enroll");
+    wait_for("the server to be kept", || {
+        remote(&hub).iter().any(|s| s.id == id && !s.online)
+    })
+    .await;
+
+    // An agent that did not keep it: the same code gets the same identity again.
+    let again = enroll_once(&addr, &token, new_agent, false)
+        .await
+        .expect("an Enroll");
+    assert_eq!(
+        again,
+        (id.clone(), key.clone()),
+        "the same identity, not a new server"
+    );
+
+    // An agent that did keep it proves it and is let in.
+    let (pid, pkey) = (id.clone(), key.clone());
+    let proven = move |challenge: &str| HelloReply {
+        id: Some(pid.clone()),
+        proof: kariz_panel::agent::proof(&pkey, challenge),
+        join: None,
+        hostname: "h".into(),
+        version: "1".into(),
+        arch: "x".into(),
+    };
+    tokio::spawn({
+        let (addr, token) = (addr.clone(), token.clone());
+        async move { enroll_once(&addr, &token, proven, false).await }
+    });
+    wait_for("the server to come online", || {
+        remote(&hub).iter().any(|s| s.id == id && s.online)
+    })
+    .await;
+    assert_eq!(remote(&hub).len(), 1);
+
+    // Confirmed: the code gives nothing out any more.
+    assert_eq!(enroll_once(&addr, &token, new_agent, false).await, None);
+}
