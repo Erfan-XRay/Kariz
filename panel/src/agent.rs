@@ -360,6 +360,14 @@ impl Agent {
                 };
                 if stream.send(Bytes::from(reply)).await.is_ok() {
                     let _ = stream.finish();
+                    // The panel finishes its side right after opening the stream. If the
+                    // answer is quick, the stream can be dropped before that end-of-stream
+                    // frame has arrived, and a stream dropped half open is reset: the panel
+                    // would see an error for a request that was answered. So wait for it.
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        while let Ok(Some(_)) = stream.recv().await {}
+                    })
+                    .await;
                 }
             });
         }
