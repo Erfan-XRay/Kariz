@@ -35,6 +35,12 @@ enum Command {
         /// The port, instead of a random one (20000-59999).
         #[arg(long)]
         port: Option<u16>,
+        /// Use this certificate chain (PEM) instead of making a self-signed one; needs `--key-file`.
+        #[arg(long, requires = "key_file")]
+        cert_file: Option<PathBuf>,
+        /// The key of `--cert-file`.
+        #[arg(long, requires = "cert_file")]
+        key_file: Option<PathBuf>,
     },
     /// Run the agent that connects this server to a panel. The first time, give it the
     /// join code the panel shows (*Add server*); after that it remembers who it is.
@@ -163,8 +169,11 @@ fn main() -> Result<()> {
             config,
             data_dir,
             port,
+            cert_file,
+            key_file,
         } => {
-            let done = kariz_panel::init(&config, &data_dir, port)?;
+            let done =
+                kariz_panel::init_with_cert(&config, &data_dir, port, cert_file.zip(key_file))?;
             println!("panel set up");
             println!("  settings    : {}", config.display());
             println!("  listen      : {}", done.config.listen);
