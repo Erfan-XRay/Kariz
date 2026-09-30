@@ -5,9 +5,12 @@ import type { Digits, Lang } from "./i18n";
 
 export type Theme = "night" | "dawn";
 
+export type ToastKind = "info" | "ok" | "err";
+
 interface Toast {
   id: number;
   text: string;
+  kind: ToastKind;
   leaving: boolean;
 }
 
@@ -26,7 +29,9 @@ interface Ctx {
   num: (n: number, decimals?: number) => string;
   /** Digits of a ready string. */
   digitsOf: (s: string) => string;
-  toast: (text: string) => void;
+  /** A short note in the corner: `ok` for something done, `err` for something that failed. */
+  toast: (text: string, kind?: ToastKind) => void;
+  dismiss: (id: number) => void;
   toasts: Toast[];
 }
 
@@ -83,12 +88,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [lang],
   );
 
-  const toast = useCallback((text: string) => {
-    const id = nextToast.current++;
-    setToasts((list) => [...list, { id, text, leaving: false }]);
-    setTimeout(() => setToasts((list) => list.map((x) => (x.id === id ? { ...x, leaving: true } : x))), 3400);
-    setTimeout(() => setToasts((list) => list.filter((x) => x.id !== id)), 3700);
+  const dismiss = useCallback((id: number) => {
+    setToasts((list) => list.map((x) => (x.id === id ? { ...x, leaving: true } : x)));
+    setTimeout(() => setToasts((list) => list.filter((x) => x.id !== id)), 300);
   }, []);
+
+  const toast = useCallback(
+    (text: string, kind: ToastKind = "info") => {
+      const id = nextToast.current++;
+      // at most three at a time: the oldest goes first
+      setToasts((list) => [...list.slice(-2), { id, text, kind, leaving: false }]);
+      setTimeout(() => dismiss(id), kind === "err" ? 6000 : 3600);
+    },
+    [dismiss],
+  );
 
   const value = useMemo<Ctx>(() => {
     const digitsOf = (s: string) => localDigits(s, lang, digits);
@@ -123,9 +136,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       num,
       digitsOf,
       toast,
+      dismiss,
       toasts,
     };
-  }, [lang, theme, low, digits, t, toast, toasts]);
+  }, [lang, theme, low, digits, t, toast, dismiss, toasts]);
 
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
 }

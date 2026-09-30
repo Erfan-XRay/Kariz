@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ReactNode, RefObject } from "react";
 import { FA_DIGITS } from "./i18n";
 import { useApp } from "./store";
@@ -95,6 +96,69 @@ const ICONS: Record<string, ReactNode> = {
     <>
       <circle cx="8" cy="15" r="4" />
       <path d="m11 12 8-8M16 7l2.5 2.5M14 9l2 2" />
+    </>
+  ),
+  link: (
+    <>
+      <path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1.2 1.2" />
+      <path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2" />
+    </>
+  ),
+  eyeOff: (
+    <>
+      <path d="M4 4l16 16" />
+      <path d="M9.9 5.7A9 9 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-3 3.8M6.3 7.4A15.6 15.6 0 0 0 2.5 12S6 18.5 12 18.5a9 9 0 0 0 4-.9" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+    </>
+  ),
+  alert: (
+    <>
+      <path d="M12 4 2.8 19.5h18.4L12 4Z" />
+      <path d="M12 10v4.5M12 17.2h.01" />
+    </>
+  ),
+  info: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 11v5.5M12 7.8h.01" />
+    </>
+  ),
+  chevron: <path d="m9 6 6 6-6 6" />,
+  more: <path d="M6 12h.01M12 12h.01M18 12h.01" strokeWidth="3" />,
+  cpu: (
+    <>
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+      <path d="M9.5 3v3M14.5 3v3M9.5 18v3M14.5 18v3M3 9.5h3M3 14.5h3M18 9.5h3M18 14.5h3" />
+    </>
+  ),
+  pulse: <path d="M3 12h4l2.5-6 5 12 2.5-6H21" />,
+  down: <path d="M12 5v14M6 13l6 6 6-6" />,
+  up: <path d="M12 19V5M6 11l6-6 6 6" />,
+  clock: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </>
+  ),
+  shield: <path d="M12 3.5 5 6v5.5c0 4.3 3 7.6 7 9 4-1.4 7-4.7 7-9V6l-7-2.5Z" />,
+  refresh: (
+    <>
+      <path d="M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5" />
+      <path d="M17.6 3v4h-4M6.4 21v-4h4" />
+    </>
+  ),
+  download: <path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14" />,
+  upload: <path d="M12 16V5M7 9.5l5-5 5 5M5 19.5h14" />,
+  palette: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 3.5a8.5 8.5 0 0 0 0 17" fill="currentColor" stroke="none" opacity=".35" />
+    </>
+  ),
+  update: (
+    <>
+      <path d="M12 3.5v10M8 9.5l4 4 4-4" />
+      <path d="M4.5 14.5v3a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-3" />
     </>
   ),
 };
@@ -214,7 +278,8 @@ export function Dialog({
       removeEventListener("keydown", key);
     };
   }, [onClose]);
-  return (
+  // On the page's body, so no moving parent can clip or shift it.
+  return createPortal(
     <div className={`dialog-backdrop ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label={title} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="dialog" ref={ref}>
         <header>
@@ -226,7 +291,8 @@ export function Dialog({
         <div className="body">{children}</div>
         {footer && <footer>{footer}</footer>}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -263,6 +329,126 @@ export function CodeBlock({ text }: { text: string }) {
         <Icon name={done ? "check" : "copy"} size={18} />
       </button>
     </pre>
+  );
+}
+
+/** A surface with an optional heading row. */
+export function Card({
+  title,
+  sub,
+  actions,
+  className = "",
+  children,
+  id,
+  flush,
+}: {
+  title?: ReactNode;
+  sub?: ReactNode;
+  actions?: ReactNode;
+  className?: string;
+  children?: ReactNode;
+  id?: string;
+  /** No inner padding: for tables and canvases that run to the edges. */
+  flush?: boolean;
+}) {
+  return (
+    <section className={`card ${flush ? "flush" : ""} ${className}`} id={id}>
+      {(title || actions) && (
+        <header className="card-head">
+          <div className="card-titles">
+            {title && <h2>{title}</h2>}
+            {sub && <p>{sub}</p>}
+          </div>
+          {actions && <div className="card-actions">{actions}</div>}
+        </header>
+      )}
+      {children}
+    </section>
+  );
+}
+
+/** A tunnel's or server's state as a small pill with a dot. */
+export function StatePill({ state, label }: { state: "up" | "down" | "off" | "warn"; label: string }) {
+  return (
+    <span className={`pill ${state}`}>
+      <i className={`dot ${state}`} aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
+/** A small line of recent values, drawn as water. */
+export function Sparkline({ values, className = "" }: { values: number[]; className?: string }) {
+  if (values.length < 2) return <svg className={`spark ${className}`} aria-hidden="true" />;
+  const W = 120;
+  const H = 32;
+  const top = Math.max(...values, 0.0001);
+  const pts = values.map((v, i) => [(i / (values.length - 1)) * W, H - 2 - (v / top) * (H - 6)]);
+  const line = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`).join(" ");
+  return (
+    <svg className={`spark ${className}`} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">
+      <path d={`${line} L${W} ${H} L0 ${H} Z`} className="spark-area" />
+      <path d={line} className="spark-line" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
+/** A friendly empty state: what is missing, and the button that makes it. */
+export function Empty({ icon, title, text, action }: { icon: string; title: string; text?: string; action?: ReactNode }) {
+  return (
+    <div className="empty">
+      <span className="empty-icon" aria-hidden="true">
+        <Icon name={icon} size={26} />
+      </span>
+      <h3>{title}</h3>
+      {text && <p>{text}</p>}
+      {action}
+    </div>
+  );
+}
+
+/** Grey shapes where content is about to be. */
+export function Skeleton({ rows = 3, height = 56 }: { rows?: number; height?: number }) {
+  return (
+    <div className="skeleton" aria-hidden="true">
+      {Array.from({ length: rows }, (_, i) => (
+        <i key={i} style={{ height }} />
+      ))}
+    </div>
+  );
+}
+
+/** A number and its unit, the way the key numbers are shown. */
+export function Stat({
+  label,
+  value,
+  unit,
+  note,
+  icon,
+  tone,
+  children,
+}: {
+  label: string;
+  value: ReactNode;
+  unit?: ReactNode;
+  note?: ReactNode;
+  icon?: string;
+  tone?: "water" | "accent" | "danger" | "warn";
+  children?: ReactNode;
+}) {
+  return (
+    <div className={`stat ${tone ?? ""}`}>
+      <div className="stat-label">
+        {icon && <Icon name={icon} size={16} />}
+        <span>{label}</span>
+      </div>
+      <div className="stat-value num">
+        {value}
+        {unit && <span className="unit">{unit}</span>}
+      </div>
+      {note && <div className="stat-note">{note}</div>}
+      {children}
+    </div>
   );
 }
 

@@ -2,25 +2,48 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api } from "./api";
 import type { LinkTransport, ServerInfo, SessionRow } from "./api";
 import { bytesPerSec, pairTunnels, rateParts } from "./derive";
+import type { TunnelState } from "./derive";
+import type { Route } from "./App";
 import { paletteNow } from "./draw";
 import { startMap } from "./scene-map";
 import type { MapData, MapHit } from "./scene-map";
 import { useApp } from "./store";
 import { BackupDialog, RestoreDialog } from "./Extras";
-import { CodeBlock, Dialog, Icon, Odo, Seg, useAgo } from "./ui";
+import { Card, CodeBlock, Dialog, Empty, Icon, Odo, Seg, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
 
 // ---------------------------------------------------------------- the map
 
 const stateKey = { up: "st.up", down: "st.down", off: "st.off" } as const;
 
-export function MapPage({ servers }: { servers: ServerInfo[] }) {
+// The total throughput of the last few minutes, kept while the panel is open (every reading
+// of the servers adds one), for the small line under the big number.
+const throughput: number[] = [];
+let lastReading: ServerInfo[] | null = null;
+
+export function MapPage({
+  servers,
+  loaded,
+  navigate,
+  outdated,
+  onUpdateServers,
+}: {
+  servers: ServerInfo[];
+  loaded: boolean;
+  navigate: (to: Route) => void;
+  outdated: number;
+  onUpdateServers: () => void;
+}) {
   const { t, num, low } = useApp();
+  const ago = useAgo();
   const canvas = useRef<HTMLCanvasElement>(null);
+  const band = useRef<HTMLDivElement>(null);
   const [tip, setTip] = useState<MapHit | null>(null);
   const tunnels = useMemo(() => pairTunnels(servers), [servers]);
   // The scene reads the latest data and settings without restarting.
   const data = useRef<MapData>({ servers: [], tunnels: [] });
   const lowRef = useRef(low);
+  const nav = useRef(navigate);
+  nav.current = navigate;
   data.current = {
     servers: servers.map((s) => ({ id: s.id, name: s.name, sub: s.local ? t("role.local") : `${s.arch} · ${s.version}`, st: s.online ? ("up" as const) : ("down" as const) })),
     tunnels: tunnels
@@ -33,7 +56,8 @@ export function MapPage({ servers }: { servers: ServerInfo[] }) {
           b: x.exit!.server.id,
           st: x.state,
           rate: x.rate,
-          label: x.state === "up" ? `${x.name}  ${num(r.value, r.decimals)} ${r.unit}` : `${x.name}  ${t(stateKey[x.state])}`,
+          label: x.name,
+          value: x.state === "up" ? `${num(r.value, r.decimals)} ${r.unit}` : t(stateKey[x.state]),
         };
       }),
   };
@@ -47,179 +71,323 @@ export function MapPage({ servers }: { servers: ServerInfo[] }) {
       low: () => lowRef.current,
       rtl: () => document.documentElement.dir === "rtl",
       onHover: setTip,
-      onOpen: () => {},
+      onOpen: (hit) => nav.current(hit.kind === "tunnel" ? { page: "tunnels", tunnel: hit.id } : { page: "servers" }),
     });
-  }, []);
+    // the canvas is there only once the first reading came
+  }, [loaded]);
 
   const up = tunnels.filter((x) => x.state === "up");
   const total = up.reduce((n, x) => n + x.rate, 0);
+  if (loaded && servers !== lastReading) {
+    lastReading = servers;
+    throughput.push(total);
+    if (throughput.length > 72) throughput.shift();
+  }
   const rate = rateParts(total);
   const conns = up.reduce((n, x) => n + x.connections, 0);
-  const online = servers.filter((s) => s.online).length;
+  const online = servers.filter((s) => s.online);
+  const offline = servers.filter((s) => !s.online);
+  const hot = online.filter((s) => (s.health?.cpu_pct ?? 0) > 85);
+  const broken = tunnels.filter((x) => x.state === "down");
+  const maxRate = Math.max(1, ...tunnels.map((x) => x.rate));
   const hoveredServer = tip?.kind === "server" ? servers.find((s) => s.id === tip.id) : undefined;
   const hoveredTunnel = tip?.kind === "tunnel" ? tunnels.find((x) => x.name === tip.id) : undefined;
+  const bandW = band.current?.clientWidth ?? 800;
+  const count = (s: TunnelState) => tunnels.filter((x) => x.state === s).length;
+
+  if (!loaded) {
+    return (
+      <div className="page is-on">
+        <div className="stats">
+          {[0, 1, 2, 3].map((i) => (
+            <div className="card stat-card" key={i}>
+              <Skeleton rows={1} height={64} />
+            </div>
+          ))}
+        </div>
+        <div className="card">
+          <Skeleton rows={1} height={380} />
+        </div>
+      </div>
+    );
+  }
+
+  const attention: { key: string; tone: "danger" | "warn"; icon: string; text: string; action?: [string, () => void] }[] = [
+    ...broken.map((x) => ({
+      key: `t-${x.name}`,
+      tone: "danger" as const,
+      icon: "tunnels",
+      text: t("att.broken", { name: x.name }),
+      action: [t("att.open"), () => navigate({ page: "tunnels", tunnel: x.name })] as [string, () => void],
+    })),
+    ...offline.map((s) => ({
+      key: `s-${s.id}`,
+      tone: "danger" as const,
+      icon: "servers",
+      text: s.seen_secs != null ? t("att.offlineSeen", { name: s.name, ago: ago(s.seen_secs) }) : t("att.offline", { name: s.name }),
+      action: [t("att.servers"), () => navigate({ page: "servers" })] as [string, () => void],
+    })),
+    ...hot.map((s) => ({
+      key: `c-${s.id}`,
+      tone: "warn" as const,
+      icon: "cpu",
+      text: t("att.cpu", { name: s.name, n: num(Math.round(s.health?.cpu_pct ?? 0)) }),
+    })),
+    ...(outdated > 0
+      ? [{ key: "upd", tone: "warn" as const, icon: "update", text: t(outdated === 1 ? "att.outdated1" : "att.outdated", { n: num(outdated) }), action: [t("upd.serversGo"), onUpdateServers] as [string, () => void] }]
+      : []),
+  ];
+
   return (
-    <div className="page is-on">
-      <div className="map-band">
-        <canvas id="map" ref={canvas} role="img" aria-label={t("nav.map")} aria-describedby="map-alt" />
-        <div className="map-legend">
-          <span>
-            <i className="dot up" />
-            {t("st.up")}
-          </span>
-          <span>
-            <i className="dot down" />
-            {t("st.down")}
-          </span>
-          <span>
-            <i className="dot off" />
-            {t("st.off")}
-          </span>
+    <div className="page is-on dash">
+      <div className="stats">
+        <div className="card stat-card hero">
+          <Stat label={t("m.through")} icon="pulse" tone="water" value={<Odo value={num(rate.value, rate.decimals)} />} unit={rate.unit}>
+            <Sparkline values={throughput} />
+          </Stat>
         </div>
-        {tip && (hoveredServer || hoveredTunnel) && (
-          <div className="map-tip is-on" style={{ left: Math.min(tip.x + 16, 600), top: tip.y + 16 }}>
-            {hoveredServer && (
-              <>
-                <b>{hoveredServer.name}</b>
-                <div className="row">
-                  <span>{t("srv.cpu")}</span>
-                  <span className="num">{hoveredServer.health?.cpu_pct != null ? `${num(Math.round(hoveredServer.health.cpu_pct))}%` : "—"}</span>
-                </div>
-                <div className="row">
-                  <span>{t("srv.ram")}</span>
-                  <span className="num">{hoveredServer.health?.mem_total ? `${num(Math.round(((hoveredServer.health.mem_used ?? 0) * 100) / hoveredServer.health.mem_total))}%` : "—"}</span>
-                </div>
-                <div className="row">
-                  <span>{t("tip.tunnels")}</span>
-                  <span className="num">{num(hoveredServer.tunnels.length)}</span>
-                </div>
-              </>
-            )}
-            {hoveredTunnel && (
-              <>
-                <b>{hoveredTunnel.name}</b>
-                <div className="row">
-                  <span className="mono">
-                    {hoveredTunnel.entry?.server.name} → {hoveredTunnel.exit?.server.name}
-                  </span>
-                </div>
-                <div className="row">
-                  <span>{t("t.transport")}</span>
-                  <span className="mono">
-                    {hoveredTunnel.transport} · {hoveredTunnel.profile}
-                  </span>
-                </div>
-                {hoveredTunnel.rtt != null && (
+        <div className="card stat-card">
+          <Stat label={t("m.conns")} icon="link" value={<Odo value={num(conns)} />} note={t("m.connsNote", { n: num(up.length) })} />
+        </div>
+        <div className="card stat-card">
+          <Stat
+            label={t("m.tunnels")}
+            icon="tunnels"
+            value={<Odo value={num(up.length)} />}
+            unit={`${t("m.of")} ${num(tunnels.length)}`}
+            note={
+              tunnels.length ? (
+                <span className="state-bar" aria-hidden="true">
+                  {(["up", "down", "off"] as TunnelState[]).map((s) => count(s) > 0 && <i key={s} className={s} style={{ flexGrow: count(s) }} />)}
+                </span>
+              ) : undefined
+            }
+          />
+        </div>
+        <div className="card stat-card">
+          <Stat
+            label={t("m.servers")}
+            icon="servers"
+            value={<Odo value={num(online.length)} />}
+            unit={`${t("m.of")} ${num(servers.length)}`}
+            tone={offline.length ? "danger" : undefined}
+            note={offline.length ? t("m.offlineNote", { names: offline.map((s) => s.name).join("، ") }) : t("m.allOnline")}
+          />
+        </div>
+      </div>
+
+      <section className="card flush map-card" aria-labelledby="map-h">
+        <header className="card-head">
+          <div className="card-titles">
+            <h2 id="map-h">{t("map.title")}</h2>
+            <p>{t("map.hint")}</p>
+          </div>
+          <div className="map-legend" aria-hidden="true">
+            <span>
+              <i className="dot up" />
+              {t("st.up")}
+            </span>
+            <span>
+              <i className="dot down" />
+              {t("st.down")}
+            </span>
+            <span>
+              <i className="dot off" />
+              {t("st.off")}
+            </span>
+          </div>
+        </header>
+        <div className="map-band" ref={band}>
+          <canvas id="map" ref={canvas} role="img" aria-label={t("nav.map")} aria-describedby="map-alt" />
+          {tip && (hoveredServer || hoveredTunnel) && (
+            <div className="map-tip is-on" style={{ left: Math.max(8, Math.min(tip.x + 16, bandW - 250)), top: tip.y + 16 }}>
+              {hoveredServer && (
+                <>
+                  <b>
+                    <i className={`dot ${hoveredServer.online ? "up" : "down"}`} /> {hoveredServer.name}
+                  </b>
                   <div className="row">
-                    <span>rtt</span>
-                    <span className="num">{num(hoveredTunnel.rtt, 1)} ms</span>
+                    <span>{t("srv.cpu")}</span>
+                    <span className="num">{hoveredServer.health?.cpu_pct != null ? `${num(Math.round(hoveredServer.health.cpu_pct))}%` : "—"}</span>
                   </div>
-                )}
-                {hoveredTunnel.error && <div className="row" style={{ color: "var(--danger)" }}>{hoveredTunnel.error}</div>}
-              </>
-            )}
-          </div>
-        )}
-        <p className="sr-only" id="map-alt">
-          {t("alt.prefix")} {servers.map((s) => s.name).join(", ")}; {tunnels.map((x) => `${x.name}: ${t(stateKey[x.state])}`).join(", ")}
-        </p>
-      </div>
-
-      <div className="stratum s1">
-        <div className="metrics">
-          <div className="metric">
-            <div className="label">{t("m.through")}</div>
-            <div className="value num">
-              <Odo value={num(rate.value, rate.decimals)} />
-              <span className="unit">{rate.unit}</span>
+                  <div className="row">
+                    <span>{t("srv.ram")}</span>
+                    <span className="num">{hoveredServer.health?.mem_total ? `${num(Math.round(((hoveredServer.health.mem_used ?? 0) * 100) / hoveredServer.health.mem_total))}%` : "—"}</span>
+                  </div>
+                  <div className="row">
+                    <span>{t("tip.tunnels")}</span>
+                    <span className="num">{num(hoveredServer.tunnels.length)}</span>
+                  </div>
+                </>
+              )}
+              {hoveredTunnel && (
+                <>
+                  <b>
+                    <i className={`dot ${hoveredTunnel.state}`} /> {hoveredTunnel.name}
+                  </b>
+                  <div className="row">
+                    <span className="mono">
+                      {hoveredTunnel.entry?.server.name} → {hoveredTunnel.exit?.server.name}
+                    </span>
+                  </div>
+                  <div className="row">
+                    <span>{t("t.rate")}</span>
+                    <span className="num" dir="ltr">
+                      {hoveredTunnel.state === "up" ? `${num(rateParts(hoveredTunnel.rate).value, rateParts(hoveredTunnel.rate).decimals)} ${rateParts(hoveredTunnel.rate).unit}` : "—"}
+                    </span>
+                  </div>
+                  <div className="row">
+                    <span>{t("tun.conns")}</span>
+                    <span className="num">{hoveredTunnel.state === "up" ? num(hoveredTunnel.connections) : "—"}</span>
+                  </div>
+                  {hoveredTunnel.rtt != null && (
+                    <div className="row">
+                      <span>{t("tun.rtt")}</span>
+                      <span className="num" dir="ltr">
+                        {num(hoveredTunnel.rtt, 0)} ms
+                      </span>
+                    </div>
+                  )}
+                  <div className="row">
+                    <span>{t("t.transport")}</span>
+                    <span className="mono">
+                      {hoveredTunnel.transport} · {hoveredTunnel.profile}
+                    </span>
+                  </div>
+                  {hoveredTunnel.error && hoveredTunnel.state !== "up" && <div className="tip-err">{hoveredTunnel.error}</div>}
+                  <div className="tip-foot">{t("map.clickOpen")}</div>
+                </>
+              )}
             </div>
-          </div>
-          <div className="metric">
-            <div className="label">{t("m.conns")}</div>
-            <div className="value num">
-              <Odo value={num(conns)} />
-            </div>
-          </div>
-          <div className="metric">
-            <div className="label">{t("m.tunnels")}</div>
-            <div className="value num">
-              <Odo value={num(up.length)} />
-              <span className="unit">
-                {t("m.of")} {num(tunnels.length)}
-              </span>
-            </div>
-          </div>
-          <div className="metric">
-            <div className="label">{t("m.servers")}</div>
-            <div className="value num">
-              <Odo value={num(online)} />
-              <span className="unit">
-                {t("m.of")} {num(servers.length)}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="stratum s2">
-        <div className="stratum-head">
-          <h2>{t("t.title")}</h2>
-          <span className="eyebrow">{t("t.hint")}</span>
-        </div>
-        {tunnels.length === 0 ? (
-          <p className="muted small" style={{ margin: 0, maxWidth: 640 }}>
-            {t("t.empty")}
+          )}
+          <p className="sr-only" id="map-alt">
+            {t("alt.prefix")} {servers.map((s) => s.name).join(", ")}; {tunnels.map((x) => `${x.name}: ${t(stateKey[x.state])}`).join(", ")}
           </p>
-        ) : (
-          <table className="tunnels">
-            <thead>
-              <tr>
-                <th>{t("t.name")}</th>
-                <th>{t("t.route")}</th>
-                <th>{t("t.transport")}</th>
-                <th>{t("t.state")}</th>
-                <th>{t("t.rate")}</th>
-              </tr>
-            </thead>
-            <tbody>
+        </div>
+      </section>
+
+      <div className="dash-grid">
+        <Card
+          title={t("t.title")}
+          sub={tunnels.length ? t("t.sub", { up: num(up.length), all: num(tunnels.length) }) : undefined}
+          actions={
+            <button className="btn btn-ghost btn-sm" type="button" onClick={() => navigate({ page: "tunnels" })}>
+              {t("t.all")}
+              <Icon name="chevron" size={16} />
+            </button>
+          }
+          flush
+        >
+          {tunnels.length === 0 ? (
+            <Empty
+              icon="tunnels"
+              title={t("t.emptyTitle")}
+              text={online.length < 2 ? t("tun.needTwo") : t("t.empty")}
+              action={
+                <button className="btn btn-primary btn-sm" type="button" onClick={() => navigate({ page: online.length < 2 ? "servers" : "tunnels" })}>
+                  <Icon name="plus" size={18} />
+                  {online.length < 2 ? t("srv.add") : t("tun.new")}
+                </button>
+              }
+            />
+          ) : (
+            <ul className="t-list">
               {tunnels.map((x) => {
                 const r = rateParts(x.rate);
                 return (
-                  <tr key={x.name}>
-                    <td>
-                      <span className="t-name">{x.name}</span>
-                    </td>
-                    <td>
-                      <span className="t-route">
-                        {x.paired ? (
+                  <li key={x.name}>
+                    <button type="button" className={`t-row ${x.state}`} onClick={() => navigate({ page: "tunnels", tunnel: x.name })}>
+                      <span className={`t-mark ${x.state}`} aria-hidden="true" />
+                      <span className="t-main">
+                        <span className="t-name">{x.name}</span>
+                        <span className="t-route">
+                          {x.paired ? (
+                            <>
+                              <span>{x.entry!.server.name}</span>
+                              <Icon name="arrow" size={14} />
+                              <span>{x.exit!.server.name}</span>
+                            </>
+                          ) : (
+                            <span>
+                              {(x.entry ?? x.exit)!.server.name} · {t("t.oneSide")}
+                            </span>
+                          )}
+                        </span>
+                      </span>
+                      <span className="t-bar" aria-hidden="true">
+                        <i style={{ width: `${x.state === "up" ? Math.max(2, (x.rate / maxRate) * 100) : 0}%` }} />
+                      </span>
+                      <span className={`t-rate num ${x.state}`} dir="ltr">
+                        {x.state === "up" ? (
                           <>
-                            <span>{x.entry!.server.name}</span>
-                            <Icon name="arrow" size={16} />
-                            <span>{x.exit!.server.name}</span>
+                            {num(r.value, r.decimals)} <small>{r.unit}</small>
                           </>
                         ) : (
-                          <span>
-                            {(x.entry ?? x.exit)!.server.name} · {t("t.oneSide")}
-                          </span>
+                          <span dir="auto">{t(stateKey[x.state])}</span>
                         )}
                       </span>
-                    </td>
-                    <td className="c-transport">
-                      <span className="tag">{x.transport}</span> <span className="tag">{x.profile}</span>
-                    </td>
-                    <td>
-                      <span className={`state ${x.state}`}>
-                        <i className={`dot ${x.state}`} />
-                        {t(stateKey[x.state])}
-                      </span>
-                    </td>
-                    <td className="rate num">{x.state === "up" ? `${num(r.value, r.decimals)} ${r.unit}` : "—"}</td>
-                  </tr>
+                      <Icon name="chevron" size={16} />
+                    </button>
+                  </li>
                 );
               })}
-            </tbody>
-          </table>
-        )}
+            </ul>
+          )}
+        </Card>
+
+        <div className="dash-side">
+          <Card title={t("att.title")} sub={attention.length ? undefined : t("att.clearText")}>
+            {attention.length === 0 ? (
+              <div className="all-clear">
+                <span className="ok-mark" aria-hidden="true">
+                  <Icon name="check" size={20} />
+                </span>
+                <span>{t("att.clear")}</span>
+              </div>
+            ) : (
+              <ul className="att-list">
+                {attention.map((a) => (
+                  <li key={a.key} className={a.tone}>
+                    <span className="att-icon" aria-hidden="true">
+                      <Icon name={a.icon} size={16} />
+                    </span>
+                    <span className="att-text">{a.text}</span>
+                    {a.action && (
+                      <button className="btn btn-ghost btn-xs" type="button" onClick={a.action[1]}>
+                        {a.action[0]}
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+          <Card
+            title={t("m.load")}
+            actions={
+              <button className="btn btn-ghost btn-sm" type="button" onClick={() => navigate({ page: "servers" })}>
+                {t("t.all")}
+                <Icon name="chevron" size={16} />
+              </button>
+            }
+          >
+            <ul className="mini-srv">
+              {servers.map((s) => {
+                const cpu = s.health?.cpu_pct ?? null;
+                return (
+                  <li key={s.id}>
+                    <i className={`dot ${s.online ? "up" : "down"}`} aria-hidden="true" />
+                    <span className="nm">{s.name}</span>
+                    <span className={`mini-bar ${cpu != null && cpu > 85 ? "hot" : ""}`} aria-hidden="true">
+                      <i style={{ width: `${s.online && cpu != null ? Math.max(2, Math.min(100, cpu)) : 0}%` }} />
+                    </span>
+                    <span className="num small">{s.online && cpu != null ? `${num(Math.round(cpu))}%` : t("srv.offline")}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          </Card>
+        </div>
       </div>
     </div>
   );
@@ -414,11 +582,17 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   );
 }
 
-export function ServersPage({ servers, agentsOn, onChanged }: { servers: ServerInfo[]; agentsOn: boolean; onChanged: () => void }) {
+export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers: ServerInfo[]; loaded: boolean; agentsOn: boolean; onChanged: () => void }) {
   const { t, num, toast, digitsOf } = useApp();
   const ago = useAgo();
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<ServerInfo | null>(null);
+  const online = servers.filter((s) => s.online).length;
+  const uptime = (secs: number) => {
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    return digitsOf(d > 0 ? t("srv.days", { d, h }) : t("srv.hours", { h: Math.max(0, h), m: Math.floor((secs % 3600) / 60) }));
+  };
   return (
     <div className="page is-on">
       <div className="page-band">
@@ -428,7 +602,7 @@ export function ServersPage({ servers, agentsOn, onChanged }: { servers: ServerI
             <span>{t("m.serversNote")}</span>
           </div>
           <div>
-            <b>{num(servers.filter((s) => s.online).length)}</b>
+            <b className={online < servers.length ? "warn-text" : "ok-text"}>{num(online)}</b>
             <span>{t("srv.online")}</span>
           </div>
         </div>
@@ -439,62 +613,97 @@ export function ServersPage({ servers, agentsOn, onChanged }: { servers: ServerI
           {t("srv.add")}
         </button>
       </div>
-      {servers.length === 0 && (
-        <div className="stratum s1">
-          <p className="muted">{t("srv.none")}</p>
+      {!loaded ? (
+        <div className="srv-list">
+          {[0, 1, 2].map((i) => (
+            <div className="card" key={i}>
+              <Skeleton rows={3} height={28} />
+            </div>
+          ))}
         </div>
-      )}
-      <ul className="srv-list">
-        {servers.map((s) => {
-          const h = s.health;
-          const mem = h?.mem_total ? ((h.mem_used ?? 0) * 100) / h.mem_total : null;
-          const rx = h?.rx_bps != null ? bytesPerSec(h.rx_bps) : null;
-          const tx = h?.tx_bps != null ? bytesPerSec(h.tx_bps) : null;
-          return (
-            <li className="srv" key={s.id}>
-              <Well level={h?.cpu_pct != null ? Math.min(1, h.cpu_pct / 100 + 0.3) : 0.5} online={s.online} />
-              <div>
-                <div className="srv-name">{s.name}</div>
-                <div className="srv-sub">
-                  {t("srv.version", { v: s.version })} · {s.arch}
-                  {h?.uptime_secs != null && ` · ${t("srv.up")} ${digitsOf(Math.floor(h.uptime_secs / 86400) > 0 ? `${Math.floor(h.uptime_secs / 86400)} d` : `${Math.floor(h.uptime_secs / 3600)} h`)}`}
-                  {s.link && ` · ${t("srv.via", { t: s.link })}`}
-                </div>
-              </div>
-              <div className="c-link">
-                <div className="srv-link">
-                  <i className={`dot ${s.online ? "up" : "down"}`} />
-                  <span>{s.local ? t("srv.panel") : s.online ? t("srv.online") : `${t("srv.offline")}${s.seen_secs != null ? ` · ${ago(s.seen_secs)}` : ""}`}</span>
-                </div>
-              </div>
-              <div className="m-cpu">
-                <Meter label={t("srv.cpu")} pct={h?.cpu_pct ?? null} />
-              </div>
-              <div className="m-ram">
-                <Meter label={t("srv.ram")} pct={mem} />
-              </div>
-              <div className="m-net">
-                <div className="meter">
-                  <div className="top">
-                    <span>{t("srv.net")}</span>
+      ) : (
+        <ul className="srv-list">
+          {servers.map((s) => {
+            const h = s.health;
+            const mem = h?.mem_total ? ((h.mem_used ?? 0) * 100) / h.mem_total : null;
+            const rx = h?.rx_bps != null ? bytesPerSec(h.rx_bps) : null;
+            const tx = h?.tx_bps != null ? bytesPerSec(h.tx_bps) : null;
+            return (
+              <li className={`srv card ${s.online ? "" : "is-off"}`} key={s.id}>
+                <header className="srv-head">
+                  <Well level={h?.cpu_pct != null ? Math.min(1, h.cpu_pct / 100 + 0.3) : 0.5} online={s.online} />
+                  <div className="srv-id">
+                    <div className="srv-name">
+                      {s.name}
+                      {s.local && <span className="badge">{t("srv.panelBadge")}</span>}
+                    </div>
+                    <div className="srv-sub">
+                      {t("srv.version", { v: s.version })} · {s.arch}
+                    </div>
                   </div>
-                  <span className="num small" dir="ltr">
-                    {rx && tx ? `↓ ${num(rx.value, rx.decimals)} ↑ ${num(tx.value, tx.decimals)} ${rx.unit}` : "—"}
-                  </span>
+                  <StatePill
+                    state={s.online ? "up" : "down"}
+                    label={s.online ? t("srv.online") : `${t("srv.offline")}${s.seen_secs != null ? ` · ${ago(s.seen_secs)}` : ""}`}
+                  />
+                </header>
+                <div className="srv-meters">
+                  <Meter label={t("srv.cpu")} pct={s.online ? (h?.cpu_pct ?? null) : null} />
+                  <Meter label={t("srv.ram")} pct={s.online ? mem : null} />
                 </div>
-              </div>
-              <div style={{ display: "flex", gap: "var(--sp-2)", alignItems: "center" }}>
-                <span className={`badge ${s.tunnels.length ? "" : "muted"}`}>{t(s.tunnels.length === 1 ? "srv.tn1" : "srv.tn", { n: num(s.tunnels.length) })}</span>
-                {!s.local && (
-                  <button className="btn btn-ghost btn-sm" type="button" onClick={() => setRemoving(s)}>
-                    {t("srv.remove")}
-                  </button>
-                )}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
+                <dl className="srv-facts">
+                  <div>
+                    <dt>
+                      {t("srv.net")}
+                      {s.online && rx ? ` · ${rx.unit}` : ""}
+                    </dt>
+                    <dd className="num" dir="ltr">
+                      {s.online && rx && tx ? (
+                        <>
+                          <span className="down-c">↓ {num(rx.value, rx.decimals)}</span> <span className="up-c">↑ {num(tx.value, tx.decimals)}</span>
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{t("srv.uptime")}</dt>
+                    <dd>{s.online && h?.uptime_secs != null ? uptime(h.uptime_secs) : "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>{t("srv.linkLabel")}</dt>
+                    <dd className="mono">{s.local ? t("srv.localLink") : s.link ?? "—"}</dd>
+                  </div>
+                </dl>
+                <footer className="srv-foot">
+                  <span className={`badge ${s.tunnels.length ? "" : "muted"}`}>{t(s.tunnels.length === 1 ? "srv.tn1" : "srv.tn", { n: num(s.tunnels.length) })}</span>
+                  {s.addr && (
+                    <span className="srv-ip" title={t("net.addresses")}>
+                      {s.addr}
+                    </span>
+                  )}
+                  <span className="grow" />
+                  {!s.local && (
+                    <button className="btn btn-quiet btn-sm" type="button" onClick={() => setRemoving(s)}>
+                      <Icon name="trash" size={16} />
+                      {t("srv.remove")}
+                    </button>
+                  )}
+                </footer>
+              </li>
+            );
+          })}
+          <li className="srv-add">
+            <button type="button" onClick={() => setAdding(true)}>
+              <span className="empty-icon" aria-hidden="true">
+                <Icon name="plus" size={24} />
+              </span>
+              <b>{t("srv.add")}</b>
+              <span>{t("srv.addHint")}</span>
+            </button>
+          </li>
+        </ul>
+      )}
       {adding && <AddServer servers={servers} agentsOn={agentsOn} onClose={() => setAdding(false)} />}
       {removing && (
         <Dialog
@@ -511,8 +720,12 @@ export function ServersPage({ servers, agentsOn, onChanged }: { servers: ServerI
                 onClick={async () => {
                   const gone = removing;
                   setRemoving(null);
-                  await api.removeServer(gone.id).catch(() => {});
-                  toast(t("srv.removed", { name: gone.name }));
+                  try {
+                    await api.removeServer(gone.id);
+                    toast(t("srv.removed", { name: gone.name }), "ok");
+                  } catch {
+                    toast(t("bak.failed"), "err");
+                  }
                   onChanged();
                 }}
               >
@@ -526,30 +739,6 @@ export function ServersPage({ servers, agentsOn, onChanged }: { servers: ServerI
           </p>
         </Dialog>
       )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------- pages that come later
-
-export function Later({ phase }: { phase: string }) {
-  const { t } = useApp();
-  return (
-    <div className="page is-on">
-      <div className="stratum s1">
-        <div className="placeholder">
-          <svg className="qloader" viewBox="0 0 180 90" aria-hidden="true">
-            <path className="bed" d="M30 58 L158 76" />
-            <path className="flow" pathLength={1} d="M30 58 L158 76" />
-            <path className="shaft" d="M38 26 V58 M84 26 V64 M130 26 V70" />
-            <path className="ground" d="M8 26 H172" />
-            <path className="mound" d="M30 26 a8 6 0 0 1 16 0Z M76 26 a8 6 0 0 1 16 0Z M122 26 a8 6 0 0 1 16 0Z" />
-            <circle className="drop" cx="38" cy="26" r="4" />
-            <path className="out" d="M164 68 L178 77 L164 86 Z" />
-          </svg>
-          <p>{t("soon", { phase })}</p>
-        </div>
-      </div>
     </div>
   );
 }
@@ -732,6 +921,7 @@ export function SettingsPage({ hasPassword, onPasswordSet, updates }: { hasPassw
   const { t, lang, setLang, theme, setTheme, digits, setDigits, low, setLow, toast } = useApp();
   const [dialog, setDialog] = useState(false);
   const [backup, setBackup] = useState<"save" | "restore" | null>(null);
+  const [at, setAt] = useState("sec");
   const row = (title: string, text: string, control: React.ReactNode) => (
     <div className="set-row">
       <div>
@@ -741,53 +931,87 @@ export function SettingsPage({ hasPassword, onPasswordSet, updates }: { hasPassw
       <div className="ctl">{control}</div>
     </div>
   );
-  const security = useMemo(() => t("set.sec"), [t]);
+  const sections: [string, string, string][] = [
+    ["sec", t("set.sec"), "shield"],
+    ["upd", t("set.updates"), "update"],
+    ["bak", t("set.backup"), "download"],
+    ["look", t("set.look"), "palette"],
+  ];
+
+  // The section in view is the one lit in the list.
+  useEffect(() => {
+    const main = document.querySelector(".main");
+    const els = sections.map(([id]) => document.getElementById(`set-${id}`)).filter((x): x is HTMLElement => !!x);
+    const io = new IntersectionObserver(
+      (entries) => {
+        const seen = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+        if (seen) setAt(seen.target.id.slice(4));
+      },
+      { root: main, rootMargin: "0px 0px -60% 0px" },
+    );
+    els.forEach((e) => io.observe(e));
+    return () => io.disconnect();
+  }, [!!updates]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
-    <div className="page is-on">
-      <section className="stratum s1">
-        <div className="stratum-head">
-          <h2>{security}</h2>
+    <div className="page is-on settings">
+      <nav className="settings-nav" aria-label={t("page.settings")}>
+        {sections.map(([id, label, icon]) => (
+          <button
+            key={id}
+            type="button"
+            aria-current={at === id ? "true" : undefined}
+            onClick={() => {
+              setAt(id);
+              document.getElementById(`set-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+          >
+            <Icon name={icon} size={18} />
+            {label}
+          </button>
+        ))}
+      </nav>
+      <div className="settings-body">
+        <Card title={t("set.sec")} id="set-sec" className="set-section">
+          {row(
+            t("set.pw"),
+            t(hasPassword ? "set.pwSet" : "set.pwNone"),
+            <button className="btn btn-ghost btn-sm" type="button" onClick={() => setDialog(true)}>
+              <Icon name="key" size={18} />
+              {t(hasPassword ? "set.pwChange" : "set.pwSetBtn")}
+            </button>,
+          )}
+          {row(t("set.link"), t("set.linkText"), <LoginLink />)}
+          {row(t("set.sessions"), t("set.sessionsText"), <Sessions />)}
+        </Card>
+        <div id="set-upd" className="set-section">
+          {updates}
         </div>
-        {row(
-          t("set.pw"),
-          t(hasPassword ? "set.pwSet" : "set.pwNone"),
-          <button className="btn btn-ghost btn-sm" type="button" onClick={() => setDialog(true)}>
-            <Icon name="key" size={18} />
-            {t(hasPassword ? "set.pwChange" : "set.pwSetBtn")}
-          </button>,
-        )}
-        {row(t("set.link"), t("set.linkText"), <LoginLink />)}
-        {row(t("set.sessions"), t("set.sessionsText"), <Sessions />)}
-      </section>
-      {updates}
-      <section className="stratum s2">
-        <div className="stratum-head">
-          <h2>{t("set.backup")}</h2>
-        </div>
-        {row(
-          t("set.backupSave"),
-          t("set.backupSaveText"),
-          <button className="btn btn-ghost btn-sm" type="button" onClick={() => setBackup("save")}>
-            {t("bak.download")}
-          </button>,
-        )}
-        {row(
-          t("set.backupRestore"),
-          t("set.backupRestoreText"),
-          <button className="btn btn-ghost btn-sm" type="button" onClick={() => setBackup("restore")}>
-            {t("rst.go")}
-          </button>,
-        )}
-      </section>
-      <section className="stratum s3">
-        <div className="stratum-head">
-          <h2>{t("set.look")}</h2>
-        </div>
-        {row(t("set.lang"), "", <Seg value={lang} options={[["fa", "فارسی"], ["en", "English"]]} onChange={setLang} />)}
-        {row(t("set.theme"), "", <Seg value={theme} options={[["night", t("set.night")], ["dawn", t("set.dawn")]]} onChange={setTheme} />)}
-        {lang === "fa" && row(t("set.digits"), "", <Seg value={digits} options={[["fa", t("set.digitsFa")], ["latin", t("set.digitsLatin")]]} onChange={setDigits} />)}
-        {row(t("set.motion"), "", <Seg value={low ? "low" : "full"} options={[["full", t("set.motionFull")], ["low", t("set.motionLow")]]} onChange={(v) => setLow(v === "low", true)} />)}
-      </section>
+        <Card title={t("set.backup")} id="set-bak" className="set-section">
+          {row(
+            t("set.backupSave"),
+            t("set.backupSaveText"),
+            <button className="btn btn-ghost btn-sm" type="button" onClick={() => setBackup("save")}>
+              <Icon name="download" size={18} />
+              {t("bak.download")}
+            </button>,
+          )}
+          {row(
+            t("set.backupRestore"),
+            t("set.backupRestoreText"),
+            <button className="btn btn-ghost btn-sm" type="button" onClick={() => setBackup("restore")}>
+              <Icon name="upload" size={18} />
+              {t("rst.go")}
+            </button>,
+          )}
+        </Card>
+        <Card title={t("set.look")} id="set-look" className="set-section">
+          {row(t("set.lang"), "", <Seg value={lang} options={[["fa", "فارسی"], ["en", "English"]]} onChange={setLang} />)}
+          {row(t("set.theme"), "", <Seg value={theme} options={[["night", t("set.night")], ["dawn", t("set.dawn")]]} onChange={setTheme} />)}
+          {lang === "fa" && row(t("set.digits"), "", <Seg value={digits} options={[["fa", t("set.digitsFa")], ["latin", t("set.digitsLatin")]]} onChange={setDigits} />)}
+          {row(t("set.motion"), t("set.motionText"), <Seg value={low ? "low" : "full"} options={[["full", t("set.motionFull")], ["low", t("set.motionLow")]]} onChange={(v) => setLow(v === "low", true)} />)}
+        </Card>
+      </div>
       {backup === "save" && <BackupDialog onClose={() => setBackup(null)} />}
       {backup === "restore" && <RestoreDialog onClose={() => setBackup(null)} onDone={() => {}} />}
       {dialog && (
@@ -797,7 +1021,7 @@ export function SettingsPage({ hasPassword, onPasswordSet, updates }: { hasPassw
           onSaved={() => {
             setDialog(false);
             onPasswordSet();
-            toast(t("set.pwSaved"));
+            toast(t("set.pwSaved"), "ok");
           }}
         />
       )}
