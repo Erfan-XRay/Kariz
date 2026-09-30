@@ -15,8 +15,12 @@ test("five wrong passwords lock the address out, even for the right one", async 
     await page.locator(".login-form .btn-primary").click();
     await expect(page.locator("#pw-err")).toContainText(/tries left|too many/i);
   }
+  // the fifth wrong try uses the last one; the next try, even the right one, is refused
+  await expect(page.locator("#pw-err")).toContainText(/0 tries left/i);
+  await page.locator("#pw").fill("a long enough panel password");
+  await page.locator(".login-form .btn-primary").click();
   await expect(page.locator("#pw-err")).toContainText(/too many tries/i);
-  // the right password is refused now, and no session is made
+  // and it stays refused, and no session is made
   await page.locator("#pw").fill("a long enough panel password");
   await page.locator(".login-form .btn-primary").click();
   await expect(page.locator("#pw-err")).toContainText(/too many tries/i);
