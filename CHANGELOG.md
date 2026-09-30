@@ -14,6 +14,13 @@ Everything about servers and tunnels is now done in the web panel, and Kariz has
   reads tunnels that were made before.
 - The panel's empty-list and hint texts no longer point to the manager.
 
+### Fixed
+
+- **Signing in.** The panel checks that the browser kept the session cookie before it opens the
+  dashboard, and says so when it did not (Safari over the self-signed certificate does this),
+  instead of silently returning to the sign-in page. The panel's address without the closing slash
+  (`/k-7f3a9c`) is sent to the slash, where its page can find its files and API.
+
 ### Removed
 
 - The design documents of the phases (`docs/PHASE*.md`); the layers and the protocol stay in
@@ -23,18 +30,13 @@ Everything about servers and tunnels is now done in the web panel, and Kariz has
 
 ### Added
 
-- **A license** ([LICENSE](LICENSE)): Kariz is source-available. You may read the code and run
-  the official releases on your own servers; using the core anywhere else, copying, deriving or
-  redistributing it is not allowed.
-- **[Using the panel](docs/using-the-panel.md)**, a walk through the panel from a new server to a
-  tunnel you can trust, and a guided tour of the live demo on the website.
-- All the documentation in Persian.
-- **The documentation website** (https://erfan-xray.github.io/Kariz/), built from `docs/` with
-  Astro, in the panel's design, in English and Persian: an animated front page (the qanat scene,
-  going down the well as you scroll), search, diagrams that move (how a tunnel works, which
-  transport to pick, what a profile changes) and the panel's prototype as a live demo with
-  sample data. It is published from the repository by the `site` workflow. No change to the
-  program.
+- **The panel always has a trusted certificate.** `kariz-manager panel install` asks for a domain
+  name or, without one, the server's public IP address, and gets a Let's Encrypt certificate for
+  it (certbot, standalone on port 80; IP address certificates last 6 days). No self-signed
+  certificate is made any more for a new panel. A timer renews it, and the panel loads the new one
+  without a restart. If a service holds port 80 the manager says which one, stops it for a moment
+  and starts it again, at the first request and at every renewal. `panel cert --domain D | --ip A`
+  changes it later; `--cert-file/--key-file` uses your own.
 
 ## 1.0.0 - 2026-09-30
 
