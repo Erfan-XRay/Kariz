@@ -1,0 +1,52 @@
+---
+// What each profile changes: the numbers are the table of docs/profiles.md; the bars are only
+// a relative picture of them.
+import type { Lang } from "../lib/site";
+import { num } from "../lib/site";
+
+const { lang } = Astro.props as { lang: Lang };
+const n = (x: string) => num(lang, x);
+const T = {
+  en: {
+    speed: "speed",
+    steady: "steady latency",
+    memory: "memory use",
+    p: [
+      { id: "balanced", name: "balanced", note: "Most uses. The default.", speed: 60, steady: 60, memory: 45, rows: ["Stream window 256 KiB", "4 mux connections", "Ping every 30 s"] },
+      { id: "ultraspeed", name: "ultraspeed", note: "Bulk transfer, the most speed.", speed: 100, steady: 30, memory: 90, rows: ["Stream window 1 MiB", "8 mux connections", "Ping every 30 s"] },
+      { id: "gaming", name: "gaming", note: "Games, voice, real-time UDP.", speed: 40, steady: 100, memory: 30, rows: ["Stream window 64 KiB", "2 mux connections, no write coalescing", "Ping every 10 s", "KCP FEC 10 / 3"] },
+    ],
+    cap: "Relative bars; the exact values are in the profiles page. Any value can still be overridden.",
+  },
+  fa: {
+    speed: "سرعت",
+    steady: "تأخیر پایدار",
+    memory: "مصرف حافظه",
+    p: [
+      { id: "balanced", name: "balanced", note: "بیشتر کاربردها. پیش‌فرض.", speed: 60, steady: 60, memory: 45, rows: ["پنجرهٔ stream: ۲۵۶ KiB", "۴ اتصال mux", "ping هر ۳۰ ثانیه"] },
+      { id: "ultraspeed", name: "ultraspeed", note: "انتقال حجیم، بیشترین سرعت.", speed: 100, steady: 30, memory: 90, rows: ["پنجرهٔ stream: ۱ MiB", "۸ اتصال mux", "ping هر ۳۰ ثانیه"] },
+      { id: "gaming", name: "gaming", note: "بازی، صدا، UDP زنده.", speed: 40, steady: 100, memory: 30, rows: ["پنجرهٔ stream: ۶۴ KiB", "۲ اتصال mux، بدون ادغام نوشتن", "ping هر ۱۰ ثانیه", "KCP FEC ‏۱۰ / ۳"] },
+    ],
+    cap: "میله‌ها نسبی‌اند؛ مقدارهای دقیق در صفحهٔ پروفایل‌ها هست. هر مقدار را می‌شود باز هم دستی عوض کرد.",
+  },
+}[lang];
+void n;
+---
+
+<div class="tune">
+  {T.p.map((p) => (
+    <article>
+      <h4><code>{p.name}</code></h4>
+      <p>{p.note}</p>
+      <div class="meter" role="presentation">
+        <span>{T.speed}</span><i style={`--v:${p.speed}%`}></i>
+        <span>{T.steady}</span><i style={`--v:${p.steady}%`}></i>
+        <span>{T.memory}</span><i style={`--v:${p.memory}%`}></i>
+      </div>
+      <ul style="margin:var(--sp-3) 0 0;padding-inline-start:18px;color:var(--text-2);font-size:var(--fs-sm)">
+        {p.rows.map((r) => <li>{r}</li>)}
+      </ul>
+    </article>
+  ))}
+</div>
+<p style="color:var(--text-3);font-size:var(--fs-sm)">{T.cap}</p>

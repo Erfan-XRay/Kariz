@@ -1,0 +1,89 @@
+name: site
+
+# The documentation site (site/, built from docs/). Every pull request that touches it must
+# build, keep its links, and say which pages are missing in Persian. It is published to
+# GitHub Pages on a release tag and on pushes to main that touch the docs or the site.
+on:
+  pull_request:
+    paths: &paths
+      - "site/**"
+      - "docs/**"
+      - "design/**"
+      - "assets/**"
+      - "README.md"
+      - "README_FA.md"
+      - "CHANGELOG.md"
+      - "Cargo.toml"
+      - "panel/web/src/tokens.css"
+      - "panel/web/src/draw.ts"
+      - "panel/web/src/fonts/**"
+      - ".github/workflows/site.yml"
+  push:
+    branches: [main]
+    paths: *paths
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: build and check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Install
+        working-directory: site
+        run: npm ci
+      - name: Translations
+        working-directory: site
+        run: node scripts/check-translations.mjs
+      - name: Build
+        working-directory: site
+        run: npm run build
+      - name: Links
+        working-directory: site
+        run: node scripts/check-links.mjs
+      - name: Search index
+        working-directory: site
+        run: test -f dist/_pagefind/pagefind.js
+      - name: Browser tests (axe, search, diagrams, motion)
+        working-directory: site
+        run: |
+          npx playwright install --with-deps chromium
+          npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: site-test-results
+          path: site/e2e-results
+          if-no-files-found: ignore
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+        with:
+          path: site/dist
+
+  deploy:
+    name: publish
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

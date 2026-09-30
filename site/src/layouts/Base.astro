@@ -1,0 +1,71 @@
+---
+import "../styles/panel/tokens.css";
+import "../styles/site.css";
+import Header from "../components/Header.astro";
+import Footer from "../components/Footer.astro";
+import Search from "../components/Search.astro";
+import { BASE, dirOf, ui } from "../lib/site";
+import type { Lang } from "../lib/site";
+
+interface Props {
+  lang: Lang;
+  title: string;
+  description?: string;
+  /** Path (after the language) of this page, so the language switch keeps it. */
+  path: string;
+  /** False when the page exists in only one language. */
+  hasOther?: boolean;
+  flow?: boolean;
+  current?: "docs" | "try" | "home";
+}
+const { lang, title, description, path, hasOther = true, flow = false, current = "home" } = Astro.props;
+const t = ui[lang];
+const full = title === "Kariz" ? `Kariz: ${t.tagline}` : `${title} | Kariz`;
+const url = new URL(`${BASE}${lang === "fa" ? "/fa" : ""}${path}`, Astro.site);
+const en = new URL(`${BASE}${path}`, Astro.site);
+const fa = new URL(`${BASE}/fa${path}`, Astro.site);
+---
+
+<!doctype html>
+<html lang={lang} dir={dirOf(lang)} data-theme="night">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{full}</title>
+    <meta name="description" content={description ?? t.tagline} />
+    <meta name="color-scheme" content="dark light" />
+    <link rel="canonical" href={url} />
+    <link rel="alternate" hreflang="en" href={en} />
+    <link rel="alternate" hreflang="fa" href={fa} />
+    <link rel="icon" type="image/svg+xml" href={`${BASE}/logo.svg`} />
+    <meta property="og:title" content={full} />
+    <meta property="og:description" content={description ?? t.tagline} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={url} />
+    <script is:inline>
+      // Before first paint: the theme and the low-power switch the reader chose.
+      (function () {
+        var h = document.documentElement;
+        h.classList.add("js");
+        try {
+          var th = localStorage.getItem("kariz-site-theme");
+          if (th === "dawn" || th === "night") h.dataset.theme = th;
+          if (localStorage.getItem("kariz-site-low") === "1") h.dataset.low = "1";
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <a class="skip" href="#main">{t.skip}</a>
+    <Header lang={lang} path={path} hasOther={hasOther} current={current} />
+    {flow && <div class="flow" aria-hidden="true"><i></i><b></b></div>}
+    <main id="main" tabindex="-1">
+      <slot />
+    </main>
+    <Footer lang={lang} />
+    <Search lang={lang} />
+    <script>
+      import "../scripts/ui.ts";
+    </script>
+  </body>
+</html>

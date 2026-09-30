@@ -1,0 +1,58 @@
+---
+// The frame of every docs page: sidebar of strata, the page, the outline.
+import Base from "../layouts/Base.astro";
+import { sidebar } from "../lib/docs";
+import { href, ui } from "../lib/site";
+import type { Lang } from "../lib/site";
+
+interface Props {
+  lang: Lang;
+  title: string;
+  description?: string;
+  path: string;
+  slug?: string;
+  hasOther?: boolean;
+  headings?: { depth: number; slug: string; text: string }[];
+  flow?: boolean;
+}
+const { lang, title, description, path, slug, hasOther = true, headings = [], flow = true } = Astro.props;
+const t = ui[lang];
+const nav = await sidebar(lang);
+const outline = headings.filter((h) => h.depth === 2 || h.depth === 3);
+---
+
+<Base lang={lang} title={title} description={description} path={path} hasOther={hasOther} flow={flow} current="docs">
+  <div class="wrap docs">
+    <nav class="side" id="side" aria-label={t.docs}>
+      {nav.map((s) => (
+        <section>
+          <h2>{s.title}</h2>
+          <ul>
+            {s.pages.map((p) => (
+              <li>
+                <a href={href(lang, `/docs/${p.slug}/`)} aria-current={p.slug === slug ? "page" : undefined}>
+                  {p.title}{!p.translated && <span class="en-tag" lang="en" title={t.notTranslated}>EN</span>}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </nav>
+    <div>
+      <slot />
+    </div>
+    <aside class="toc" aria-label={t.onThisPage}>
+      {outline.length > 1 && (
+        <>
+          <h2>{t.onThisPage}</h2>
+          <ul>
+            {outline.map((h) => (
+              <li class={`d${h.depth}`}><a href={`#${h.slug}`}>{h.text}</a></li>
+            ))}
+          </ul>
+        </>
+      )}
+    </aside>
+  </div>
+</Base>

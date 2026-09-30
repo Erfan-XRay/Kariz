@@ -1,0 +1,79 @@
+---
+import DocsShell from "./DocsShell.astro";
+import TunnelDiagram from "./TunnelDiagram.astro";
+import Chooser from "./Chooser.astro";
+import Profiles from "./Profiles.astro";
+import { href } from "../lib/site";
+import type { Lang } from "../lib/site";
+
+const { lang } = Astro.props as { lang: Lang };
+const T = {
+  en: {
+    title: "How it works",
+    desc: "The shape of a Kariz tunnel, its layers, which transport to pick and what each profile changes, animated.",
+    h1: "How it works",
+    intro: "A tunnel joins two servers. Users connect to the entry; Kariz carries their traffic to the exit, which reaches the real targets.",
+    s1: "The shape",
+    p1: "Switch who dials to see the two modes. In direct mode the entry opens the connection to the exit; in reverse mode the exit opens it to the entry, so the entry is the only server that needs a reachable port. Either way many user connections share a few long-lived tunnel connections: each is a stream with its own flow control, opened without a round trip.",
+    s2: "The layers",
+    p2: "Every transport except QUIC carries the same layers on top: a handshake that proves both sides know the token and agrees a key with X25519 (so a later leak of the token does not open recorded traffic), AEAD records with no fixed bytes on the wire, and the mux. The transport underneath is the only thing you choose.",
+    more2: "Read more: Security, Transports",
+    s3: "Which transport?",
+    p3: "The flow chart of the transports page as a few questions. It is advice, not a rule; measure on your own path with the speed test.",
+    s4: "What a profile changes",
+    p4: "A profile sets many values at once for one kind of use.",
+    l: { sec: "/docs/security/", tr: "/docs/transports/", pr: "/docs/profiles/", sp: "/docs/speedtest/" },
+    trL: "The transports page",
+    prL: "The profiles page",
+    spL: "The speed test",
+    secL: "Security",
+  },
+  fa: {
+    title: "چطور کار می‌کند",
+    desc: "شکل یک تانل کاریز، لایه‌هایش، انتخاب ترنسپورت و کاری که هر پروفایل می‌کند، با انیمیشن.",
+    h1: "چطور کار می‌کند",
+    intro: "تانل دو سرور را به هم وصل می‌کند. کاربرها به entry وصل می‌شوند؛ کاریز ترافیکشان را به exit می‌رساند و exit به مقصدهای واقعی می‌رسد.",
+    s1: "شکل کار",
+    p1: "با کلید بالای نمودار دو حالت را ببینید. در حالت direct، entry اتصال را به exit باز می‌کند؛ در حالت reverse، exit آن را به entry باز می‌کند، پس entry تنها سروری است که پورت در دسترس می‌خواهد. در هر دو حالت اتصال‌های زیاد کاربرها چند اتصال بلندمدت تانل را share می‌کنند: هر کدام یک stream با کنترل جریان خودش است و بدون رفت‌وبرگشت باز می‌شود.",
+    s2: "لایه‌ها",
+    p2: "هر ترنسپورتی جز QUIC همین لایه‌ها را روی خودش می‌برد: handshake که ثابت می‌کند دو طرف توکن را می‌دانند و با X25519 کلید توافق می‌کند (پس لو رفتن بعدی توکن ترافیک ضبط‌شده را باز نمی‌کند)، رکوردهای AEAD که روی سیم هیچ بایت ثابتی ندارند، و mux. تنها چیزی که انتخاب می‌کنید ترنسپورت زیرین است.",
+    more2: "بیشتر: امنیت، ترنسپورت‌ها",
+    s3: "کدام ترنسپورت؟",
+    p3: "نمودار صفحهٔ ترنسپورت‌ها به شکل چند پرسش. این توصیه است نه قانون؛ روی مسیر خودتان با تست سرعت اندازه بگیرید.",
+    s4: "هر پروفایل چه چیزی را عوض می‌کند",
+    p4: "پروفایل چند مقدار را یک‌جا برای یک نوع کاربرد تنظیم می‌کند.",
+    l: { sec: "/docs/security/", tr: "/docs/transports/", pr: "/docs/profiles/", sp: "/docs/speedtest/" },
+    trL: "صفحهٔ ترنسپورت‌ها",
+    prL: "صفحهٔ پروفایل‌ها",
+    spL: "تست سرعت",
+    secL: "امنیت",
+  },
+}[lang];
+const headings = [
+  { depth: 2, slug: "shape", text: T.s1 },
+  { depth: 2, slug: "layers", text: T.s2 },
+  { depth: 2, slug: "transport", text: T.s3 },
+  { depth: 2, slug: "profile", text: T.s4 },
+];
+---
+
+<DocsShell lang={lang} title={T.title} description={T.desc} path="/docs/how-it-works/" slug="how-it-works" headings={headings}>
+  <article class="prose" data-pagefind-body>
+    <h1>{T.h1}</h1>
+    <p>{T.intro}</p>
+    <h2 id="shape">{T.s1}</h2>
+    <p>{T.p1}</p>
+    <TunnelDiagram lang={lang} />
+    <h2 id="layers">{T.s2}</h2>
+    <p>{T.p2}</p>
+    <p><a href={href(lang, T.l.sec)}>{T.secL}</a> · <a href={href(lang, T.l.tr)}>{T.trL}</a></p>
+    <h2 id="transport">{T.s3}</h2>
+    <p>{T.p3}</p>
+    <Chooser lang={lang} />
+    <p><a href={href(lang, T.l.tr)}>{T.trL}</a> · <a href={href(lang, T.l.sp)}>{T.spL}</a></p>
+    <h2 id="profile">{T.s4}</h2>
+    <p>{T.p4}</p>
+    <Profiles lang={lang} />
+    <p><a href={href(lang, T.l.pr)}>{T.prL}</a></p>
+  </article>
+</DocsShell>

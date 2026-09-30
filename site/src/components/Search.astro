@@ -1,0 +1,18 @@
+---
+import { BASE, ui } from "../lib/site";
+import type { Lang } from "../lib/site";
+
+const { lang } = Astro.props as { lang: Lang };
+const t = ui[lang];
+---
+
+<dialog class="search" data-search aria-label={t.search} data-base={BASE}
+  data-none={t.searchNone} data-hint={t.searchHint} data-off={t.searchOff}>
+  <form method="dialog" role="search">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m20 20-4.2-4.2" /></svg>
+    <input type="search" data-search-input placeholder={t.searchPlaceholder} aria-label={t.searchPlaceholder} autocomplete="off" spellcheck="false" />
+    <button class="sq" type="submit" aria-label="Esc">Esc</button>
+  </form>
+  <p class="msg" data-search-msg role="status">{t.searchHint}</p>
+  <ul data-search-results></ul>
+</dialog>
