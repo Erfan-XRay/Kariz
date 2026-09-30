@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 - 2026-09-30
+
+The panel reaches servers on networks that stall TCP, and each tunnel has a page of its own
+with a new speed test.
 
 ### Changed
 
