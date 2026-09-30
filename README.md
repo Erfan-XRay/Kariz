@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/Erfan-XRay/Kariz/actions/workflows/ci.yml"><img src="https://github.com/Erfan-XRay/Kariz/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/Erfan-XRay/Kariz/releases"><img src="https://img.shields.io/badge/version-0.11.0-34d0c3" alt="Version 0.11.0"></a>
+  <a href="https://github.com/Erfan-XRay/Kariz/releases"><img src="https://img.shields.io/badge/version-1.0.0-34d0c3" alt="Version 1.0.0"></a>
   <img src="https://img.shields.io/badge/rust-1.80%2B-e9c46a?logo=rust" alt="Rust 1.80+">
   <img src="https://img.shields.io/badge/platform-linux-12365e?logo=linux&logoColor=white" alt="Linux">
 </p>
@@ -86,8 +86,8 @@ kariz-manager add main --role entry --mode reverse --transport tcpmux --listen 3
 kariz-manager update                # new release, running tunnels restarted
 ```
 
-While the repository is private, set `GITHUB_TOKEN` (a token that can read it) before
-running the script. More in [docs/manager.md](docs/manager.md).
+More in [docs/manager.md](docs/manager.md). The documentation is also in Persian:
+[docs/fa](docs/fa/README.md).
 
 ### By hand
 
