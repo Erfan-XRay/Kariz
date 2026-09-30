@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 - 2026-09-30
 
 Everything about servers and tunnels is now done in the web panel, and Kariz has a license.
 
