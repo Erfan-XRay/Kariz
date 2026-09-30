@@ -332,7 +332,22 @@ impl Agent {
         let mut asked = 0u32;
         let mut working = Some(working);
         let session = Arc::new(session);
-        while let Some((stream, syn)) = session.accept().await {
+        loop {
+            // The panel asks every 2 s. A link where it has gone quiet is stalled on the
+            // way (its close may not get through either): drop it now instead of waiting
+            // for the keepalive, so a stalled transport is given up in seconds.
+            let (stream, syn) = match tokio::time::timeout(QUIET_LINK, session.accept()).await {
+                Ok(Some(next)) => next,
+                Ok(None) => break,
+                Err(_) => {
+                    warn!(
+                        secs = QUIET_LINK.as_secs(),
+                        "the panel asked nothing for a while; dropping the link"
+                    );
+                    session.close();
+                    break;
+                }
+            };
             asked = asked.saturating_add(1);
             if asked >= GOOD_LINK {
                 if let Some(f) = working.take() {
@@ -484,6 +499,8 @@ impl Agent {
 const TRANSPORT_FILE: &str = "link-transport";
 /// A link that served this many requests is working (the panel polls every 2 s).
 const GOOD_LINK: u32 = 3;
+/// Silence from the panel after which a link counts as stalled (it asks every 2 s).
+const QUIET_LINK: Duration = Duration::from_secs(20);
 /// Failed links in a row before the agent tries the next transport.
 const MISSES_BEFORE_SWITCH: u32 = 2;
 

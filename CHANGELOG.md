@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- An agent drops a link on which the panel has asked nothing for 20 s (it asks every 2 s),
+  so a stalled TCP path is given up and KCP tried in about 40 s. 1.2.0 waited for the
+  keepalive, 90 s a link, because on such a path the panel's close does not get through.
 - A server whose enrollment is cut off (the agent got its identity but the answer was lost,
   or never got it) is no longer deleted by the panel: the join code gives the same identity
   again until it expires, so the agent comes back as that server. 1.2.0 deleted it, and an
