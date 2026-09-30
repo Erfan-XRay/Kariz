@@ -1,4 +1,4 @@
-//! What the panel and its agents say to each other (docs/PHASE11.md, section 4).
+//! What the panel and its agents say to each other.
 //!
 //! A request is one mux stream: the panel opens it with the request as JSON in the open
 //! bytes, the agent answers with one JSON document and finishes the stream. The panel is
@@ -80,7 +80,7 @@ pub struct UpdateFile {
     pub size: u64,
 }
 
-/// One private network link on this server, as data (docs/PHASE13.md, section 4). The
+/// One private network link on this server, as data. The
 /// agent checks every field before it runs anything.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -128,7 +128,7 @@ pub struct PingReply {
 }
 
 /// What a tunnel is, as data: everything the manager's `add` takes, without free text
-/// going into the file. The agent turns it into the config (docs/PHASE12.md, section 2).
+/// going into the file. The agent turns it into the config.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
@@ -239,7 +239,7 @@ pub struct Health {
     pub load1: Option<f64>,
     /// The IPv4 networks this server already has routes for (`172.17.0.0/16`, a cloud's
     /// private network...), without the default route and Kariz's own `kz-` links. Private
-    /// networks are never given a range that overlaps one (docs/PHASE13.md, section 3).
+    /// networks are never given a range that overlaps one.
     #[serde(default)]
     pub routes: Vec<String>,
 }

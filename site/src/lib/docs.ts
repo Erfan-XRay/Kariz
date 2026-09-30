@@ -2,7 +2,7 @@
 // titles, and the neighbours of a page.
 import { getCollection, render } from "astro:content";
 import type { CollectionEntry } from "astro:content";
-import { LABELS, OWN_PAGES, SECTIONS, ORDER, phaseLabel } from "./site";
+import { LABELS, OWN_PAGES, SECTIONS, ORDER } from "./site";
 import type { Lang } from "./site";
 
 type Entry = CollectionEntry<"docs"> | CollectionEntry<"fa"> | CollectionEntry<"root">;
@@ -63,10 +63,6 @@ export async function titleOf(slug: string, lang: Lang): Promise<string> {
   }
   const d = await getDoc(slug, lang);
   const t = h1(d?.entry.body);
-  if (/^phase\d+$/.test(slug)) {
-    const rest = t.split(":").slice(1).join(":").trim();
-    return `${phaseLabel(slug, lang)}${rest ? ` · ${rest}` : ""}`;
-  }
   return t || slug;
 }
 

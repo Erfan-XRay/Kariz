@@ -1,4 +1,4 @@
-//! The panel's part of updating (docs/PHASE14.md, sections 2 and 4): remember what the last
+//! The panel's part of updating: remember what the last
 //! check found, answer the browser, and run an update as an operation whose steps the
 //! browser follows. The downloading, verifying and swapping themselves are in `update.rs`.
 

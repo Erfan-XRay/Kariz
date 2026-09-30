@@ -1,4 +1,4 @@
-//! Signed releases (docs/PHASE14.md, section 3). Every release archive has a `.sha256`
+//! Signed releases. Every release archive has a `.sha256`
 //! file (`HEX  NAME`) and a `.sig` file: an Ed25519 signature over that `.sha256` file's
 //! exact bytes. Signing the file binds the archive's name to its hash, so an archive cannot
 //! be swapped for another one of the same release (another CPU, say).

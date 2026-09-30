@@ -1,6 +1,4 @@
 //! `kmux`: many streams over one tunnel connection.
-//!
-//! See `docs/PHASE2.md`, section 5, for the design and the frame format.
 
 pub mod frame;
 mod session;

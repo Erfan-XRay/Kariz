@@ -1,4 +1,4 @@
-//! The panel's JSON API for sign-in and sessions (docs/PHASE11.md, section 3).
+//! The panel's JSON API for sign-in and sessions.
 //!
 //! * The session cookie is `__Host-kariz` (`Secure`, `HttpOnly`, `SameSite=Strict`,
 //!   `Path=/`); its value is a random token of which only a hash is stored.
@@ -521,7 +521,7 @@ async fn remove_server(
     }
 }
 
-// ---- tunnels (docs/PHASE12.md) ----
+// ---- tunnels ----
 
 /// Turns a refusal from the pair code into a response.
 fn pair_error(e: anyhow::Error) -> Response {
@@ -917,7 +917,7 @@ async fn restore(
     }
 }
 
-// ---- private networks (docs/PHASE13.md) ----
+// ---- private networks ----
 
 /// Turns a refusal from the network code into a response: the code is the text before a
 /// colon (`overlaps_route:frankfurt:10.77.3.0/24` keeps its detail for the browser).
@@ -1122,7 +1122,7 @@ async fn server_address(
     }
 }
 
-// ---- updating (docs/PHASE14.md) ----
+// ---- updating ----
 
 fn update_error(e: anyhow::Error) -> Response {
     let text = format!("{e:#}");

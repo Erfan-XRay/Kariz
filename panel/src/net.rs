@@ -1,4 +1,4 @@
-//! What an agent does for a private GRE network (docs/PHASE13.md, section 4): make the
+//! What an agent does for a private GRE network: make the
 //! `kz-` interface of a link, address it, take it down, test the path across it, and keep
 //! the list so the interfaces come back after a reboot.
 //!

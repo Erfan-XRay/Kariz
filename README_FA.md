@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <b>فارسی</b> · <a href="https://erfan-xray.github.io/Kariz/fa/">وب‌سایت</a> · <a href="docs/README.md">مستندات (انگلیسی)</a> · <a href="CHANGELOG.md">تغییرات</a>
+  <a href="README.md">English</a> · <b>فارسی</b> · <a href="https://erfan-xray.github.io/Kariz/fa/">وب‌سایت</a> · <a href="docs/fa/README.md">مستندات</a> · <a href="CHANGELOG.md">تغییرات</a>
 </p>
 
 <div dir="rtl">
@@ -62,9 +62,9 @@ flowchart LR
 
 ## 🚀 شروع سریع
 
-### راه آسان: اسکریپت مدیریت
+### راه آسان: پنل وب
 
-روی هر سرور، با دسترسی root، فقط یک خط:
+روی سروری که پنل را نگه می‌دارد، با دسترسی root، فقط یک خط:
 
 </div>
 
@@ -74,23 +74,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/script
 
 <div dir="rtl">
 
-اسکریپت کاریز را برای CPU سرور (x86_64، aarch64 یا armv7) نصب می‌کند و یک منو باز می‌کند. گزینه‌ی **New tunnel** چند سؤال می‌پرسد، تانل را به‌صورت سرویس systemd اجرا می‌کند، و دستور دقیقی را که باید روی سرور دیگر اجرا شود چاپ می‌کند؛ پس راه‌اندازی دو طرف فقط یک کپی و پیست است. بعداً با دستور `kariz-manager` منو برمی‌گردد، یا مستقیم از دستورهایش استفاده کنید:
+اسکریپت کاریز را برای CPU سرور (x86_64، aarch64 یا armv7) نصب می‌کند، امضای ریلیز را می‌سنجد و یک منو باز می‌کند: **۲** و بعد **install** را بزنید. آدرس پنل و یک لینک ورود یک‌بارمصرف چاپ می‌شود. از اینجا به بعد همه‌چیز در مرورگر است: سرورهای دیگر را اضافه کنید (هر کدام یک دستور با کد پیوستن اجرا می‌کند)، با ویزاردی که اگر جایی خطا شود همه‌چیز را برمی‌گرداند بینشان تانل بسازید، زنده تماشایشان کنید، سرعتشان را بسنجید و به‌روزشان کنید. پیش از نصب، صفحه‌ها را در [دموی زنده](https://erfan-xray.github.io/Kariz/fa/try/) ببینید؛ [docs/fa/using-the-panel.md](docs/fa/using-the-panel.md) قدم‌به‌قدم توضیح می‌دهد و [docs/fa/manager.md](docs/fa/manager.md) اسکریپت نصب را.
 
-</div>
-
-```bash
-kariz-manager list                  # every tunnel and its state
-kariz-manager logs main             # follow a tunnel's log
-kariz-manager speedtest main        # speed, latency and UDP through the tunnel
-kariz-manager restart main
-kariz-manager update                # new release, running tunnels restarted
-```
-
-<div dir="rtl">
-
-توضیح کامل در [docs/fa/manager.md](docs/fa/manager.md). مستندات فارسی: [docs/fa](docs/fa/README.md).
-
-### راه دستی
+### راه دستی (بدون پنل)
 
 ۱. روی هر دو سرور نصب کنید (یا فایل اجرایی را از Releases بگیرید) و یک توکن بسازید که در هر دو سمت یکی باشد:
 
@@ -203,15 +189,15 @@ sudo cp systemd/kariz.service /etc/systemd/system/ && sudo systemctl enable --no
 
 ## 📚 مستندات
 
-مستندات کامل (به انگلیسی) در پوشه‌ی [`docs/`](docs/README.md) است:
+همهٔ مستندات به فارسی در [`docs/fa/`](docs/fa/README.md) است:
 
 | صفحه | موضوع |
 |---|---|
-| [شروع](docs/getting-started.md) | نصب، توکن، اولین تانل، systemd |
-| [مرجع کانفیگ](docs/configuration.md) | همه‌ی تنظیمات با مقدار پیش‌فرض و محدوده |
-| [transportها](docs/transports.md) · [پروفایل‌ها](docs/profiles.md) | انتخاب و تنظیم |
-| [UDP و بازی](docs/udp-and-games.md) · [CDN](docs/CDN.md) | راه‌اندازی‌های خاص |
-| [کارایی](docs/performance.md) · [امنیت](docs/security.md) · [رفع مشکل](docs/troubleshooting.md) | اجرای درست |
+| [شروع کار](docs/fa/getting-started.md) · [کار با پنل](docs/fa/using-the-panel.md) | نصب، پنل، اولین تانل |
+| [مرجع پیکربندی](docs/fa/configuration.md) | همهٔ تنظیمات با مقدار پیش‌فرض و محدوده |
+| [ترنسپورت‌ها](docs/fa/transports.md) · [پروفایل‌ها](docs/fa/profiles.md) | انتخاب و تنظیم |
+| [UDP و بازی](docs/fa/udp-and-games.md) · [CDN](docs/fa/CDN.md) | راه‌اندازی‌های خاص |
+| [کارایی](docs/fa/performance.md) · [امنیت](docs/fa/security.md) · [عیب‌یابی](docs/fa/troubleshooting.md) | اجرای درست |
 
 ## 🔒 نکته‌های امنیتی
 
@@ -232,6 +218,10 @@ cargo build --release --no-default-features   # without quic and kcp
 
 <div dir="rtl">
 
-مستندات طراحی: [roadmap](docs/ROADMAP.md) و طرح فازها در [`docs/`](docs). فهرست تغییرات هر نسخه: [CHANGELOG.md](CHANGELOG.md).
+طراحی و پروتکل: [docs/ROADMAP.md](docs/ROADMAP.md). فهرست تغییرات هر نسخه: [CHANGELOG.md](CHANGELOG.md).
+
+## 📄 مجوز
+
+کاریز **کدباز نیست، «سورس‌در‌دسترس» است**: می‌توانید کد را بخوانید و ریلیزهای رسمی را روی سرورهای خودتان اجرا کنید؛ استفاده از هسته (یا هر بخشی از آن) در جای دیگر، کپی کردن یا پخش کردنش مجاز نیست. متن کامل شرایط در فایل [LICENSE](LICENSE) است (متن انگلیسی معتبر است).
 
 </div>

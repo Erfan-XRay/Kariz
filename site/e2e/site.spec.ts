@@ -15,6 +15,9 @@ const PAGES = [
   "/fa/docs/how-it-works/",
   "/fa/docs/getting-started/",
   "/fa/docs/transports/",
+  "/docs/tour/",
+  "/fa/docs/tour/",
+  "/fa/docs/using-the-panel/",
 ];
 
 async function open(page: Page, path: string, theme: "night" | "dawn" = "night") {
@@ -53,9 +56,10 @@ test("the language switch keeps the page and turns it around", async ({ page }) 
   await page.getByRole("link", { name: "Read this page in Persian" }).click();
   await expect(page).toHaveURL(`${B}/fa/docs/transports/`);
   await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
-  // A page not translated yet says so, and stays left to right.
-  await expect(page.locator(".notice")).toContainText("ترجمه نشده");
-  await expect(page.locator("article.prose")).toHaveAttribute("dir", "ltr");
+  // Every page is translated: the Persian text, right to left, with no notice.
+  await expect(page.locator(".notice")).toHaveCount(0);
+  await expect(page.locator("article.prose")).toHaveAttribute("dir", "rtl");
+  await expect(page.locator("article.prose h1")).toHaveText("ترنسپورت‌ها");
   await page.getByRole("link", { name: "خواندن این صفحه به انگلیسی" }).click();
   await expect(page).toHaveURL(`${B}/docs/transports/`);
 });
@@ -161,4 +165,15 @@ test("a page that is not there says so, with a way out", async ({ page }) => {
   const r = await page.goto(`${B}/docs/no-such-page/`);
   expect(r?.status()).toBe(404);
   await expect(page.getByRole("heading", { name: "This page is not here." })).toBeVisible();
+});
+
+test("the guided tour signs in and takes the demo to each screen", async ({ page }) => {
+  await open(page, "/docs/tour/");
+  const demo = page.frameLocator("iframe");
+  await expect(demo.locator("#login.is-on")).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "Next" }).click(); // the map: signs in first
+  await expect(demo.locator("#app.is-on")).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "Next" }).click(); // servers
+  await expect(demo.locator(".tour-hi")).toHaveId("srv-add");
+  await expect(page.getByRole("status")).toContainText("3 of 9");
 });

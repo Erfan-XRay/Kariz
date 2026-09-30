@@ -1,5 +1,5 @@
 //! Datagram sealing: user datagrams that travel beside the record layer instead of
-//! inside it (the datagram path over KCP, docs/PHASE6.md section 3).
+//! inside it (the datagram path over KCP).
 //!
 //! ```text
 //! datagram = pn (8, LE) | seal(k, pn, payload)     -> 8 + payload + 16 bytes

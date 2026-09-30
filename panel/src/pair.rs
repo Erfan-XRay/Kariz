@@ -1,5 +1,5 @@
 //! A tunnel is a pair: the entry on one server and the exit on another. This makes, edits,
-//! controls and deletes both sides as one operation (docs/PHASE12.md, section 3). Each
+//! controls and deletes both sides as one operation. Each
 //! operation runs in the background as a list of steps that the browser follows, and a
 //! step that fails undoes what the earlier ones did.
 
@@ -42,7 +42,7 @@ pub struct PairRequest {
     pub rotate: bool,
     /// Direct mode only: run the tunnel over a private GRE network (its id). The panel
     /// finds or makes the link between the two servers and the tunnel listens on and
-    /// dials the private address (docs/PHASE13.md, section 2).
+    /// dials the private address.
     #[serde(default)]
     pub network: Option<String>,
 }

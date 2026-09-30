@@ -2,8 +2,32 @@
 
 ## Unreleased
 
+Everything about servers and tunnels is now done in the web panel, and Kariz has a license.
+
+### Changed
+
+- **The manager script no longer makes or runs tunnels.** `kariz-manager` keeps `install`,
+  `update`, `uninstall`, `panel ...`, `agent ...` and `--agent CODE`; its menu is now install or
+  update, web panel and agent, uninstall. The commands `add`, `list`, `status`, `start`, `stop`,
+  `restart`, `logs`, `speedtest`, `edit`, `remove` and `net` are gone: use the panel. Tunnel
+  configs and services (`/etc/kariz/NAME.toml`, `kariz@NAME`) are unchanged, and the panel still
+  reads tunnels that were made before. This breaks the 1.x promise about the manager's commands,
+  so the next release is 2.0.0.
+- The panel's empty-list and hint texts no longer point to the manager.
+
+### Removed
+
+- The design documents of the phases (`docs/PHASE*.md`); the layers and the protocol stay in
+  `docs/ROADMAP.md`, now "Design and protocol". The history is in git.
+
 ### Added
 
+- **A license** ([LICENSE](LICENSE)): Kariz is source-available. You may read the code and run
+  the official releases on your own servers; using the core anywhere else, copying, deriving or
+  redistributing it is not allowed.
+- **[Using the panel](docs/using-the-panel.md)**, a walk through the panel from a new server to a
+  tunnel you can trust, and a guided tour of the live demo on the website.
+- All the documentation in Persian.
 - **The documentation website** (https://erfan-xray.github.io/Kariz/), built from `docs/` with
   Astro, in the panel's design, in English and Persian: an animated front page (the qanat scene,
   going down the well as you scroll), search, diagrams that move (how a tunnel works, which
@@ -52,7 +76,7 @@ listed here; update the panel and its agents together as usual.
 
 ## 0.11.0 - 2026-09-30
 
-**Updating from the panel, and signed releases** (docs/panel.md, docs/PHASE14.md). Backward
+**Updating from the panel, and signed releases** (docs/panel.md). Backward
 compatibility is not kept before 1.0. Servers on 0.10 or older have to be updated once by hand
 (`kariz-manager update`); from 0.11 on they can be updated from the panel.
 
@@ -90,7 +114,7 @@ compatibility is not kept before 1.0. Servers on 0.10 or older have to be update
 
 ## 0.10.0 - 2026-09-30
 
-**Private networks with GRE** (docs/networks.md, docs/PHASE13.md). Backward compatibility is
+**Private networks with GRE** (docs/networks.md). Backward compatibility is
 not kept before 1.0: update the panel and its agents together.
 
 ### Added
@@ -126,8 +150,7 @@ not kept before 1.0: update the panel and its agents together.
 
 ## 0.9.0 - 2026-09-30
 
-The panel can now **make and manage tunnels**, and shows what they do (docs/panel.md,
-docs/PHASE12.md). Backward compatibility is not kept before 1.0: the agent protocol changed,
+The panel can now **make and manage tunnels**, and shows what they do (docs/panel.md). Backward compatibility is not kept before 1.0: the agent protocol changed,
 so update the panel and its agents together (`kariz-manager update` on each server).
 
 ### Added
@@ -160,7 +183,7 @@ so update the panel and its agents together (`kariz-manager update` on each serv
 
 ## 0.8.0-beta - 2026-09-29
 
-The first release of the **web panel** (docs/panel.md, docs/PHASE11.md). It is a beta: a
+The first release of the **web panel** (docs/panel.md). It is a beta: a
 prerelease that GitHub's "latest release" does not pick, so `kariz-manager update` on a
 running server stays on 0.7.0 until a stable release. To try it:
 `kariz-manager install --version v0.8.0-beta`, then `kariz-manager panel install`.
@@ -210,7 +233,7 @@ panel, sign-in with a second factor, Let's Encrypt, and an agent that the panel 
 
 ## 0.7.0 - 2026-09-29
 
-Status for the coming web panel, and for people on the server (docs/PHASE10.md). Nothing
+Status for the coming web panel, and for people on the server. Nothing
 changes between the two sides: v0.7 works with v0.6, v0.5 and v0.4 peers over every
 transport.
 
@@ -240,7 +263,7 @@ transport.
 ### Changed
 
 - The design of the web panel is in the repository: its plan for phases 9 to 13
-  (docs/PHASE9.md), the design system (design/) and an interactive prototype of every
+ , the design system (design/) and an interactive prototype of every
   screen (design/prototype/). Nothing of it runs yet.
 
 ## 0.6.1 - 2026-09-29
@@ -381,8 +404,7 @@ it).
 - **Samples:** `entry-gaming.toml` / `exit-gaming.toml`.
 - **Game-traffic benchmark:** 128-byte packets at 64 Hz, echoed, on an idle tunnel and
   next to four downloads, at 0 / 1 / 5 % and bursty loss (`cargo test --release --test
-  tunnel game_traffic -- --ignored --nocapture`). Results in the README and
-  docs/PHASE6.md.
+  tunnel game_traffic -- --ignored --nocapture`). Results in the README.
 
 ### Changed
 
@@ -437,7 +459,7 @@ the new transports need both sides at v0.4.
 - **Lossy-link benchmark:** the tests carry a UDP and a TCP link emulator (delay,
   jitter, random or bursty loss, reordering, a rate-limited bottleneck with a queue).
   The TCP one models the sender's TCP, so loss slows `tcpmux` as it would on a real
-  path. See the Performance section of the README and docs/PHASE4.md.
+  path. See the Performance section of the README.
 
 ### Changed
 

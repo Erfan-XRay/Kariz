@@ -1,7 +1,7 @@
 //! Tunnel cryptography: the handshake that authenticates both sides and agrees on
 //! session keys, and the record layer that encrypts everything after it.
 //!
-//! See `docs/PHASE2.md` (sections 3 and 4) for the wire formats.
+//! The wire formats are in docs/ROADMAP.md (Protocol).
 
 pub mod datagram;
 pub mod handshake;

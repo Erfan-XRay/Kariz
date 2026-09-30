@@ -37,7 +37,7 @@ each side knows it without sending it.
 
 ## Updates
 
-Releases are signed with an Ed25519 key (docs/PHASE14.md). `kariz-manager` and the panel check the
+Releases are signed with an Ed25519 key. `kariz-manager` and the panel check the
 signature, and the panel's agents check it again on their own servers, so a copy of a release that
 was tampered with, or that another key signed, is not installed even if it comes from the right
 address. The panel's update swaps the programs with a rollback, and never runs a file whose

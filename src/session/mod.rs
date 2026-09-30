@@ -3,8 +3,7 @@
 //!
 //! Entry, exit and the UDP code work with [`Session`] and [`SessionStream`] only. Today
 //! the one implementation is kmux (`src/mux/`), running over an authenticated link;
-//! QUIC, which brings its own streams and datagrams, becomes a second variant (see
-//! `docs/PHASE4.md`). Enums rather than trait objects keep dispatch static.
+//! QUIC, which brings its own streams and datagrams, becomes a second variant. Enums rather than trait objects keep dispatch static.
 
 mod manager;
 #[cfg(feature = "quic")]

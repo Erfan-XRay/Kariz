@@ -1,6 +1,5 @@
 //! `transport = "kcp"`: KCP, an ARQ protocol over UDP that trades bandwidth for latency,
-//! as a byte stream under the tunnel's handshake, records and mux (docs/PHASE4.md,
-//! section 4).
+//! as a byte stream under the tunnel's handshake, records and mux.
 //!
 //! ```text
 //!  handshake / records / kmux      unchanged, over a KcpStream
@@ -12,7 +11,7 @@
 //!
 //! Each UDP packet carries one of these (the first plaintext byte): KCP segments, a ping,
 //! a close, a datagram, or with FEC on (`fec.rs`) KCP segments or a datagram as a data
-//! shard, or a parity shard. Datagrams (docs/PHASE6.md, section 2) travel beside KCP,
+//! shard, or a parity shard. Datagrams travel beside KCP,
 //! not through it: they are never resent and never wait for a lost segment.
 //! KCP runs in message mode so a message can say what it is: data, the
 //! end of the stream in that direction (FIN), or the dialer's opening message, which makes

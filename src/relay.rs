@@ -1,8 +1,7 @@
 //! Bidirectional byte relay between a user connection and a tunnel connection.
 //!
 //! Both relays add to the rule's (or the exit's) counters as data goes, not when the
-//! connection ends, so a connection that stays open for hours shows up in `status`
-//! (docs/PHASE10.md, section 2).
+//! connection ends, so a connection that stays open for hours shows up in `status`.
 
 use std::io;
 use std::pin::Pin;

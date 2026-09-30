@@ -1,4 +1,4 @@
-//! UDP forwarding (phase 3, see `docs/PHASE3.md`).
+//! UDP forwarding (phase 3).
 //!
 //! A **flow** is one client address talking to one UDP forward rule. The entry keeps a
 //! flow table per rule and opens a tunnel path per flow; the exit gives each flow its own
@@ -7,7 +7,7 @@
 //! Either way [`relay`] moves packets both ways until the flow has been idle for the
 //! configured timeout or one side ends it.
 //!
-//! **Duplication** (docs/PHASE6.md, section 4): a flow opened with it numbers every
+//! **Duplication**: a flow opened with it numbers every
 //! packet, `seq (4, BE) | packet`, in both directions. A packet that goes where it may be
 //! lost (KCP's datagram path, a QUIC datagram) is sent again `gap` later, once or twice;
 //! the receiver drops the numbers it has seen. Packets that go reliably are numbered but

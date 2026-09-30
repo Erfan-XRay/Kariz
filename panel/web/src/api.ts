@@ -66,7 +66,7 @@ export interface ForwardSpec {
   protocol: string;
 }
 
-/** What the wizard sends: one tunnel, both sides (docs/PHASE12.md). */
+/** What the wizard sends: one tunnel, both sides. */
 export interface PairRequest {
   name: string;
   entry: string;

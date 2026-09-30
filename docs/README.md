@@ -7,16 +7,17 @@ animated diagrams and a live demo of the panel, in English and Persian:
 
 | Page | What it covers |
 |---|---|
-| [Getting started](getting-started.md) | Install, a token, a first tunnel in reverse or direct mode, systemd |
-| [The manager script](manager.md) | One-line install, a menu, and commands to add and run tunnels |
+| [Getting started](getting-started.md) | The quick way (the panel), and by hand: a token, two configs, systemd |
+| [Using the panel](using-the-panel.md) | A walk through the web panel: sign in, add servers, make a tunnel, watch it, keep it safe |
+| [The manager script](manager.md) | One-line install of Kariz and the panel on a server, and connecting a server to a panel |
 | [Configuration reference](configuration.md) | Every setting, its default and its limits |
-| [Speed test](speedtest.md) | `kariz speedtest`: speed, latency and UDP through the live tunnel, in either mode |
+| [Speed test](speedtest.md) | The panel's button and `kariz speedtest`: speed, latency and UDP through the live tunnel |
 | [The web panel](panel.md) | Install the panel, sign in, connect servers with agents, what it shows |
 | [Status](status.md) | `kariz status`: connection, round trip, last error and traffic per port, on either side; the JSON document |
 | [Compatibility](compatibility.md) | what 1.x promises to keep, what is left free, and how a breaking change is made |
 | [Accessibility](accessibility.md) | what is checked on every change (axe, keyboard, motion) and what is checked by hand |
 | [Security review](security-review.md) | who is assumed to attack the panel, what was checked and fixed for 1.0, what is left |
-| [فارسی: مستندات به زبان فارسی](fa/README.md) | the guides in Persian: getting started, the manager, the panel, private networks, security, troubleshooting |
+| [فارسی: مستندات به زبان فارسی](fa/README.md) | every page of this documentation in Persian |
 | [Private networks (GRE)](networks.md) | private addresses between your servers, made by the panel, never repeated |
 | [Transports](transports.md) | `tcp`, `tcpmux`, `ws`, `wss`, `quic`, `kcp`: how each works and when to pick it |
 | [Profiles](profiles.md) | `balanced`, `ultraspeed`, `gaming`, and overriding their values |
@@ -26,9 +27,9 @@ animated diagrams and a live demo of the panel, in English and Persian:
 | [Security](security.md) | What the token protects, encryption, what is visible on the wire |
 | [Troubleshooting](troubleshooting.md) | `kariz check` warnings, common errors, logs |
 
-Design documents, for how and why things were built:
-[ROADMAP](ROADMAP.md), [phase 2](PHASE2.md) (encryption, mux, WebSocket),
-[phase 3](PHASE3.md) (UDP), [phase 4](PHASE4.md) (QUIC, KCP),
-[phase 6](PHASE6.md) (gaming).
+How it is built: [design and protocol](ROADMAP.md).
+
+Kariz is source-available under its own [license](../LICENSE): you may read it and run the
+official releases on your own servers; using the core anywhere else is not allowed.
 
 In Persian: [README_FA.md](../README_FA.md) covers the same ground in short.

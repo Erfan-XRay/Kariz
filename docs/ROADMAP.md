@@ -1,4 +1,4 @@
-# Roadmap and design
+# Design and protocol
 
 ## Layers
 
@@ -23,34 +23,12 @@ head-of-line blocking, so for games QUIC datagrams, KCP or raw UDP are preferred
 Both **reverse** (exit dials entry) and **direct** (entry dials exit) modes are
 supported for every transport.
 
-## Phases
-
-| Phase | Scope | Status |
-|---|---|---|
-| 1 | Project skeleton, CLI, TOML config, profiles, mutual auth, plain `tcp` transport, reverse + direct modes, tests, CI | **done (v0.1.0)** |
-| 2 | Encryption layer, `tcpmux`, `ws` / `wss` (CDN friendly); plan in [PHASE2.md](PHASE2.md) | **done (v0.2.0)** |
-| 3 | UDP forwarding and UDP-over-stream framing; plan in [PHASE3.md](PHASE3.md) | **done (v0.3.0)** |
-| 4 | `kcp` (full settings + Reed-Solomon FEC) and `quic` (quinn; BBR/Cubic, datagrams, GSO/GRO); plan in [PHASE4.md](PHASE4.md) | **done (v0.4.0)** |
-| 5 | (`icmp` transport) | dropped |
-| 6 | Full `gaming` profile: unreliable datagram path over KCP, packet duplication, DSCP, measured defaults; plan in [PHASE6.md](PHASE6.md) | **done (v0.5.0)** |
-| 7 | User-settable mux settings (`[tunnel.mux]`: coalescing, ping interval, datagram buffers, unsent-data limit) | **done (v0.5.1)** |
-| - | (`stealth` profile, active-probe fallback) | dropped |
-| 8 | Release builds (static musl for x86_64 / aarch64 / armv7), mimalloc, the manager script, `kariz speedtest`, new log lines; plan in [PHASE8.md](PHASE8.md) | **done (v0.6.0)** |
-| 9 | Web panel design: design system, interactive prototype, all screens; plan (with the whole panel) in [PHASE9.md](PHASE9.md) | **done** (no release) |
-| 10 | Core for the panel: counters, `status` on the control socket (both sides), `kariz status`, `kariz check --json`; plan in [PHASE10.md](PHASE10.md) | **done (v0.7.0)** |
-| 11 | Panel base: `kariz-panel`, sign-in, installer, agents and servers, app shell; plan in [PHASE11.md](PHASE11.md) | **done (v0.8.0-beta)** |
-| 12 | Panel tunnels and live monitoring | **done (v0.9.0)** |
-| 13 | Private networks: a direct-mode tunnel can run over GRE with private addresses the panel hands out, never repeated, for two or many servers; plan in [PHASE13.md](PHASE13.md) | **done (v0.10.0)** |
-| 14 | Updating from the panel: signed releases, one button for the panel and one for every server (agents get the update over their link); plan in [PHASE14.md](PHASE14.md) | **done (v0.11.0)** |
-| 15 | Panel tests (Playwright), security review, accessibility, docs in both languages | **done (v1.0.0)** |
-| 16 | The documentation website on GitHub Pages: animated, in the panel's design, Persian and English, with a live demo; plan in [PHASE16.md](PHASE16.md) | **done (the site, published from the repository)** |
-
 ## Protocol (v2)
 
 0. **Transport**: a TCP connection (`tcp`, `tcpmux`), a WebSocket over TCP (`ws`) or
    TLS (`wss`) that looks like a browser's, or KCP over UDP with every packet sealed by
    a key from the token (`kcp`) (see `src/transport/`). Everything below travels inside
-   it. (`quic` replaces the layers below with its own; see PHASE4.md.)
+   it. (`quic` replaces the layers below with its own.)
 1. **Handshake** (see `src/crypto/handshake.rs`): mutual authentication with the shared
    token plus an X25519 exchange for forward secrecy. The hello is masked and padded to a
    random length, so it has no fixed bytes and no fixed size; replays are rejected.
@@ -74,4 +52,3 @@ A connection that fails the handshake is not closed at once but drained for a ra
 5-30 s. Wire format v2 is not compatible with v0.1: upgrade both sides together.
 Camouflage beyond that (padding and timing shaping, active-probe fallback) is not planned.
 
-Full design: [PHASE2.md](PHASE2.md).

@@ -23,15 +23,17 @@ flowchart LR
 
 سمتی که وصل می‌شود `tunnel.remote` را می‌گذارد و سمت دیگر `tunnel.listen` را.
 
-## راه سریع
+## راه سریع: پنل وب
 
-اسکریپت مدیر همهٔ مرحله‌های پایین را برایتان انجام می‌دهد، از جمله یک سرویس systemd برای هر تانل و دستوری که باید روی سرور دیگر اجرا شود:
+پنل را با اسکریپت مدیر روی یک سرور نصب کنید، سرورهای دیگرتان را به آن وصل کنید و تانل‌ها را در مرورگر بسازید. پنل همهٔ مرحله‌های پایین را روی هر دو سرور برایتان انجام می‌دهد (کانفیگ‌ها، token، یک سرویس systemd، بررسی اینکه وصل شد) و اگر مرحله‌ای خراب شود همه را برمی‌گرداند:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh)
 ```
 
-[اسکریپت مدیر](manager.md) را ببینید. بقیهٔ این صفحه همین کار است به‌صورت دستی. اگر پنل وب می‌خواهید، [پنل](panel.md) را بخوانید.
+**۲** (پنل وب) و بعد **install** را بزنید و لینکی را که چاپ می‌شود باز کنید. بعد [کار با پنل](using-the-panel.md) را بخوانید؛ [اسکریپت مدیر](manager.md) منو را توضیح می‌دهد.
+
+بقیهٔ این صفحه همین کار است به‌صورت دستی، برای سروری بدون پنل یا برای دیدن اینکه پنل چه می‌نویسد.
 
 ## ۱. نصب
 
@@ -63,7 +65,7 @@ token تنها رازِ تانل است: هر دو سمت یکی را دارند
 | `entry-tcpmux-reverse.toml`، `exit-tcpmux-reverse.toml` | حالت reverse با mux |
 | `entry-udp-reverse.toml`، `exit-udp-reverse.toml` | فوروارد UDP (وایرگارد، بازی) |
 | `entry-wss-direct.toml`، `exit-wss-direct.toml` | `wss` به سرور خودتان، با گواهی خودامضا و پین |
-| `entry-wss-cdn.toml`، `exit-wss-cdn.toml` | `wss` از راه CDN ([راهنما](../CDN.md)) |
+| `entry-wss-cdn.toml`، `exit-wss-cdn.toml` | `wss` از راه CDN ([راهنما](CDN.md)) |
 | `entry-quic-direct.toml`، `exit-quic-direct.toml` | `quic`، با وایرگارد روی datagramهای QUIC |
 | `entry-kcp-reverse.toml`، `exit-kcp-reverse.toml` | `kcp` برای خط پرافت |
 | `entry-gaming.toml`، `exit-gaming.toml` | سرور بازی روی `kcp` با پروفایل gaming |
@@ -119,7 +121,7 @@ journalctl -u kariz -f
 
 ## بعدش
 
-- ترنسپورت مناسب مسیرتان را انتخاب کنید: [Transports](../transports.md) (انگلیسی).
-- برای سرعت یا تأخیر تنظیم کنید: [Profiles](../profiles.md) (انگلیسی).
-- همهٔ تنظیم‌ها: [مرجع کانفیگ](../configuration.md) (انگلیسی).
+- ترنسپورت مناسب مسیرتان را انتخاب کنید: [Transports](transports.md).
+- برای سرعت یا تأخیر تنظیم کنید: [Profiles](profiles.md).
+- همهٔ تنظیم‌ها: [مرجع کانفیگ](configuration.md).
 - پنل وب برای مدیریت چند سرور: [پنل](panel.md).

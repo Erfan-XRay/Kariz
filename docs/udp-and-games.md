@@ -71,7 +71,7 @@ What makes the difference:
   congestion control as the streams, which slows down under random loss. After a long
   loss burst, it holds datagrams for a few hundred milliseconds.
 
-Full numbers, including bursty loss and the other rows: [PHASE6.md](PHASE6.md).
+The full numbers, including bursty loss, are in [Performance](performance.md).
 
 ## Packet duplication
 
