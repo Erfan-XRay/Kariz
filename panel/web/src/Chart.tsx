@@ -41,16 +41,24 @@ export function Chart({ series, unit, decimals = 1 }: { series: string; unit: st
   }, [points]);
 
   const at = hover !== null && points[hover] ? points[hover] : null;
+  const last = points.length ? points[points.length - 1][1] : null;
   const time = (ts: number) => new Date(ts * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
   const kind = series.split(":")[2];
 
   return (
     <div className="chart-block">
       <div className="chart-head">
-        <span className="label">{t(`chart.${kind}`)}</span>
+        <span className="chart-title">
+          <span className="label">{t(`chart.${kind}`)}</span>
+          {last != null && (
+            <b className="num" dir="ltr">
+              {num(last, decimals)} <small>{unit}</small>
+            </b>
+          )}
+        </span>
         <Seg value={range} options={RANGES.map((r) => [r, r] as [Range, string])} onChange={setRange} />
       </div>
-      <div className="chart-wrap">
+      <div className="chart-wrap" dir="ltr">
         {points.length < 2 ? (
           <p className="muted small" style={{ padding: "var(--sp-5) 0" }}>
             {t("chart.none")}
@@ -64,10 +72,9 @@ export function Chart({ series, unit, decimals = 1 }: { series: string; unit: st
             aria-label={t(`chart.${kind}`)}
             onMouseLeave={() => setHover(null)}
             onMouseMove={(e) => {
+              // time runs left to right in both directions, like the axis of any chart
               const box = e.currentTarget.getBoundingClientRect();
-              const rtl = document.documentElement.dir === "rtl";
-              const f = (e.clientX - box.left) / box.width;
-              const x = (rtl ? 1 - f : f) * W;
+              const x = ((e.clientX - box.left) / box.width) * W;
               let best = 0;
               coords.forEach(([cx], i) => {
                 if (Math.abs(cx - x) < Math.abs(coords[best][0] - x)) best = i;
@@ -81,14 +88,23 @@ export function Chart({ series, unit, decimals = 1 }: { series: string; unit: st
                 <stop offset="1" stopColor="var(--water)" stopOpacity="0.02" />
               </linearGradient>
             </defs>
+            {[0.25, 0.5, 0.75].map((k) => (
+              <line key={k} className="chart-grid" x1="0" x2={W} y1={H * k} y2={H * k} vectorEffect="non-scaling-stroke" />
+            ))}
             <path d={area} fill={`url(#g-${series})`} />
             <path d={path} fill="none" stroke="var(--water)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-            {hover !== null && coords[hover] && <circle cx={coords[hover][0]} cy={coords[hover][1]} r="4" fill="var(--accent)" />}
+            {hover !== null && coords[hover] && <line className="chart-guide" x1={coords[hover][0]} x2={coords[hover][0]} y1="0" y2={H} vectorEffect="non-scaling-stroke" />}
           </svg>
         )}
+        {hover !== null && coords[hover] && (
+          <span className="chart-dot" style={{ left: `${(coords[hover][0] / W) * 100}%`, top: `${(coords[hover][1] / H) * 100}%` }} aria-hidden="true" />
+        )}
         {at && (
-          <div className="chart-tip is-on" style={{ insetInlineStart: 8 }}>
-            {num(at[1], decimals)} {unit} · {time(at[0])}
+          <div className="chart-tip is-on" style={{ left: `clamp(8px, calc(${((coords[hover!][0] / W) * 100).toFixed(1)}% - 60px), calc(100% - 150px))` }}>
+            <b className="num" dir="ltr">
+              {num(at[1], decimals)} {unit}
+            </b>{" "}
+            · {time(at[0])}
           </div>
         )}
       </div>

@@ -3,7 +3,7 @@ import { api } from "./api";
 import type { EventRow, LogLine, ServerInfo } from "./api";
 import { pairTunnels } from "./derive";
 import { useApp } from "./store";
-import { Seg, useAgo } from "./ui";
+import { Card, Empty, Icon, Seg, useAgo } from "./ui";
 
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;]*m/g;
@@ -118,20 +118,25 @@ export function LogsPage({ servers }: { servers: ServerInfo[] }) {
                 </option>
               ))}
             </select>
-            <input className="text search" dir="ltr" placeholder={t("logs.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
+            <label className="search">
+              <Icon name="search" size={18} />
+              <input type="search" dir="ltr" placeholder={t("logs.search")} aria-label={t("logs.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
+            </label>
             <span className="grow" />
             <button className={`btn btn-sm ${follow ? "btn-primary" : "btn-ghost"}`} type="button" aria-pressed={follow} onClick={() => setFollow(!follow)}>
+              <Icon name={follow ? "pause" : "play"} size={16} />
               {t("logs.follow")}
             </button>
           </>
         )}
       </div>
       {tab === "logs" && (
+        <div className="card flush log-card">
         <div className="log-view" ref={view} tabIndex={0} aria-label={t("logs.tab")}>
           {tunnels.length === 0 && <div className="log-empty">{t("tun.empty")}</div>}
           {tunnels.length > 0 && shown.length === 0 && <div className="log-empty">{error || t("logs.empty")}</div>}
           {shown.map((l, i) => (
-            <div className="log-line" key={`${i}-${l.time}`}>
+            <div className={`log-line ${l.level}`} key={`${i}-${l.time}`}>
               <time>{l.time}</time>
               <span className={`lv ${l.level}`}>{l.level}</span>
               <span className="who">
@@ -141,11 +146,12 @@ export function LogsPage({ servers }: { servers: ServerInfo[] }) {
             </div>
           ))}
         </div>
+        </div>
       )}
       {tab === "events" && (
-        <div className="stratum s1">
+        <Card title={t("logs.events")}>
           {events.length === 0 ? (
-            <p className="muted">{t("logs.noEvents")}</p>
+            <Empty icon="logs" title={t("logs.noEvents")} />
           ) : (
             <ul className="timeline">
               {events.map((e) => (
@@ -156,7 +162,7 @@ export function LogsPage({ servers }: { servers: ServerInfo[] }) {
               ))}
             </ul>
           )}
-        </div>
+        </Card>
       )}
     </div>
   );

@@ -3,7 +3,7 @@ import { ApiError, api } from "./api";
 import type { UpdateStatus } from "./api";
 import { Checklist, describeError, useOp } from "./ops";
 import { useApp } from "./store";
-import { Dialog, Seg } from "./ui";
+import { Card, Dialog, Seg } from "./ui";
 
 /** The update status of the panel, kept fresh (a look every minute is cheap: it is in memory). */
 export function useUpdate(enabled: boolean): { status: UpdateStatus | null; reload: () => void } {
@@ -35,7 +35,7 @@ export function UpdatePill({ status, onOpen, onServers }: { status: UpdateStatus
     return (
       <button className="update-pill" type="button" onClick={onOpen}>
         <i aria-hidden="true" />
-        {t("upd.pill", { v: status.latest.version })}
+        <span className="pill-text">{t("upd.pill", { v: status.latest.version })}</span>
       </button>
     );
   }
@@ -43,7 +43,7 @@ export function UpdatePill({ status, onOpen, onServers }: { status: UpdateStatus
     return (
       <button className="update-pill" type="button" onClick={onServers}>
         <i aria-hidden="true" />
-        {t("upd.pillServers", { n: num(status.outdated.length) })}
+        <span className="pill-text">{t("upd.pillServers", { n: num(status.outdated.length) })}</span>
       </button>
     );
   }
@@ -267,10 +267,7 @@ export function UpdatesSection({ status, reload }: { status: UpdateStatus | null
             ? t("upd.older")
             : t("upd.notChecked");
   return (
-    <section className="stratum s2">
-      <div className="stratum-head">
-        <h2>{t("set.updates")}</h2>
-      </div>
+    <Card title={t("set.updates")}>
       {row(
         t("upd.installed", { v: status.current }),
         state,
@@ -320,6 +317,6 @@ export function UpdatesSection({ status, reload }: { status: UpdateStatus | null
         row(t("upd.lastFailed", { v: status.last_result.version }), status.last_result.rolled_back ? t("upd.rolled") : "", <span className="err small">{status.last_result.error}</span>)}
       {dialog && <UpdateDialog status={status} onClose={() => setDialog(false)} />}
       {servers && <ServersDialog status={status} onClose={() => { setServers(false); reload(); }} />}
-    </section>
+    </Card>
   );
 }
