@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.0.0 - 2026-09-30
+
+The first stable release. From here on the project follows semantic versioning and keeps what
+works: see [docs/compatibility.md](docs/compatibility.md) for exactly what 1.x promises (tunnel
+configs, the tunnel protocol between any two 1.x versions, the status document, `kariz-manager`,
+the panel and its agents) and what stays free. Nothing changes for a 0.11 install except what is
+listed here; update the panel and its agents together as usual.
+
+### Added
+
+- **A security review of the panel, its agents and its update path**, with everything it found
+  fixed and tested (docs/security-review.md): connections that say nothing are closed (TLS
+  handshake within 10 seconds, request headers within 15, at most 512 connections); every answer
+  under the secret path carries hardening headers (a strict Content-Security-Policy, no framing,
+  no sniffing, no referrer, HSTS) while the 404 for any other address stays exactly nginx's; the
+  database is `0600` in a `0700` folder whatever the umask; downloads follow `https` only, and an
+  archive is limited to 500 entries and 400 MB; password checks run four at a time at most;
+  tunnels with many IPv6 ports are no longer refused for their size; the audit log is kept for a
+  year. `cargo audit` runs in CI.
+- **Browser tests** (Playwright, on a real panel and a real agent, in CI): signing in with a
+  link and a password, the lockout, the secret path and its headers, adding a server, making a
+  tunnel with the wizard and sending traffic through it, editing, stopping, starting and deleting
+  it, a tunnel that cannot connect being undone on both servers, both languages and themes, and a
+  phone-sized screen with no sideways scroll.
+- **Accessibility checked on every change** (axe, WCAG 2.1 A and AA, on every page and dialog in
+  English and Persian, Night and Dawn; the keyboard; reduced motion), with what it found fixed:
+  secondary text now has the contrast it needs in both themes, dialogs, the wizard and the command
+  palette **keep Tab inside themselves** and give focus back, the map and the page area have names
+  and keyboard access, and the command palette is a proper combobox (docs/accessibility.md).
+- **The guides in Persian** (docs/fa): getting started, the manager, the panel, private networks,
+  security and troubleshooting.
+- **docs/compatibility.md**: what 1.x promises and how a breaking change is made.
+
+### Changed
+
+- The manager script no longer speaks of a private repository; `GITHUB_TOKEN` is only there to
+  lift GitHub's download limit.
+- A request from the panel to an agent may be up to 60 KB (it was 16 KB).
+
 ## 0.11.0 - 2026-09-30
 
 **Updating from the panel, and signed releases** (docs/panel.md, docs/PHASE14.md). Backward

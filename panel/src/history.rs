@@ -162,6 +162,8 @@ impl History {
         let conn = self.db.conn();
         conn.execute("DELETE FROM metrics WHERE ts < ?1", [now() - KEEP_SECS])?;
         conn.execute("DELETE FROM events WHERE ts < ?1", [now() - KEEP_SECS])?;
+        // The audit log is kept for a year.
+        conn.execute("DELETE FROM audit WHERE at < ?1", [now() - 365 * 24 * 3600])?;
         Ok(())
     }
 

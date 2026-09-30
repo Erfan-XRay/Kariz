@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useApp } from "./store";
-import { Icon } from "./ui";
+import { Icon, useFocusTrap } from "./ui";
 import logo from "./logo.svg";
 
 export type PageId = "map" | "servers" | "tunnels" | "networks" | "logs" | "settings";
@@ -112,7 +112,7 @@ export function Shell({
         </div>
       </header>
 
-      <main className="main" ref={main}>
+      <main className="main" ref={main} tabIndex={0} aria-label={t(`page.${page}`)}>
         {children}
       </main>
 
@@ -134,6 +134,8 @@ function Palette({ commands, onClose }: { commands: Command[]; onClose: () => vo
   const [sel, setSel] = useState(0);
   const [on, setOn] = useState(false);
   const input = useRef<HTMLInputElement>(null);
+  const box = useRef<HTMLDivElement>(null);
+  useFocusTrap(box);
   const items = commands.filter((c) => c.label.toLowerCase().includes(query.trim().toLowerCase()));
 
   useEffect(() => {
@@ -148,11 +150,17 @@ function Palette({ commands, onClose }: { commands: Command[]; onClose: () => vo
   };
 
   return (
-    <div className={`palette-backdrop ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label="Commands" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div ref={box} className={`palette-backdrop ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label="Commands" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="palette">
         <input
           ref={input}
           type="text"
+          role="combobox"
+          aria-expanded="true"
+          aria-controls="pal-list"
+          aria-autocomplete="list"
+          aria-activedescendant={items.length ? `pal-${sel}` : undefined}
+          aria-label={t("pal.title")}
           autoComplete="off"
           placeholder={t("pal.placeholder")}
           value={query}
@@ -171,9 +179,9 @@ function Palette({ commands, onClose }: { commands: Command[]; onClose: () => vo
             else if (e.key === "Escape") onClose();
           }}
         />
-        <ul role="listbox">
+        <ul role="listbox" id="pal-list" aria-label={t("pal.title")} tabIndex={-1}>
           {items.map((c, i) => (
-            <li key={c.label} role="option" aria-selected={i === sel} onMouseMove={() => setSel(i)} onClick={() => run(c)}>
+            <li key={c.label} id={`pal-${i}`} role="option" aria-selected={i === sel} onMouseMove={() => setSel(i)} onClick={() => run(c)}>
               <span>{c.label}</span>
               <span className="hint">{c.hint}</span>
             </li>

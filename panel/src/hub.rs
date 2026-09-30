@@ -749,6 +749,9 @@ pub async fn request_within(
     limit: Duration,
 ) -> Result<Vec<u8>> {
     let syn = serde_json::to_vec(request)?;
+    if syn.len() > crate::wire::MAX_REQUEST {
+        bail!("too_large");
+    }
     let ask = async {
         let stream = session.open(Bytes::from(syn))?;
         // The request is all in the open bytes: this side has nothing more to send. Left

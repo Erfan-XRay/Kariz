@@ -38,9 +38,19 @@ pub fn routes() -> Router<AppState> {
         .route("/api/servers", get(servers))
         .route("/api/servers/join-code", post(join_code))
         .route("/api/servers/remove", post(remove_server))
-        .route("/api/tunnels/check", post(tunnel_check))
-        .route("/api/tunnels", post(tunnel_create))
-        .route("/api/tunnels/edit", post(tunnel_edit))
+        // A tunnel with many ports is a bigger body than the other calls take.
+        .route(
+            "/api/tunnels/check",
+            post(tunnel_check).layer(DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/api/tunnels",
+            post(tunnel_create).layer(DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/api/tunnels/edit",
+            post(tunnel_edit).layer(DefaultBodyLimit::max(128 * 1024)),
+        )
         .route("/api/tunnels/control", post(tunnel_control))
         .route("/api/tunnels/delete", post(tunnel_delete))
         .route("/api/op", get(op_status))
@@ -220,6 +230,16 @@ async fn login(
     if let Err(r) = locked(&state, &ip) {
         return r;
     }
+    // A password check costs real CPU and memory (that is its point): only a few at once, so
+    // a flood of tries from many addresses cannot make the panel unusable.
+    static GATE: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    let gate = GATE
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone();
+    let Ok(_permit) = gate.try_acquire_owned() else {
+        return error(StatusCode::TOO_MANY_REQUESTS, "busy");
+    };
     let db = state.db.clone();
     let password = body.password;
     let ok = tokio::task::spawn_blocking(move || auth::check_password(&db, &password))

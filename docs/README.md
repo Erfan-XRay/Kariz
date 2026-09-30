@@ -1,6 +1,6 @@
 # Kariz documentation
 
-For Kariz **v0.11.0**. Start with [Getting started](getting-started.md); come back to the
+For Kariz **v1.0.0**. Start with [Getting started](getting-started.md); come back to the
 reference pages when you need a specific setting.
 
 | Page | What it covers |
@@ -11,6 +11,10 @@ reference pages when you need a specific setting.
 | [Speed test](speedtest.md) | `kariz speedtest`: speed, latency and UDP through the live tunnel, in either mode |
 | [The web panel](panel.md) | Install the panel, sign in, connect servers with agents, what it shows |
 | [Status](status.md) | `kariz status`: connection, round trip, last error and traffic per port, on either side; the JSON document |
+| [Compatibility](compatibility.md) | what 1.x promises to keep, what is left free, and how a breaking change is made |
+| [Accessibility](accessibility.md) | what is checked on every change (axe, keyboard, motion) and what is checked by hand |
+| [Security review](security-review.md) | who is assumed to attack the panel, what was checked and fixed for 1.0, what is left |
+| [فارسی: مستندات به زبان فارسی](fa/README.md) | the guides in Persian: getting started, the manager, the panel, private networks, security, troubleshooting |
 | [Private networks (GRE)](networks.md) | private addresses between your servers, made by the panel, never repeated |
 | [Transports](transports.md) | `tcp`, `tcpmux`, `ws`, `wss`, `quic`, `kcp`: how each works and when to pick it |
 | [Profiles](profiles.md) | `balanced`, `ultraspeed`, `gaming`, and overriding their values |

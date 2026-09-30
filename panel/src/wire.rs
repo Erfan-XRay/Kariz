@@ -7,8 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Largest request the panel sends (the open bytes of a stream hold 64 KiB).
-pub const MAX_REQUEST: usize = 16 * 1024;
+/// Largest request the panel sends (the open bytes of a stream hold 64 KiB). A tunnel with
+/// the most ports the wizard allows (200 forwards) is 15 KB with IPv4 addresses and more
+/// than 20 KB with IPv6 ones.
+pub const MAX_REQUEST: usize = 60 * 1024;
 /// Largest answer the panel reads.
 pub const MAX_REPLY: usize = 4 * 1024 * 1024;
 
@@ -272,6 +274,34 @@ pub struct TunnelInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tunnel_with_the_most_ports_the_wizard_allows_fits_one_request() {
+        let spec = Spec {
+            name: "big".into(),
+            role: "entry".into(),
+            mode: "reverse".into(),
+            transport: "tcpmux".into(),
+            listen: Some("0.0.0.0:3080".into()),
+            token: Some("t".repeat(48)),
+            forwards: (0..200)
+                .map(|i| ForwardInfo {
+                    listen: format!("[::]:{}", 10000 + i),
+                    target: format!("[2001:db8:85a3::8a2e:370:7334]:{}", 10000 + i),
+                    protocol: "tcp+udp".into(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let size = serde_json::to_vec(&Request::TunnelPut { spec })
+            .unwrap()
+            .len();
+        assert!(size < MAX_REQUEST, "{size} bytes");
+        assert!(
+            size > 16 * 1024,
+            "the old limit would have refused it: {size} bytes"
+        );
+    }
 
     #[test]
     fn requests_are_tagged_json() {

@@ -19,6 +19,9 @@ pub const DEFAULT_API: &str = "https://api.github.com/repos/Erfan-XRay/Kariz";
 /// The biggest archive the panel will take (the releases are about 5 MB).
 const MAX_ARCHIVE: u64 = 200 * 1024 * 1024;
 const MAX_SMALL: u64 = 64 * 1024;
+/// The most entries an archive may have, and the most the two programs may unpack to.
+const MAX_ENTRIES: usize = 500;
+const MAX_UNPACKED: u64 = 400 * 1024 * 1024;
 
 // ---- versions ----
 
@@ -114,6 +117,12 @@ pub struct Release {
     pub prerelease: bool,
     #[serde(skip)]
     pub assets: Vec<Asset>,
+    /// The listing came from a repository on this machine (`http://127.0.0.1...`, which only
+    /// the tests use): its files may be fetched from there too. From anywhere else only
+    /// `https` addresses are followed, so a listing cannot point the panel at a service of
+    /// this server.
+    #[serde(skip)]
+    pub from_local_api: bool,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +171,7 @@ pub fn parse_releases(json: &str) -> Result<Vec<Release>> {
                         url: a.browser_download_url,
                     })
                     .collect(),
+                from_local_api: false,
             })
         })
         .collect())
@@ -217,8 +227,8 @@ pub fn asset_names(tag: &str, arch: &str) -> [String; 3] {
 
 // ---- downloading ----
 
-fn get(url: &str, limit: u64) -> Result<Vec<u8>> {
-    if !(url.starts_with("https://") || url.starts_with("http://127.0.0.1")) {
+fn get(url: &str, limit: u64, local: bool) -> Result<Vec<u8>> {
+    if !(url.starts_with("https://") || (local && url.starts_with("http://127.0.0.1"))) {
         bail!("bad_url");
     }
     let agent = ureq::AgentBuilder::new()
@@ -252,11 +262,18 @@ fn get(url: &str, limit: u64) -> Result<Vec<u8>> {
 
 /// The releases of the repository behind `api` (`.../repos/OWNER/REPO`).
 pub fn fetch_releases(api: &str) -> Result<Vec<Release>> {
+    let local = api.starts_with("http://127.0.0.1");
     let body = get(
         &format!("{}/releases?per_page=20", api.trim_end_matches('/')),
         2 * 1024 * 1024,
+        local,
     )?;
-    parse_releases(std::str::from_utf8(&body).map_err(|_| anyhow!("bad_release_list"))?)
+    let mut releases =
+        parse_releases(std::str::from_utf8(&body).map_err(|_| anyhow!("bad_release_list"))?)?;
+    for r in &mut releases {
+        r.from_local_api = local;
+    }
+    Ok(releases)
 }
 
 /// Takes `kariz` and `kariz-panel` out of a release archive into `dir`, marked executable.
@@ -265,7 +282,13 @@ pub fn extract(archive: &[u8], dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
     let mut found = 0;
-    for entry in tar.entries().context("bad_archive")? {
+    let mut total = 0u64;
+    for (seen, entry) in tar.entries().context("bad_archive")?.enumerate() {
+        // A release has a few dozen files: an archive of thousands, or one that unpacks to
+        // far more than it should, is not a release (a decompression bomb).
+        if seen >= MAX_ENTRIES {
+            bail!("bad_archive");
+        }
         let mut entry = entry.context("bad_archive")?;
         let path = entry.path().context("bad_archive")?.into_owned();
         let parts: Vec<_> = path.components().collect();
@@ -278,6 +301,10 @@ pub fn extract(archive: &[u8], dir: &Path) -> Result<()> {
         }
         let mut data = Vec::new();
         entry.by_ref().take(MAX_ARCHIVE).read_to_end(&mut data)?;
+        total += data.len() as u64;
+        if total > MAX_UNPACKED {
+            bail!("bad_archive");
+        }
         let out = dir.join(name);
         std::fs::write(&out, &data)?;
         #[cfg(unix)]
@@ -314,9 +341,10 @@ pub fn download(
     };
     let key = sign::release_key(key_override)?;
     step("upd_download");
-    let archive = get(&url(&names[0])?, MAX_ARCHIVE)?;
-    let sha = get(&url(&names[1])?, MAX_SMALL)?;
-    let sig = get(&url(&names[2])?, MAX_SMALL).map_err(|_| anyhow!("unsigned"))?;
+    let archive = get(&url(&names[0])?, MAX_ARCHIVE, release.from_local_api)?;
+    let sha = get(&url(&names[1])?, MAX_SMALL, release.from_local_api)?;
+    let sig = get(&url(&names[2])?, MAX_SMALL, release.from_local_api)
+        .map_err(|_| anyhow!("unsigned"))?;
     step("upd_verify");
     sign::verify_archive(&key, &names[0], &archive, &sha, &sig)?;
     step("upd_stage");
@@ -583,6 +611,7 @@ mod tests {
             notes: String::new(),
             prerelease: pre,
             assets: vec![],
+            from_local_api: false,
         }
     }
 
@@ -852,7 +881,36 @@ mod tests {
             "ftp://x",
             "//x",
         ] {
-            assert!(get(bad, 10).is_err(), "{bad}");
+            assert!(get(bad, 10, false).is_err(), "{bad}");
+            assert!(get(bad, 10, true).is_err(), "{bad}");
         }
+        // A repository on this machine is for the tests: from a real listing, a file on
+        // this server's own ports is out of reach (no request to an internal service).
+        for internal in ["http://127.0.0.1:1/x", "http://127.0.0.1/secret"] {
+            assert_eq!(
+                format!("{:#}", get(internal, 10, false).unwrap_err()),
+                "bad_url"
+            );
+        }
+    }
+
+    #[test]
+    fn an_archive_of_thousands_of_files_is_not_a_release() {
+        let mut builder = tar::Builder::new(Vec::new());
+        for i in 0..(MAX_ENTRIES + 5) {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("kariz-x/file{i}"), &b"x"[..])
+                .unwrap();
+        }
+        let tar = builder.into_inner().unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &tar).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let err = extract(&gz.finish().unwrap(), dir.path()).unwrap_err();
+        assert_eq!(format!("{err:#}"), "bad_archive");
     }
 }

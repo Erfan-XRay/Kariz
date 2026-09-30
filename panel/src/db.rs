@@ -113,6 +113,18 @@ impl Db {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open the database {}", path.display()))?;
+        // It holds the agents' keys and the hashes of the sessions: only its owner reads it,
+        // whatever the umask of whoever started the panel.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let private =
+                |p: &Path, mode| std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode));
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                private(dir, 0o700).ok();
+            }
+            private(path, 0o600).ok();
+        }
         Self::init(conn)
     }
 

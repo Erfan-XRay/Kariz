@@ -15,11 +15,8 @@ It opens a menu. Choose **1** to install: it finds your CPU (x86_64, aarch64 or 
 downloads the latest release, checks its SHA-256, and installs `kariz` in
 `/usr/local/bin`, the systemd template `kariz@.service`, and the `kariz-manager` command.
 
-While the repository is private, the download needs a token that can read it:
-
-```bash
-export GITHUB_TOKEN=ghp_...        # or run as: sudo GITHUB_TOKEN=... bash <(curl ...)
-```
+If GitHub limits your downloads (many servers behind one address), set `GITHUB_TOKEN` to any
+personal access token before running the script: it is used only to lift that limit.
 
 Other ways to install:
 
@@ -174,11 +171,10 @@ kariz-manager uninstall             # asks before removing configs; --yes remove
 one is not installed; older releases have none and are accepted with a warning) and its
 SHA-256. `update` checks the new release's SHA-256 like `install` does, and restarts every running
 tunnel so it uses the new binary. It does not replace the manager script itself; for a
-new version of the manager, fetch it again (with the token while the repository is
-private):
+new version of the manager, fetch it again:
 
 ```bash
-curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -o /usr/local/bin/kariz-manager \
+curl -fsSL -o /usr/local/bin/kariz-manager \
     https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh
 chmod +x /usr/local/bin/kariz-manager
 ```

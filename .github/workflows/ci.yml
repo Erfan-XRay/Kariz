@@ -249,6 +249,47 @@ jobs:
       - run: cargo build -p kariz -p kariz-panel
       - run: sudo bash tests/gre_ns.sh target/debug/kariz-panel target/debug/kariz
 
+  # The panel the way a person uses it: Playwright drives a real browser against a real panel
+  # and a real agent (tunnels run as child processes, so no systemd is needed here). It covers
+  # signing in, adding a server, making, editing, stopping and deleting a tunnel with traffic
+  # through it, a tunnel that cannot connect being undone, the look in both languages and
+  # themes, and axe (WCAG 2.1 A and AA) on every page and dialog.
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: panel/web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: panel/web
+      - run: cargo build -p kariz -p kariz-panel
+      - run: npx playwright install --with-deps chromium
+        working-directory: panel/web
+      - run: npx playwright test
+        working-directory: panel/web
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-results
+          path: panel/web/e2e-results
+          retention-days: 7
+
+  # Known vulnerabilities in the dependencies (RustSec's advisory database). It runs on the
+  # lock file, so it also catches an advisory published after the last change.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+
   # nginx in front of the tunnel as a stand-in for a CDN: WebSocket proxying, TLS
   # termination and an idle timeout (tests/tunnel.rs, module `nginx`).
   cdn:
