@@ -89,6 +89,21 @@ jobs:
           ls -l kariz-*
           test "$(ls kariz-*.tar.gz | wc -l)" = 3
           for f in kariz-*.tar.gz; do sha256sum -c "$f.sha256"; done
+      # Releases are signed (docs/PHASE14.md): the private key is the repository secret
+      # KARIZ_SIGNING_KEY, and every signature is checked with the public key built into
+      # the program before anything is published, so a wrong secret stops the release.
+      - name: Sign the checksums
+        env:
+          KARIZ_SIGNING_KEY: ${{ secrets.KARIZ_SIGNING_KEY }}
+        run: |
+          if [ -z "$KARIZ_SIGNING_KEY" ]; then
+            echo "::error::the repository secret KARIZ_SIGNING_KEY is not set: releases must be signed"
+            exit 1
+          fi
+          tar -xzf kariz-*-x86_64-linux.tar.gz --wildcards '*/kariz-panel' --strip-components=1
+          for f in kariz-*.tar.gz.sha256; do ./kariz-panel release-sign "$f"; done
+          for f in kariz-*.tar.gz; do ./kariz-panel release-verify "$f"; done
+          ls -l kariz-*.sig
       - name: Release notes from CHANGELOG.md
         run: |
           awk -v version="${GITHUB_REF_NAME#v}" '
@@ -106,4 +121,4 @@ jobs:
           flags=()
           case "$GITHUB_REF_NAME" in *-*) flags=(--prerelease) ;; esac
           gh release create "$GITHUB_REF_NAME" --title "Kariz $GITHUB_REF_NAME" "${flags[@]}" \
-            --notes-file notes.md kariz-*.tar.gz kariz-*.tar.gz.sha256
+            --notes-file notes.md kariz-*.tar.gz kariz-*.tar.gz.sha256 kariz-*.tar.gz.sig

@@ -174,10 +174,51 @@ jobs:
           out=$(sudo kariz-manager update --binary target/release/kariz --panel-binary target/release/kariz-panel)
           echo "$out" | grep -q "Restarted kariz-panel"
           echo "$out" | grep -q "Restarted kariz-agent"
+      # The manager checks release signatures with openssl and the key in the script; here a
+      # key made for the test is pinned, since only the release workflow has the real one.
+      - name: Release signatures
+        run: |
+          kp=target/release/kariz-panel
+          d=$(mktemp -d)
+          n=kariz-v0.11.0-x86_64-linux
+          out=$($kp release-key --out "$d/key")
+          pem=$(printf '%s\n' "$out" | sed -n '/BEGIN PUBLIC KEY/,/END PUBLIC KEY/p')
+          hexkey=$(printf '%s\n' "$out" | sed -n 's/^public key (hex): //p')
+          echo "an archive" > "$d/$n.tar.gz"
+          (cd "$d" && sha256sum "$n.tar.gz" > "$n.tar.gz.sha256")
+          KARIZ_SIGNING_KEY=$(cat "$d/key") $kp release-sign "$d/$n.tar.gz.sha256"
+          $kp release-verify --key "$hexkey" "$d/$n.tar.gz"
+          check() { KARIZ_RELEASE_KEY_PEM="$pem" bash -c 'source scripts/kariz.sh; verify_signature "$@"' _ "$@"; }
+          check "$d" "$n" v0.11.0
+          # the release's own key (built in) does not accept a signature made with another
+          if bash -c 'source scripts/kariz.sh; verify_signature "$@"' _ "$d" "$n" v0.11.0; then exit 1; fi
+          # a checksum file that was changed after signing
+          cp -r "$d" "$d-t"
+          echo x >> "$d-t/$n.tar.gz.sha256"
+          if check "$d-t" "$n" v0.11.0; then echo "a changed checksum file passed" >&2; exit 1; fi
+          # a signed archive put under another name (another CPU's)
+          m=kariz-v0.11.0-aarch64-linux
+          mkdir "$d-n"
+          for e in tar.gz tar.gz.sha256 tar.gz.sig; do cp "$d/$n.$e" "$d-n/$m.$e"; done
+          if check "$d-n" "$m" v0.11.0; then echo "a swapped archive passed" >&2; exit 1; fi
+          # no signature: fine for a release before 0.11 (with a warning), refused from 0.11
+          rm "$d/$n.tar.gz.sig"
+          check "$d" "$n" v0.10.0
+          if check "$d" "$n" v0.11.0; then echo "an unsigned 0.11 passed" >&2; exit 1; fi
       - name: Private network links, read only
         run: |
           sudo kariz-manager net list | grep -q "No private network links"
           if sudo kariz-manager net status kz-nothere 2>/dev/null; then exit 1; fi
+      # Updating the panel from the panel, on this systemd host: a second panel is built that
+      # calls itself 99.0.0, a local server plays the releases (signed with a key made for the
+      # test), and the panel must roll back a release that does not come up and take a good one.
+      - name: Update the panel from the panel
+        run: |
+          shellcheck tests/update_e2e.sh
+          cp target/release/kariz-panel /tmp/kariz-panel-old
+          KARIZ_BUILD_VERSION=99.0.0 cargo build --release --locked -p kariz-panel
+          cp target/release/kariz-panel /tmp/kariz-panel-new
+          sudo bash tests/update_e2e.sh /tmp/kariz-panel-new target/release/kariz
       - name: Banner in the journal, priority prefixes understood
         run: |
           sudo journalctl -u kariz@plain -o cat --no-pager | tee journal.txt | head -20

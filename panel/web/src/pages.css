@@ -735,3 +735,23 @@ textarea.text { padding: var(--sp-3); min-height: 88px; resize: vertical; line-h
 .meter i { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--water-deep), var(--water-bright)); transition: width 700ms var(--ease-water); }
 [dir="rtl"] .meter i { background: linear-gradient(270deg, var(--water-deep), var(--water-bright)); }
 @media (max-width: 767px) { .addr-row { grid-template-columns: 1fr; } .rail-item span { font-size: 10px; } }
+
+/* updates (phase 14) */
+.update-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 40px;
+  padding: 0 var(--sp-4);
+  border: var(--hairline) solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.update-pill i { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pill-pulse 1800ms ease-in-out infinite; }
+@keyframes pill-pulse { 50% { transform: scale(1.5); opacity: 0.5; } }
+.update-pill:hover { background: var(--accent); color: var(--on-accent); }
+pre.notes { max-height: 220px; overflow: auto; white-space: pre-wrap; }
+@media (max-width: 767px) { .update-pill { min-width: 0; padding: 0 var(--sp-3); font-size: 12px; } }

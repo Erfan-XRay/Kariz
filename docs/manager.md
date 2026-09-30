@@ -170,7 +170,9 @@ kariz-manager update --version v0.5.1
 kariz-manager uninstall             # asks before removing configs; --yes removes everything
 ```
 
-`update` checks the new release's SHA-256 like `install` does, and restarts every running
+`install` and `update` check the release's **signature** (from 0.11, a release without a valid
+one is not installed; older releases have none and are accepted with a warning) and its
+SHA-256. `update` checks the new release's SHA-256 like `install` does, and restarts every running
 tunnel so it uses the new binary. It does not replace the manager script itself; for a
 new version of the manager, fetch it again (with the token while the repository is
 private):

@@ -55,6 +55,11 @@ pub fn routes() -> Router<AppState> {
         .route("/api/networks/links", post(links_create))
         .route("/api/networks/links/delete", post(link_delete))
         .route("/api/servers/address", post(server_address))
+        .route("/api/update", get(update_status))
+        .route("/api/update/check", post(update_check))
+        .route("/api/update/settings", post(update_settings))
+        .route("/api/update/apply", post(update_apply))
+        .route("/api/update/servers", post(update_servers))
         .route("/api/backup", post(backup))
         .route(
             "/api/restore",
@@ -1094,5 +1099,134 @@ async fn server_address(
             reply(StatusCode::OK, json!({}))
         }
         Err(e) => net_error(e),
+    }
+}
+
+// ---- updating (docs/PHASE14.md) ----
+
+fn update_error(e: anyhow::Error) -> Response {
+    let text = format!("{e:#}");
+    let code = text.split(':').next().unwrap_or_default();
+    match code {
+        "not_configured" | "no_update" | "no_systemd" => error(StatusCode::CONFLICT, code),
+        "major_needs_confirm" => error(StatusCode::CONFLICT, code),
+        "busy" => error(StatusCode::CONFLICT, "busy"),
+        _ => internal(e),
+    }
+}
+
+async fn update_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    reply(StatusCode::OK, state.hub.update_status())
+}
+
+async fn update_check(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = authenticate(&state, &headers, true) {
+        return r;
+    }
+    // A failed look is part of the status (the browser shows it), not an error page.
+    match state.hub.check_update().await {
+        Ok(()) => {}
+        Err(e) if format!("{e:#}") == "not_configured" => return update_error(e),
+        Err(_) => {}
+    }
+    reply(StatusCode::OK, state.hub.update_status())
+}
+
+#[derive(Deserialize)]
+struct UpdateOptions {
+    channel: Option<String>,
+    auto: Option<bool>,
+}
+
+async fn update_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateOptions>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, true) {
+        return r;
+    }
+    let channel = match body.channel.as_deref() {
+        None => None,
+        Some(c) => match crate::update::Channel::parse(c) {
+            Some(c) => Some(c),
+            None => return error(StatusCode::BAD_REQUEST, "bad_input"),
+        },
+    };
+    match state.hub.set_update_options(channel, body.auto) {
+        Ok(()) => reply(StatusCode::OK, state.hub.update_status()),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ApplyBody {
+    #[serde(default)]
+    confirm_major: bool,
+}
+
+async fn update_apply(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<ApplyBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let target = state
+        .hub
+        .update_status()
+        .get("latest")
+        .and_then(|l| l.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_owned();
+    match crate::updater::start(&state.hub, body.confirm_major) {
+        Ok(op) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("updated the panel to {target}"),
+            );
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => update_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ServersBody {
+    #[serde(default)]
+    restart_tunnels: bool,
+}
+
+/// Updates the servers whose agent is older than the panel, one at a time.
+async fn update_servers(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<ServersBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match crate::updater::start_servers(&state.hub, body.restart_tunnels) {
+        Ok(op) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                "updated the other servers",
+            );
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => update_error(e),
     }
 }

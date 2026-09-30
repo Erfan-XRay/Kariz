@@ -42,6 +42,19 @@ Kariz programs and their agents, with the tunnels restarted one at a time.
 This needs a key pair the owner makes once (`kariz-panel release-key`), with the private half
 stored only as a repository secret; see the decisions at the end.
 
+*Status after 14.1:* `kariz-panel release-key --out FILE` makes the key pair (the private half goes
+to the file, mode 0600, and becomes the repository secret `KARIZ_SIGNING_KEY`), `release-sign
+X.tar.gz.sha256` writes `X.tar.gz.sig` (64 raw bytes: the signature of the `.sha256` file's exact
+bytes, which also binds the archive's name), and `release-verify X.tar.gz` checks archive,
+checksum file and signature with the built-in key (or `--key HEX`). The release workflow signs
+all three archives and checks each signature with the key built into the program before it
+publishes, so a wrong or missing secret stops the release. `kariz-manager install|update`
+verifies with `openssl pkeyutl -verify -rawin` and the key in the script: releases before 0.11
+have no signature and are accepted with a warning, from 0.11 a missing or wrong signature stops
+the installation (`KARIZ_RELEASE_KEY_PEM` pins another key). The public key is
+`586c5c36...8d3b`; the tests cover a wrong key, a damaged signature, a checksum file changed
+after signing, another archive's bytes, an archive of another CPU, and a missing signature.
+
 ## 4. How the update happens
 
 1. **Find:** `GET https://api.github.com/repos/Erfan-XRay/Kariz/releases/latest` (or the list,
@@ -68,6 +81,26 @@ New agent requests (data only, as always): `update_offer {version, size, sha256,
 `update_chunk`, `update_apply {version}`, `update_status`. The agent writes only into its own
 updates directory and to the two program paths.
 
+*Status after 14.2 to 14.4:* `panel/src/update.rs` finds a release (GitHub's `/releases`, drafts left
+out, stable or beta), downloads it with `ureq`, checks it (`sign.rs`), unpacks only `kariz` and
+`kariz-panel`, and swaps them with `apply` (copies to `.previous`, renames the new ones in, restarts,
+asks, rolls back); `updater.rs` runs it as an operation and starts the helper with `systemd-run` as
+the transient service `kariz-panel-update`, which starts three seconds late so the browser sees the
+hand-over went well. The helper is the **new** program, and it asks the panel for its version over TLS
+with the panel's own certificate pinned. For the agents, `agent_update.rs` receives the release (a
+request holds 16 KB, so it comes in pieces of 9000 bytes, six requests at once, each checked for offset
+and size), verifies it again with the agent's own key, and starts `kariz-agent-update`; the helper
+counts the new agent as working when it has reached the panel again (the agent touches `connected`
+beside `agent.toml`), else it puts the old programs back. Changes from the plan: the panel does not
+send `update_offer`/`update_status`; three requests carry the transfer (`update_begin`,
+`update_chunk`, `update_apply`) and the panel learns the result from the agent coming back with the
+new version in its `hello`. A too-old agent answers "unknown request" and is reported as such. CI
+(`tests/update_e2e.sh`, in the manager job, on a real systemd host) builds a second panel that
+calls itself 99.0.0 (`KARIZ_BUILD_VERSION`), serves signed releases from a local server, and checks
+a release that does not come up being rolled back, a good release taking, and the agent being updated
+over the link with its tunnels restarted one at a time. The owner needs the repository secret
+`KARIZ_SIGNING_KEY` (the private half of the key) before a release can be published.
+
 ## 5. Old and new versions together
 
 The panel and its agents may be at different versions for a while (a server that was offline).
@@ -80,7 +113,7 @@ by the panel, with the one command to update it by hand (`kariz-manager update`)
 | Step | Content | Done when |
 |---|---|---|
 | **14.0** Plan | This document. | |
-| **14.1** Signing | Key generation, the workflow signs the archives, verification in the panel and the manager; tests with a good, a wrong and a damaged signature. | An archive with a bad signature is refused everywhere. |
-| **14.2** The panel | Finding a release, the download, verification, the swap helper with rollback; Settings > Updates and the top-bar notice. | A CI test updates a panel from one build to the next and rolls back a broken one. |
-| **14.3** Servers | The agent requests, the rolling update with tunnel restarts, progress on the map. | A CI test updates a panel and an agent on one host and sees both on the new version. |
-| **14.4** Release | Docs, CHANGELOG, `0.11.0`. | CI green; release, and the first update made with the button. |
+| **14.1** Signing (done) | Key generation, the workflow signs the archives, verification in the panel and the manager; tests with a good, a wrong and a damaged signature. | An archive with a bad signature is refused everywhere. |
+| **14.2** The panel (done) | Finding a release, the download, verification, the swap helper with rollback; Settings > Updates and the top-bar notice. | A CI test updates a panel from one build to the next and rolls back a broken one. |
+| **14.3** Servers (done) | The agent requests, the rolling update with tunnel restarts, progress on the map. | A CI test updates a panel and an agent on one host and sees both on the new version. |
+| **14.4** Release (done) | Docs, CHANGELOG, `0.11.0`. | CI green; release, and the first update made with the button. |

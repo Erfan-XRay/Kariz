@@ -89,7 +89,7 @@ pub fn export(db: &Db, passphrase: &str) -> Result<Vec<u8>> {
     let payload = Payload {
         format: 1,
         created: now(),
-        panel: env!("CARGO_PKG_VERSION").to_owned(),
+        panel: crate::version().to_owned(),
         link_token: db.meta("link_token")?,
         servers,
     };

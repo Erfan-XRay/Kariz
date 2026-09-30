@@ -195,16 +195,68 @@ themselves; that is the price of having no service manager.
 
 | Path | What |
 |---|---|
-| `/etc/kariz-panel/panel.toml` | the panel's settings: `listen`, `path`, `agent_listen`, `data_dir`, `kariz_dir`, `services`, `cert_file`, `key_file` |
-| `/etc/kariz-panel/agent.toml` | an agent's identity (id and key), the panel's address, `kariz_dir`, `services` |
+| `/etc/kariz-panel/panel.toml` | the panel's settings: `listen`, `path`, `agent_listen`, `data_dir`, `kariz_dir`, `services`, `cert_file`, `key_file`, `release_api`, `release_key` |
+| `/etc/kariz-panel/agent.toml` | an agent's identity (id and key), the panel's address, `kariz_dir`, `services`, `release_key` |
+| `/var/lib/kariz-panel/updates/` | the releases the panel downloaded, and the result of the last update |
 | `/var/lib/kariz-panel/` | the database, the certificate and its key |
 | `kariz-panel.service`, `kariz-agent.service` | the systemd units |
 
-## Updating and removing
+## Updating
 
-`kariz-manager update` installs the new binaries and restarts the tunnels, the panel and
-the agent. `kariz-manager panel uninstall` removes the panel (and asks before deleting its
-database); `kariz-manager agent remove` removes the agent.
+When a newer release is out, a notice appears in the top bar (*Kariz 0.11.0 is out*), and
+*Settings*, *Updates* shows it with the release notes. **The panel never updates by itself**:
+it looks (once a day, or *Check now*), and updating is your button.
+
+- **Update the panel:** the panel downloads the release for its own CPU **once**, checks its
+  signature and checksum (see below), and hands over to a helper that runs as a service of its
+  own, so that it lives on while the panel is replaced. The helper keeps the old programs as
+  `kariz-panel.previous` and `kariz.previous`, puts the new ones in place with a rename (never
+  half written), restarts the panel, and asks it over TLS (its certificate pinned) for its
+  version. **If the new panel does not answer as the new version within 30 seconds, the old
+  programs are put back and the panel restarted**; the result is kept, shown in *Updates*, and
+  written to the audit log. The browser waits and reloads by itself. A new **major** version
+  asks you to tick a box first, and a release older than the installed one is refused (no
+  downgrades).
+- **Update the other servers:** *Update the servers* (in the top bar when some are behind, and in
+  *Updates*). The servers never need the internet: the panel sends the release it has, over the
+  link that already exists, in pieces. Each agent checks the signature **again with its own copy
+  of the key**, unpacks it, and hands over to its own helper, which swaps the programs, restarts
+  the agent and waits for the new agent to reach the panel, putting the old programs back if it
+  does not. The servers go **one at a time**, the panel waits for each to come back before the
+  next, and a server that fails stops the rest, which are left as they were.
+- **Their tunnels:** the tunnel daemons keep running the old program until they are restarted.
+  Tick *Restart their tunnels afterwards* and they are restarted **one at a time**, each
+  waited for until it is connected again, so a pair never loses both its sides at once. A tunnel
+  drops for a moment; choose your time.
+- **Channel:** *Stable* (the default) or *Beta*, which also offers prereleases.
+- A server whose agent is too old to be updated this way (before 0.11) shows an error for that
+  server; update it once by hand with `kariz-manager update`, and it can be updated from the
+  panel from then on.
+
+### The releases are signed
+
+Every release archive has a checksum file and a signature (`.sha256` and `.sig`): an Ed25519
+signature over the checksum file, which also names the archive, so an archive cannot be swapped
+for another of the same release. The public key is built into `kariz-panel` and into
+`kariz-manager`; the private key is a repository secret that only the release workflow sees. A
+file whose signature does not verify is never run, and is deleted. The checksum alone would only
+prove the download was not damaged: it comes from the same place as the file.
+
+To check a download by hand: `kariz-panel release-verify kariz-v0.11.0-x86_64-linux.tar.gz`
+(with its `.sha256` and `.sig` beside it). To pin a key of your own (a fork), set
+`release_key = "HEX"` in `panel.toml` (and in `agent.toml` for agents), and `release_api =
+"https://api.github.com/repos/OWNER/REPO"` to look somewhere else.
+
+### If the panel cannot reach GitHub
+
+The panel needs to reach `api.github.com` and GitHub's download addresses to find and fetch a
+release. If it cannot, update by hand on each server with `kariz-manager update` (the manager
+checks the signature too).
+
+## Removing
+
+`kariz-manager panel uninstall` removes the panel (and asks before deleting its database);
+`kariz-manager agent remove` removes the agent.
 
 ## Troubleshooting
 

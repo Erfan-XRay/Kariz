@@ -54,6 +54,13 @@ export function opError(t: T, error: string | null, names?: Map<string, string>)
   return describeError(t, error ?? "", names);
 }
 
+/** A step's text. An id like `upd_send:frankfurt` or `upd_tunnel:frankfurt/main` carries a server (and a tunnel). */
+function stepText(t: T, id: string): string {
+  const [code, arg = ""] = id.split(":");
+  const [server, tunnel = ""] = arg.split("/");
+  return t(`op.${code}`, { server, tunnel });
+}
+
 /** The steps of an operation as a checklist that fills in as they finish. */
 export function Checklist({ op }: { op: Op | null }) {
   const { t } = useApp();
@@ -63,7 +70,7 @@ export function Checklist({ op }: { op: Op | null }) {
       {op.steps.map((s, i) => (
         <li key={`${s.id}-${i}`} className={s.state === "fail" ? "fail" : s.state}>
           <span className="st">{s.state === "ok" && <Icon name="check" size={14} />}{s.state === "fail" && <Icon name="x" size={14} />}</span>
-          <span>{t(`op.${s.id}`)}</span>
+          <span>{stepText(t, s.id)}</span>
           <span />
         </li>
       ))}

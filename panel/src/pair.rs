@@ -191,6 +191,13 @@ impl Ops {
         });
     }
 
+    /// Whether an operation of this kind is running.
+    pub fn running(&self, kind: &str) -> bool {
+        self.lock()
+            .iter()
+            .any(|o| o.kind == kind && o.state == "running")
+    }
+
     pub fn get(&self, id: &str) -> Option<Op> {
         self.lock().iter().find(|o| o.id == id).cloned()
     }

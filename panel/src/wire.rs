@@ -55,6 +55,27 @@ pub enum Request {
     NetPing { name: String },
     /// Whether GRE can be made here, and the state of this server's links.
     NetStatus,
+    /// A release is about to be sent (its three files and their sizes).
+    UpdateBegin {
+        version: String,
+        files: Vec<UpdateFile>,
+    },
+    /// One piece of one of the files: a base64 chunk at an offset.
+    UpdateChunk {
+        version: String,
+        name: String,
+        offset: u64,
+        data: String,
+    },
+    /// Everything has been sent: check it, unpack it and swap the programs.
+    UpdateApply { version: String },
+}
+
+/// A file of a release that is being sent to an agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateFile {
+    pub name: String,
+    pub size: u64,
 }
 
 /// One private network link on this server, as data (docs/PHASE13.md, section 4). The
