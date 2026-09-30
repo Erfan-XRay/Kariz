@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- **Join over IPv6.** *Add server* offers the panel's own public IPv4 and IPv6 addresses to
+  put in the join code, and the agents port now listens on IPv6 as well as IPv4.
+- **Choose the link's transport.** *Add server* has *Auto* (the default), *TCP*, *KCP* and
+  *WSS*. A fixed choice goes into the join code and the agent uses only that transport.
+- **`wss` for the panel link:** WebSocket over TLS with the panel's own certificate, on the
+  agents port + 1. It looks like an ordinary HTTPS site. The agent does not check the
+  certificate (the token handshake inside proves the panel), so a self-signed or an IP
+  certificate works. *Auto* now tries `tcpmux`, `kcp`, then `wss`. Open TCP on the agents
+  port + 1 for it.
+
 ### Fixed
 
 - An agent drops a link on which the panel has asked nothing for 20 s (it asks every 2 s),

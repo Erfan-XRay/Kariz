@@ -165,6 +165,7 @@ impl Hub {
             kariz_dir: kariz_dir.clone(),
             services: Default::default(),
             release_key: None,
+            transport: None,
         };
         Arc::new(Self {
             history: crate::history::History::new(db.clone()),
@@ -294,6 +295,19 @@ impl Hub {
     /// A join code for a new server: `name` (optional) is what it will be called, and
     /// `panel` where it should dial.
     pub fn create_join(&self, name: Option<&str>, panel: &str) -> Result<String> {
+        self.create_join_via(name, panel, None)
+    }
+
+    /// Like [`Hub::create_join`], for an agent that is to use only `transport`.
+    pub fn create_join_via(
+        &self,
+        name: Option<&str>,
+        panel: &str,
+        transport: Option<&str>,
+    ) -> Result<String> {
+        if transport.is_some_and(|x| !join::valid_transport(x)) {
+            bail!("unknown transport");
+        }
         let secret = random_hex(16)?;
         let t = now();
         self.db.conn().execute(
@@ -305,6 +319,7 @@ impl Hub {
             t: self.link_token()?,
             j: secret,
             n: name.map(str::to_owned),
+            x: transport.map(str::to_owned),
         }))
     }
 

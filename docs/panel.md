@@ -20,7 +20,7 @@ then writes the settings, makes the database, starts the service `kariz-panel`, 
 ```text
   address       https://203.0.113.5:28443/k-7f3a9c2e/
   certificate   /etc/letsencrypt/live/kariz-panel-203-0-113-5/fullchain.pem
-  agents        port 22230, TCP and UDP (open both in the firewall for the servers you add)
+  agents        port 22230: TCP and UDP, and TCP 22231 (open them for the servers you add)
   sign in       https://203.0.113.5:28443/k-7f3a9c2e/#t=...
 ```
 
@@ -32,7 +32,8 @@ then writes the settings, makes the database, starts the service `kariz-panel`, 
   and disappears from the address bar. Make another any time with
   `kariz-manager panel link`.
 - **The ports** are random (above 20000). `--port N` chooses the panel's. Open both the
-  panel's port (for you) and the agents' port (for your other servers, TCP and UDP) in the firewall.
+  panel's port (for you) and the agents' port (for your other servers: TCP and UDP, and TCP on the next port for
+  `wss`) in the firewall.
 
 Set a password in *Settings* if you want to sign in without a link (10 characters or
 more). Or from the server: `kariz-manager panel password` (makes a random one and shows
@@ -84,11 +85,17 @@ panel within seconds.
 
 - **The agent dials the panel**, so the new server opens no port. It needs to reach the
   panel's *agents* port.
-- **The link's transport is automatic.** The agents' port takes `tcpmux` (TCP) and `kcp`
-  (UDP). An agent tries `tcpmux` first; after two links in a row that connect but carry no
-  requests (networks that let TCP connect and then stall it) it moves to `kcp`, and back,
-  and remembers the one that worked in `/etc/kariz-panel/link-transport`. *Servers* shows
-  which one each server uses.
+- **Choose the address.** *Add server* offers the panel's own public IPv4 and IPv6
+  addresses. A server with only IPv6, or whose IPv4 route is filtered, can join over IPv6:
+  the agents port listens on both.
+- **The link's transport is automatic by default.** The panel takes agents over `tcpmux`
+  (TCP on the agents port), `kcp` (UDP on the same port) and `wss` (WebSocket over TLS with
+  the panel's certificate, on the next port; it looks like an ordinary HTTPS site). With
+  *Auto*, an agent tries them in that order, moves on after two links in a row that carry no
+  requests (it drops a link the panel has been quiet on for 20 s), and remembers the one
+  that worked in `/etc/kariz-panel/link-transport`. Pick *TCP*, *KCP* or *WSS* instead to
+  make the code use only that one (the agent must be 1.3 or newer). *Servers* shows which
+  one each server uses.
 - **A code works once**, for 10 minutes. It carries a token, so keep it as secret as a
   password until it is used.
 - The agent runs as the service `kariz-agent`: `kariz-manager agent status | logs | remove`.
@@ -298,9 +305,9 @@ checks the signature too).
 ## Troubleshooting
 
 - **A server does not show up:** `kariz-manager agent logs` on it. "could not connect"
-  usually means the panel's agents port (TCP and UDP) is closed in a firewall between them;
-  "connected" repeating every few seconds means the path stalls TCP: the agent moves to
-  `kcp` by itself within about 20 s, as long as UDP on that port is open; a join
+  usually means the panel's agents ports (TCP and UDP, and TCP on the next port) are closed
+  in a firewall between them; "connected" repeating every 20 s or so means the path stalls
+  TCP: with *Auto* the agent moves to `kcp`, then `wss`, by itself; a join
   code that was already used or has expired is refused (make a new one).
 - **The map shows no tunnel:** both servers must be connected and the tunnel must have the
   same name on both. A tunnel with one side connected is listed in the table as

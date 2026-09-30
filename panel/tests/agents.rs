@@ -277,3 +277,52 @@ async fn an_enrollment_cut_short_is_finished_later_with_the_same_identity() {
     // Confirmed: the code gives nothing out any more.
     assert_eq!(enroll_once(&addr, &token, new_agent, false).await, None);
 }
+
+#[tokio::test]
+async fn a_code_can_pin_the_agent_to_wss() {
+    let panel_dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Hub::new(Db::in_memory().unwrap(), panel_dir.path().to_path_buf());
+    let token = hub.link_token().unwrap();
+    // A certificate for another name: the agent does not check it (the token does).
+    let c = rcgen::generate_simple_self_signed(vec!["panel.example".to_owned()]).unwrap();
+    let (cert, key) = (
+        panel_dir.path().join("c.pem"),
+        panel_dir.path().join("k.pem"),
+    );
+    std::fs::write(&cert, c.cert.pem()).unwrap();
+    std::fs::write(&key, c.signing_key.serialize_pem()).unwrap();
+    // tcpmux on the agents port, wss on the next one, as a panel listens.
+    let (tcp, wss) = loop {
+        let tcp = kariz::link::Acceptor::bind("127.0.0.1:0", &token)
+            .await
+            .unwrap();
+        let next = kariz::link::wss_addr(&tcp.local_addr().unwrap().to_string()).unwrap();
+        if let Ok(wss) = kariz::link::Acceptor::bind_wss(&next, &token, &cert, &key).await {
+            break (tcp, wss);
+        }
+    };
+    let addr = tcp.local_addr().unwrap().to_string();
+    tokio::spawn(hub.clone().serve_agents(tcp));
+    tokio::spawn(hub.clone().serve_agents(wss));
+
+    let code = hub
+        .create_join_via(Some("pinned"), &addr, Some("wss"))
+        .unwrap();
+    assert!(hub
+        .create_join_via(None, &addr, Some("carrier-pigeon"))
+        .is_err());
+    let (agent, path) = agent_for(&code, dir.path(), dir.path());
+    assert_eq!(
+        AgentConfig::load(&path).unwrap().transport.as_deref(),
+        Some("wss")
+    );
+    let running = tokio::spawn(agent.run());
+    wait_for("the server to join over wss", || {
+        remote(&hub)
+            .iter()
+            .any(|s| s.online && s.link.as_deref() == Some("wss"))
+    })
+    .await;
+    running.abort();
+}

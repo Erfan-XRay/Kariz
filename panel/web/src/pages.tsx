@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api } from "./api";
-import type { ServerInfo, SessionRow } from "./api";
+import type { LinkTransport, ServerInfo, SessionRow } from "./api";
 import { bytesPerSec, pairTunnels, rateParts } from "./derive";
 import { paletteNow } from "./draw";
 import { startMap } from "./scene-map";
@@ -258,12 +258,26 @@ function Meter({ label, pct }: { label: string; pct: number | null }) {
 function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agentsOn: boolean; onClose: () => void }) {
   const { t, digitsOf, toast } = useApp();
   const [name, setName] = useState("");
-  const [host, setHost] = useState(location.hostname);
+  const [host, setHost] = useState(location.hostname.replace(/^\[|\]$/g, ""));
+  const [transport, setTransport] = useState<LinkTransport>("auto");
+  const [own, setOwn] = useState<{ v4: string | null; v6: string | null; agent_port: number | null } | null>(null);
   const [code, setCode] = useState("");
   const [left, setLeft] = useState(0);
   const [error, setError] = useState("");
   const known = useRef<Set<string>>(new Set());
   const joined = servers.find((s) => code && !known.current.has(s.id) && s.online);
+
+  // The panel's own public addresses (IPv4 and IPv6), to pick from.
+  useEffect(() => {
+    let alive = true;
+    api
+      .panelAddresses()
+      .then((a) => alive && setOwn(a))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (left <= 0 || joined) return;
@@ -275,7 +289,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
     setError("");
     try {
       known.current = new Set(servers.map((s) => s.id));
-      const made = await api.joinCode(name.trim() || undefined, host.trim());
+      const made = await api.joinCode(name.trim() || undefined, host.trim(), transport);
       setCode(made.code);
       setLeft(made.valid_for);
     } catch (e) {
@@ -284,6 +298,22 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   };
 
   const mmss = `${String(Math.floor(left / 60)).padStart(2, "0")}:${String(left % 60).padStart(2, "0")}`;
+  const port = own?.agent_port ?? null;
+  const here = location.hostname.replace(/^\[|\]$/g, "");
+  const choices: [string, string][] = [
+    ...(own?.v4 ? [[t("add.addr.v4"), own.v4] as [string, string]] : []),
+    ...(own?.v6 ? [[t("add.addr.v6"), own.v6] as [string, string]] : []),
+    ...(here && here !== own?.v4 && here !== own?.v6 ? [[t("add.addr.here"), here] as [string, string]] : []),
+  ];
+  const portText = (x: LinkTransport) => (port == null ? "?" : String(x === "wss" ? port + 1 : port));
+  const openList =
+    port == null
+      ? ""
+      : transport === "auto"
+        ? `TCP ${port}, UDP ${port}, TCP ${port + 1}`
+        : transport === "kcp"
+          ? `UDP ${port}`
+          : `TCP ${portText(transport)}`;
   return (
     <Dialog
       title={t("add.title")}
@@ -324,8 +354,35 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
           </div>
           <div className="field">
             <label htmlFor="add-host">{t("add.host")}</label>
+            {choices.length > 1 && (
+              <div className="addr-picks" role="group" aria-label={t("add.host")}>
+                {choices.map(([label, value]) => (
+                  <button key={value} type="button" className="addr-pick" aria-pressed={host === value} onClick={() => setHost(value)}>
+                    <span>{label}</span>
+                    <code dir="ltr">{value}</code>
+                  </button>
+                ))}
+              </div>
+            )}
             <input className="text mono" id="add-host" dir="ltr" value={host} onChange={(e) => setHost(e.target.value)} />
+            <span className="help">{t("add.addrHelp")}</span>
             <span className="err">{error}</span>
+          </div>
+          <div className="field">
+            <span className="label">{t("add.transport")}</span>
+            <Seg
+              value={transport}
+              options={(["auto", "tcpmux", "kcp", "wss"] as LinkTransport[]).map((x) => [x, t(`add.x.${x}`)] as [LinkTransport, string])}
+              onChange={setTransport}
+            />
+            <span className="help">{t(`add.x.${transport}.d`, { p: portText(transport) })}</span>
+            {openList && (
+              <span className="help">
+                {t("add.ports", { list: "" })}
+                <code dir="ltr">{openList}</code>
+              </span>
+            )}
+            {transport !== "auto" && <span className="help">{t("add.newAgent")}</span>}
           </div>
         </>
       )}
@@ -334,6 +391,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
           <div className="field">
             <span className="label">{t("add.run")}</span>
             <CodeBlock text={`kariz-panel agent --join ${code}`} />
+            {transport !== "auto" && <span className="help">{t("add.via", { t: t(`add.x.${transport}`) })}</span>}
             <span className="countdown">{joined ? "" : t("add.valid", { m: digitsOf(mmss) })}</span>
           </div>
           <div className={`waiting ${joined ? "done" : ""}`}>
