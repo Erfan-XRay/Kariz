@@ -126,7 +126,9 @@ jobs:
       # with the health `/proc` gives and the tunnels made above.
       - name: The web panel and an agent through the manager
         run: |
-          sudo kariz-manager panel install --port 28443 --host 127.0.0.1 | tee panel.txt
+          # Let's Encrypt cannot be reached from here: a certificate made for the test.
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/ci-key.pem -out /tmp/ci-cert.pem             -days 2 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 2>/dev/null
+          sudo kariz-manager panel install --port 28443 --host 127.0.0.1             --cert-file /tmp/ci-cert.pem --key-file /tmp/ci-key.pem | tee panel.txt
           grep -q "certificate" panel.txt
           link=$(grep -o 'https://[^ ]*#t=[0-9a-f]*' panel.txt)
           base=${link%%#*}

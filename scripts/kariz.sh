@@ -9,7 +9,8 @@
 # Without arguments it opens a menu. The same actions as commands (see `help`):
 #   kariz-manager install [--version vX.Y.Z] [--binary PATH]
 #   kariz-manager update | uninstall [--yes]
-#   kariz-manager panel install | link | password | status | logs | uninstall
+#   kariz-manager panel install [--domain D | --ip ADDRESS] | link | password | status | logs | uninstall
+#   kariz-manager panel cert [--domain D | --ip ADDRESS]   change the domain or address of the panel
 #   kariz-manager --agent CODE        connect this server to a panel (its join code)
 #   kariz-manager agent status | logs | remove
 #
@@ -27,6 +28,10 @@ PANEL_DIR=/etc/kariz-panel
 PANEL_DATA=/var/lib/kariz-panel
 PANEL_CONF=$PANEL_DIR/panel.toml
 AGENT_CONF=$PANEL_DIR/agent.toml
+# What the panel's certificate is for (a domain or an IP address), and what was stopped
+# for a moment while Let's Encrypt looked at port 80.
+PANEL_DOMAIN=$PANEL_DIR/domain
+ACME_STOPPED=/run/kariz-acme-stopped
 PANEL_UNIT=/etc/systemd/system/kariz-panel.service
 AGENT_UNIT=/etc/systemd/system/kariz-agent.service
 RAW_URL="https://raw.githubusercontent.com/$REPO/main/scripts/kariz.sh"
@@ -432,6 +437,7 @@ panel_setting() { sed -n "s/^$1 = \"\(.*\)\"/\1/p" "$PANEL_CONF" | head -n 1; }
 # This server's address as another machine would use it: --host, else its IPv4, else IPv6.
 panel_host() {
     local host=${1:-}
+    [[ -n "$host" || ! -s "$PANEL_DOMAIN" ]] || host=$(head -n 1 "$PANEL_DOMAIN")
     [[ -n "$host" ]] || host=$(own_ip4)
     [[ -n "$host" ]] || host=$(own_ip6)
     [[ -n "$host" ]] || host="<this-server>"
@@ -446,9 +452,13 @@ panel_show() {
     agent=$(panel_setting agent_listen)
     echo
     printf '  %s address     %s https://%s:%s/%s/\n' "$C_TEAL" "$C_RESET" "$host" "${listen##*:}" "$path"
-    if [[ -n "$fingerprint" ]]; then
+    if [[ -n "$(panel_setting cert_file)" ]]; then
+        printf '  %s certificate %s %s\n' "$C_TEAL" "$C_RESET" "$(panel_setting cert_file)"
+        printf '  %s             %s (not self-signed: no browser warning)\n' "$C_DIM" "$C_RESET"
+    elif [[ -n "$fingerprint" ]]; then
         printf '  %s certificate %s SHA-256 %s\n' "$C_TEAL" "$C_RESET" "$fingerprint"
         printf '  %s             %s (self-signed: the browser warns; compare this fingerprint)\n' "$C_DIM" "$C_RESET"
+        printf '  %s             %s (no warning with a real one: kariz-manager panel cert)\n' "$C_DIM" "$C_RESET"
     fi
     if [[ -n "$agent" ]]; then
         printf '  %s agents      %s port %s (open it in the firewall for the servers you add)\n' "$C_TEAL" "$C_RESET" "${agent##*:}"
@@ -461,15 +471,23 @@ panel_show() {
 panel_install() {
     need_root
     need_systemd
-    local port="" host="" version=()
+    local port="" host="" domain="" ip="" email="" yes=0 cert="" key="" version=()
     while [[ $# -gt 0 ]]; do
         case $1 in
             --port) port=$2 && shift 2 ;;
             --host) host=$2 && shift 2 ;;
+            --domain) domain=${2:-} && shift 2 ;;
+            --ip) ip=${2:-} && shift 2 ;;
+            --email) email=${2:-} && shift 2 ;;
+            --cert-file) cert=${2:-} && shift 2 ;;
+            --key-file) key=${2:-} && shift 2 ;;
+            --yes) yes=1 && shift ;;
             --version) version=(--version "$2") && shift 2 ;;
             *) die "panel install: unknown option $1" ;;
         esac
     done
+    [[ -z "$cert" && -z "$key" ]] || [[ -f "$cert" && -f "$key" ]] ||
+        die "--cert-file and --key-file go together, and both must be files."
     if [[ ! -x "$PANEL_BIN" ]]; then
         cmd_install "${version[@]}"
     fi
@@ -481,6 +499,22 @@ panel_install() {
     fi
     mkdir -p "$PANEL_DIR" "$PANEL_DATA"
     chmod 700 "$PANEL_DIR" "$PANEL_DATA"
+    # A new panel gets its certificate first (the panel is only ever served over TLS that
+    # the browser trusts); one that is already set up keeps what it has.
+    if [[ ! -f "$PANEL_CONF" ]]; then
+        if [[ -n "$cert" ]]; then
+            init_args+=(--cert-file "$cert" --key-file "$key")
+        else
+            choose_identity "$domain" "$ip" "$yes" || die "Cancelled."
+            if [[ -z "$email" ]] && ((!yes)); then
+                ask email "Email for expiry notices (optional, Enter to skip)" ""
+            fi
+            get_cert "$CERT_IDENTITY" "$CERT_KIND" "$email" "$yes"
+            init_args+=(--cert-file "$CERT_LIVE/fullchain.pem" --key-file "$CERT_LIVE/privkey.pem")
+            printf '%s
+' "$CERT_IDENTITY" >"$PANEL_DOMAIN"
+        fi
+    fi
     local out fingerprint
     out=$("$PANEL_BIN" init "${init_args[@]}")
     fingerprint=$(printf '%s\n' "$out" | sed -n 's/.*SHA-256 \([0-9a-f]*\).*/\1/p')
@@ -491,6 +525,296 @@ panel_install() {
         die "The panel did not start: journalctl -u kariz-panel -n 50"
     ok "The web panel is running."
     panel_show "$(panel_host "$host")" "$fingerprint"
+}
+
+# ---- The panel's certificate (Let's Encrypt) ----
+#
+# The panel is always served over a certificate the browser trusts: for a domain name, or
+# for the server's own public IP address (Let's Encrypt issues those for 6 days at a time).
+# Both are renewed by a timer, and the panel loads the new one without a restart.
+
+CERTBOT_VENV=/opt/kariz-certbot
+RENEW_SERVICE=/etc/systemd/system/kariz-cert-renew.service
+RENEW_TIMER=/etc/systemd/system/kariz-cert-renew.timer
+# IP address certificates need certbot 5.4 or later, newer than most distributions carry.
+CERTBOT_MIN=5.4.0
+
+# Who listens on TCP port $1, one process per line: "unit comm pid" (unit is - when the
+# process is not a systemd service).
+port_users() {
+    local pids pid unit comm
+    pids=$({ ss -H -ltnp "sport = :$1" 2>/dev/null || true; } | { grep -o 'pid=[0-9]*' || true; } | sort -u)
+    for pid in $pids; do
+        pid=${pid#pid=}
+        unit=$({ sed -n 's#.*/\([^/]*\.service\)$#\1#p' "/proc/$pid/cgroup" 2>/dev/null || true; } | head -n 1)
+        comm=$(cat "/proc/$pid/comm" 2>/dev/null || echo "?")
+        printf '%s %s %s\n' "${unit:--}" "$comm" "$pid"
+    done
+}
+
+# What certbot runs around a request: `pre` stops the services that hold port 80 (Let's
+# Encrypt must reach it), `post` starts them again, `deploy` makes the panel load the new
+# certificate. The same three run at every renewal, so it keeps working by itself.
+cert_hook() {
+    local unit comm pid stop=""
+    case ${1:-} in
+        pre)
+            while read -r unit comm pid; do
+                [[ -n "${pid:-}" ]] || continue
+                if [[ "$unit" == - || "$comm" == docker-proxy ]]; then
+                    warn "Port 80 is used by $comm (pid $pid), which this script cannot stop and start again."
+                    exit 1
+                fi
+                [[ " $stop " == *" $unit "* ]] || stop="$stop $unit"
+            done < <(port_users 80)
+            : >"$ACME_STOPPED"
+            for unit in $stop; do
+                info "Stopping $unit for a moment (port 80)"
+                systemctl stop "$unit"
+                echo "$unit" >>"$ACME_STOPPED"
+            done
+            ;;
+        post)
+            if [[ -f "$ACME_STOPPED" ]]; then
+                while read -r unit; do
+                    [[ -n "$unit" ]] || continue
+                    info "Starting $unit again"
+                    systemctl start "$unit" || warn "Could not start $unit: start it yourself."
+                done <"$ACME_STOPPED"
+                rm -f "$ACME_STOPPED"
+            fi
+            ;;
+        deploy) systemctl kill -s HUP kariz-panel 2>/dev/null || true ;;
+        *) die "cert-hook: pre | post | deploy" ;;
+    esac
+}
+
+# Sets (or, with no arguments, clears) the panel's own certificate in its settings.
+panel_set_cert() {
+    local tmp
+    tmp=$(mktemp)
+    { grep -v -e '^cert_file *=' -e '^key_file *=' "$PANEL_CONF" || true; } >"$tmp"
+    if [[ $# -eq 2 ]]; then
+        printf 'cert_file = "%s"\nkey_file = "%s"\n' "$1" "$2" >>"$tmp"
+    fi
+    install -m 0600 "$tmp" "$PANEL_CONF"
+    rm -f "$tmp"
+}
+
+# Whether the certbot at $1 is new enough.
+certbot_ok() {
+    local v
+    v=$({ "$1" --version 2>&1 || true; } | sed -n 's/^certbot \([0-9][0-9.]*\).*/\1/p')
+    [[ -n "$v" ]] && ! version_lt "$v" "$CERTBOT_MIN"
+}
+
+# The certbot to use (its path in CERTBOT): the system's if it is new enough, else one of
+# our own in a virtualenv, installed with pip.
+ensure_certbot() {
+    local c
+    for c in "$CERTBOT_VENV/bin/certbot" "$(command -v certbot || true)"; do
+        if [[ -n "$c" && -x "$c" ]] && certbot_ok "$c"; then
+            CERTBOT=$c
+            return 0
+        fi
+    done
+    info "This needs certbot $CERTBOT_MIN or later; installing it in $CERTBOT_VENV (python, pip)."
+    if ! command -v python3 >/dev/null || ! python3 -c 'import venv, ensurepip' 2>/dev/null; then
+        if command -v apt-get >/dev/null; then
+            apt-get install -y python3 python3-venv
+        elif command -v dnf >/dev/null; then
+            dnf install -y python3
+        elif command -v yum >/dev/null; then
+            yum install -y python3
+        elif command -v apk >/dev/null; then
+            apk add python3
+        else
+            die "Install python3 (with venv) yourself, then run this again."
+        fi
+    fi
+    python3 -m venv "$CERTBOT_VENV" || die "Could not make a python virtualenv in $CERTBOT_VENV."
+    "$CERTBOT_VENV/bin/pip" install --quiet --upgrade pip certbot ||
+        die "pip could not install certbot."
+    certbot_ok "$CERTBOT_VENV/bin/certbot" ||
+        die "The certbot that got installed is older than $CERTBOT_MIN: update python or install certbot yourself."
+    CERTBOT=$CERTBOT_VENV/bin/certbot
+}
+
+# Whether $1 is a public IPv4 address: the kind Let's Encrypt can certify.
+public_ip4() {
+    local a b
+    [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    a=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]}
+    ((a < 256 && b < 256)) || return 1
+    ((a == 10 || a == 127 || a == 0 || a >= 224)) && return 1
+    ((a == 172 && b >= 16 && b <= 31)) && return 1
+    ((a == 192 && b == 168)) && return 1
+    ((a == 169 && b == 254)) && return 1
+    ((a == 100 && b >= 64 && b <= 127)) && return 1
+    return 0
+}
+
+# certbot's name for the certificate of one identity (a domain or an IP address).
+cert_name() { printf 'kariz-panel-%s' "$(printf '%s' "$1" | tr -c 'a-zA-Z0-9\n' '-')"; }
+
+# The timer that renews the certificate: twice a day, and certbot renews only when it is
+# due (an IP address certificate lasts 6 days, so about every 2 to 3 days).
+install_renew_timer() {
+    cat >"$RENEW_SERVICE" <<EOF
+[Unit]
+Description=Renew the Kariz panel certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$CERTBOT renew --non-interactive --quiet
+EOF
+    cat >"$RENEW_TIMER" <<'EOF'
+[Unit]
+Description=Renew the Kariz panel certificate
+
+[Timer]
+OnCalendar=*-*-* 00,12:00:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now kariz-cert-renew.timer >/dev/null
+}
+
+# Stops and starts nothing; only says what holds port 80 and asks whether it may be stopped
+# for a moment. Returns 1 when it may not.
+port80_agreed() {
+    local yes=$1 users unit comm pid
+    users=$(port_users 80)
+    [[ -n "$users" ]] || return 0
+    echo
+    warn "Port 80 is in use right now:"
+    while read -r unit comm pid; do
+        printf '      %s (%s, pid %s)\n' "$comm" "${unit/#-/not a service}" "$pid" >&2
+    done <<<"$users"
+    info "Let's Encrypt has to reach port 80. I can stop it for the few seconds this takes,"
+    info "and start it again right after. The same happens each time the certificate is renewed."
+    ((yes)) || confirm "Stop it for a moment and start it again afterwards?" y
+}
+
+# Gets the certificate for `$1` (a domain, or an IP address with `$2` = ip); the directory
+# of its files is left in CERT_LIVE. Not run in $(...): it asks questions.
+get_cert() {
+    local identity=$1 kind=$2 email=$3 yes=$4
+    local name mail=() target=()
+    name=$(cert_name "$identity")
+    port80_agreed "$yes" || die "Free port 80 (or let me stop it) and run this again."
+    ensure_certbot
+    [[ -x "$MANAGER" ]] || install_manager
+    [[ -x "$MANAGER" ]] || die "The certificate hooks need $MANAGER."
+    mail=(--register-unsafely-without-email)
+    [[ -z "$email" ]] || mail=(--email "$email")
+    if [[ "$kind" == ip ]]; then
+        target=(--ip-address "$identity" --preferred-profile shortlived)
+    else
+        target=(-d "$identity")
+    fi
+    info "Asking Let's Encrypt for $identity"
+    "$CERTBOT" certonly --standalone --preferred-challenges http "${target[@]}" \
+        --cert-name "$name" --non-interactive --agree-tos "${mail[@]}" --reuse-key \
+        --pre-hook "$MANAGER panel cert-hook pre" \
+        --post-hook "$MANAGER panel cert-hook post" \
+        --deploy-hook "$MANAGER panel cert-hook deploy" ||
+        die "Let's Encrypt did not give a certificate (see above; DNS for a domain, and port 80 reachable from the internet, are the usual reasons)."
+    install_renew_timer
+    CERT_LIVE=/etc/letsencrypt/live/$name
+}
+
+# Asks which it is, a domain or this server's IP address; sets CERT_KIND and CERT_IDENTITY.
+choose_identity() {
+    local domain=$1 ip=$2 yes=$3
+    CERT_KIND="" CERT_IDENTITY=""
+    if [[ -n "$domain" ]]; then
+        CERT_KIND=domain CERT_IDENTITY=$domain
+    elif [[ -n "$ip" ]]; then
+        CERT_KIND=ip CERT_IDENTITY=$ip
+    else
+        local pick
+        choose pick "How will you open the panel?" domain \
+            "domain|I have a domain name that points at this server" \
+            "ip|only this server's IP address (a 6-day certificate, renewed by itself)"
+        CERT_KIND=$pick
+    fi
+    if [[ "$CERT_KIND" == domain ]]; then
+        [[ -n "$CERT_IDENTITY" ]] || ask CERT_IDENTITY "Domain name (like panel.example.com)"
+        [[ "$CERT_IDENTITY" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]] ||
+            die "That is not a domain name: $CERT_IDENTITY"
+        local resolved mine
+        resolved=$({ getent ahostsv4 "$CERT_IDENTITY" 2>/dev/null || true; } | awk 'NR==1{print $1}')
+        mine=$(own_ip4)
+        if [[ -z "$resolved" ]]; then
+            warn "$CERT_IDENTITY does not resolve yet: add its DNS record (an A record to ${mine:-this server}) first."
+            ((yes)) || confirm "Try anyway?" || return 1
+        elif [[ -n "$mine" && "$resolved" != "$mine" ]]; then
+            warn "$CERT_IDENTITY points at $resolved, but this server is $mine."
+            ((yes)) || confirm "Try anyway?" || return 1
+        fi
+    else
+        [[ -n "$CERT_IDENTITY" ]] || CERT_IDENTITY=$(own_ip4)
+        if [[ -z "${ip:-}" ]] && ((!yes)); then
+            ask CERT_IDENTITY "This server's public IP address" "$CERT_IDENTITY"
+        fi
+        public_ip4 "$CERT_IDENTITY" ||
+            die "$CERT_IDENTITY is not a public IPv4 address: Let's Encrypt cannot certify it. Use a domain, or the address the internet reaches this server at (--ip ADDRESS)."
+    fi
+}
+
+# `panel cert`: gets a certificate and makes the panel use it. Run again to change the
+# domain or the address.
+panel_cert() {
+    need_root
+    need_systemd
+    [[ -f "$PANEL_CONF" ]] || die "The panel is not installed: kariz-manager panel install"
+    local domain="" ip="" email="" yes=0 cert="" key=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --domain) domain=${2:-} && shift 2 ;;
+            --ip) ip=${2:-} && shift 2 ;;
+            --email) email=${2:-} && shift 2 ;;
+            --cert-file) cert=${2:-} && shift 2 ;;
+            --key-file) key=${2:-} && shift 2 ;;
+            --yes) yes=1 && shift ;;
+            *) die "panel cert: [--domain D | --ip ADDRESS] [--email E] [--yes] | --cert-file F --key-file K" ;;
+        esac
+    done
+    if [[ -n "$cert$key" ]]; then
+        # A certificate of your own (not renewed by Kariz).
+        [[ -f "$cert" && -f "$key" ]] || die "--cert-file and --key-file go together, and both must be files."
+        panel_set_cert "$(realpath "$cert")" "$(realpath "$key")"
+        rm -f "$PANEL_DOMAIN"
+        systemctl restart kariz-panel
+        ok "The panel uses your certificate now. Kariz does not renew it: send the panel a SIGHUP after you do (systemctl kill -s HUP kariz-panel)."
+        return 0
+    fi
+    choose_identity "$domain" "$ip" "$yes" || return 0
+    if [[ -z "$email" ]] && ((!yes)); then
+        ask email "Email for expiry notices (optional, Enter to skip)" ""
+    fi
+    local old=""
+    get_cert "$CERT_IDENTITY" "$CERT_KIND" "$email" "$yes"
+    if [[ -s "$PANEL_DOMAIN" ]]; then old=$(cert_name "$(head -n 1 "$PANEL_DOMAIN")"); fi
+    panel_set_cert "$CERT_LIVE/fullchain.pem" "$CERT_LIVE/privkey.pem"
+    printf '%s\n' "$CERT_IDENTITY" >"$PANEL_DOMAIN"
+    systemctl restart kariz-panel
+    sleep 2
+    systemctl is-active --quiet kariz-panel ||
+        die "The panel did not start with the new certificate: journalctl -u kariz-panel -n 50"
+    # The certificate of what it was before is not needed any more (and must not be renewed).
+    if [[ -n "$old" && "$old" != "$(cert_name "$CERT_IDENTITY")" ]]; then
+        "$CERTBOT" delete --cert-name "$old" --non-interactive >/dev/null 2>&1 || true
+    fi
+    ok "The panel has a trusted certificate for $CERT_IDENTITY; it renews by itself."
+    panel_show "$CERT_IDENTITY"
 }
 
 cmd_panel() {
@@ -520,8 +844,10 @@ cmd_panel() {
             fi
             ;;
         logs) journalctl -u kariz-panel -n 100 -f ;;
+        cert) panel_cert "$@" ;;
+        cert-hook) cert_hook "$@" ;;
         uninstall) panel_uninstall "$@" ;;
-        *) die "panel: install [--port N] [--host H] | link | password [--stdin] | status | logs | uninstall [--yes]" ;;
+        *) die "panel: install [--port N] [--domain D | --ip A] | link | password [--stdin] | cert [--domain D | --ip A] | status | logs | uninstall [--yes]" ;;
     esac
 }
 
@@ -532,6 +858,17 @@ panel_uninstall() {
         confirm "Stop the web panel and remove it?" || return 0
     fi
     systemctl disable --now kariz-panel 2>/dev/null || true
+    if [[ -s "$PANEL_DOMAIN" ]]; then
+        # Its Let's Encrypt certificate is not renewed any more.
+        systemctl disable --now kariz-cert-renew.timer 2>/dev/null || true
+        rm -f "$RENEW_SERVICE" "$RENEW_TIMER"
+        local c
+        for c in "$CERTBOT_VENV/bin/certbot" "$(command -v certbot || true)"; do
+            [[ -n "$c" && -x "$c" ]] || continue
+            "$c" delete --cert-name "$(cert_name "$(head -n 1 "$PANEL_DOMAIN")")" --non-interactive >/dev/null 2>&1 || true
+        done
+        rm -f "$PANEL_DOMAIN"
+    fi
     rm -f "$PANEL_UNIT"
     systemctl daemon-reload
     if [[ ! -f "$AGENT_CONF" ]]; then
@@ -602,6 +939,7 @@ menu_panel() {
         "install|install the web panel on this server" \
         "link|make a one-time login link" \
         "password|set a new admin password" \
+        "cert|change the domain or IP address (Let's Encrypt certificate)" \
         "status|its address and state" \
         "agent|connect this server to a panel (with a join code)" \
         "uninstall|remove the web panel"
@@ -694,7 +1032,11 @@ usage() {
   install [--version vX.Y.Z] [--binary PATH]   install Kariz (latest release by default)
   update  [--version vX.Y.Z]                   update Kariz and restart what runs
   uninstall [--yes]                            also deletes the configs with --yes
-  panel install [--port N] [--host H]          the web panel on this server
+  panel install [--port N] [--domain D | --ip ADDRESS] [--email E] [--yes]
+                                               the web panel on this server, with a Let's
+                                               Encrypt certificate for the domain or IP address
+  panel cert [--domain D | --ip ADDRESS]       change its domain or address (renewal is automatic)
+  panel cert --cert-file F --key-file K        use a certificate of your own instead
   panel link | password [--stdin] | status | logs | uninstall [--yes]
   --agent CODE [--version V]                   connect this server to a panel
   agent status | logs | remove
