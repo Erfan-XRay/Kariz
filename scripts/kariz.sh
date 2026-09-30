@@ -13,7 +13,7 @@
 #   kariz-manager panel install | link | password | status | logs | uninstall
 #   kariz-manager --agent CODE        connect this server to a panel (its join code)
 #
-# The repository is private for now: set GITHUB_TOKEN to a token that can read it.
+# If GitHub limits your downloads, set GITHUB_TOKEN to a personal access token: it lifts the limit.
 set -euo pipefail
 
 REPO="Erfan-XRay/Kariz"
@@ -208,7 +208,7 @@ version_lt() {
     [[ "$a" != "$b" && "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n1)" == "$a" ]]
 }
 
-# curl or wget, with the token for a private repository. $1: URL, $2: output file or
+# curl or wget, with the token if there is one. $1: URL, $2: output file or
 # - for stdout, $3: extra header (optional).
 fetch() {
     local url=$1 out=$2 header=${3:-}
@@ -234,7 +234,7 @@ latest_version() {
 }
 
 # Downloads release asset $2 of version $1 to file $3. With a token it goes through the
-# API (works for private repositories), otherwise the public download link.
+# API, otherwise the public download link.
 download_asset() {
     local version=$1 name=$2 out=$3
     if [[ -z "${GITHUB_TOKEN:-}" ]]; then
@@ -354,7 +354,7 @@ cmd_install() {
         local a tmp
         a=$(arch)
         [[ -n "$version" ]] || version=$(latest_version)
-        [[ -n "$version" ]] || die "Could not find the latest release (private repository? set GITHUB_TOKEN)."
+        [[ -n "$version" ]] || die "Could not find the latest release (GitHub may be limiting you: set GITHUB_TOKEN)."
         info "Downloading Kariz $version for $a"
         local name="kariz-$version-$a-linux"
         tmp=$(mktemp -d)

@@ -52,5 +52,5 @@ apart, and how a breaking change is announced. Then the release.
 | **15.1** Security review (done) | The review, its fixes and their tests, `cargo audit` in CI. | The review is in the repository and CI is green. |
 | **15.2** Browser tests (done) | Playwright and its CI job. | The flows above pass in CI. |
 | **15.3** Accessibility (done) | axe on every page, the keyboard, motion. | No violation left, or each one explained. |
-| **15.4** Documentation | The Persian guides. | Both languages say the same things. |
-| **15.5** Release | `compatibility.md`, CHANGELOG, `1.0.0`. | CI green; release. |
+| **15.4** Documentation (done) | The Persian guides. | Both languages say the same things. |
+| **15.5** Release (done) | `compatibility.md`, CHANGELOG, `1.0.0`. | CI green; release. |
