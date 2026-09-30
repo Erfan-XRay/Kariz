@@ -113,7 +113,7 @@ test.describe("the tunnel", () => {
 
     // it shows up as up, and its page opens
     const row = page.locator(".tunnels tr", { hasText: "demo" });
-    await expect(row).toContainText(/up|connected/i, { timeout: 30_000 });
+    await expect(row).toContainText(/flowing/i, { timeout: 30_000 });
     await row.click();
     await page.getByRole("button", { name: "Edit" }).click();
     // the wizard is filled in from the servers: the ports step shows what is there now
