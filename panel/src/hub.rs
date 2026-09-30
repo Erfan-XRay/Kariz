@@ -78,7 +78,7 @@ struct Live {
 }
 
 pub struct Hub {
-    db: Db,
+    pub(crate) db: Db,
     kariz_dir: PathBuf,
     live: Mutex<HashMap<String, Live>>,
     /// The panel's own server, which answers the same requests as an agent, in-process.
@@ -92,6 +92,10 @@ pub struct Hub {
     pub networks: crate::networks::Networks,
     /// How long a new tunnel has to connect (shortened in tests).
     pub connect_wait: Duration,
+    /// Where the panel finds releases and its own files (set once the panel starts).
+    pub update_settings: std::sync::OnceLock<crate::updater::UpdateSettings>,
+    /// What the last check for a newer release found.
+    pub checked: Mutex<crate::updater::Checked>,
 }
 
 pub const LOCAL: &str = "local";
@@ -148,6 +152,7 @@ impl Hub {
             key: None,
             kariz_dir: kariz_dir.clone(),
             services: Default::default(),
+            release_key: None,
         };
         Arc::new(Self {
             history: crate::history::History::new(db.clone()),
@@ -162,6 +167,8 @@ impl Hub {
             services,
             ops: crate::pair::Ops::default(),
             connect_wait,
+            update_settings: std::sync::OnceLock::new(),
+            checked: Mutex::new(crate::updater::Checked::default()),
             kariz_dir,
             live: Mutex::new(HashMap::new()),
         })
@@ -643,6 +650,11 @@ impl Hub {
             if round % 1800 == 0 {
                 let _ = self.history.prune();
             }
+            // A look for a newer release: a minute after the start, then every day. It
+            // only looks; installing is always the user's button.
+            if (round == 30 || round % 43_200 == 43_199) && self.update_auto() {
+                let _ = self.check_update().await;
+            }
             round = round.wrapping_add(1);
             let health = sampler.sample();
             let tunnels = collect::tunnels(&self.kariz_dir, &*self.services).await;
@@ -651,7 +663,7 @@ impl Hub {
                 let entry = live.entry(LOCAL.to_owned()).or_default();
                 entry.online = true;
                 entry.hostname = collect::hostname();
-                entry.version = env!("CARGO_PKG_VERSION").to_owned();
+                entry.version = crate::version().to_owned();
                 entry.arch = std::env::consts::ARCH.to_owned();
             }
             self.update(LOCAL, Some(health), tunnels);
@@ -704,7 +716,7 @@ impl Hub {
             LOCAL,
             local_name,
             true,
-            env!("CARGO_PKG_VERSION").to_owned(),
+            crate::version().to_owned(),
             std::env::consts::ARCH.to_owned(),
             String::new(),
         )];

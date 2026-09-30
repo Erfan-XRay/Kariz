@@ -20,6 +20,7 @@ export function Shell({
   rising,
   onLogout,
   onMakeLink,
+  notice,
   children,
 }: {
   page: PageId;
@@ -28,6 +29,8 @@ export function Shell({
   rising: boolean;
   onLogout: () => void;
   onMakeLink: () => void;
+  /** Something for the top bar, such as the notice of a newer release. */
+  notice?: ReactNode;
   children: ReactNode;
 }) {
   const { t, lang, setLang, theme, setTheme, low, setLow, toasts } = useApp();
@@ -90,6 +93,7 @@ export function Shell({
           <small>{subtitle}</small>
         </h1>
         <div className="sky-spacer" />
+        {notice}
         <button className="search-btn" type="button" onClick={() => setPalette(true)} aria-label={t("search")}>
           <Icon name="search" size={18} />
           <span className="label">{t("search")}</span>

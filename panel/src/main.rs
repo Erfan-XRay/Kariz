@@ -66,6 +66,68 @@ enum Command {
         #[arg(long)]
         stdin: bool,
     },
+    /// Make a release signing key pair. The private key goes to a file (keep it secret: it
+    /// becomes the repository secret KARIZ_SIGNING_KEY); the public key is printed.
+    ReleaseKey {
+        /// Where to write the private key (must not exist).
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Sign a release's `.sha256` file: writes the `.sig` beside it (the archive's name
+    /// with `.sig`). The private key is read from the environment variable.
+    ReleaseSign {
+        file: PathBuf,
+        #[arg(long, default_value = "KARIZ_SIGNING_KEY")]
+        key_env: String,
+    },
+    /// Check a downloaded archive against its `.sha256` and `.sig` beside it.
+    ReleaseVerify {
+        archive: PathBuf,
+        /// The public key (hex), instead of the one built in.
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// What the panel runs, as a transient service, to swap in a new version (the panel
+    /// starts it itself; there is no reason to run it by hand).
+    #[command(hide = true)]
+    UpdateApply {
+        #[arg(long)]
+        stage: PathBuf,
+        #[arg(long)]
+        version: String,
+        #[arg(long, default_value = DEFAULT_CONFIG)]
+        config: PathBuf,
+        #[arg(long)]
+        panel_bin: PathBuf,
+        #[arg(long)]
+        kariz_bin: PathBuf,
+        /// Seconds the new panel has to answer.
+        #[arg(long, default_value_t = 30)]
+        wait: u64,
+        /// Seconds to wait before starting, so the panel can still answer the browser
+        /// that the hand-over went well.
+        #[arg(long, default_value_t = 0)]
+        delay: u64,
+    },
+    /// What an agent runs, as a transient service, to swap in a new version (the agent
+    /// starts it itself).
+    #[command(hide = true)]
+    AgentUpdateApply {
+        #[arg(long)]
+        stage: PathBuf,
+        #[arg(long)]
+        version: String,
+        /// The file the agent touches each time it reaches the panel.
+        #[arg(long)]
+        stamp: PathBuf,
+        #[arg(long)]
+        panel_bin: PathBuf,
+        #[arg(long)]
+        kariz_bin: PathBuf,
+        /// Seconds to wait before starting, so the agent can still answer the panel.
+        #[arg(long, default_value_t = 0)]
+        delay: u64,
+    },
     /// Private network links on this server, by hand (what the agent does when the panel
     /// asks; for debugging and for the tests). Needs root and Linux.
     Net {
@@ -110,8 +172,34 @@ fn main() -> Result<()> {
             println!("  certificate : SHA-256 {}", done.fingerprint);
             Ok(())
         }
-        Command::Serve { config } => serve(Config::load(&config)?),
+        Command::Serve { config } => serve(Config::load(&config)?, &config),
         Command::Net { command } => net_command(command),
+        Command::UpdateApply {
+            stage,
+            version,
+            config,
+            panel_bin,
+            kariz_bin,
+            wait,
+            delay,
+        } => {
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+            update_apply(&stage, &version, &config, panel_bin, kariz_bin, wait)
+        }
+        Command::AgentUpdateApply {
+            stage,
+            version,
+            stamp,
+            panel_bin,
+            kariz_bin,
+            delay,
+        } => {
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+            agent_update_apply(&stage, &version, stamp, panel_bin, kariz_bin)
+        }
+        Command::ReleaseKey { out } => release_key(&out),
+        Command::ReleaseSign { file, key_env } => release_sign(&file, &key_env),
+        Command::ReleaseVerify { archive, key } => release_verify(&archive, key.as_deref()),
         Command::Agent {
             config,
             join,
@@ -160,6 +248,145 @@ fn main() -> Result<()> {
     }
 }
 
+fn update_apply(
+    stage: &std::path::Path,
+    version: &str,
+    config: &std::path::Path,
+    panel: PathBuf,
+    kariz: PathBuf,
+    wait: u64,
+) -> Result<()> {
+    use kariz_panel::update::{self, SystemHost, Targets};
+    let config = Config::load(config)?;
+    let host = SystemHost {
+        unit: "kariz-panel".into(),
+        listen: config.listen.clone(),
+        path: config.path.clone(),
+        pin: kariz_panel::cert::fingerprint(&config.cert())?,
+    };
+    let outcome = update::apply(
+        stage,
+        &Targets { panel, kariz },
+        version,
+        &host,
+        std::time::Duration::from_secs(wait),
+        std::time::Duration::from_secs(1),
+        auth::now(),
+    );
+    // Beside the downloads, for the panel to show when it is back.
+    let dir = stage.parent().unwrap_or(stage);
+    update::write_outcome(dir, &outcome)?;
+    if let Ok(db) = Db::open(&config.database()) {
+        let what = if outcome.ok {
+            format!("the panel was updated to {version}")
+        } else {
+            format!(
+                "the update to {version} failed and the old version was put back: {}",
+                outcome.error.as_deref().unwrap_or("")
+            )
+        };
+        let _ = db.audit("update", None, &what);
+    }
+    if outcome.ok {
+        Ok(())
+    } else {
+        anyhow::bail!(outcome.error.unwrap_or_default())
+    }
+}
+
+fn agent_update_apply(
+    stage: &std::path::Path,
+    version: &str,
+    stamp: PathBuf,
+    panel: PathBuf,
+    kariz: PathBuf,
+) -> Result<()> {
+    use kariz_panel::agent_update::{AgentHost, WAIT};
+    use kariz_panel::update::{self, Targets};
+    let host = AgentHost {
+        unit: "kariz-agent".into(),
+        stamp,
+        since: std::time::SystemTime::now(),
+    };
+    let outcome = update::apply(
+        stage,
+        &Targets { panel, kariz },
+        version,
+        &host,
+        WAIT,
+        std::time::Duration::from_secs(1),
+        auth::now(),
+    );
+    update::write_outcome(stage.parent().unwrap_or(stage), &outcome)?;
+    if outcome.ok {
+        Ok(())
+    } else {
+        anyhow::bail!(outcome.error.unwrap_or_default())
+    }
+}
+
+fn release_key(out: &std::path::Path) -> Result<()> {
+    use kariz_panel::sign;
+    if out.exists() {
+        anyhow::bail!("{} exists already; it would be overwritten", out.display());
+    }
+    let (private, public) = sign::generate()?;
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(out)?
+            .write_all(private.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(out, &private)?;
+    println!("private key written to {} (keep it secret)", out.display());
+    println!("public key (hex): {}", sign::hex(&public));
+    println!("{}", sign::public_pem(&public));
+    Ok(())
+}
+
+fn release_sign(file: &std::path::Path, key_env: &str) -> Result<()> {
+    let key = std::env::var(key_env).map_err(|_| {
+        anyhow::anyhow!("the signing key is not in the environment variable {key_env}")
+    })?;
+    let message = std::fs::read(file)?;
+    let signature = kariz_panel::sign::sign(&key, &message)?;
+    let name = file
+        .to_str()
+        .and_then(|n| n.strip_suffix(".sha256"))
+        .ok_or_else(|| anyhow::anyhow!("give the .sha256 file of a release"))?;
+    std::fs::write(format!("{name}.sig"), signature)?;
+    println!("signed {}", file.display());
+    Ok(())
+}
+
+fn release_verify(archive: &std::path::Path, key: Option<&str>) -> Result<()> {
+    use kariz_panel::sign;
+    let public = sign::release_key(key)?;
+    let name = archive
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("no archive name"))?;
+    let read = |suffix: &str| {
+        let p = format!("{}{suffix}", archive.display());
+        std::fs::read(&p).map_err(|e| anyhow::anyhow!("cannot read {p}: {e}"))
+    };
+    sign::verify_archive(
+        &public,
+        name,
+        &std::fs::read(archive)?,
+        &read(".sha256")?,
+        &read(".sig")?,
+    )?;
+    println!("{name}: the signature and the checksum are good");
+    Ok(())
+}
+
 fn net_command(command: NetCommand) -> Result<()> {
     use kariz_panel::net::Net;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -193,7 +420,7 @@ fn net_command(command: NetCommand) -> Result<()> {
     })
 }
 
-fn serve(config: Config) -> Result<()> {
+fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -211,6 +438,18 @@ fn serve(config: Config) -> Result<()> {
             config.services.services(&config.kariz_dir),
             config.data_dir.clone(),
         );
+        // Where updating finds its releases and the programs it replaces.
+        hub.set_update_settings(kariz_panel::updater::UpdateSettings {
+            api: config
+                .release_api
+                .clone()
+                .unwrap_or_else(|| kariz_panel::update::DEFAULT_API.to_owned()),
+            key: config.release_key.clone(),
+            dir: config.data_dir.join("updates"),
+            config: config_path.to_path_buf(),
+            panel_bin: std::env::current_exe()?,
+            kariz_bin: std::env::current_exe()?.with_file_name("kariz"),
+        });
         tokio::spawn(hub.clone().run_local());
         let mut state = AppState::new(db);
         state.hub = hub.clone();

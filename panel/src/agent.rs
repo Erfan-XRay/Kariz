@@ -42,6 +42,9 @@ pub struct AgentConfig {
     /// How tunnels are started: `systemd` (default) or `process`.
     #[serde(default)]
     pub services: manage::ServiceKind,
+    /// A release public key (hex) of your own, instead of the one built in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_key: Option<String>,
 }
 
 fn default_kariz_dir() -> PathBuf {
@@ -59,6 +62,7 @@ impl AgentConfig {
             key: None,
             kariz_dir: default_kariz_dir(),
             services: Default::default(),
+            release_key: None,
         }
     }
 
@@ -129,6 +133,7 @@ pub struct Agent {
     sampler: Mutex<Sampler>,
     services: Arc<dyn Services>,
     net: crate::net::Net,
+    update: crate::agent_update::AgentUpdate,
 }
 
 impl Agent {
@@ -153,6 +158,25 @@ impl Agent {
         services: Arc<dyn Services>,
         exec: Arc<dyn crate::net::Exec>,
     ) -> Arc<Self> {
+        Self::with_launcher(
+            path,
+            config,
+            services,
+            exec,
+            Box::new(crate::agent_update::SystemdRun),
+        )
+    }
+
+    /// Like [`Agent::with_exec`], and the update helper is started through `launcher` (the
+    /// tests record it instead of running systemd).
+    pub fn with_launcher(
+        path: &Path,
+        config: AgentConfig,
+        services: Arc<dyn Services>,
+        exec: Arc<dyn crate::net::Exec>,
+        launcher: Box<dyn crate::agent_update::Launcher>,
+    ) -> Arc<Self> {
+        let config_key = config.release_key.clone();
         Arc::new(Self {
             path: path.to_path_buf(),
             config: Mutex::new(config),
@@ -162,6 +186,16 @@ impl Agent {
             net: crate::net::Net::with_exec(
                 (!path.as_os_str().is_empty()).then(|| path.with_file_name("net.toml")),
                 exec,
+            ),
+            update: crate::agent_update::AgentUpdate::new(
+                path.with_file_name("updates"),
+                path.to_path_buf(),
+                config_key,
+                std::env::current_exe().unwrap_or_default(),
+                std::env::current_exe()
+                    .unwrap_or_default()
+                    .with_file_name("kariz"),
+                launcher,
             ),
         })
     }
@@ -184,7 +218,7 @@ impl Agent {
                     proof,
                     join: c.join.clone(),
                     hostname: collect::hostname(),
-                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                    version: crate::version().to_owned(),
                     arch: std::env::consts::ARCH.to_owned(),
                 })
             }
@@ -271,6 +305,14 @@ impl Agent {
             Request::NetSync { links } => ack(self.net.sync(links).await),
             Request::NetPing { name } => to_json(&self.net.ping(&name).await),
             Request::NetStatus => to_json(&self.net.status().await),
+            Request::UpdateBegin { version, files } => ack(self.update.begin(&version, &files)),
+            Request::UpdateChunk {
+                version,
+                name,
+                offset,
+                data,
+            } => ack(self.update.chunk(&version, &name, offset, &data)),
+            Request::UpdateApply { version } => ack(self.update.apply(&version)),
             Request::Logs { name, lines } => to_json(&manage::logs(&name, lines).await),
             Request::Speedtest {
                 name,
@@ -291,15 +333,41 @@ impl Agent {
             let agent = self.clone();
             tokio::spawn(async move {
                 let reply = match serde_json::from_slice::<Request>(&syn) {
-                    Ok(request) if syn.len() <= MAX_REQUEST => agent.handle(request).await,
-                    _ => serde_json::to_vec(&Ack {
-                        ok: false,
-                        error: Some("unknown request".into()),
-                    })
-                    .unwrap_or_default(),
+                    Ok(request) if syn.len() <= MAX_REQUEST => {
+                        // A request that panics is answered with an error (and logged), not
+                        // left to reset its stream.
+                        let doing = agent.clone();
+                        match tokio::spawn(async move { doing.handle(request).await }).await {
+                            Ok(reply) => reply,
+                            Err(e) => {
+                                warn!(error = %e, "a request failed inside the agent");
+                                serde_json::to_vec(&Ack {
+                                    ok: false,
+                                    error: Some("internal error".into()),
+                                })
+                                .unwrap_or_default()
+                            }
+                        }
+                    }
+                    _ => {
+                        warn!(bytes = syn.len(), "an unknown or oversized request");
+                        serde_json::to_vec(&Ack {
+                            ok: false,
+                            error: Some("unknown request".into()),
+                        })
+                        .unwrap_or_default()
+                    }
                 };
                 if stream.send(Bytes::from(reply)).await.is_ok() {
                     let _ = stream.finish();
+                    // The panel finishes its side right after opening the stream. If the
+                    // answer is quick, the stream can be dropped before that end-of-stream
+                    // frame has arrived, and a stream dropped half open is reset: the panel
+                    // would see an error for a request that was answered. So wait for it.
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        while let Ok(Some(_)) = stream.recv().await {}
+                    })
+                    .await;
                 }
             });
         }
@@ -340,6 +408,7 @@ impl Agent {
             match dialer.connect(Side::Server).await {
                 Ok(session) => {
                     info!(panel = %c.panel, "connected to the panel");
+                    crate::agent_update::touch(&self.path.with_file_name("connected"));
                     backoff = Duration::from_secs(1);
                     let started = std::time::Instant::now();
                     self.serve(session).await;
