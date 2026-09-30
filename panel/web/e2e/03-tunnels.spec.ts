@@ -114,6 +114,8 @@ test.describe("the tunnel", () => {
     // it shows up as up, and its page opens
     const row = page.locator(".tunnels tr", { hasText: "demo" });
     await expect(row).toContainText(/flowing/i, { timeout: 30_000 });
+    // both sides are reported (the entry's name and the agent's), so it can be edited as a pair
+    await expect(row).toContainText("far-away", { timeout: 30_000 });
     await row.click();
     await page.getByRole("button", { name: "Edit" }).click();
     // the wizard is filled in from the servers: the ports step shows what is there now

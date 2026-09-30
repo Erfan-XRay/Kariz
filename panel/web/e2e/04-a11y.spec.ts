@@ -9,7 +9,9 @@ import { PAGES, goTo, signIn } from "./helpers";
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"];
 
 async function scan(page: Page, what: string, scope?: string) {
-  // Dialogs and pages fade in: axe measures colours, so it must not look mid-fade.
+  // Dialogs and pages fade in and a toast fades out: axe measures colours, so it must not look
+  // mid-fade.
+  await expect(page.locator(".toast")).toHaveCount(0, { timeout: 10_000 });
   await page.waitForTimeout(600);
   let builder = new AxeBuilder({ page }).withTags(TAGS);
   if (scope) builder = builder.include(scope);
