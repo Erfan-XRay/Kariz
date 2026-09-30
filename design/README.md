@@ -1,7 +1,7 @@
 # Kariz panel design system
 
-The visual language of the web panel: "Kariz at night". The idea and the plan are in
-[docs/PHASE9.md](../docs/PHASE9.md); this document is the reference for building it.
+The visual language of the web panel: "Kariz at night". This document is the reference for
+building it.
 The tokens are in [tokens.css](tokens.css); the interactive prototype is in
 [prototype/](prototype/).
 

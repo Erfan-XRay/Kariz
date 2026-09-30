@@ -1,4 +1,4 @@
-//! The agent's tunnel requests (docs/PHASE12.md, section 2) through `Agent::handle`, the
+//! The agent's tunnel requests through `Agent::handle`, the
 //! same path the panel's link uses: check, write, read back, edit, delete, ports.
 
 use kariz_panel::agent::{Agent, AgentConfig};

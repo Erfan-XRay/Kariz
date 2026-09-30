@@ -17,7 +17,7 @@ mod report;
 mod status_view;
 
 /// musl's allocator is built for size, not speed; mimalloc is much faster on the
-/// many small allocations of the packet path (docs/PHASE8.md).
+/// many small allocations of the packet path.
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

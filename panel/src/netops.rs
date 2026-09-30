@@ -1,6 +1,6 @@
 //! Private networks as operations: making the links of a network (with their interfaces on
 //! both servers and a path test), removing them, and keeping each server's list of links
-//! in step with the panel's (docs/PHASE13.md, sections 3 and 4).
+//! in step with the panel's.
 //!
 //! Like tunnels (`pair.rs`) these run in the background as steps the browser follows, and
 //! a step that fails undoes what the earlier ones did.

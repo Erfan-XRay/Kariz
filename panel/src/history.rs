@@ -1,6 +1,5 @@
 //! What the panel remembers about the servers and tunnels: a time series per measure for
-//! the charts, and the events (a tunnel going down, a server going offline) for the log
-//! (docs/PHASE12.md, section 4).
+//! the charts, and the events (a tunnel going down, a server going offline) for the log.
 //!
 //! The last hour is kept in memory at the rate the servers are asked (every couple of
 //! seconds); five-minute averages go to SQLite and are kept for 30 days.

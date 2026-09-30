@@ -14,15 +14,17 @@ interface Props {
   hasOther?: boolean;
   headings?: { depth: number; slug: string; text: string }[];
   flow?: boolean;
+  /** The whole width for the page (the tour): no outline, and the sidebar only as a drawer. */
+  wide?: boolean;
 }
-const { lang, title, description, path, slug, hasOther = true, headings = [], flow = true } = Astro.props;
+const { lang, title, description, path, slug, hasOther = true, headings = [], flow = true, wide = false } = Astro.props;
 const t = ui[lang];
 const nav = await sidebar(lang);
 const outline = headings.filter((h) => h.depth === 2 || h.depth === 3);
 ---
 
 <Base lang={lang} title={title} description={description} path={path} hasOther={hasOther} flow={flow} current="docs">
-  <div class="wrap docs">
+  <div class={`wrap docs${wide ? " wide" : ""}`}>
     <nav class="side" id="side" aria-label={t.docs}>
       {nav.map((s) => (
         <section>
@@ -42,7 +44,7 @@ const outline = headings.filter((h) => h.depth === 2 || h.depth === 3);
     <div>
       <slot />
     </div>
-    <aside class="toc" aria-label={t.onThisPage}>
+    {!wide && <aside class="toc" aria-label={t.onThisPage}>
       {outline.length > 1 && (
         <>
           <h2>{t.onThisPage}</h2>
@@ -53,6 +55,6 @@ const outline = headings.filter((h) => h.depth === 2 || h.depth === 3);
           </ul>
         </>
       )}
-    </aside>
+    </aside>}
   </div>
 </Base>

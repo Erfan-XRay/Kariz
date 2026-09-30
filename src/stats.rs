@@ -1,5 +1,5 @@
 //! Live counters of a running side, answered by `status` on the control socket
-//! (docs/PHASE10.md, docs/status.md).
+//! (docs/status.md).
 //!
 //! Everything is updated where the work already happens, with relaxed atomics; nothing
 //! runs in the background. Reading them ([`Stats::snapshot`]) never touches the tunnel.

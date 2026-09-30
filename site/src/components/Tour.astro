@@ -1,0 +1,240 @@
+---
+// A guided tour of the panel: the live demo beside a list of steps. Each step takes the demo
+// to the screen it talks about and rings the part to look at. The demo is the prototype
+// (same origin), driven through the `K` object it shares between its own scripts.
+import DocsShell from "./DocsShell.astro";
+import { href } from "../lib/site";
+import type { Lang } from "../lib/site";
+
+const { lang } = Astro.props as { lang: Lang };
+interface Step {
+  id: string;
+  page?: string;
+  param?: string;
+  hi?: string;
+  wizard?: boolean;
+  title: string;
+  text: string;
+}
+const T = {
+  en: {
+    title: "Guided tour of the panel",
+    desc: "The panel's screens one by one, in a live demo with sample data: what each is for and where to click.",
+    lead: "Each step opens the part of the panel it talks about in the demo, and rings what to look at. Nothing is installed and nothing is sent anywhere; the data is a sample.",
+    show: "Show me",
+    prev: "Previous",
+    next: "Next",
+    of: "Step {n} of {m}",
+    frame: "Kariz panel demo",
+    loading: "The demo is starting…",
+    more: "The same in words, with every detail:",
+    moreLink: "Using the panel",
+    steps: [
+      { id: "signin", hi: "#pw-wrap", title: "Sign in", text: "The manager printed a one-time link on the server: open it and you are in. In the demo the password is kariz. With Show me, the tour signs in for you and you watch the descent into the panel." },
+      { id: "map", page: "map", hi: "#main", title: "The map", text: "Every server is a well on the horizon, every tunnel a channel of water between two of them. Flowing water is traffic; a dashed empty channel is a stopped tunnel; a red pulse is a broken one. Hover a channel for its numbers." },
+      { id: "servers", page: "servers", hi: "#srv-add", title: "Add your servers", text: "Servers lists every server with its CPU, memory and network. Add server gives a join code and one command to run on the new server; it appears here within seconds, and opens no port." },
+      { id: "tunnels", page: "tunnels", hi: "#tn-new", title: "Your tunnels", text: "Tunnels lists every tunnel with its two servers, transport, state and traffic. New tunnel opens the wizard." },
+      { id: "wizard", page: "tunnels", wizard: true, hi: ".wizard, #wizard, [role=dialog]", title: "The wizard", text: "Five short steps: servers, kind, connection, ports, build. Each question explains itself, the defaults suit most paths, and if anything fails while building, both servers are put back as they were." },
+      { id: "detail", page: "tunnel", param: "backup", hi: ".diagnosis", title: "When something is wrong", text: "Open a tunnel to see both sides, its charts and its ports. A broken tunnel says why in plain words, and what to try. From here: edit, stop, restart, a new token, a speed test, delete." },
+      { id: "logs", page: "logs", hi: "#main", title: "Logs and events", text: "Pick a tunnel and read both of its sides interleaved by time, filtered by level or text, following as they come. Events lists servers going offline and tunnels losing their connection, and coming back." },
+      { id: "settings", page: "settings", hi: "#bk-down", title: "Settings", text: "The password, one-time links, every signed-in device with Revoke, the backup (one file locked with your passphrase), updates for the panel and every server, and the look." },
+      { id: "bar", page: "map", hi: ".search-btn", title: "Handy things", text: "Ctrl+K searches pages and commands. The top bar switches Persian and English, Night and Dawn, and a low-power mode that stops the animation. Everything works on a phone too." },
+    ] as Step[],
+  },
+  fa: {
+    title: "تور راهنمای پنل",
+    desc: "صفحه‌های پنل یکی‌یکی، در دموی زنده با داده‌های نمونه: هرکدام برای چیست و کجا را بزنید.",
+    lead: "هر گام همان بخشی از پنل را که درباره‌اش حرف می‌زند در دمو باز می‌کند و دور جایی که باید ببینید حلقه می‌کشد. چیزی نصب نمی‌شود و چیزی جایی فرستاده نمی‌شود؛ داده‌ها نمونه‌اند.",
+    show: "نشانم بده",
+    prev: "قبلی",
+    next: "بعدی",
+    of: "گام {n} از {m}",
+    frame: "دموی پنل کاریز",
+    loading: "دمو دارد بالا می‌آید…",
+    more: "همین‌ها به‌صورت نوشته، با همهٔ جزئیات:",
+    moreLink: "کار با پنل",
+    steps: [
+      { id: "signin", hi: "#pw-wrap", title: "ورود", text: "مدیر روی سرور یک لینک یک‌بارمصرف چاپ کرد: بازش کنید و وارد شده‌اید. در دمو رمز kariz است. با «نشانم بده»، تور به‌جای شما وارد می‌شود و فرود به داخل پنل را می‌بینید." },
+      { id: "map", page: "map", hi: "#main", title: "نقشه", text: "هر سرور یک چاه روی افق است و هر تانل مجرای آبی بین دو تا از آن‌ها. آب روان ترافیک است؛ مجرای خالی و خط‌چین تانل متوقف است؛ نبض قرمز یعنی خراب. برای دیدن عددها روی یک مجرا نگه دارید." },
+      { id: "servers", page: "servers", hi: "#srv-add", title: "سرورهایتان را اضافه کنید", text: "«سرورها» هر سرور را با CPU، حافظه و شبکه‌اش نشان می‌دهد. «افزودن سرور» یک کد پیوستن و یک دستور می‌دهد که روی سرور تازه اجرا می‌کنید؛ در چند ثانیه اینجا ظاهر می‌شود و هیچ پورتی باز نمی‌کند." },
+      { id: "tunnels", page: "tunnels", hi: "#tn-new", title: "تانل‌هایتان", text: "«تانل‌ها» هر تانل را با دو سرورش، ترنسپورت، وضعیت و ترافیکش نشان می‌دهد. «تانل تازه» ویزارد را باز می‌کند." },
+      { id: "wizard", page: "tunnels", wizard: true, hi: ".wizard, #wizard, [role=dialog]", title: "ویزارد", text: "پنج گام کوتاه: سرورها، نوع، اتصال، پورت‌ها، ساخت. هر پرسش خودش را توضیح می‌دهد، پیش‌فرض‌ها برای بیشتر مسیرها درست‌اند، و اگر در ساخت چیزی شکست بخورد هر دو سرور به حالت قبل برمی‌گردند." },
+      { id: "detail", page: "tunnel", param: "backup", hi: ".diagnosis", title: "وقتی چیزی خراب است", text: "یک تانل را باز کنید تا هر دو سمت، نمودارها و پورت‌هایش را ببینید. تانل خراب با کلمه‌های ساده می‌گوید چرا و چه چیزی را امتحان کنید. از همین‌جا: ویرایش، توقف، راه‌اندازی دوباره، token تازه، تست سرعت، حذف." },
+      { id: "logs", page: "logs", hi: "#main", title: "لاگ و رویدادها", text: "یک تانل را انتخاب کنید و هر دو سمتش را با ترتیب زمانی درهم بخوانید، با فیلتر سطح یا متن، و دنبال کنید. «رویدادها» رفتن سرورها و قطع شدن تانل‌ها، و برگشتنشان را فهرست می‌کند." },
+      { id: "settings", page: "settings", hi: "#bk-down", title: "تنظیمات", text: "رمز، لینک‌های یک‌بارمصرف، هر دستگاه واردشده با «لغو»، پشتیبان (یک فایل قفل‌شده با عبارت خودتان)، به‌روزرسانی پنل و همهٔ سرورها، و ظاهر." },
+      { id: "bar", page: "map", hi: ".search-btn", title: "چیزهای کاربردی", text: "Ctrl+K صفحه‌ها و دستورها را جستجو می‌کند. نوار بالا فارسی و انگلیسی، شب و سپیده‌دم، و حالت کم‌مصرف را که انیمیشن را می‌ایستاند عوض می‌کند. همه‌چیز روی گوشی هم کار می‌کند." },
+    ] as Step[],
+  },
+}[lang];
+const headings = [{ depth: 2, slug: "steps", text: T.title }];
+---
+
+<DocsShell lang={lang} title={T.title} description={T.desc} path="/docs/tour/" slug="tour" headings={headings} flow={false} wide>
+  <article class="prose tour-intro" data-pagefind-body>
+    <h1>{T.title}</h1>
+    <p>{T.lead}</p>
+  </article>
+  <div class="tour" data-tour data-of={T.of} data-loading={T.loading}>
+    <ol class="tour-steps" id="steps">
+      {T.steps.map((s, i) => (
+        <li data-step={i} data-page={s.page} data-param={s.param} data-hi={s.hi} data-wizard={s.wizard ? "1" : undefined} data-signin={s.id === "signin" ? "1" : undefined}>
+          <h3><button type="button" class="tour-head" aria-expanded={i === 0 ? "true" : "false"}>{s.title}</button></h3>
+          <div class="tour-body" hidden={i !== 0}>
+            <p>{s.text}</p>
+            <button type="button" class="btn primary tour-show">{T.show}</button>
+          </div>
+        </li>
+      ))}
+    </ol>
+    <div class="tour-stage">
+      <div class="frame">
+        <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span>kariz-panel · demo</span></div>
+        <iframe title={T.frame} src={`${import.meta.env.BASE_URL}demo/index.html?lang=${lang}`}></iframe>
+      </div>
+      <div class="tour-nav">
+        <button type="button" class="btn" data-prev>{T.prev}</button>
+        <span role="status" aria-live="polite" data-count></span>
+        <button type="button" class="btn primary" data-next>{T.next}</button>
+      </div>
+    </div>
+  </div>
+  <p class="tour-more">{T.more} <a href={href(lang, "/docs/using-the-panel/")}>{T.moreLink}</a></p>
+</DocsShell>
+
+<style>
+  .tour { display: grid; grid-template-columns: minmax(220px, 300px) minmax(0, 1fr); gap: var(--sp-5); align-items: start; margin-top: var(--sp-4); }
+  .tour-steps { list-style: none; margin: 0; padding: 0; counter-reset: step; display: grid; gap: var(--sp-2); }
+  .tour-steps li { counter-increment: step; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--stratum-1); }
+  .tour-steps li.on { border-color: var(--accent); background: var(--accent-soft); }
+  .tour-steps h3 { margin: 0; font-size: var(--fs-md); }
+  .tour-head { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 8px 12px; background: none; border: 0; color: var(--text); font: inherit; font-weight: 600; text-align: start; cursor: pointer; }
+  .tour-head::before { content: counter(step); display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--line-strong); font-size: var(--fs-xs); color: var(--accent-strong); flex: none; }
+  .tour-body { padding: 0 12px 12px; }
+  .tour-body p { margin: 0 0 var(--sp-3); color: var(--text-2); font-size: var(--fs-sm); }
+  .tour-body .btn { height: 38px; padding: 0 16px; font-size: var(--fs-sm); }
+  .tour-stage { position: sticky; top: 84px; }
+  .tour-stage iframe { height: min(72vh, 700px); }
+  .tour-nav { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); margin-top: var(--sp-3); color: var(--text-2); font-size: var(--fs-sm); }
+  .tour-more { margin-top: var(--sp-6); color: var(--text-2); }
+  @media (max-width: 1080px) {
+    .tour { grid-template-columns: 1fr; }
+    .tour-stage { position: static; order: -1; }
+    .tour-stage iframe { height: 460px; }
+  }
+</style>
+
+<script>
+  document.querySelectorAll<HTMLElement>("[data-tour]").forEach((tour) => {
+    const frame = tour.querySelector<HTMLIFrameElement>("iframe")!;
+    const items = [...tour.querySelectorAll<HTMLLIElement>("[data-step]")];
+    const count = tour.querySelector<HTMLElement>("[data-count]")!;
+    const prev = tour.querySelector<HTMLButtonElement>("[data-prev]")!;
+    const next = tour.querySelector<HTMLButtonElement>("[data-next]")!;
+    let at = 0;
+    let seq = 0; // the step asked for last; an older one stops where it is
+    let signing: Promise<void> | null = null;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const win = () => frame.contentWindow as (Window & { K?: any }) | null;
+    const doc = () => frame.contentDocument;
+
+    // The demo's own screens: boot, then login, then the app.
+    const screen = () => doc()?.querySelector(".screen.is-on")?.id ?? "";
+    const until = async (ok: () => boolean, ms = 8000) => {
+      const end = Date.now() + ms;
+      while (!ok() && Date.now() < end) await sleep(100);
+      return ok();
+    };
+
+    const ring = (sel?: string) => {
+      const d = doc();
+      if (!d) return;
+      if (!d.getElementById("tour-style")) {
+        const st = d.createElement("style");
+        st.id = "tour-style";
+        st.textContent =
+          ".tour-hi{outline:3px solid var(--accent)!important;outline-offset:4px;border-radius:10px;animation:tour-ring 1.6s ease-in-out infinite}" +
+          "@keyframes tour-ring{50%{outline-color:transparent}}" +
+          "@media (prefers-reduced-motion:reduce){.tour-hi{animation:none}}";
+        d.head.append(st);
+      }
+      d.querySelectorAll(".tour-hi").forEach((e) => e.classList.remove("tour-hi"));
+      if (!sel) return;
+      const el = [...d.querySelectorAll<HTMLElement>(sel)].find((e) => e.offsetParent !== null);
+      if (el) {
+        el.classList.add("tour-hi");
+        el.scrollIntoView({ block: "nearest" });
+      }
+    };
+
+    const signIn = () =>
+      (signing ??= (async () => {
+        await until(() => screen() === "login" || screen() === "app");
+        if (screen() !== "app") {
+          const d = doc()!;
+          d.querySelector<HTMLInputElement>("#pw")!.value = "kariz";
+          d.querySelector<HTMLFormElement>("#login-form")!.requestSubmit();
+          await until(() => screen() === "app", 6000);
+          await sleep(400);
+        }
+        signing = null;
+      })());
+
+    // The part to ring appears once the demo has drawn the page.
+    const visible = (sel?: string) =>
+      !sel || [...(doc()?.querySelectorAll<HTMLElement>(sel) ?? [])].some((e) => e.offsetParent !== null);
+
+    const show = async (i: number) => {
+      const mine = ++seq;
+      const li = items[i];
+      const K = win()?.K;
+      if (!K) return;
+      if (li.dataset.signin) {
+        await until(() => screen() === "login" || screen() === "app");
+        if (screen() === "login") {
+          ring(li.dataset.hi);
+          await sleep(900);
+          await signIn();
+        }
+        ring();
+        return;
+      }
+      await signIn();
+      if (mine !== seq) return;
+      K.wizard?.close?.();
+      if (li.dataset.page) K.setPage(li.dataset.page, false, li.dataset.param || undefined);
+      if (li.dataset.wizard) {
+        await sleep(500);
+        if (mine !== seq) return;
+        K.wizard.open();
+      }
+      await until(() => visible(li.dataset.hi), 4000);
+      if (mine !== seq) return;
+      ring(li.dataset.hi);
+    };
+
+    const select = (i: number, run: boolean) => {
+      at = Math.max(0, Math.min(items.length - 1, i));
+      items.forEach((li, j) => {
+        li.classList.toggle("on", j === at);
+        li.querySelector(".tour-head")!.setAttribute("aria-expanded", String(j === at));
+        (li.querySelector(".tour-body") as HTMLElement).hidden = j !== at;
+      });
+      count.textContent = (tour.dataset.of ?? "").replace("{n}", String(at + 1)).replace("{m}", String(items.length));
+      prev.disabled = at === 0;
+      next.disabled = at === items.length - 1;
+      if (run) void show(at);
+    };
+
+    items.forEach((li, i) => {
+      li.querySelector(".tour-head")!.addEventListener("click", () => select(i, true));
+      li.querySelector(".tour-show")!.addEventListener("click", () => select(i, true));
+    });
+    prev.addEventListener("click", () => select(at - 1, true));
+    next.addEventListener("click", () => select(at + 1, true));
+    select(0, false);
+    frame.addEventListener("load", async () => {
+      await until(() => screen() === "login");
+      ring(items[0].dataset.hi);
+    });
+  });
+</script>

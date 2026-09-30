@@ -1,5 +1,5 @@
 //! Finding, downloading and checking a release, against a small local server that answers
-//! the way GitHub does (docs/PHASE14.md). The swap itself is tested in `update.rs` with a
+//! the way GitHub does. The swap itself is tested in `update.rs` with a
 //! fake host, and for real by CI on a systemd host.
 
 use std::collections::HashMap;

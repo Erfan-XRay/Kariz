@@ -1,4 +1,4 @@
-//! Private networks between the servers (docs/PHASE13.md, section 3): a network is a pool
+//! Private networks between the servers: a network is a pool
 //! of private IPv4 addresses the panel owns, and every link between two servers takes its
 //! own /30 from it, so that **no address is ever given twice**.
 //!

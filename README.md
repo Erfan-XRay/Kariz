@@ -63,33 +63,23 @@ Details: [docs/transports.md](docs/transports.md).
 
 ## 🚀 Quick start
 
-### The easy way: the manager script
+### The easy way: the web panel
 
-One line, as root, on each server:
+One line, as root, on the server that will hold the panel:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh)
 ```
 
-It installs Kariz for your CPU (x86_64, aarch64, armv7) and opens a menu. **New tunnel**
-walks through six short steps with numbered choices: ports as a list
-(`443, 8080-8090, 2053=53`), IPv4 or IPv6 addresses, a summary before anything starts.
-It then runs the tunnel as a systemd service and prints the exact command to run on the
-other server. Later, `kariz-manager` brings the menu back, or use its commands directly:
+It installs Kariz for your CPU (x86_64, aarch64, armv7), checks the release's signature, and
+opens a menu: choose **2**, then **install**. It prints the panel's address and a one-time login
+link. From there everything is done in the browser: add your other servers (each runs one
+command with a join code), make tunnels between them with a wizard that undoes itself if
+anything fails, watch them live, test their speed, update them. Try the screens first in the
+[live demo](https://erfan-xray.github.io/Kariz/try/); [docs/using-the-panel.md](docs/using-the-panel.md)
+walks through them, and [docs/manager.md](docs/manager.md) explains the install script.
 
-```bash
-kariz-manager list                  # every tunnel and its state
-kariz-manager logs main             # follow a tunnel's log
-kariz-manager speedtest main        # speed, latency and UDP through the tunnel
-kariz-manager restart main
-kariz-manager add main --role entry --mode reverse --transport tcpmux --listen 3080 --ports 443,8080-8090
-kariz-manager update                # new release, running tunnels restarted
-```
-
-More in [docs/manager.md](docs/manager.md). The documentation is also in Persian:
-[docs/fa](docs/fa/README.md).
-
-### By hand
+### By hand (without the panel)
 
 ```bash
 # 1. On both servers: install (or download from Releases)
@@ -174,7 +164,7 @@ Methods, tables and the benchmarks: [docs/performance.md](docs/performance.md).
 |---|---|
 | [Getting started](docs/getting-started.md) | install, token, first tunnel, systemd |
 | [Configuration reference](docs/configuration.md) | every setting, default and limit |
-| [Speed test](docs/speedtest.md) · [Manager script](docs/manager.md) | measuring and managing tunnels |
+| [Using the panel](docs/using-the-panel.md) · [Manager script](docs/manager.md) | the panel, and installing it |
 | [Transports](docs/transports.md) · [Profiles](docs/profiles.md) | choosing and tuning |
 | [UDP and games](docs/udp-and-games.md) · [CDN](docs/CDN.md) | specific setups |
 | [Performance](docs/performance.md) · [Security](docs/security.md) · [Troubleshooting](docs/troubleshooting.md) | running it well |
@@ -188,5 +178,10 @@ cargo test                                    # nginx tests run too when nginx i
 cargo build --release --no-default-features   # without quic and kcp
 ```
 
-Design documents: [roadmap](docs/ROADMAP.md) and the phase plans in [`docs/`](docs).
-Changes by version: [CHANGELOG.md](CHANGELOG.md).
+Design and protocol: [docs/ROADMAP.md](docs/ROADMAP.md). Changes by version: [CHANGELOG.md](CHANGELOG.md).
+
+## 📄 License
+
+Kariz is **source-available, not open source**: you may read the code and run the official releases
+on your own servers; using the core (or anything in it) anywhere else, copying it, or
+redistributing it is not allowed. The full terms are in [LICENSE](LICENSE).

@@ -89,7 +89,7 @@ jobs:
           ls -l kariz-*
           test "$(ls kariz-*.tar.gz | wc -l)" = 3
           for f in kariz-*.tar.gz; do sha256sum -c "$f.sha256"; done
-      # Releases are signed (docs/PHASE14.md): the private key is the repository secret
+      # Releases are signed: the private key is the repository secret
       # KARIZ_SIGNING_KEY, and every signature is checked with the public key built into
       # the program before anything is published, so a wrong secret stops the release.
       - name: Sign the checksums

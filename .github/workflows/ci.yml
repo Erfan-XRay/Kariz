@@ -68,9 +68,9 @@ jobs:
       - name: Library tests under QEMU
         run: cross test --locked --target ${{ matrix.target }} --lib
 
-  # scripts/kariz.sh on a real systemd host: install from a local build, a tcpmux pair
-  # and a wss pair (self-signed certificate and pin), traffic through both, the banner
-  # in the journal without its priority prefix, then removal.
+  # scripts/kariz.sh on a real systemd host: install from a local build, the menu through a
+  # terminal, the panel and an agent, signed releases, updating the panel from the panel. The
+  # tunnels the agent would make are written by hand here (same files, same units).
   manager:
     runs-on: ubuntu-latest
     steps:
@@ -83,51 +83,33 @@ jobs:
         run: |
           sudo scripts/kariz.sh install --binary target/release/kariz --panel-binary target/release/kariz-panel
           kariz-manager help >/dev/null
-      - name: Tunnels through the manager
+      - name: Two tunnels by hand, as the agent would write them
         run: |
           python3 -m http.server 18081 --bind 127.0.0.1 >/dev/null 2>&1 &
-          token() { sudo sed -n 's/^token = "\(.*\)"/\1/p' "/etc/kariz/$1.toml"; }
-          sudo kariz-manager add plain --role entry --mode reverse --transport tcpmux \
-            --listen 3080 --forward 127.0.0.1:18080=127.0.0.1:18081 --public-ip 127.0.0.1
-          # a bare port listens on [::], which takes IPv4 too: the exit dials 127.0.0.1
-          sudo grep -q 'listen = "\[::\]:3080"' /etc/kariz/plain.toml
-          sudo kariz-manager add plain-exit --role exit --mode reverse --transport tcpmux \
-            --remote 127.0.0.1:3080 --token "$(token plain)"
-          # wss: the listening side first; it prints the pin for the dialing side.
-          out=$(sudo kariz-manager add secure-exit --role exit --mode direct --transport wss \
-            --listen 127.0.0.1:3443 --ws-path /manager-test --public-ip 127.0.0.1)
-          echo "$out"
-          pin=$(echo "$out" | sed -n 's/.*--pin \([0-9a-f]*\).*/\1/p')
-          test -n "$pin"
-          sudo kariz-manager add secure --role entry --mode direct --transport wss \
-            --remote 127.0.0.1:3443 --forward 127.0.0.1:18082=127.0.0.1:18081 \
-            --ws-path /manager-test --pin "$pin" --token "$(token secure-exit)"
-          # IPv6 between the servers (kcp over ::1), and a port range onto one port.
-          sudo kariz-manager add six --role entry --mode reverse --transport kcp \
-            --listen 3092 --ports 18090-18092=18081 --public-ip ::1
-          sudo kariz-manager add six-exit --role exit --mode reverse --transport kcp \
-            --remote '[::1]:3092' --token "$(token six)"
-          test "$(sudo grep -c '^\[\[forward\]\]' /etc/kariz/six.toml)" = 3
+          tok=$(/usr/local/bin/kariz token)
+          sudo tee /etc/kariz/plain.toml >/dev/null <<EOF
+          role = "entry"
+          mode = "reverse"
+          [tunnel]
+          transport = "tcpmux"
+          listen = "127.0.0.1:3080"
+          token = "$tok"
+          [[forward]]
+          listen = "127.0.0.1:18080"
+          target = "127.0.0.1:18081"
+          EOF
+          sudo tee /etc/kariz/plain-exit.toml >/dev/null <<EOF
+          role = "exit"
+          mode = "reverse"
+          [tunnel]
+          transport = "tcpmux"
+          remote = "127.0.0.1:3080"
+          token = "$tok"
+          EOF
+          sudo sh -c 'chmod 600 /etc/kariz/*.toml'
+          sudo systemctl enable --now kariz@plain kariz@plain-exit
           sleep 3
-          sudo kariz-manager list
           curl -sf --max-time 5 http://127.0.0.1:18080/ >/dev/null
-          curl -sf --max-time 5 http://127.0.0.1:18082/ >/dev/null
-          for p in 18090 18091 18092; do curl -sf --max-time 5 "http://127.0.0.1:$p/" >/dev/null; done
-          curl -sfg --max-time 5 "http://[::1]:18091/" >/dev/null
-      - name: Speed test through the daemons, both modes, and the exit side's refusal
-        run: |
-          # 'plain' is a reverse tcpmux pair, 'secure' a direct wss pair: both modes.
-          sudo kariz-manager speedtest plain --seconds 2 --streams 2 | tee reverse.txt
-          grep -q "download" reverse.txt && grep -q "UDP" reverse.txt
-          sudo kariz-manager speedtest secure --seconds 2 --streams 2 --no-udp | tee direct.txt
-          grep -q "download" direct.txt
-          # the exit side says where to run it, and does not run a test
-          if sudo kariz-manager speedtest secure-exit > exit.txt 2>&1; then
-            echo "the speed test ran on the exit side" >&2
-            exit 1
-          fi
-          cat exit.txt
-          grep -q "entry server" exit.txt
       - name: The menu through a real terminal, installed and piped in
         run: |
           sudo python3 tests/manager_tty.py kariz-manager
@@ -136,7 +118,7 @@ jobs:
         run: |
           out=$(sudo kariz-manager update --binary target/release/kariz)
           echo "$out"
-          echo "$out" | grep -q "6 running tunnel(s) restarted"
+          echo "$out" | grep -q "2 running tunnel(s) restarted"
           sleep 3
           curl -sf --max-time 5 http://127.0.0.1:18080/ >/dev/null
       # The web panel and an agent, through the manager: install, sign in with the link it
@@ -205,10 +187,6 @@ jobs:
           rm "$d/$n.tar.gz.sig"
           check "$d" "$n" v0.10.0
           if check "$d" "$n" v0.11.0; then echo "an unsigned 0.11 passed" >&2; exit 1; fi
-      - name: Private network links, read only
-        run: |
-          sudo kariz-manager net list | grep -q "No private network links"
-          if sudo kariz-manager net status kz-nothere 2>/dev/null; then exit 1; fi
       # Updating the panel from the panel, on this systemd host: a second panel is built that
       # calls itself 99.0.0, a local server plays the releases (signed with a key made for the
       # test), and the panel must roll back a release that does not come up and take a good one.
@@ -226,7 +204,7 @@ jobs:
           ! grep -q '^<[0-9]>' journal.txt
       - name: Remove and uninstall
         run: |
-          for t in plain plain-exit secure secure-exit six six-exit; do sudo kariz-manager remove "$t" --yes; done
+          sudo systemctl disable --now kariz@plain kariz@plain-exit
           sudo kariz-manager agent remove
           sudo kariz-manager panel uninstall --yes
           test ! -e /etc/kariz-panel/panel.toml

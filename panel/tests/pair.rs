@@ -1,7 +1,6 @@
 //! Making a tunnel as a pair, through the hub and a real agent, with real `kariz` daemons
 //! (run as child processes instead of systemd units): create, traffic, edit, stop, delete,
-//! and a create that cannot connect leaving nothing behind (docs/PHASE12.md, sections 3
-//! and 6). The daemons' status comes over their control sockets, which are Unix only.
+//! and a create that cannot connect leaving nothing behind. The daemons' status comes over their control sockets, which are Unix only.
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};

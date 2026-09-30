@@ -29,8 +29,7 @@ It reads the counters twice, one second apart, to show rates.
 | `--json` | print the daemon's document as is (one reading, no rates) |
 
 Exit codes: 0 when the daemon answered, 3 when it is not running (nothing listens on the
-control socket), 1 for other errors. The manager script shows the same with
-`kariz-manager status [NAME]`.
+control socket), 1 for other errors. The web panel shows the same on each tunnel's page.
 
 ## The control socket
 

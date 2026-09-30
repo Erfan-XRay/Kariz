@@ -17,7 +17,7 @@
 //! receive queue. When a queue is full a packet is dropped, never waited for: new ones on
 //! the send side, the oldest on the receive side.
 //!
-//! **The datagram path** (a KCP link, docs/PHASE6.md section 2): `DGRAM` frames that fit
+//! **The datagram path** (a KCP link): `DGRAM` frames that fit
 //! are sent beside the connection instead, unreliably, straight from `send_datagram`.
 //! Both ends probe for it when the session starts (a `DGRAM` frame for stream 0, which
 //! older versions ignore) and use it once anything came over it from the peer, and for a

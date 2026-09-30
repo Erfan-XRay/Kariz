@@ -9,7 +9,7 @@ users' traffic, so the numbers are the tunnel's, not the raw network's.
 kariz speedtest -c /etc/kariz/main.toml
 ```
 
-With the manager script: `kariz-manager speedtest main`, or option 6 of its menu.
+In the web panel it is a button on the tunnel's page ([Using the panel](using-the-panel.md)).
 
 ```text
   ▸ tcpmux · ultraspeed   entry · direct mode

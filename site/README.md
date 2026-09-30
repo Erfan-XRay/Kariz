@@ -8,7 +8,7 @@ The documentation website, at <https://erfan-xray.github.io/Kariz/>. It is built
 | Documentation pages | `docs/*.md` (English) and `docs/fa/*.md` (Persian), plus `CHANGELOG.md` |
 | Tokens and fonts | `panel/web/src/tokens.css`, `panel/web/src/fonts/` (the panel's own) |
 | The hero's drawing helpers | `panel/web/src/draw.ts` |
-| The live demo | `design/prototype/` (the phase 9 prototype, with sample data) |
+| The live demo | `design/prototype/` (the interactive prototype, with sample data) |
 | The front page, how-it-works, the diagrams | `site/src/` (written in both languages) |
 
 `scripts/prepare.mjs` copies the shared files into places Astro serves; the copies are not

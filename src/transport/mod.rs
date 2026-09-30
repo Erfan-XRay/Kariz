@@ -306,7 +306,7 @@ impl WsDialer {
     }
 }
 
-/// Marks a socket's packets with the DSCP codepoint `dscp` (docs/PHASE6.md, section 5):
+/// Marks a socket's packets with the DSCP codepoint `dscp`:
 /// `IP_TOS` for IPv4, and on Unix `IPV6_TCLASS` for IPv6 (plus `IP_TOS` for the IPv4
 /// traffic of a dual-stack socket). The ECN bits stay 0. Failing only costs the mark,
 /// so it is logged rather than returned. Not for QUIC sockets: quinn sets the TOS byte of

@@ -6,7 +6,7 @@
 //! proves the peer holds the key, so a valid peer is one that knows the token, as for
 //! every other transport, with no extra round trip. Certificates travel encrypted in
 //! TLS 1.3. Sessions (streams and datagrams over a connection) are in
-//! `src/session/quic.rs`; see `docs/PHASE4.md`, section 3.
+//! `src/session/quic.rs`.
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
