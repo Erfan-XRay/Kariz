@@ -154,6 +154,34 @@ test("the hero goes down the well as the page scrolls, and its words leave", asy
   await expect(text).toHaveAttribute("inert", "");
 });
 
+for (const theme of ["night", "dawn"] as const) {
+  test(`the journey ends in the page's own colour, with no seam (${theme})`, async ({ page }) => {
+    await open(page, "/", theme);
+    await expect(page.locator(".hero")).toHaveClass(/ready/);
+    await page.evaluate(() => {
+      const s = document.querySelector<HTMLElement>(".hero")!;
+      window.scrollTo({ top: s.offsetTop + s.offsetHeight - window.innerHeight, behavior: "instant" });
+    });
+    // The first frame builds the underground, so wait for the picture rather than a fixed time.
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const c = document.querySelector<HTMLCanvasElement>("[data-hero-canvas]")!;
+            const d = c.getContext("2d")!.getImageData(Math.round(c.width / 2), c.height - 2, 1, 1).data;
+            const probe = document.createElement("i");
+            probe.style.color = "var(--bg)";
+            document.body.append(probe);
+            const m = getComputedStyle(probe).color.match(/\d+/g)!.map(Number);
+            probe.remove();
+            return Math.max(...[0, 1, 2].map((i) => Math.abs(d[i] - m[i])));
+          }),
+        { message: "the bottom of the last frame is the page's background" },
+      )
+      .toBeLessThanOrEqual(3);
+  });
+}
+
 test("the panel demo runs in the page, in the page's language", async ({ page }) => {
   await open(page, "/fa/try/");
   const demo = page.frameLocator("iframe");
