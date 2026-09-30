@@ -225,6 +225,9 @@ impl AgentUpdate {
             self.panel_bin.display().to_string(),
             "--kariz-bin".to_owned(),
             self.kariz_bin.display().to_string(),
+            // The agent still has to answer the panel that the hand-over went well.
+            "--delay".to_owned(),
+            "3".to_owned(),
         ];
         self.launcher.launch(&dir.join("kariz-panel"), args)
     }

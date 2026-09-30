@@ -222,6 +222,9 @@ fn handoff(s: &UpdateSettings, stage: &std::path::Path, version: &str) -> Result
         .arg(&s.panel_bin)
         .arg("--kariz-bin")
         .arg(&s.kariz_bin)
+        // A few seconds first, so the browser sees the hand-over went well before the panel
+        // is stopped.
+        .args(["--delay", "3"])
         .status()
         .map_err(|_| anyhow!("no_systemd"))?;
     if status.success() {
