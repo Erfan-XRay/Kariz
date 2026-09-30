@@ -3,13 +3,19 @@
 //! the mux), so it resists DPI like a tunnel does. The web panel uses it to talk to its
 //! agents; nothing in the tunnel core uses it.
 //!
-//! The transport is `tcpmux` or `kcp` ([`LINK_TRANSPORTS`]): a panel listens on both (TCP
-//! and UDP, the same port number), and an agent uses the one that gets through. Which side
-//! dials and which opens streams are independent: an agent dials the panel, but the panel
-//! is the one that opens streams (requests).
+//! The transport is `tcpmux`, `kcp` or `wss` ([`LINK_TRANSPORTS`]): a panel listens on all
+//! three (TCP and UDP of its agents port, and TLS on the next port, [`wss_addr`]), and an
+//! agent uses the one that gets through. Which side dials and which opens streams are
+//! independent: an agent dials the panel, but the panel is the one that opens streams
+//! (requests).
+//!
+//! Over `wss` the dialing side does not check the certificate: TLS is only there to look
+//! like a web site. Who is on the other end is proven by the token handshake inside, as on
+//! the other transports.
 
 use std::io;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,8 +29,91 @@ use crate::transport::{Dialer as TransportDialer, Incoming, Listener, Settings};
 
 /// The transports a management link can use, in the order an agent tries them. Some
 /// networks let a TCP connection open and then stall it; KCP (over UDP) often gets
-/// through those.
-pub const LINK_TRANSPORTS: [TransportKind; 2] = [TransportKind::Tcpmux, TransportKind::Kcp];
+/// through those, and WebSocket over TLS looks like an ordinary web site.
+pub const LINK_TRANSPORTS: [TransportKind; 3] = [
+    TransportKind::Tcpmux,
+    TransportKind::Kcp,
+    TransportKind::Wss,
+];
+
+/// The `wss` address of a panel whose agents port is in `addr`: the next port, as the
+/// other transports use the agents port itself (TCP and UDP).
+pub fn wss_addr(addr: &str) -> io::Result<String> {
+    let bad = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("not an address with a port: {addr}"),
+        )
+    };
+    let (host, port) = addr.rsplit_once(':').ok_or_else(bad)?;
+    let port: u16 = port.parse().map_err(|_| bad())?;
+    let next = port.checked_add(1).ok_or_else(bad)?;
+    Ok(format!("{host}:{next}"))
+}
+
+/// The WebSocket path of the link: made from the token, so both ends know it and a
+/// scanner does not.
+fn ws_path(token: &str) -> String {
+    let hash = blake3::hash(format!("kariz link ws {token}").as_bytes());
+    format!("/{}", &hash.to_hex()[..16])
+}
+
+/// The synthetic config of one end. `tls`: the listening side's certificate and key for
+/// `wss`.
+fn toml(
+    kind: TransportKind,
+    listening: bool,
+    addr: &str,
+    token: &str,
+    tls: Option<(&Path, &Path)>,
+) -> io::Result<String> {
+    check(kind)?;
+    let (mode, key) = if listening {
+        ("direct", "listen")
+    } else {
+        ("reverse", "remote")
+    };
+    let mut toml = format!(
+        "role = \"exit\"
+mode = \"{mode}\"
+[tunnel]
+transport = \"{}\"
+{key} = {addr:?}
+token = {token:?}
+",
+        kind.name()
+    );
+    if kind == TransportKind::Wss {
+        toml.push_str(&format!(
+            "[tunnel.ws]
+path = {:?}
+[tunnel.tls]
+",
+            ws_path(token)
+        ));
+        if listening {
+            let (cert, key) = tls.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "a wss link needs a certificate and its key",
+                )
+            })?;
+            toml.push_str(&format!(
+                "cert = {:?}
+key = {:?}
+",
+                cert.display().to_string(),
+                key.display().to_string()
+            ));
+        } else {
+            toml.push_str(
+                "insecure = true
+",
+            );
+        }
+    }
+    Ok(toml)
+}
 
 fn check(kind: TransportKind) -> io::Result<()> {
     if LINK_TRANSPORTS.contains(&kind) {
@@ -72,13 +161,24 @@ impl Acceptor {
         Self::bind_via(addr, token, TransportKind::Tcpmux).await
     }
 
-    /// Like [`Acceptor::bind`], over `kind` (one of [`LINK_TRANSPORTS`]).
+    /// Like [`Acceptor::bind`], over `tcpmux` or `kcp`.
     pub async fn bind_via(addr: &str, token: &str, kind: TransportKind) -> io::Result<Self> {
-        check(kind)?;
-        let toml = format!(
-            "role = \"exit\"\nmode = \"direct\"\n[tunnel]\ntransport = \"{}\"\nlisten = {addr:?}\ntoken = {token:?}\n",
-            kind.name()
-        );
+        Self::bind_with(addr, token, kind, None).await
+    }
+
+    /// Like [`Acceptor::bind`], over `wss` with this certificate (reloaded when its files
+    /// change).
+    pub async fn bind_wss(addr: &str, token: &str, cert: &Path, key: &Path) -> io::Result<Self> {
+        Self::bind_with(addr, token, TransportKind::Wss, Some((cert, key))).await
+    }
+
+    async fn bind_with(
+        addr: &str,
+        token: &str,
+        kind: TransportKind,
+        tls: Option<(&Path, &Path)>,
+    ) -> io::Result<Self> {
+        let toml = toml(kind, true, addr, token, tls)?;
         let common = common(toml)?;
         let listener = Listener::bind(&common.settings, addr, &common.tuning).await?;
         Ok(Self {
@@ -152,13 +252,10 @@ impl Dialer {
         Self::via(addr, token, TransportKind::Tcpmux)
     }
 
-    /// Like [`Dialer::new`], over `kind` (one of [`LINK_TRANSPORTS`]).
+    /// Like [`Dialer::new`], over `kind` (one of [`LINK_TRANSPORTS`]; for `wss`, `addr` is
+    /// the panel's [`wss_addr`]).
     pub fn via(addr: &str, token: &str, kind: TransportKind) -> io::Result<Self> {
-        check(kind)?;
-        let toml = format!(
-            "role = \"exit\"\nmode = \"reverse\"\n[tunnel]\ntransport = \"{}\"\nremote = {addr:?}\ntoken = {token:?}\n",
-            kind.name()
-        );
+        let toml = toml(kind, false, addr, token, None)?;
         let common = common(toml)?;
         let dialer = TransportDialer::new(&common.settings, addr, &common.tuning)?;
         Ok(Self { dialer, common })
@@ -205,14 +302,8 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "kcp")]
-    #[tokio::test]
-    async fn a_link_works_over_kcp_too() {
-        let acceptor = Acceptor::bind_via("127.0.0.1:0", TOKEN, TransportKind::Kcp)
-            .await
-            .unwrap();
-        let addr = acceptor.local_addr().unwrap().to_string();
-        let dialer = Dialer::via(&addr, TOKEN, TransportKind::Kcp).unwrap();
+    /// Three requests from the accepting end, answered by the dialing end.
+    async fn round_trips(acceptor: Acceptor, dialer: Dialer) {
         let (dialed, accepted) = tokio::join!(dialer.connect(Side::Server), async {
             let pending = acceptor.accept().await.unwrap();
             pending.establish(Side::Client).await
@@ -230,7 +321,51 @@ mod tests {
                 Bytes::from_static(b"pong")
             );
         }
+    }
+
+    #[cfg(feature = "kcp")]
+    #[tokio::test]
+    async fn a_link_works_over_kcp_too() {
+        let acceptor = Acceptor::bind_via("127.0.0.1:0", TOKEN, TransportKind::Kcp)
+            .await
+            .unwrap();
+        let addr = acceptor.local_addr().unwrap().to_string();
+        let dialer = Dialer::via(&addr, TOKEN, TransportKind::Kcp).unwrap();
+        round_trips(acceptor, dialer).await;
         assert!(Dialer::via(&addr, TOKEN, TransportKind::Ws).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_link_works_over_wss_with_any_certificate() {
+        // A self-signed certificate for another name: the dialing end does not check it.
+        let c = rcgen::generate_simple_self_signed(vec!["panel.example".to_owned()]).unwrap();
+        let dir = std::env::temp_dir().join(format!("kariz-link-wss-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (cert, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+        std::fs::write(&cert, c.cert.pem()).unwrap();
+        std::fs::write(&key, c.signing_key.serialize_pem()).unwrap();
+        let acceptor = Acceptor::bind_wss("127.0.0.1:0", TOKEN, &cert, &key)
+            .await
+            .unwrap();
+        let addr = acceptor.local_addr().unwrap().to_string();
+        let dialer = Dialer::via(&addr, TOKEN, TransportKind::Wss).unwrap();
+        round_trips(acceptor, dialer).await;
+        // Without a certificate there is no wss listener.
+        assert!(Acceptor::bind_via("127.0.0.1:0", TOKEN, TransportKind::Wss)
+            .await
+            .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_wss_port_is_the_next_one() {
+        assert_eq!(wss_addr("203.0.113.5:29001").unwrap(), "203.0.113.5:29002");
+        assert_eq!(
+            wss_addr("[2001:db8::1]:29001").unwrap(),
+            "[2001:db8::1]:29002"
+        );
+        assert!(wss_addr("host").is_err());
+        assert!(wss_addr("host:65535").is_err());
     }
 
     #[tokio::test]

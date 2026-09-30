@@ -14,7 +14,6 @@ pub const PREFIX: &str = "kz1_";
 pub const JOIN_TTL: i64 = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct JoinCode {
     /// Where the panel listens for agents: `host:port`.
     pub p: String,
@@ -25,6 +24,46 @@ pub struct JoinCode {
     /// The name the server is to have, if it was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n: Option<String>,
+    /// The one link transport to use (`tcpmux`, `kcp`, `wss`); none: try them all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<String>,
+}
+
+/// This server's public addresses, as other servers would dial them: the source address
+/// the system picks for the Internet, over IPv4 and over IPv6. Nothing is sent (a UDP
+/// socket is only connected). Private, loopback and link-local addresses are left out.
+pub fn own_addresses() -> (Option<std::net::Ipv4Addr>, Option<std::net::Ipv6Addr>) {
+    use std::net::{IpAddr, UdpSocket};
+    let probe = |bind: &str, to: &str| -> Option<IpAddr> {
+        let s = UdpSocket::bind(bind).ok()?;
+        s.connect(to).ok()?;
+        Some(s.local_addr().ok()?.ip())
+    };
+    let v4 = match probe("0.0.0.0:0", "8.8.8.8:53") {
+        Some(IpAddr::V4(a))
+            if !a.is_private() && !a.is_loopback() && !a.is_link_local() && !a.is_unspecified() =>
+        {
+            Some(a)
+        }
+        _ => None,
+    };
+    let v6 = match probe("[::]:0", "[2001:4860:4860::8888]:53") {
+        Some(IpAddr::V6(a)) if global_v6(&a) => Some(a),
+        _ => None,
+    };
+    (v4, v6)
+}
+
+/// A global unicast IPv6 address (2000::/3), not a unique-local or link-local one.
+fn global_v6(a: &std::net::Ipv6Addr) -> bool {
+    (a.segments()[0] & 0xe000) == 0x2000
+}
+
+/// A link transport a join code may name.
+pub fn valid_transport(name: &str) -> bool {
+    kariz::link::LINK_TRANSPORTS
+        .iter()
+        .any(|k| k.name() == name)
 }
 
 pub fn encode(code: &JoinCode) -> String {
@@ -44,6 +83,9 @@ pub fn decode(text: &str) -> Result<JoinCode> {
         .map_err(|_| anyhow!("this join code is damaged (copy all of it)"))?;
     if code.p.is_empty() || code.t.len() < 16 || code.j.is_empty() {
         bail!("this join code is incomplete");
+    }
+    if code.x.as_deref().is_some_and(|x| !valid_transport(x)) {
+        bail!("this join code names a transport this agent does not know: update it");
     }
     Ok(code)
 }
@@ -77,6 +119,7 @@ mod tests {
             t: "t".repeat(64),
             j: "j".repeat(32),
             n: Some("istanbul-1".into()),
+            x: None,
         }
     }
 
@@ -109,6 +152,35 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("incomplete"));
+        let unknown = JoinCode {
+            x: Some("carrier-pigeon".into()),
+            ..code()
+        };
+        assert!(decode(&encode(&unknown))
+            .unwrap_err()
+            .to_string()
+            .contains("update it"));
+    }
+
+    #[test]
+    fn only_global_ipv6_addresses_are_offered() {
+        let ok = |s: &str| global_v6(&s.parse().unwrap());
+        assert!(ok("2001:db8::1") && ok("2a01:4f8::5"));
+        assert!(!ok("fe80::1") && !ok("fd00::1") && !ok("::1") && !ok("::"));
+    }
+
+    #[test]
+    fn a_code_can_name_one_transport() {
+        for x in ["tcpmux", "kcp", "wss"] {
+            let one = JoinCode {
+                x: Some(x.into()),
+                ..code()
+            };
+            assert_eq!(decode(&encode(&one)).unwrap().x.as_deref(), Some(x));
+        }
+        // Without one (auto) the code is what agents before 1.3 read too.
+        assert!(!encode(&code()).is_empty());
+        assert!(!serde_json::to_string(&code()).unwrap().contains("\"x\""));
     }
 
     #[test]

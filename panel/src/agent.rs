@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
+use kariz::config::TransportKind;
 use kariz::mux::{MuxSession, Side};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -44,6 +45,9 @@ pub struct AgentConfig {
     /// A release public key (hex) of your own, instead of the one built in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_key: Option<String>,
+    /// The one link transport to use (`tcpmux`, `kcp`, `wss`); none: try them in turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
 }
 
 fn default_kariz_dir() -> PathBuf {
@@ -62,6 +66,7 @@ impl AgentConfig {
             kariz_dir: default_kariz_dir(),
             services: Default::default(),
             release_key: None,
+            transport: code.x.clone(),
         }
     }
 
@@ -427,7 +432,18 @@ impl Agent {
                 }
             }
         }
-        let kinds = kariz::link::LINK_TRANSPORTS;
+        // One transport if the join code named it, else all of them in turn.
+        let kinds: Vec<_> = kariz::link::LINK_TRANSPORTS
+            .into_iter()
+            .filter(|k| !matches!(c.transport.as_deref(), Some(t) if t != k.name()))
+            .collect();
+        if kinds.is_empty() {
+            bail!(
+                "unknown transport {:?} in the agent's settings",
+                c.transport.unwrap_or_default()
+            );
+        }
+        let wss = kariz::link::wss_addr(&c.panel)?;
         let chosen = self.path.with_file_name(TRANSPORT_FILE);
         let mut at = std::fs::read_to_string(&chosen)
             .ok()
@@ -437,10 +453,15 @@ impl Agent {
         let mut backoff = Duration::from_secs(1);
         loop {
             let kind = kinds[at];
-            let dialer = kariz::link::Dialer::via(&c.panel, &c.link_token, kind)?;
+            let addr = if kind == TransportKind::Wss {
+                &wss
+            } else {
+                &c.panel
+            };
+            let dialer = kariz::link::Dialer::via(addr, &c.link_token, kind)?;
             match dialer.connect(Side::Server).await {
                 Ok(session) => {
-                    info!(panel = %c.panel, transport = kind.name(), "connected to the panel");
+                    info!(panel = %addr, transport = kind.name(), "connected to the panel");
                     crate::agent_update::touch(&self.path.with_file_name("connected"));
                     let started = std::time::Instant::now();
                     let asked = self
@@ -481,7 +502,7 @@ impl Agent {
             // A transport that keeps failing is swapped for the next one, round and round,
             // so a network that stalls TCP (or blocks UDP) is got around without anyone
             // having to choose.
-            if misses >= MISSES_BEFORE_SWITCH {
+            if misses >= MISSES_BEFORE_SWITCH && kinds.len() > 1 {
                 misses = 0;
                 at = (at + 1) % kinds.len();
                 backoff = Duration::from_secs(1);
@@ -558,6 +579,7 @@ mod tests {
             t: "t".repeat(64),
             j: "j".repeat(32),
             n: None,
+            x: None,
         };
         let config = enroll_from_code(&join::encode(&code), &path).unwrap();
         assert_eq!(config.join.as_deref(), Some(code.j.as_str()));
@@ -630,6 +652,7 @@ mod tests {
             t: "t".repeat(64),
             j: "j".into(),
             n: None,
+            x: None,
         });
         config.kariz_dir = dir.path().to_path_buf();
         let agent = Agent::new(&dir.path().join("agent.toml"), config);
