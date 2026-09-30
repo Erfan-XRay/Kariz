@@ -503,7 +503,7 @@ panel_install() {
     # the browser trusts); one that is already set up keeps what it has.
     if [[ ! -f "$PANEL_CONF" ]]; then
         if [[ -n "$cert" ]]; then
-            init_args+=(--cert-file "$cert" --key-file "$key")
+            init_args+=(--cert-file "$(own_file "$cert")" --key-file "$(own_file "$key")")
         else
             choose_identity "$domain" "$ip" "$yes" || die "Cancelled."
             if [[ -z "$email" ]] && ((!yes)); then
@@ -587,6 +587,17 @@ cert_hook() {
         deploy) systemctl kill -s HUP kariz-panel 2>/dev/null || true ;;
         *) die "cert-hook: pre | post | deploy" ;;
     esac
+}
+
+# The absolute path of a certificate or key file of your own. The panel service has a
+# private /tmp, so a file there would be invisible to it.
+own_file() {
+    local f
+    f=$(realpath "$1") || die "No such file: $1"
+    case $f in
+        /tmp/* | /var/tmp/*) die "$f is in /tmp, which the panel service does not see: put it somewhere else (like /etc/kariz-panel/)." ;;
+    esac
+    printf '%s' "$f"
 }
 
 # Sets (or, with no arguments, clears) the panel's own certificate in its settings.
@@ -790,7 +801,7 @@ panel_cert() {
     if [[ -n "$cert$key" ]]; then
         # A certificate of your own (not renewed by Kariz).
         [[ -f "$cert" && -f "$key" ]] || die "--cert-file and --key-file go together, and both must be files."
-        panel_set_cert "$(realpath "$cert")" "$(realpath "$key")"
+        panel_set_cert "$(own_file "$cert")" "$(own_file "$key")"
         rm -f "$PANEL_DOMAIN"
         systemctl restart kariz-panel
         ok "The panel uses your certificate now. Kariz does not renew it: send the panel a SIGHUP after you do (systemctl kill -s HUP kariz-panel)."

@@ -127,8 +127,9 @@ jobs:
       - name: The web panel and an agent through the manager
         run: |
           # Let's Encrypt cannot be reached from here: a certificate made for the test.
-          openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/ci-key.pem -out /tmp/ci-cert.pem             -days 2 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 2>/dev/null
-          sudo kariz-manager panel install --port 28443 --host 127.0.0.1             --cert-file /tmp/ci-cert.pem --key-file /tmp/ci-key.pem | tee panel.txt
+          sudo mkdir -p /etc/kariz-ci
+          sudo openssl req -x509 -newkey rsa:2048 -nodes -keyout /etc/kariz-ci/key.pem -out /etc/kariz-ci/cert.pem \n            -days 2 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 2>/dev/null
+          sudo kariz-manager panel install --port 28443 --host 127.0.0.1 \n            --cert-file /etc/kariz-ci/cert.pem --key-file /etc/kariz-ci/key.pem | tee panel.txt
           grep -q "certificate" panel.txt
           link=$(grep -o 'https://[^ ]*#t=[0-9a-f]*' panel.txt)
           base=${link%%#*}
