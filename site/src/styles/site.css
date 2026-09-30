@@ -29,8 +29,8 @@ img, svg, canvas { max-width: 100%; }
 /* ---- Header ---- */
 .top {
   position: sticky; top: 0; z-index: 30;
-  background: color-mix(in srgb, var(--bg) 82%, transparent);
-  backdrop-filter: blur(10px);
+  /* No backdrop blur: over the moving hero it would be redrawn every frame. */
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
   border-bottom: 1px solid var(--line);
 }
 .top .wrap { display: flex; align-items: center; gap: var(--sp-4); height: 60px; }
