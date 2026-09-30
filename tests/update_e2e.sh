@@ -117,6 +117,13 @@ echo "the update to 99.0.0 worked"
 # ---- the other servers: the agent (this same machine, connected as ci-agent) is still the
 # old program in memory; the panel sends it the release, it swaps, restarts and reconnects,
 # then the tunnels are restarted one at a time ----
+# the agent checks the release again itself, with its own copy of the key: here the test key
+echo "release_key = \"$hexkey\"" >>/etc/kariz-panel/agent.toml
+systemctl restart kariz-agent
+for _ in $(seq 1 30); do
+    if [[ -n "$(api "${base}api/servers" | jq -r '.servers[] | select(.local == false and .online) | .id' 2>/dev/null || true)" ]]; then break; fi
+    sleep 1
+done
 agent_version() { api "${base}api/servers" | jq -r '.servers[] | select(.local == false) | .version' | head -n1; }
 test "$(api "${base}api/update" | jq -r '.outdated | length')" = 1
 echo "the agent is $(agent_version), the panel 99.0.0"
