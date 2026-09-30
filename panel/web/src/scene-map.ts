@@ -19,8 +19,10 @@ export interface MapTunnel {
   st: "up" | "down" | "off";
   /** Mbit/s, both directions together. */
   rate: number;
-  /** The text on the channel. */
+  /** The tunnel's name, on the channel. */
   label: string;
+  /** Next to the name: the rate while it flows, else its state. */
+  value: string;
 }
 
 export interface MapData {
@@ -128,7 +130,11 @@ export function startMap(canvas: HTMLCanvasElement, opts: MapOptions): () => voi
     const { ctx, W, H } = fitCanvas(canvas);
     if (!geo || geo.key !== key(W, H)) geo = layout(W, H);
     const g = geo;
-    const { servers } = opts.data();
+    const { servers, tunnels } = opts.data();
+    // The layout is kept while the servers and tunnels stay the same, but what they show
+    // (state, rate, labels) is read fresh on every frame.
+    const fresh = new Map(tunnels.map((t) => [t.id, t]));
+    const current = (t: MapTunnel) => fresh.get(t.id) ?? t;
     const time = now / 1000;
     const dt = Math.min(0.05, last ? time - last : 0.016);
     last = time;
@@ -180,7 +186,7 @@ export function startMap(canvas: HTMLCanvasElement, opts: MapOptions): () => voi
 
     // Channels.
     for (const ch of g.chans) {
-      const t = ch.t;
+      const t = current(ch.t);
       const lit = hover?.kind === "tunnel" && hover.id === t.id;
       const target = t.st === "off" ? 0 : 1;
       const cur = fill.get(t.id) ?? 0;
@@ -272,26 +278,52 @@ export function startMap(canvas: HTMLCanvasElement, opts: MapOptions): () => voi
       }
     }
 
-    // Channel labels.
+    // Channel labels: a pill with the name, and the rate (or the state) after it. Each part
+    // is drawn on its own, left to right, so a number and its unit never turn around in RTL.
     ctx.textBaseline = "middle";
-    ctx.direction = rtl ? "rtl" : "ltr";
+    ctx.direction = "ltr";
     g.chans.forEach((ch, i) => {
-      const t = ch.t;
-      const p = ch.pts[Math.round((0.28 + 0.14 * (i % 3)) * 60)];
-      ctx.font = uiFont(500, g.narrow ? 10 : 12);
-      const tw = ctx.measureText(t.label).width + 14;
-      const y = p.y - (g.narrow ? 12 : 15);
-      ctx.fillStyle = rgba(P.night ? P.skyTop : "#fbf6ec", 0.85);
+      const t = current(ch.t);
+      const p = ch.pts[Math.round((0.3 + 0.13 * (i % 3)) * 60)];
+      const fs = g.narrow ? 10 : 12;
+      const nameFont = uiFont(600, fs);
+      const valueFont = uiFont(500, fs);
+      ctx.font = nameFont;
+      const nw = ctx.measureText(t.label).width;
+      ctx.font = valueFont;
+      const vw = ctx.measureText(t.value).width;
+      const gap = 8;
+      const padX = 9;
+      const w = nw + gap + vw + padX * 2 + 8;
+      const h = g.narrow ? 18 : 22;
+      const x = clamp(p.x - w / 2, 6, W - w - 6);
+      const y = p.y - (g.narrow ? 13 : 17);
+      const lit = hover?.kind === "tunnel" && hover.id === t.id;
+      ctx.fillStyle = rgba(P.night ? P.skyTop : "#fffaf1", P.night ? 0.88 : 0.94);
       ctx.beginPath();
-      ctx.roundRect(p.x - tw / 2, y - 9, tw, 18, 4);
+      ctx.roundRect(x, y - h / 2, w, h, h / 2);
       ctx.fill();
-      ctx.strokeStyle = t.st === "down" ? rgba(P.danger, 0.6) : rgba(P.gold, hover?.id === t.id ? 0.7 : 0.25);
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = t.st === "down" ? rgba(P.danger, 0.65) : t.st === "up" ? rgba(P.water, lit ? 0.9 : 0.4) : rgba(P.gold, lit ? 0.7 : 0.25);
+      ctx.lineWidth = lit ? 1.5 : 1;
       ctx.stroke();
-      ctx.fillStyle = t.st === "down" ? P.danger : t.st === "off" ? P.text3 : P.text;
-      ctx.textAlign = "center";
-      ctx.fillText(t.label, p.x, y + 1);
+      // the state dot, then the two parts in reading order
+      const dotX = rtl ? x + w - padX - 2 : x + padX + 2;
+      ctx.fillStyle = t.st === "up" ? P.water : t.st === "down" ? P.danger : P.text3;
+      ctx.beginPath();
+      ctx.arc(dotX, y + 0.5, 3, 0, 6.28);
+      ctx.fill();
+      const inner = rtl ? x + padX : x + padX + 8;
+      const nameX = rtl ? inner + vw + gap : inner;
+      const valueX = rtl ? inner : inner + nw + gap;
+      ctx.textAlign = "left";
+      ctx.font = nameFont;
+      ctx.fillStyle = t.st === "off" ? P.text3 : P.text;
+      ctx.fillText(t.label, nameX, y + 1);
+      ctx.font = valueFont;
+      ctx.fillStyle = t.st === "up" ? P.water : t.st === "down" ? P.danger : P.text3;
+      ctx.fillText(t.value, valueX, y + 1);
     });
+    ctx.direction = rtl ? "rtl" : "ltr";
 
     // The horizon, the mounds and the servers' names.
     ctx.strokeStyle = P.gold;

@@ -3,7 +3,7 @@ import { ApiError, api } from "./api";
 import type { Link, Network, ServerInfo } from "./api";
 import { Checklist, describeError, useOp } from "./ops";
 import { useApp } from "./store";
-import { Dialog, Icon } from "./ui";
+import { Card, Dialog, Empty, Icon } from "./ui";
 
 /** The networks and links of the panel, kept fresh while the page is open. */
 export function useNetworks(): { networks: Network[]; links: Link[]; reload: () => void } {
@@ -225,42 +225,51 @@ export function NetworksPage({ servers, onChanged }: { servers: ServerInfo[]; on
         </button>
       </div>
 
-      <div className="stratum s1">
-        <div className="stratum-head">
-          <h2>{t("net.addresses")}</h2>
-          <span className="eyebrow">{t("net.addressesHint")}</span>
-        </div>
+      <Card title={t("net.addresses")} sub={t("net.addressesHint")}>
         <ul className="addr-list">
           {servers.map((s) => (
             <AddressRow key={`${s.id}-${s.addr ?? ""}`} server={s} onSaved={onChanged} />
           ))}
         </ul>
-      </div>
+      </Card>
 
       {networks.length === 0 && (
-        <div className="stratum s2">
-          <p className="muted" style={{ margin: 0, maxWidth: 640 }}>
-            {t("net.none")}
-          </p>
+        <div className="card">
+          <Empty
+            icon="networks"
+            title={t("net.emptyTitle")}
+            text={t("net.none")}
+            action={
+              <button className="btn btn-primary btn-sm" type="button" onClick={() => setDialog("new")}>
+                <Icon name="plus" size={18} />
+                {t("net.new")}
+              </button>
+            }
+          />
         </div>
       )}
-      {networks.map((n, i) => {
+      {networks.map((n) => {
         const mine = links.filter((l) => l.network === n.id);
         return (
-          <section className={`stratum s${(i % 3) + 2}`} key={n.id}>
-            <div className="stratum-head">
-              <h2>
-                {n.name} <span className="tag mono">{n.cidr}</span>
-              </h2>
-              <span className="eyebrow">{t("net.usage", { used: num(n.links), of: num(n.capacity) })}</span>
-            </div>
-            <div className="meter" aria-hidden="true">
-              <i style={{ width: `${Math.max(2, (n.links / Math.max(1, n.capacity)) * 100)}%` }} />
+          <Card
+            key={n.id}
+            className="net-card"
+            title={
+              <>
+                {n.name} <span className="tag">{n.cidr}</span>
+              </>
+            }
+          >
+            <div className="usage">
+              <span>{t("net.usage", { used: num(n.links), of: num(n.capacity) })}</span>
+              <div className="usage-bar" aria-hidden="true">
+                <i style={{ width: `${Math.max(2, (n.links / Math.max(1, n.capacity)) * 100)}%` }} />
+              </div>
             </div>
             {mine.length === 0 ? (
               <p className="muted small">{t("net.noLinks")}</p>
             ) : (
-              <table className="plain-table" style={{ marginTop: "var(--sp-4)" }}>
+              <table className="plain-table">
                 <thead>
                   <tr>
                     <th>{t("t.route")}</th>
@@ -291,8 +300,9 @@ export function NetworksPage({ servers, onChanged }: { servers: ServerInfo[]; on
                 </tbody>
               </table>
             )}
-            <div style={{ display: "flex", gap: "var(--sp-3)", marginTop: "var(--sp-4)" }}>
+            <div className="net-actions">
               <button className="btn btn-primary btn-sm" type="button" onClick={() => setDialog({ add: n })}>
+                <Icon name="plus" size={18} />
                 {t("net.add")}
               </button>
               {mine.length === 0 && (
@@ -301,12 +311,13 @@ export function NetworksPage({ servers, onChanged }: { servers: ServerInfo[]; on
                 </button>
               )}
             </div>
-          </section>
+          </Card>
         );
       })}
-      <p className="muted small" style={{ padding: "0 var(--sp-6) var(--sp-6)", maxWidth: 720 }}>
-        {t("net.honest")}
-      </p>
+      <div className="banner info net-honest">
+        <Icon name="info" size={18} />
+        <span>{t("net.honest")}</span>
+      </div>
 
       {dialog === "new" && (
         <NewNetwork

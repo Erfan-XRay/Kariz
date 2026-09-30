@@ -64,6 +64,7 @@
   --r-1: 4px;   /* chips, inputs inside bands */
   --r-2: 8px;   /* buttons, fields */
   --r-3: 14px;  /* dialogs, the login well */
+  --r-4: 18px;  /* cards */
   --r-pill: 999px;
   --hairline: 1px;
 
@@ -132,6 +133,16 @@
   --shadow-deep: 0 24px 64px -24px rgb(0 0 0 / 0.7);
   --grain-opacity: 0.05;
   --star: #e9c46a;
+
+  /* cards: raised a little above the page, with a faint light on their top edge */
+  --card: var(--navy-850);
+  --card-2: var(--navy-800);
+  --card-edge: rgb(233 196 106 / 0.13);
+  --card-shadow: inset 0 1px 0 rgb(255 255 255 / 0.035), 0 18px 40px -28px rgb(0 0 0 / 0.8);
+  --backdrop: rgb(3 8 16 / 0.62);
+  --ok: var(--water-400);
+  --ok-soft: rgb(52 208 195 / 0.12);
+  --warn-soft: rgb(244 162 89 / 0.14);
 }
 
 /* ---- Dawn (light) ---- */
@@ -168,6 +179,15 @@
   --shadow-deep: 0 24px 64px -28px rgb(60 40 0 / 0.35);
   --grain-opacity: 0.07;
   --star: #c8962e;
+
+  --card: #fffaf1;
+  --card-2: var(--sand-50);
+  --card-edge: rgb(122 78 0 / 0.14);
+  --card-shadow: 0 1px 2px rgb(60 40 0 / 0.06), 0 16px 36px -26px rgb(60 40 0 / 0.35);
+  --backdrop: rgb(40 28 8 / 0.38);
+  --ok: var(--water-800);
+  --ok-soft: rgb(10 110 101 / 0.1);
+  --warn-soft: rgb(138 72 0 / 0.1);
 }
 
 @media (prefers-reduced-motion: reduce) {

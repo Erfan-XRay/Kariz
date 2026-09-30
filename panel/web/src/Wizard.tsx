@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ApiError, api } from "./api";
 import type { CheckReply, ForwardSpec, PairRequest, ServerInfo } from "./api";
 import type { Tunnel } from "./derive";
@@ -203,7 +204,7 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
   const labels = [t("wz.s1"), t("wz.s2"), t("wz.s3"), t("wz.s4"), t("wz.s5")];
   const dir = lang === "fa" ? -1 : 1;
 
-  return (
+  return createPortal(
     <div ref={box} className={`wizard ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label={editing ? t("wz.titleEdit", { name: edit!.name }) : t("wz.titleNew")}>
       <div className="wz-top">
         <h2>{editing ? t("wz.titleEdit", { name: edit!.name }) : t("wz.titleNew")}</h2>
@@ -462,7 +463,8 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
           </button>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
