@@ -61,7 +61,7 @@ export function MapPage({ servers }: { servers: ServerInfo[] }) {
   return (
     <div className="page is-on">
       <div className="map-band">
-        <canvas id="map" ref={canvas} role="img" aria-describedby="map-alt" />
+        <canvas id="map" ref={canvas} role="img" aria-label={t("nav.map")} aria-describedby="map-alt" />
         <div className="map-legend">
           <span>
             <i className="dot up" />
