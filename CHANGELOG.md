@@ -11,8 +11,7 @@ Everything about servers and tunnels is now done in the web panel, and Kariz has
   update, web panel and agent, uninstall. The commands `add`, `list`, `status`, `start`, `stop`,
   `restart`, `logs`, `speedtest`, `edit`, `remove` and `net` are gone: use the panel. Tunnel
   configs and services (`/etc/kariz/NAME.toml`, `kariz@NAME`) are unchanged, and the panel still
-  reads tunnels that were made before. This breaks the 1.x promise about the manager's commands,
-  so the next release is 2.0.0.
+  reads tunnels that were made before.
 - The panel's empty-list and hint texts no longer point to the manager.
 
 ### Removed
