@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <b>فارسی</b> · <a href="docs/README.md">مستندات (انگلیسی)</a> · <a href="CHANGELOG.md">تغییرات</a>
+  <a href="README.md">English</a> · <b>فارسی</b> · <a href="https://erfan-xray.github.io/Kariz/fa/">وب‌سایت</a> · <a href="docs/README.md">مستندات (انگلیسی)</a> · <a href="CHANGELOG.md">تغییرات</a>
 </p>
 
 <div dir="rtl">

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **The documentation website** (https://erfan-xray.github.io/Kariz/), built from `docs/` with
+  Astro, in the panel's design, in English and Persian: an animated front page (the qanat scene,
+  going down the well as you scroll), search, diagrams that move (how a tunnel works, which
+  transport to pick, what a profile changes) and the panel's prototype as a live demo with
+  sample data. It is published from the repository by the `site` workflow. No change to the
+  program.
+
 ## 1.0.0 - 2026-09-30
 
 The first stable release. From here on the project follows semantic versioning and keeps what

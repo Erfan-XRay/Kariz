@@ -1,0 +1,37 @@
+---
+import DocsShell from "./DocsShell.astro";
+import { getDoc, hasTranslation, h1, neighbours, rendered, summary, titleOf } from "../lib/docs";
+import { REPO, dirOf, href, ui } from "../lib/site";
+import type { Lang } from "../lib/site";
+
+interface Props {
+  lang: Lang;
+  slug: string;
+}
+const { lang, slug } = Astro.props;
+const t = ui[lang];
+const doc = (await getDoc(slug, lang))!;
+const { Content, headings } = await rendered(doc);
+const translated = await hasTranslation(slug, lang);
+const { prev, next } = await neighbours(slug);
+const title = h1(doc.entry.body) || slug;
+const source =
+  slug === "changelog"
+    ? "CHANGELOG.md"
+    : `docs/${doc.written === "fa" ? "fa/" : ""}${doc.entry.filePath?.split("/").pop() ?? `${slug}.md`}`;
+// A page written in English inside the Persian site stays left to right.
+const pageDir = dirOf(doc.written);
+const pageLang = doc.written;
+---
+
+<DocsShell lang={lang} title={title} description={summary(doc.entry.body)} path={`/docs/${slug}/`} slug={slug} headings={headings}>
+  <article class="prose" data-pagefind-body data-pagefind-weight={/^phase\d+$/.test(slug) ? "0.2" : undefined} dir={pageDir} lang={pageLang}>
+    {!translated && <p class="notice" dir={dirOf(lang)} lang={lang} data-pagefind-ignore>{t.notTranslated}</p>}
+    <Content />
+    <p data-pagefind-ignore><a class="edit" href={`${REPO}/edit/main/${source}`}>{t.editOnGithub}</a></p>
+  </article>
+  <nav class="pager" aria-label="Pages" data-pagefind-ignore>
+    {prev && <a href={href(lang, `/docs/${prev}/`)} rel="prev"><small>{t.previous}</small>{await titleOf(prev, lang)}</a>}
+    {next && <a class="nx" href={href(lang, `/docs/${next}/`)} rel="next"><small>{t.next}</small>{await titleOf(next, lang)}</a>}
+  </nav>
+</DocsShell>

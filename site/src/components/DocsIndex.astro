@@ -1,0 +1,43 @@
+---
+import DocsShell from "./DocsShell.astro";
+import { getDoc, sidebar, summary } from "../lib/docs";
+import { href, ui } from "../lib/site";
+import type { Lang } from "../lib/site";
+
+const { lang } = Astro.props as { lang: Lang };
+const t = ui[lang];
+const nav = await sidebar(lang);
+const skipDesc = new Set(["how-it-works"]);
+const desc: Record<string, string> = {
+  "how-it-works": lang === "fa" ? "لایه‌ها، حالت direct و reverse، mux و انتخاب ترنسپورت، با انیمیشن." : "Layers, direct and reverse, the mux, and a chooser for the transport, animated.",
+};
+for (const s of nav) for (const p of s.pages) if (!skipDesc.has(p.slug)) desc[p.slug] = summary((await getDoc(p.slug, lang))?.entry.body, 110);
+---
+
+<DocsShell lang={lang} title={t.docs} description={t.docsIntro} path="/docs/" flow={false}>
+  <div class="prose">
+    <h1>{t.docs}</h1>
+    <p>{t.docsIntro}</p>
+    {nav.filter((s) => s.id !== "project").map((s) => (
+      <>
+        <h2 id={s.id}>{s.title}</h2>
+        <div class="cards">
+          {s.pages.map((p) => (
+            <a class="card" href={href(lang, `/docs/${p.slug}/`)}>
+              <b>{p.title}{!p.translated && <span class="en-tag" lang="en"> EN</span>}</b>
+              <span>{desc[p.slug]}</span>
+            </a>
+          ))}
+        </div>
+      </>
+    ))}
+    {nav.filter((s) => s.id === "project").map((s) => (
+      <>
+        <h2 id={s.id}>{s.title}</h2>
+        <ul>
+          {s.pages.map((p) => <li><a href={href(lang, `/docs/${p.slug}/`)}>{p.title}</a></li>)}
+        </ul>
+      </>
+    ))}
+  </div>
+</DocsShell>

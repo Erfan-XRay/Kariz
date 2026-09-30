@@ -66,13 +66,33 @@ one language says so.
 
 | Step | Content | Done when |
 |---|---|---|
-| **16.0** Plan | This document. | |
-| **16.1** Design | The site's screens designed from the panel's system: front page, a docs page, search, the demo. | Approved. |
-| **16.2** Build | Astro project, the theme, the docs pages from `docs/`, search, both languages. | The site builds from `docs/` alone. |
-| **16.3** The hero and the demo | The qanat hero and scroll, the live demo of the panel, the diagrams. | Smooth at 60 fps on a mid phone; reduced motion honoured. |
-| **16.4** Publish | The Pages workflow, link and translation checks, the README pointing to it. | The site is live at the repository's Pages address. |
+| **16.0** Plan (done) | This document. | |
+| **16.1** Design (done) | The site's screens designed from the panel's system: front page, a docs page, search, the demo. | Approved. |
+| **16.2** Build (done) | Astro project, the theme, the docs pages from `docs/`, search, both languages. | The site builds from `docs/` alone. |
+| **16.3** The hero and the demo (done) | The qanat hero and scroll, the live demo of the panel, the diagrams. | Smooth at 60 fps on a mid phone; reduced motion honoured. |
+| **16.4** Publish (done) | The Pages workflow, link and translation checks, the README pointing to it. | The site is live at the repository's Pages address. |
 
-## 7. Depends on
+## 7. What was built
+
+- `site/` is an Astro project (see [`site/README.md`](../site/README.md)). The docs are read
+  from `docs/` and `docs/fa/` by content collections; a small remark plugin turns the links
+  between files into routes, and links to anything else in the repository into GitHub links.
+- The front page is the hero (the panel's login scene, drawn from the same tokens, with the
+  camera going down the well as the page scrolls), then strata: what Kariz is, how a tunnel
+  works, the transport chooser, the panel (the prototype in a frame), install in one line.
+- **How it works** (`/docs/how-it-works/`) is a page of the site's own, in both languages: the
+  tunnel diagram with a direct / reverse switch, the layers, the chooser (the flow chart of
+  `transports.md` as questions), and what each profile changes.
+- Search is Pagefind, built after the site and loaded on demand; each language searches its own
+  pages. Design notes (the phase plans) weigh less than the guides.
+- A page not translated says so, is marked `EN` in the sidebar and stays left to right;
+  `untranslated.txt` lists them, and CI fails when the list is not true.
+- The demo is `design/prototype/` copied at build time with the panel's tokens; it opens in
+  the language and theme of the page it is in.
+- Playwright tests (axe in both themes and languages, phone width, search, the language switch,
+  the diagrams, copy, low power, reduced motion) run in the `site` workflow.
+
+## 8. Depends on
 
 The repository being **public** (GitHub Pages on a private repository needs a paid plan),
 which is also what the panel's self-update needs to see releases without a token.

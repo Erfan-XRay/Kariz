@@ -1,0 +1,134 @@
+---
+// How a tunnel works: users, the entry, the tunnel with its layers, the exit, the targets.
+// The switch turns the direction of the dial (direct: the entry dials; reverse: the exit
+// dials); the traffic flows the same way in both.
+import type { Lang } from "../lib/site";
+
+const { lang } = Astro.props as { lang: Lang };
+const T = {
+  en: {
+    direct: "Direct",
+    reverse: "Reverse",
+    mode: "Who dials",
+    users: "Users",
+    entry: "Entry",
+    entrySub: "public port",
+    exit: "Exit",
+    exitSub: "reaches targets",
+    targets: "Targets",
+    tunnel: "the tunnel",
+    dialsDirect: "the entry dials the exit",
+    dialsReverse: "the exit dials the entry",
+    layers: "Layers, top to bottom",
+    l1: "mux: many streams, one flow control each",
+    l2: "AEAD records, no fixed bytes",
+    l3: "handshake: token + X25519",
+    l4: "tcp · tcpmux · ws · wss · quic · kcp",
+    capDirect: "Direct mode: the entry dials the exit, so the exit's port must be reachable. Users' traffic goes the same way in both modes.",
+    capReverse: "Reverse mode: the exit dials the entry, so only the entry needs a reachable port, which is what a server behind NAT wants.",
+    label: "Diagram: users connect to the entry, Kariz carries their traffic through an encrypted, multiplexed tunnel to the exit, and the exit reaches the targets.",
+  },
+  fa: {
+    direct: "direct",
+    reverse: "reverse",
+    mode: "چه کسی وصل می‌شود",
+    users: "کاربرها",
+    entry: "entry",
+    entrySub: "پورت عمومی",
+    exit: "exit",
+    exitSub: "به مقصد می‌رسد",
+    targets: "مقصدها",
+    tunnel: "تانل",
+    dialsDirect: "entry به exit وصل می‌شود",
+    dialsReverse: "exit به entry وصل می‌شود",
+    layers: "لایه‌ها، از بالا به پایین",
+    l1: "mux: چند stream، هر کدام با کنترل جریان خودش",
+    l2: "رکوردهای AEAD، بدون بایت ثابت",
+    l3: "handshake: توکن + X25519",
+    l4: "tcp · tcpmux · ws · wss · quic · kcp",
+    capDirect: "حالت direct: entry به exit وصل می‌شود، پس پورت exit باید در دسترس باشد. ترافیک کاربرها در هر دو حالت یک مسیر را می‌رود.",
+    capReverse: "حالت reverse: exit به entry وصل می‌شود، پس فقط entry به پورت در دسترس نیاز دارد؛ همان چیزی که سرور پشت NAT می‌خواهد.",
+    label: "نمودار: کاربرها به entry وصل می‌شوند، کاریز ترافیکشان را در یک تانل رمزشدهٔ mux به exit می‌رساند و exit به مقصدها می‌رسد.",
+  },
+}[lang];
+---
+
+<figure class="diagram tunnel-dia" data-mode="reverse" data-cap-direct={T.capDirect} data-cap-reverse={T.capReverse}>
+  <div class="seg" role="group" aria-label={T.mode}>
+    <button type="button" data-set="direct" aria-pressed="false">{T.direct}</button>
+    <button type="button" data-set="reverse" aria-pressed="true">{T.reverse}</button>
+  </div>
+  <svg viewBox="0 0 900 340" role="img" aria-label={T.label}>
+    <defs>
+      <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 10 5 0 10z" fill="var(--accent)" />
+      </marker>
+    </defs>
+    <!-- the surface and the earth -->
+    <line x1="0" y1="170" x2="900" y2="170" stroke="var(--accent)" stroke-opacity=".25" stroke-dasharray="2 6" />
+    <!-- nodes -->
+    <g>
+      <rect class="dia-box" x="10" y="72" width="130" height="76" rx="8" />
+      <text class="dia-text" x="75" y="106" text-anchor="middle" font-weight="600">{T.users}</text>
+      <text class="dia-sub" x="75" y="128" text-anchor="middle">TCP · UDP</text>
+
+      <rect class="dia-box" x="200" y="72" width="130" height="76" rx="8" />
+      <text class="dia-text" x="265" y="106" text-anchor="middle" font-weight="600">{T.entry}</text>
+      <text class="dia-sub" x="265" y="128" text-anchor="middle">{T.entrySub}</text>
+
+      <rect class="dia-box" x="570" y="72" width="130" height="76" rx="8" />
+      <text class="dia-text" x="635" y="106" text-anchor="middle" font-weight="600">{T.exit}</text>
+      <text class="dia-sub" x="635" y="128" text-anchor="middle">{T.exitSub}</text>
+
+      <rect class="dia-box" x="760" y="72" width="130" height="76" rx="8" />
+      <text class="dia-text" x="825" y="106" text-anchor="middle" font-weight="600">{T.targets}</text>
+      <text class="dia-sub" x="825" y="128" text-anchor="middle">TCP · UDP</text>
+    </g>
+    <!-- user and target legs -->
+    <line class="dia-flow" x1="140" y1="110" x2="200" y2="110" />
+    <line class="dia-flow" x1="700" y1="110" x2="760" y2="110" />
+    <!-- the tunnel: a pipe with three streams in it -->
+    <rect x="330" y="86" width="240" height="48" rx="24" fill="var(--water-soft)" stroke="var(--water)" stroke-opacity=".7" />
+    <line class="dia-flow" x1="352" y1="99" x2="548" y2="99" style="animation-duration:1.1s" />
+    <line class="dia-flow" x1="352" y1="110" x2="548" y2="110" style="animation-duration:1.6s" />
+    <line class="dia-flow" x1="352" y1="121" x2="548" y2="121" style="animation-duration:1.3s" />
+    <text class="dia-sub" x="450" y="80" text-anchor="middle">{T.tunnel}</text>
+    <!-- who dials -->
+    <g class="m-direct">
+      <path class="dia-gold" d="M280 152 C 300 200, 600 200, 620 152" marker-end="url(#ah)" />
+      <text class="dia-text" x="450" y="196" text-anchor="middle">{T.dialsDirect}</text>
+    </g>
+    <g class="m-reverse">
+      <path class="dia-gold" d="M620 152 C 600 200, 300 200, 280 152" marker-end="url(#ah)" />
+      <text class="dia-text" x="450" y="196" text-anchor="middle">{T.dialsReverse}</text>
+    </g>
+    <!-- the layers of the tunnel -->
+    <text class="dia-sub" x="450" y="232" text-anchor="middle">{T.layers}</text>
+    <g>
+      <rect class="dia-box" x="230" y="240" width="440" height="20" rx="4" /><text class="dia-sub" x="450" y="254" text-anchor="middle" style="fill:var(--text-2)">{T.l1}</text>
+      <rect class="dia-box" x="230" y="264" width="440" height="20" rx="4" /><text class="dia-sub" x="450" y="278" text-anchor="middle" style="fill:var(--text-2)">{T.l2}</text>
+      <rect class="dia-box" x="230" y="288" width="440" height="20" rx="4" /><text class="dia-sub" x="450" y="302" text-anchor="middle" style="fill:var(--text-2)">{T.l3}</text>
+      <rect class="dia-box" x="230" y="312" width="440" height="20" rx="4" style="stroke:var(--accent)" /><text class="dia-sub" x="450" y="326" text-anchor="middle" style="fill:var(--accent-strong)">{T.l4}</text>
+    </g>
+  </svg>
+  <figcaption aria-live="polite" data-cap>{T.capReverse}</figcaption>
+</figure>
+
+<style>
+  .tunnel-dia[data-mode="direct"] .m-reverse { display: none; }
+  .tunnel-dia[data-mode="reverse"] .m-direct { display: none; }
+</style>
+
+<script>
+  document.querySelectorAll<HTMLElement>(".tunnel-dia").forEach((fig) => {
+    const cap = fig.querySelector<HTMLElement>("[data-cap]")!;
+    fig.querySelectorAll<HTMLButtonElement>("[data-set]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const mode = b.dataset.set!;
+        fig.dataset.mode = mode;
+        fig.querySelectorAll("[data-set]").forEach((o) => o.setAttribute("aria-pressed", String(o === b)));
+        cap.textContent = fig.dataset[mode === "direct" ? "capDirect" : "capReverse"] ?? "";
+      }),
+    );
+  });
+</script>
