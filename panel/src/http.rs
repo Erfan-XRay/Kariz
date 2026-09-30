@@ -67,7 +67,17 @@ fn not_found() -> Response<Body> {
 
 /// The panel's routes, all under `/<path>/`.
 pub fn router(path: &str, state: AppState) -> Router {
+    // Without the closing slash the page's relative addresses (`./api/...`, `./assets/...`)
+    // would point outside the secret path and the app would not load: send it to the slash.
+    let slash = format!("/{path}/");
     let inner = Router::new()
+        .route(
+            "/",
+            get(move || {
+                let slash = slash.clone();
+                async move { axum::response::Redirect::permanent(&slash) }
+            }),
+        )
         .route("/api/version", get(version))
         .merge(crate::api::routes())
         .route("/api/{*rest}", get(|| async { not_found() }))
@@ -426,7 +436,11 @@ mod tests {
             assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
             assert!(body.contains("<center>nginx</center>"), "{path}: {body}");
         }
-        for path in ["/k-7f3a9c", "/k-7f3a9c/", "/k-7f3a9c/servers"] {
+        // No closing slash: on to the slash, where the page's relative addresses work.
+        let (status, headers) = headers_of("/k-7f3a9c").await;
+        assert_eq!(status, StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(headers.get("location").unwrap(), "/k-7f3a9c/");
+        for path in ["/k-7f3a9c/", "/k-7f3a9c/servers"] {
             let (status, body, cache) = get_path(path).await;
             assert_eq!(status, StatusCode::OK, "{path}");
             assert!(body.contains("Kariz"), "{path}");

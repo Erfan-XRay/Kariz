@@ -67,8 +67,9 @@ the sign-in is hardened.
 - **The lockout is per address.** Someone with many addresses (an IPv6 /64) can try more; the
   Argon2 cost, the gate of four checks at a time, and a password of at least 10 characters are what
   stand against that. Use a long password, or only sign in with links.
-- **The certificate is self-signed by default,** so the first visit trusts what the installer
-  printed (compare the fingerprint). Use your own certificate (`cert_file`) to remove that step.
+- **The certificate comes from Let's Encrypt** (a domain, or the server's public IP address) and is
+  renewed by a timer, so a browser has a real chain to check. Panels set up earlier keep their
+  self-signed certificate until `kariz-manager panel cert` replaces it.
 - **The panel says whether a password is set** before sign-in (the login page needs to know).
 - **The agent runs as root** because it manages services and interfaces. Its requests are the fixed
   list above, but a bug in one of them is a bug as root; they are small, validated and tested.

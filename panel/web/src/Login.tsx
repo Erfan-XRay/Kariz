@@ -53,12 +53,23 @@ export function Login({
     return () => s.stop();
   }, []);
 
+  // The server said yes. Before the dashboard opens, check that the browser kept the
+  // session cookie: some (Safari over a self-signed certificate) drop it silently, and the
+  // panel would then send the user straight back here with no word why.
   const succeed = useCallback(
-    (csrf: string, viaLink: boolean) => {
+    async (csrf: string, viaLink: boolean) => {
+      const kept = await api.session().then((s) => s.authenticated, () => false);
+      if (!kept) {
+        setBusy(false);
+        scene.current?.ripple();
+        setShake((n) => n + 1);
+        setError(t("login.noCookie"));
+        return;
+      }
       setLeaving(true);
       scene.current?.descend(() => onSignedIn(csrf, viaLink));
     },
-    [onSignedIn],
+    [onSignedIn, t],
   );
 
   const fail = useCallback(
@@ -84,7 +95,7 @@ export function Login({
       setError("");
       try {
         const { csrf } = await api.loginWithLink(token);
-        succeed(csrf, true);
+        await succeed(csrf, true);
       } catch (e) {
         fail(e, true);
       }
@@ -118,7 +129,7 @@ export function Login({
     setError("");
     try {
       const { csrf } = await api.login(password);
-      succeed(csrf, false);
+      await succeed(csrf, false);
     } catch (e) {
       fail(e, false);
     }
