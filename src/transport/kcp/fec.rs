@@ -1,6 +1,6 @@
 //! Forward error correction for KCP: Reed-Solomon over groups of consecutive KCP
 //! packets, so a receiver rebuilds lost packets from the parity instead of waiting a
-//! round trip for KCP to resend them (docs/PHASE4.md, section 5).
+//! round trip for KCP to resend them.
 //!
 //! A group has up to `data` packets. Each goes out at once, as a *data shard*
 //! (`len (2) | packet`); when the group is full, `parity` parity shards follow, computed

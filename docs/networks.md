@@ -65,8 +65,8 @@ and links that are no longer wanted are removed.
 
 The MTU is 1476 (GRE adds 24 bytes to a 1500-byte path).
 
-- `kariz-manager net list` shows a server's `kz-` links (read only); `kariz-manager net status
-  kz-XXXXX` shows one with its counters. The panel is where they are made and removed.
+- The panel is where the links are made, shown and removed. On a server, `ip -br addr show` lists
+  its `kz-` interfaces and `ip -s link show kz-XXXXX` shows one with its counters.
 - **Servers that cannot do it:** GRE needs root and the `ip_gre` module. Some containers and
   VPS types (OpenVZ) do not allow it: the panel says `cannot make GRE interfaces` for that
   server and does not try.

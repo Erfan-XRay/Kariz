@@ -1,6 +1,6 @@
 //! The panel's side of the agents: it accepts their links, checks who they are, asks them
 //! for their health and tunnels every couple of seconds, and keeps the latest of it for
-//! the API (docs/PHASE11.md, section 4).
+//! the API.
 //!
 //! An agent proves itself in one of two ways. A registered one answers the panel's
 //! random challenge with a keyed hash only its key makes. A new one shows the join

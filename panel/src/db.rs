@@ -74,7 +74,7 @@ const MIGRATIONS: &[&str] = &[
          detail TEXT NOT NULL DEFAULT ''
      );
      CREATE INDEX events_ts ON events (ts);",
-    // 5: private networks (docs/PHASE13.md). Every subnet, address and interface name is
+    // 5: private networks. Every subnet, address and interface name is
     // UNIQUE, so no address can be given twice whatever the code does.
     "CREATE TABLE networks (
          id TEXT PRIMARY KEY,

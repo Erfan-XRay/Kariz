@@ -1,9 +1,9 @@
 # The web panel
 
 A web panel for Kariz: connect your servers, make and manage tunnels between them, and watch
-their traffic live, from one page. Tunnels made with [kariz-manager](manager.md) on a server
-show up in the panel too, and the other way round: the panel and the manager share the same
-files (`/etc/kariz/NAME.toml`) and services (`kariz@NAME`).
+their traffic live, from one page. **Everything is done here**; the [manager script](manager.md)
+only installs Kariz and the panel. New to it? Start with [Using the panel](using-the-panel.md),
+a walk through the screens in the order you need them.
 
 ## Install
 
@@ -102,7 +102,7 @@ and forgets it. So *a new token* cannot be undone if it fails half way; run it a
   Linux; nothing is shown where there is no `/proc`.)
 - **Tunnels** come from the `*.toml` files in `/etc/kariz` on each server, with systemd's
   state and the running daemon's `kariz status`. A tunnel is drawn when its entry and exit
-  have **the same name**, which is how `kariz-manager` names the two sides. Each tunnel's page
+  have **the same name**, which is how the panel names the two sides. Each tunnel's page
   has charts of its throughput and round trip over 1 hour, 24 hours, 7 days and 30 days. The
   last hour is kept in memory; five-minute averages are stored in the database for 30 days.
 - **Networks:** private GRE networks between your servers, with addresses that are never
@@ -111,7 +111,7 @@ and forgets it. So *a new token* cannot be undone if it fails half way; run it a
   level or text, with *Follow*. The *Events* tab lists a server going offline or back, a tunnel
   losing its connection or getting it back.
 - **Speed test:** on a tunnel's page. The entry server measures download, upload and UDP
-  through the tunnel (the same as `kariz-manager speedtest`); it uses the tunnel for the
+  through the tunnel ([Speed test](speedtest.md)); it uses the tunnel for the
   seconds you choose.
 - **Settings:** the password, one-time login links, the sessions (each device, its address,
   when it was last used, and *Revoke*), the backup, and the appearance.
@@ -152,7 +152,7 @@ kariz-manager --agent CODE                          # connect this server to a p
 kariz-manager agent status | logs | remove
 ```
 
-The menu has the same under *w*. Without the manager: `kariz-panel init`, `serve`,
+The menu has the same under *2*. Without the manager: `kariz-panel init`, `serve`,
 `login-link`, `reset-password`, `agent --join CODE` (see `kariz-panel --help`).
 
 ## Backup and restore
@@ -267,8 +267,8 @@ checks the signature too).
   same name on both. A tunnel with one side connected is listed in the table as
   "one side only".
 - **A tunnel shows as broken:** the panel reports what the entry side's daemon says
-  (`kariz status`): not connected, or no daemon running. Start with `kariz-manager status NAME`
-  on the server.
+  (`kariz status`): not connected, or no daemon running. Run `kariz status -c /etc/kariz/NAME.toml`
+  on the server for the details ([Status](status.md)).
 - **The wizard says a port is in use:** it names the program (`sshd`, `nginx`, another
   tunnel). Pick another port, or stop that program. The check is done on the server itself, so
   a firewall rule does not matter here, but do open the port for your users.

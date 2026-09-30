@@ -67,10 +67,9 @@ pub enum TransportKind {
     Ws,
     /// WebSocket over TLS.
     Wss,
-    /// QUIC: its own streams, datagrams and TLS 1.3 (see docs/PHASE4.md).
+    /// QUIC: its own streams, datagrams and TLS 1.3.
     Quic,
-    /// KCP over UDP, every packet encrypted with a key from the token (see
-    /// docs/PHASE4.md).
+    /// KCP over UDP, every packet encrypted with a key from the token.
     Kcp,
 }
 
@@ -234,7 +233,7 @@ pub struct KcpConfig {
     /// the profile's default (`Config::kcp`).
     pub fec_data: Option<usize>,
     pub fec_parity: Option<usize>,
-    /// UDP flows take the datagram path beside KCP (docs/PHASE6.md, section 2). Off:
+    /// UDP flows take the datagram path beside KCP. Off:
     /// they stay in the reliable stream, as in v0.4 (never lost, but a lost segment makes
     /// them wait for its retransmission).
     #[serde(default = "default_true")]
@@ -629,8 +628,8 @@ pub struct Tuning {
     /// the socket. Without it, a UDP packet waits behind everything already queued in the
     /// kernel on a slow link.
     pub notsent_lowat: Option<u32>,
-    /// DSCP codepoint for tunnel sockets and the exit's UDP sockets to targets
-    /// (docs/PHASE6.md, section 5); `None` leaves the OS default (0).
+    /// DSCP codepoint for tunnel sockets and the exit's UDP sockets to targets;
+    /// `None` leaves the OS default (0).
     pub dscp: Option<u8>,
 }
 
@@ -1145,7 +1144,7 @@ impl Config {
 
     /// `[tunnel.kcp]` with the profile's defaults filled in: the gaming profile turns FEC
     /// on (10 data + 3 parity packets per group) unless the table sets `fec_data` or
-    /// `fec_parity`, or an MTU too large for FEC (docs/PHASE6.md, 6.5).
+    /// `fec_parity`, or an MTU too large for FEC.
     pub fn kcp(&self) -> KcpConfig {
         let mut k = self.tunnel.kcp.clone().unwrap_or_default();
         let unset = k.fec_data.is_none() && k.fec_parity.is_none();

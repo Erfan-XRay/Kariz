@@ -15,7 +15,7 @@ token = "CHANGE-ME-run-kariz-token"
 
 [tunnel.quic]
 congestion = "cubic"               # cubic | bbr | newreno; bbr keeps the rate on lossy links
-                                   # but can overfill queues (see docs/PHASE4.md)
+                                   # but can overfill queues
 # sni = "www.example.com"          # server name in the handshake; default: the remote host
 # alpn = "h3"                      # same on both sides
 

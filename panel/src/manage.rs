@@ -1,5 +1,4 @@
-//! What an agent does to its server's tunnels when the panel asks (docs/PHASE12.md,
-//! section 2): check and write a config from a structured spec, read it back, control its
+//! What an agent does to its server's tunnels when the panel asks: check and write a config from a structured spec, read it back, control its
 //! service, delete it, list the listening ports, read the log, run the speed test.
 //!
 //! Nothing here takes a command, a path or a piece of config text from the panel: the file

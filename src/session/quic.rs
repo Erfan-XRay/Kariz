@@ -9,8 +9,6 @@
 //!   stream's first bytes) is held for a moment instead of dropped.
 //! * Reset reasons travel as QUIC error codes (the same numbers as kmux's `RST`).
 //! * `GOAWAY` is a unidirectional stream carrying `GOAWAY`: QUIC has no such frame.
-//!
-//! See `docs/PHASE4.md`, section 3.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;

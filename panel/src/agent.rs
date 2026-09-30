@@ -1,6 +1,5 @@
 //! The agent: what runs on every other server (`kariz-panel agent`). It dials the panel,
-//! proves who it is, and answers the panel's requests: a fixed list (docs/PHASE11.md,
-//! section 4), none of which runs anything the panel names.
+//! proves who it is, and answers the panel's requests: a fixed list, none of which runs anything the panel names.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

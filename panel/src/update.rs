@@ -1,4 +1,4 @@
-//! Updating the panel from the panel (docs/PHASE14.md): find a newer release, download it
+//! Updating the panel from the panel: find a newer release, download it
 //! once, check its signature, and swap the programs with a rollback if the new panel does
 //! not come up.
 //!

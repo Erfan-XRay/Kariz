@@ -10,8 +10,7 @@
 //!
 //! After that, a TCP channel carries raw bytes. A UDP channel without mux carries
 //! packets as `len (2, BE) | packet` in both directions (with mux, packets travel as
-//! `DGRAM` frames instead, see `src/mux/`). With duplication (v0.5, docs/PHASE6.md
-//! section 4), every packet starts with a 4-byte sequence number (see `src/udp.rs`);
+//! `DGRAM` frames instead, see `src/mux/`). With duplication (v0.5), every packet starts with a 4-byte sequence number (see `src/udp.rs`);
 //! older exits reject kind 3 as unknown.
 
 use std::io;

@@ -23,16 +23,22 @@ Which side opens the tunnel is the **mode**:
 
 The dialing side sets `tunnel.remote`, the other side `tunnel.listen`.
 
-## The quick way
+## The quick way: the web panel
 
-The manager script does every step below for you, including a systemd service per
-tunnel and the command to run on the other server:
+Install the panel on one server with the manager script, connect your other servers to it, and
+make tunnels in the browser. The panel does every step below for you on both servers (the
+configs, a token, a systemd service, a check that it connected) and undoes it all if a step
+fails:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh)
 ```
 
-See [The manager script](manager.md). The rest of this page is the same thing by hand.
+Choose **2** (web panel), then **install**, and open the link it prints. Then read
+[Using the panel](using-the-panel.md); [The manager script](manager.md) explains the menu.
+
+The rest of this page is the same thing by hand, for a server without the panel or to see what
+the panel writes.
 
 ## 1. Install
 

@@ -1,7 +1,7 @@
 //! A management link: one authenticated, encrypted mux session between two Kariz programs,
 //! made the way a tunnel's connections are (the token handshake, the encrypted records,
 //! the mux), so it resists DPI like a tunnel does. The web panel uses it to talk to its
-//! agents (docs/PHASE11.md, section 4); nothing in the tunnel core uses it.
+//! agents; nothing in the tunnel core uses it.
 //!
 //! The transport is `tcpmux`. Which side dials and which opens streams are independent:
 //! an agent dials the panel, but the panel is the one that opens streams (requests).

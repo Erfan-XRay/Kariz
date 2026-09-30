@@ -1,7 +1,7 @@
 //! Settings for the global allocator (mimalloc, cargo feature `mimalloc`).
 //!
 //! The allocator itself is installed by the `kariz` binary (and the test binaries that
-//! benchmark it); this only tunes it. Measured on static musl builds (docs/PHASE8.md):
+//! benchmark it); this only tunes it. Measured on static musl builds:
 //! mimalloc's default commits its first arena eagerly, and an idle tunnel then takes
 //! 15.6 MiB of memory against 6.0 MiB with musl's own allocator. Committing on demand
 //! instead brings it to 8.1 MiB, with the speed gain of mimalloc intact.

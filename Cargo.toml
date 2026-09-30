@@ -5,8 +5,9 @@ edition = "2021"
 rust-version = "1.80"
 description = "High-performance, resource-efficient tunnel core for server-to-server links, built to resist DPI."
 publish = false
+license-file = "LICENSE"
 
-# The web panel is a separate crate that uses this one as a library (docs/PHASE11.md).
+# The web panel is a separate crate that uses this one as a library.
 # A plain `cargo build` at the root still builds only `kariz`.
 [workspace]
 members = ["panel"]

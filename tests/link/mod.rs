@@ -1,5 +1,5 @@
 //! Link emulators: a UDP and a TCP proxy between the tunnel's two sides that do to the
-//! traffic what a long, lossy path does (PHASE4.md, section 8).
+//! traffic what a long, lossy path does.
 //!
 //! Each direction of a link is a [`Path`]: a bottleneck with a rate and a bounded queue
 //! (tail drop), random or bursty loss, delay, jitter and optional reordering. The UDP

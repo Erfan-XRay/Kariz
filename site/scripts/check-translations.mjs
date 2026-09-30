@@ -11,6 +11,7 @@ const slugs = (dir) =>
   fs.readdirSync(dir).filter((f) => f.endsWith(".md") && f !== "README.md").map((f) => f.replace(/\.md$/, "").toLowerCase());
 
 const en = new Set(slugs(docs));
+en.add("changelog"); // the root CHANGELOG.md; its Persian version is docs/fa/CHANGELOG.md
 const fa = new Set(slugs(path.join(docs, "fa")));
 const listed = new Set(
   fs.readFileSync(path.join(site, "untranslated.txt"), "utf8").split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#")),

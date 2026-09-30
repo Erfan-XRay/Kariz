@@ -1,4 +1,4 @@
-//! An agent updating itself when the panel sends it a release (docs/PHASE14.md, section 4).
+//! An agent updating itself when the panel sends it a release.
 //! The panel downloaded the release once; the agent never needs the internet. It is sent in
 //! pieces (a request holds 16 KB), checked again here with the release key, unpacked, and
 //! handed to a helper that swaps the programs, restarts the agent's service and waits for the

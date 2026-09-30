@@ -1596,7 +1596,7 @@ async fn over_link(setup: Setup, imp: Impairment) -> LinkRun {
     }
 }
 
-/// Transports over a long, lossy path (PHASE4.md, section 8): 60 ms RTT, 50 Mbit/s each
+/// Transports over a long, lossy path: 60 ms RTT, 50 Mbit/s each
 /// way with a 50 ms queue, random loss of 0, 1 and 5 % in both directions:
 /// `cargo test --release --test tunnel lossy_link -- --ignored --nocapture`.
 /// `KARIZ_BENCH_LOSS=1` (in percent) runs one loss rate only, `KARIZ_BENCH_ONLY=kcp` the
@@ -1739,7 +1739,7 @@ impl std::fmt::Display for Game {
     }
 }
 
-/// Game traffic (PHASE6.md, section 8): 128-byte packets at 64 Hz on one flow for
+/// Game traffic: 128-byte packets at 64 Hz on one flow for
 /// `duration`, each echoed by the target, without waiting for answers.
 async fn game(port: u16, duration: Duration) -> Game {
     let every = Duration::from_micros(15_625);
@@ -1806,7 +1806,7 @@ async fn downloads(port: u16, connections: usize, warmup: Duration, window: Dura
     total
 }
 
-/// Game traffic over a long, lossy path (PHASE6.md, sections 8 and 10): 60 ms RTT,
+/// Game traffic over a long, lossy path: 60 ms RTT,
 /// 50 Mbit/s each way with a 50 ms queue, random loss of 0, 1 and 5 % and bursty loss
 /// of 2 % (mean burst 3). 128-byte packets at 64 Hz on an idle tunnel, then during four
 /// downloads on the same tunnel. Every row uses the gaming profile.
