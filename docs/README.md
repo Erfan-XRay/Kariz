@@ -11,6 +11,7 @@ reference pages when you need a specific setting.
 | [Speed test](speedtest.md) | `kariz speedtest`: speed, latency and UDP through the live tunnel, in either mode |
 | [The web panel](panel.md) | Install the panel, sign in, connect servers with agents, what it shows |
 | [Status](status.md) | `kariz status`: connection, round trip, last error and traffic per port, on either side; the JSON document |
+| [Accessibility](accessibility.md) | what is checked on every change (axe, keyboard, motion) and what is checked by hand |
 | [Security review](security-review.md) | who is assumed to attack the panel, what was checked and fixed for 1.0, what is left |
 | [Private networks (GRE)](networks.md) | private addresses between your servers, made by the panel, never repeated |
 | [Transports](transports.md) | `tcp`, `tcpmux`, `ws`, `wss`, `quic`, `kcp`: how each works and when to pick it |

@@ -998,3 +998,7 @@ kbd {
   .proto-bar > span { display: none; }
   .toasts { bottom: 84px; inset-inline: var(--sp-3); }
 }
+
+/* the page area scrolls, so the keyboard can reach it; the ring shows only for the keyboard */
+.main:focus { outline: none; }
+.main:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

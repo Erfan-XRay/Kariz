@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 import { FA_DIGITS } from "./i18n";
 import { useApp } from "./store";
 
@@ -140,6 +140,43 @@ export function Odo({ value }: { value: string }) {
   );
 }
 
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Keeps the keyboard inside a modal: Tab and Shift+Tab go round its controls instead of out
+ * into the page behind it, and when it closes focus goes back to what opened it.
+ */
+export function useFocusTrap(ref: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const box = ref.current;
+    if (!box) return;
+    const opener = document.activeElement as HTMLElement | null;
+    const controls = () => [...box.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((n) => n.getClientRects().length > 0);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const list = controls();
+      if (list.length === 0) return e.preventDefault();
+      const first = list[0];
+      const last = list[list.length - 1];
+      const at = document.activeElement;
+      const outside = !at || !box.contains(at);
+      if (e.shiftKey && (at === first || outside)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (at === last || outside)) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      opener?.focus?.();
+    };
+  }, [ref]);
+}
+
 export function Dialog({
   title,
   onClose,
@@ -154,6 +191,7 @@ export function Dialog({
   const { t } = useApp();
   const ref = useRef<HTMLDivElement>(null);
   const [on, setOn] = useState(false);
+  useFocusTrap(ref);
   useEffect(() => {
     const id = requestAnimationFrame(() => setOn(true));
     const key = (e: KeyboardEvent) => e.key === "Escape" && onClose();
