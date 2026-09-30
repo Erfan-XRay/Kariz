@@ -133,24 +133,21 @@ test.describe("the tunnel", () => {
   test("is stopped, started again and deleted, from its page", async ({ page }) => {
     await signIn(page);
     await goTo(page, "tunnels");
-    const open = async () => {
-      await page.locator(".tunnels tr", { hasText: "demo" }).click();
-    };
-    await open();
+    // The tunnel's page opens once. After each action its dialog closes and the tunnel's page
+    // is there again, showing what the servers say now.
+    await page.locator(".tunnels tr", { hasText: "demo" }).click();
     await page.getByRole("button", { name: "Stop", exact: true }).click();
     await page.locator(".dialog .btn-primary").click();
     await expect(page.locator(".dialog p.ok")).toContainText(/Done/i, { timeout: 60_000 });
     await closeDialog(page);
     expect(await refuses(front), "a stopped tunnel listens nowhere").toBe(true);
 
-    await open();
     await page.getByRole("button", { name: "Start", exact: true }).click();
     await page.locator(".dialog .btn-primary").click();
     await expect(page.locator(".dialog p.ok")).toContainText(/Done/i, { timeout: 60_000 });
     await closeDialog(page);
     expect(await echoes(front, "after starting again")).toBe(true);
 
-    await open();
     await page.getByRole("button", { name: "Delete" }).click();
     await page.locator(".dialog .btn-danger").click();
     await expect(page.locator(".dialog p.ok")).toContainText(/Done/i, { timeout: 60_000 });
