@@ -45,6 +45,18 @@ pub struct Installed {
 /// `config_path` already exists), the database and the certificate. Safe to run again:
 /// it keeps what is there.
 pub fn init(config_path: &Path, data_dir: &Path, port: Option<u16>) -> Result<Installed> {
+    init_with_cert(config_path, data_dir, port, None)
+}
+
+/// Like [`init`], for a panel that uses a certificate that already exists (a Let's Encrypt
+/// one: `(certificate chain, key)`), so no self-signed one is made.
+pub fn init_with_cert(
+    config_path: &Path,
+    data_dir: &Path,
+    port: Option<u16>,
+    cert: Option<(std::path::PathBuf, std::path::PathBuf)>,
+) -> Result<Installed> {
+    let (cert_file, key_file) = cert.unzip();
     let config = if config_path.exists() {
         Config::load(config_path)?
     } else {
@@ -55,8 +67,8 @@ pub fn init(config_path: &Path, data_dir: &Path, port: Option<u16>) -> Result<In
             agent_listen: Some(format!("0.0.0.0:{}", random_port()?)),
             kariz_dir: std::path::PathBuf::from("/etc/kariz"),
             services: Default::default(),
-            cert_file: None,
-            key_file: None,
+            cert_file,
+            key_file,
             release_api: None,
             release_key: None,
         };
@@ -98,5 +110,35 @@ mod tests {
         assert_eq!(second.config.listen, first.config.listen);
         assert_eq!(second.config.path, first.config.path);
         assert_eq!(second.fingerprint, first.fingerprint);
+    }
+
+    #[test]
+    fn init_with_a_given_certificate_makes_no_self_signed_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cert, key) = (
+            dir.path().join("fullchain.pem"),
+            dir.path().join("privkey.pem"),
+        );
+        // Made elsewhere (by Let's Encrypt, in real life).
+        let pin = crate::cert::ensure(&cert, &key).unwrap();
+        let config_path = dir.path().join("etc").join("panel.toml");
+        let data = dir.path().join("data");
+        let done = init_with_cert(
+            &config_path,
+            &data,
+            Some(24_681),
+            Some((cert.clone(), key.clone())),
+        )
+        .unwrap();
+        assert_eq!(done.fingerprint, pin);
+        assert_eq!(done.config.cert_file.as_deref(), Some(cert.as_path()));
+        assert!(
+            !data.join("cert.pem").exists(),
+            "no self-signed certificate"
+        );
+        // A given certificate that is not there is an error, not a silent new one.
+        std::fs::remove_file(&key).unwrap();
+        let other = dir.path().join("other.toml");
+        assert!(init_with_cert(&other, &data, Some(24_682), Some((cert, key))).is_err());
     }
 }
