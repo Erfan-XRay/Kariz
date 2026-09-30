@@ -106,7 +106,7 @@ export const SECTIONS: Section[] = [
   { id: "start", title: { en: "Get started", fa: "شروع کار" }, pages: ["getting-started", "using-the-panel", "tour", "manager", "panel"] },
   { id: "concepts", title: { en: "Concepts", fa: "مفاهیم" }, pages: ["how-it-works", "transports", "profiles", "udp-and-games", "cdn"] },
   { id: "guides", title: { en: "Guides", fa: "راهنماها" }, pages: ["networks", "troubleshooting", "speedtest", "performance"] },
-  { id: "reference", title: { en: "Reference", fa: "مرجع" }, pages: ["configuration", "status", "compatibility", "accessibility"] },
+  { id: "reference", title: { en: "Reference", fa: "مرجع" }, pages: ["configuration", "status", "accessibility"] },
   { id: "security", title: { en: "Security", fa: "امنیت" }, pages: ["security", "security-review"] },
   { id: "project", title: { en: "Project", fa: "پروژه" }, pages: ["changelog", "roadmap"] },
 ];
@@ -129,7 +129,6 @@ export const LABELS: Record<string, Record<Lang, string>> = {
   performance: { en: "Performance", fa: "کارایی" },
   configuration: { en: "Configuration", fa: "پیکربندی" },
   status: { en: "Status", fa: "وضعیت" },
-  compatibility: { en: "Compatibility", fa: "سازگاری" },
   accessibility: { en: "Accessibility", fa: "دسترس‌پذیری" },
   security: { en: "Security", fa: "امنیت" },
   "security-review": { en: "Security review", fa: "بازبینی امنیتی" },

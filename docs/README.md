@@ -14,7 +14,6 @@ animated diagrams and a live demo of the panel, in English and Persian:
 | [Speed test](speedtest.md) | The panel's button and `kariz speedtest`: speed, latency and UDP through the live tunnel |
 | [The web panel](panel.md) | Install the panel, sign in, connect servers with agents, what it shows |
 | [Status](status.md) | `kariz status`: connection, round trip, last error and traffic per port, on either side; the JSON document |
-| [Compatibility](compatibility.md) | what 1.x promises to keep, what is left free, and how a breaking change is made |
 | [Accessibility](accessibility.md) | what is checked on every change (axe, keyboard, motion) and what is checked by hand |
 | [Security review](security-review.md) | who is assumed to attack the panel, what was checked and fixed for 1.0, what is left |
 | [فارسی: مستندات به زبان فارسی](fa/README.md) | every page of this documentation in Persian |

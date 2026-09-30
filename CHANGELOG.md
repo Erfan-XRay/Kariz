@@ -18,6 +18,8 @@ Everything about servers and tunnels is now done in the web panel, and Kariz has
 
 - The design documents of the phases (`docs/PHASE*.md`); the layers and the protocol stay in
   `docs/ROADMAP.md`, now "Design and protocol". The history is in git.
+- `docs/compatibility.md`: Kariz is not publicly released yet, so it makes no compatibility
+  promise.
 
 ### Added
 
@@ -36,10 +38,7 @@ Everything about servers and tunnels is now done in the web panel, and Kariz has
 
 ## 1.0.0 - 2026-09-30
 
-The first stable release. From here on the project follows semantic versioning and keeps what
-works: see [docs/compatibility.md](docs/compatibility.md) for exactly what 1.x promises (tunnel
-configs, the tunnel protocol between any two 1.x versions, the status document, `kariz-manager`,
-the panel and its agents) and what stays free. Nothing changes for a 0.11 install except what is
+The first stable release. Nothing changes for a 0.11 install except what is
 listed here; update the panel and its agents together as usual.
 
 ### Added
@@ -65,7 +64,6 @@ listed here; update the panel and its agents together as usual.
   and keyboard access, and the command palette is a proper combobox (docs/accessibility.md).
 - **The guides in Persian** (docs/fa): getting started, the manager, the panel, private networks,
   security and troubleshooting.
-- **docs/compatibility.md**: what 1.x promises and how a breaking change is made.
 
 ### Changed
 
