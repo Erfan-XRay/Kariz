@@ -99,8 +99,9 @@ async fn a_server_joins_across_a_slow_link() {
     assert!(ok, "the server never showed as online with its health");
 }
 
-/// Passes the panel's first reply (the handshake) and then drops what the panel sends: a
-/// TCP path that connects, shakes hands and stalls, like some filtered networks.
+/// Passes the panel's first reply (the handshake) and then drops what the panel sends,
+/// its close included: a TCP path that connects, shakes hands and stalls, like some
+/// filtered networks.
 async fn stalling_proxy(listener: TcpListener, target: String) {
     while let Ok((client, _)) = listener.accept().await {
         let target = target.clone();
@@ -123,6 +124,9 @@ async fn stalling_proxy(listener: TcpListener, target: String) {
                     break;
                 }
             }
+            // The panel's close does not get through either: the agent's side stays open.
+            std::future::pending::<()>().await;
+            drop(cw);
         });
     }
 }
@@ -168,8 +172,9 @@ async fn an_agent_moves_to_kcp_when_tcp_is_stalled() {
     config.save(&path).unwrap();
     let running = tokio::spawn(Agent::new(&path, config).run());
 
+    // Well inside the keepalive's 90 s: the agent notices the silence by itself.
     let mut ok = false;
-    for _ in 0..900 {
+    for _ in 0..600 {
         let servers = hub.snapshot().unwrap();
         if servers
             .iter()

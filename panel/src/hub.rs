@@ -64,6 +64,14 @@ pub struct ServerView {
     pub tunnels: Vec<TunnelView>,
 }
 
+/// What a join secret is good for.
+enum Spent {
+    /// A new server, with the name the code carried (empty: the agent's host name).
+    New(String),
+    /// The server it registered before, whose agent has not confirmed yet.
+    Unconfirmed { id: String, key: String },
+}
+
 #[derive(Default)]
 struct Live {
     online: bool,
@@ -300,24 +308,37 @@ impl Hub {
         }))
     }
 
-    /// Spends a join secret: the name it carried, once, if it is valid.
-    fn spend_join(&self, secret: &str) -> Result<Option<String>> {
+    /// Spends a join secret, if it is valid: a new server to register (with the name the
+    /// code carried), or the server it already registered whose agent never confirmed.
+    fn spend_join(&self, secret: &str) -> Result<Option<Spent>> {
         let conn = self.db.conn();
         let t = now();
         conn.execute("DELETE FROM joins WHERE expires < ?1 - 86400", [t])?;
         let hash = hash_token(secret);
-        let changed = conn.execute(
-            "UPDATE joins SET used = 1 WHERE hash = ?1 AND used = 0 AND expires > ?2",
-            params![hash, t],
-        )?;
-        if changed != 1 {
-            return Ok(None);
+        let row: Option<(String, bool, Option<String>)> = conn
+            .query_row(
+                "SELECT name, used, server FROM joins WHERE hash = ?1 AND expires > ?2",
+                params![hash, t],
+                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get(2)?)),
+            )
+            .optional()?;
+        match row {
+            None => Ok(None),
+            Some((name, false, _)) => {
+                let changed = conn.execute(
+                    "UPDATE joins SET used = 1 WHERE hash = ?1 AND used = 0",
+                    [&hash],
+                )?;
+                Ok((changed == 1).then_some(Spent::New(name)))
+            }
+            Some((_, true, Some(id))) => {
+                let key: Option<String> = conn
+                    .query_row("SELECT key FROM servers WHERE id = ?1", [&id], |r| r.get(0))
+                    .optional()?;
+                Ok(key.map(|key| Spent::Unconfirmed { id, key }))
+            }
+            Some((_, true, None)) => Ok(None),
         }
-        Ok(Some(conn.query_row(
-            "SELECT name FROM joins WHERE hash = ?1",
-            [&hash],
-            |r| r.get(0),
-        )?))
     }
 
     fn unique_name(&self, wanted: &str) -> Result<String> {
@@ -515,45 +536,55 @@ impl Hub {
         let Some(secret) = &hello.join else {
             bail!("an agent with neither an identity nor a join secret");
         };
-        let Some(wanted) = self.spend_join(secret)? else {
+        let Some(spent) = self.spend_join(secret)? else {
             bail!("an agent with a join secret that is wrong, used or expired");
         };
-        let wanted = if wanted.is_empty() {
-            hello.hostname.clone()
-        } else {
-            wanted
-        };
-        let (id, key, name) = self.register(&wanted, &hello)?;
-        // If the agent never confirms, the registration is undone and the join secret can
-        // be used again: a link that drops in the middle must not burn the code.
-        let enrolled = async {
-            let raw = request_on(
-                session,
-                &Request::Enroll {
-                    id: id.clone(),
-                    key,
-                },
-            )
-            .await?;
-            let ack: Ack = serde_json::from_slice(&raw)?;
-            if !ack.ok {
-                bail!(
-                    "the agent did not keep its identity: {}",
-                    ack.error.unwrap_or_default()
-                );
+        let hash = hash_token(secret);
+        let (id, key, name) = match spent {
+            Spent::New(wanted) => {
+                let wanted = if wanted.is_empty() {
+                    hello.hostname.clone()
+                } else {
+                    wanted
+                };
+                let (id, key, name) = self.register(&wanted, &hello)?;
+                self.db.conn().execute(
+                    "UPDATE joins SET server = ?2 WHERE hash = ?1",
+                    params![hash, id],
+                )?;
+                (id, key, name)
             }
-            Ok(())
-        }
-        .await;
-        if let Err(e) = enrolled {
-            let conn = self.db.conn();
-            let _ = conn.execute("DELETE FROM servers WHERE id = ?1", [&id]);
-            let _ = conn.execute(
-                "UPDATE joins SET used = 0 WHERE hash = ?1",
-                [hash_token(secret)],
+            // Registered on an earlier link that dropped before the agent answered: the
+            // same identity again (the agent may or may not have kept it; if it has, it
+            // comes with its proof instead and never gets here).
+            Spent::Unconfirmed { id, key } => {
+                let name: String = self.db.conn().query_row(
+                    "SELECT name FROM servers WHERE id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )?;
+                (id, key, name)
+            }
+        };
+        let raw = request_on(
+            session,
+            &Request::Enroll {
+                id: id.clone(),
+                key,
+            },
+        )
+        .await?;
+        let ack: Ack = serde_json::from_slice(&raw)?;
+        if !ack.ok {
+            bail!(
+                "the agent did not keep its identity: {}",
+                ack.error.unwrap_or_default()
             );
-            return Err(e);
         }
+        // Confirmed: the code can never give this identity out again.
+        self.db
+            .conn()
+            .execute("UPDATE joins SET server = NULL WHERE hash = ?1", [&hash])?;
         let _ = self
             .db
             .audit("hub", None, &format!("registered server {name} ({id})"));
