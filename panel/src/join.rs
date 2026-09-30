@@ -178,7 +178,7 @@ mod tests {
             };
             assert_eq!(decode(&encode(&one)).unwrap().x.as_deref(), Some(x));
         }
-        // Without one (auto) the code is what agents before 1.3 read too.
+        // Without one (auto) the code is what agents before 1.4 read too.
         assert!(!encode(&code()).is_empty());
         assert!(!serde_json::to_string(&code()).unwrap().contains("\"x\""));
     }
