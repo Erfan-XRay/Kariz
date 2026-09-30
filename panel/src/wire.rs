@@ -205,6 +205,19 @@ pub struct TextReply {
     pub text: String,
 }
 
+/// The answer to [`Request::Speedtest`]: what was measured. An agent older than 1.2
+/// answers with `text` (the printed report) and no `report`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpeedReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<kariz::speedtest::Report>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HelloReply {
     /// Set once the agent is registered.

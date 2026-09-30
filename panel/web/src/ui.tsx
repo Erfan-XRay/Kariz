@@ -57,6 +57,18 @@ const ICONS: Record<string, ReactNode> = {
     </>
   ),
   leaf: <path d="M13 3 5 13.5h6L10 21l8-10.5h-6L13 3Z" />,
+  bolt: <path d="M13 3 5 13.5h6L10 21l8-10.5h-6L13 3Z" />,
+  play: <path d="M8 5.5v13l10.5-6.5L8 5.5Z" />,
+  pause: <path d="M8.5 5.5v13M15.5 5.5v13" />,
+  restart: (
+    <>
+      <path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" />
+      <path d="M19.5 4.5v4h-4" />
+    </>
+  ),
+  edit: <path d="M4.5 19.5h4l10-10a2.1 2.1 0 0 0-4-4l-10 10v4ZM13 7l4 4" />,
+  trash: <path d="M5 7h14M10 7V5h4v2M7 7l1 12.5h8L17 7M10.5 11v5M13.5 11v5" />,
+  back: <path d="M20 12H5M10 7l-5 5 5 5" />,
   eye: (
     <>
       <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />

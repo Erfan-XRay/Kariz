@@ -57,6 +57,9 @@ pub struct ServerView {
     /// The address other servers reach this one at (for private networks), if set.
     pub addr: Option<String>,
     pub seen_secs: Option<u64>,
+    /// The transport its agent's link uses now (`tcpmux` or `kcp`); none for the panel's
+    /// own server and for one that is offline.
+    pub link: Option<String>,
     pub health: Option<Health>,
     pub tunnels: Vec<TunnelView>,
 }
@@ -68,6 +71,7 @@ struct Live {
     hostname: String,
     version: String,
     arch: String,
+    link: Option<&'static str>,
     health: Option<Health>,
     tunnels: Vec<TunnelView>,
     /// Bytes counted at the last reading of each tunnel, for the rates.
@@ -401,6 +405,7 @@ impl Hub {
     /// Accepts agents for ever. Each connection gets its own task, so a slow or hostile
     /// peer never holds up the others.
     pub async fn serve_agents(self: Arc<Self>, acceptor: kariz::link::Acceptor) {
+        let link = acceptor.kind().name();
         loop {
             match acceptor.accept().await {
                 Ok(pending) => {
@@ -409,7 +414,7 @@ impl Hub {
                     tokio::spawn(async move {
                         match pending.establish(Side::Client).await {
                             Ok(session) => {
-                                if let Err(e) = hub.run_session(Arc::new(session)).await {
+                                if let Err(e) = hub.run_session(Arc::new(session), link).await {
                                     debug!(%peer, error = %e, "an agent link ended");
                                 }
                             }
@@ -425,10 +430,19 @@ impl Hub {
         }
     }
 
-    async fn run_session(&self, session: Arc<MuxSession>) -> Result<()> {
-        let (id, hello) = tokio::time::timeout(Duration::from_secs(20), self.identify(&session))
+    async fn run_session(&self, session: Arc<MuxSession>, link: &'static str) -> Result<()> {
+        let identified = tokio::time::timeout(Duration::from_secs(20), self.identify(&session))
             .await
-            .map_err(|_| anyhow!("the agent did not identify itself in time"))??;
+            .map_err(|_| anyhow!("the agent did not identify itself in time"))
+            .and_then(|r| r);
+        let (id, hello) = match identified {
+            Ok(found) => found,
+            Err(e) => {
+                // Said at warn: this is why a new server never shows up.
+                warn!(error = %format!("{e:#}"), "an agent could not be identified");
+                return Err(e);
+            }
+        };
         info!(server = %id, "an agent is connected");
         {
             let mut live = self.live();
@@ -438,6 +452,7 @@ impl Hub {
                 old.close();
             }
             entry.online = true;
+            entry.link = Some(link);
             entry.hostname = hello.hostname.clone();
             entry.version = hello.version.clone();
             entry.arch = hello.arch.clone();
@@ -458,6 +473,7 @@ impl Hub {
                 .is_some_and(|s| Arc::ptr_eq(s, &session))
             {
                 entry.online = false;
+                entry.link = None;
                 entry.session = None;
                 self.history.event("server_down", &id, "");
             }
@@ -508,25 +524,35 @@ impl Hub {
             wanted
         };
         let (id, key, name) = self.register(&wanted, &hello)?;
-        let raw = request_on(
-            session,
-            &Request::Enroll {
-                id: id.clone(),
-                key,
-            },
-        )
-        .await?;
-        let ack: Ack = serde_json::from_slice(&raw)?;
-        if !ack.ok {
-            // Registered a moment ago and never used: just forget it.
-            let _ = self
-                .db
-                .conn()
-                .execute("DELETE FROM servers WHERE id = ?1", [&id]);
-            bail!(
-                "the agent did not keep its identity: {}",
-                ack.error.unwrap_or_default()
+        // If the agent never confirms, the registration is undone and the join secret can
+        // be used again: a link that drops in the middle must not burn the code.
+        let enrolled = async {
+            let raw = request_on(
+                session,
+                &Request::Enroll {
+                    id: id.clone(),
+                    key,
+                },
+            )
+            .await?;
+            let ack: Ack = serde_json::from_slice(&raw)?;
+            if !ack.ok {
+                bail!(
+                    "the agent did not keep its identity: {}",
+                    ack.error.unwrap_or_default()
+                );
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(e) = enrolled {
+            let conn = self.db.conn();
+            let _ = conn.execute("DELETE FROM servers WHERE id = ?1", [&id]);
+            let _ = conn.execute(
+                "UPDATE joins SET used = 0 WHERE hash = ?1",
+                [hash_token(secret)],
             );
+            return Err(e);
         }
         let _ = self
             .db
@@ -703,6 +729,10 @@ impl Hub {
                         .map_or(host, |l| l.hostname.clone()),
                     addr: None,
                     seen_secs: l.and_then(|l| l.seen).map(|s| s.elapsed().as_secs()),
+                    link: l
+                        .filter(|l| l.online)
+                        .and_then(|l| l.link)
+                        .map(str::to_owned),
                     health: l.and_then(|l| l.health.clone()),
                     tunnels: l.map(|l| l.tunnels.clone()).unwrap_or_default(),
                 }

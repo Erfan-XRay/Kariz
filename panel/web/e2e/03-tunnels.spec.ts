@@ -138,19 +138,24 @@ test.describe("the tunnel", () => {
     // The tunnel's page opens once. After each action its dialog closes and the tunnel's page
     // is there again, showing what the servers say now.
     await page.locator(".tunnels tr", { hasText: "demo" }).click();
-    await page.getByRole("button", { name: "Stop", exact: true }).click();
+    // the actions in the page's head (a stopped tunnel also offers Start in its notice)
+    const head = page.locator(".hero-route .head");
+    await head.getByRole("button", { name: "Stop", exact: true }).click();
     await page.locator(".dialog .btn-primary").click();
     await expect(page.locator(".dialog p.ok")).toContainText(/Done/i, { timeout: 60_000 });
     await closeDialog(page);
     expect(await refuses(front), "a stopped tunnel listens nowhere").toBe(true);
 
-    await page.getByRole("button", { name: "Start", exact: true }).click();
+    await head.getByRole("button", { name: "Start", exact: true }).click();
     await page.locator(".dialog .btn-primary").click();
     await expect(page.locator(".dialog p.ok")).toContainText(/Done/i, { timeout: 60_000 });
     await closeDialog(page);
     expect(await echoes(front, "after starting again")).toBe(true);
 
-    await page.getByRole("button", { name: "Delete" }).click();
+    await head.getByRole("button", { name: "Delete" }).click();
+    // deleting waits for the tunnel's name to be typed
+    await expect(page.locator(".dialog .btn-danger")).toBeDisabled();
+    await page.locator("#run-confirm").fill("demo");
     await page.locator(".dialog .btn-danger").click();
     await expect(page.locator(".dialog p.ok")).toContainText(/Done/i, { timeout: 60_000 });
     await closeDialog(page);
