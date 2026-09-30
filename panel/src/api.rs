@@ -828,7 +828,7 @@ async fn tunnel_speedtest(
     {
         Ok(r) => reply(
             StatusCode::OK,
-            json!({ "ok": r.ok, "error": r.error, "text": r.text }),
+            json!({ "ok": r.ok, "error": r.error, "text": r.text, "report": r.report }),
         ),
         Err(e) => match format!("{e:#}").as_str() {
             "no_such_tunnel" => error(StatusCode::NOT_FOUND, "no_such_tunnel"),

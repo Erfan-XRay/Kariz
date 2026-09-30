@@ -454,11 +454,17 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
         let mut state = AppState::new(db);
         state.hub = hub.clone();
         if let Some(listen) = &config.agent_listen {
-            let acceptor = kariz::link::Acceptor::bind(listen, &hub.link_token()?)
-                .await
-                .with_context(|| format!("failed to listen for agents on {listen}"))?;
+            // Every link transport on the same port number (TCP for tcpmux, UDP for kcp):
+            // an agent uses the one that gets through its network.
+            for kind in kariz::link::LINK_TRANSPORTS {
+                let acceptor = kariz::link::Acceptor::bind_via(listen, &hub.link_token()?, kind)
+                    .await
+                    .with_context(|| {
+                        format!("failed to listen for agents on {listen} ({})", kind.name())
+                    })?;
+                tokio::spawn(hub.clone().serve_agents(acceptor));
+            }
             state.agent_port = config.agent_port();
-            tokio::spawn(hub.clone().serve_agents(acceptor));
         }
         let app = http::router(&config.path, state);
         tokio::select! {

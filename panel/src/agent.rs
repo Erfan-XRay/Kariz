@@ -326,9 +326,19 @@ impl Agent {
     }
 
     /// Answers the requests on one session until it closes.
-    pub async fn serve(self: &Arc<Self>, session: MuxSession) {
+    /// Returns how many requests the panel made; `working` is called once it has made
+    /// [`GOOD_LINK`] of them.
+    pub async fn serve(self: &Arc<Self>, session: MuxSession, working: impl FnOnce()) -> u32 {
+        let mut asked = 0u32;
+        let mut working = Some(working);
         let session = Arc::new(session);
         while let Some((stream, syn)) = session.accept().await {
+            asked = asked.saturating_add(1);
+            if asked >= GOOD_LINK {
+                if let Some(f) = working.take() {
+                    f();
+                }
+            }
             let agent = self.clone();
             tokio::spawn(async move {
                 let reply = match serde_json::from_slice::<Request>(&syn) {
@@ -370,6 +380,7 @@ impl Agent {
                 }
             });
         }
+        asked
     }
 
     /// Makes the private network links this server had (after a start or a reboot).
@@ -401,30 +412,80 @@ impl Agent {
                 }
             }
         }
-        let dialer = kariz::link::Dialer::new(&c.panel, &c.link_token)?;
+        let kinds = kariz::link::LINK_TRANSPORTS;
+        let chosen = self.path.with_file_name(TRANSPORT_FILE);
+        let mut at = std::fs::read_to_string(&chosen)
+            .ok()
+            .and_then(|t| kinds.iter().position(|k| k.name() == t.trim()))
+            .unwrap_or(0);
+        let mut misses = 0u32;
         let mut backoff = Duration::from_secs(1);
         loop {
+            let kind = kinds[at];
+            let dialer = kariz::link::Dialer::via(&c.panel, &c.link_token, kind)?;
             match dialer.connect(Side::Server).await {
                 Ok(session) => {
-                    info!(panel = %c.panel, "connected to the panel");
+                    info!(panel = %c.panel, transport = kind.name(), "connected to the panel");
                     crate::agent_update::touch(&self.path.with_file_name("connected"));
-                    backoff = Duration::from_secs(1);
                     let started = std::time::Instant::now();
-                    self.serve(session).await;
-                    warn!("the link to the panel ended; reconnecting");
+                    let asked = self
+                        .serve(session, || {
+                            // This transport gets through: the one to start with next time.
+                            if at != 0 || chosen.exists() {
+                                let _ = std::fs::write(&chosen, kind.name());
+                            }
+                        })
+                        .await;
+                    warn!(
+                        transport = kind.name(),
+                        requests = asked,
+                        "the link to the panel ended; reconnecting"
+                    );
+                    if asked >= GOOD_LINK {
+                        misses = 0;
+                        backoff = Duration::from_secs(1);
+                    } else {
+                        misses += 1;
+                        if asked == 0 && self.config().id.is_some() {
+                            warn!(
+                                "the panel asked this server nothing: the link is stalled on                                  the way, or the panel does not know this server (removed, or                                  reinstalled; then delete agent.toml and join with a new code)"
+                            );
+                        }
+                    }
                     if started.elapsed() < Duration::from_secs(2) {
                         tokio::time::sleep(backoff).await;
                     }
                 }
                 Err(e) => {
-                    warn!(error = %e, "could not connect to the panel");
+                    warn!(transport = kind.name(), error = %e, "could not connect to the panel");
+                    misses += 1;
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(Duration::from_secs(30));
                 }
             }
+            // A transport that keeps failing is swapped for the next one, round and round,
+            // so a network that stalls TCP (or blocks UDP) is got around without anyone
+            // having to choose.
+            if misses >= MISSES_BEFORE_SWITCH {
+                misses = 0;
+                at = (at + 1) % kinds.len();
+                backoff = Duration::from_secs(1);
+                info!(
+                    transport = kinds[at].name(),
+                    "trying another transport to the panel"
+                );
+            }
         }
     }
 }
+
+/// Beside `agent.toml`: the link transport that last worked. A file of its own, so an
+/// older agent (a rolled back update) still reads its settings.
+const TRANSPORT_FILE: &str = "link-transport";
+/// A link that served this many requests is working (the panel polls every 2 s).
+const GOOD_LINK: u32 = 3;
+/// Failed links in a row before the agent tries the next transport.
+const MISSES_BEFORE_SWITCH: u32 = 2;
 
 fn to_json<T: Serialize>(value: &T) -> Vec<u8> {
     serde_json::to_vec(value).unwrap_or_default()

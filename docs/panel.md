@@ -20,7 +20,7 @@ service `kariz-panel`, and prints:
 ```text
   address       https://203.0.113.5:28443/k-7f3a9c2e/
   certificate   SHA-256 9f2c41e0...
-  agents        port 22230 (open it in the firewall for the servers you add)
+  agents        port 22230, TCP and UDP (open both in the firewall for the servers you add)
   sign in       https://203.0.113.5:28443/k-7f3a9c2e/#t=...
 ```
 
@@ -32,7 +32,7 @@ service `kariz-panel`, and prints:
   and disappears from the address bar. Make another any time with
   `kariz-manager panel link`.
 - **The ports** are random (above 20000). `--port N` chooses the panel's. Open both the
-  panel's port (for you) and the agents' port (for your other servers) in the firewall.
+  panel's port (for you) and the agents' port (for your other servers, TCP and UDP) in the firewall.
 
 Set a password in *Settings* if you want to sign in without a link (10 characters or
 more). Or from the server: `kariz-manager panel password` (makes a random one and shows
@@ -53,6 +53,11 @@ panel within seconds.
 
 - **The agent dials the panel**, so the new server opens no port. It needs to reach the
   panel's *agents* port.
+- **The link's transport is automatic.** The agents' port takes `tcpmux` (TCP) and `kcp`
+  (UDP). An agent tries `tcpmux` first; after two links in a row that connect but carry no
+  requests (networks that let TCP connect and then stall it) it moves to `kcp`, and back,
+  and remembers the one that worked in `/etc/kariz-panel/link-transport`. *Servers* shows
+  which one each server uses.
 - **A code works once**, for 10 minutes. It carries a token, so keep it as secret as a
   password until it is used.
 - The agent runs as the service `kariz-agent`: `kariz-manager agent status | logs | remove`.
@@ -261,7 +266,9 @@ checks the signature too).
 ## Troubleshooting
 
 - **A server does not show up:** `kariz-manager agent logs` on it. "could not connect"
-  usually means the panel's agents port is closed in a firewall between them; a join
+  usually means the panel's agents port (TCP and UDP) is closed in a firewall between them;
+  "connected" repeating every few seconds means the path stalls TCP: the agent moves to
+  `kcp` by itself within about 20 s, as long as UDP on that port is open; a join
   code that was already used or has expired is refused (make a new one).
 - **The map shows no tunnel:** both servers must be connected and the tunnel must have the
   same name on both. A tunnel with one side connected is listed in the table as

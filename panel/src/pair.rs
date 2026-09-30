@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::random_hex;
 use crate::hub::Hub;
 use crate::manage::valid_name;
-use crate::wire::{Ack, CheckReply, ForwardInfo, PutReply, Request, Spec, TextReply, TunnelInfo};
+use crate::wire::{
+    Ack, CheckReply, ForwardInfo, PutReply, Request, Spec, SpeedReply, TextReply, TunnelInfo,
+};
 
 /// How long a new tunnel has to connect before it counts as failed.
 pub const CONNECT_WAIT: Duration = Duration::from_secs(30);
@@ -800,7 +802,7 @@ pub async fn speedtest(
     seconds: u32,
     streams: u32,
     udp: bool,
-) -> Result<TextReply> {
+) -> Result<SpeedReply> {
     if !valid_name(name) {
         bail!("bad_name");
     }
