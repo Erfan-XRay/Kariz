@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api } from "./api";
 import type { CheckReply, ForwardSpec, PairRequest, ServerInfo } from "./api";
 import type { Tunnel } from "./derive";
 import { useApp } from "./store";
-import { Icon, Seg } from "./ui";
+import { Icon, Seg, useFocusTrap } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { useNetworks } from "./Networks";
 
@@ -45,6 +45,8 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
   const editing = !!edit;
   const online = servers.filter((s) => s.online);
   const [on, setOn] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  useFocusTrap(box);
   const [step, setStep] = useState(0);
   const [back, setBack] = useState(false);
   const [name, setName] = useState(edit?.name ?? "");
@@ -79,7 +81,14 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
 
   // Editing: what the two servers hold now.
   useEffect(() => {
-    if (!edit?.entry || !edit.exit) return;
+    if (!edit?.entry || !edit.exit) {
+      // A tunnel seen from one side only cannot be edited as a pair: say so instead of waiting.
+      if (edit) {
+        setError(t("wz.oneSide"));
+        setLoading(false);
+      }
+      return;
+    }
     let alive = true;
     void Promise.all([api.tunnelSpec(edit.entry.server.id, edit.name), api.tunnelSpec(edit.exit.server.id, edit.name)])
       .then(([a, b]) => {
@@ -195,7 +204,7 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
   const dir = lang === "fa" ? -1 : 1;
 
   return (
-    <div className={`wizard ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label={editing ? t("wz.titleEdit", { name: edit!.name }) : t("wz.titleNew")}>
+    <div ref={box} className={`wizard ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label={editing ? t("wz.titleEdit", { name: edit!.name }) : t("wz.titleNew")}>
       <div className="wz-top">
         <h2>{editing ? t("wz.titleEdit", { name: edit!.name }) : t("wz.titleNew")}</h2>
         <button className="x-btn" type="button" onClick={onClose} disabled={running} aria-label={t("close")}>

@@ -157,7 +157,7 @@ function Detail({ tunnel, onClose, onAct, onEdit }: { tunnel: Tunnel; onClose: (
               {t("tun.stop")}
             </button>
           )}
-          <button className="btn btn-primary btn-sm" type="button" onClick={onEdit}>
+          <button className="btn btn-primary btn-sm" type="button" disabled={!tunnel.paired} title={tunnel.paired ? undefined : t("wz.oneSide")} onClick={onEdit}>
             {t("tun.edit")}
           </button>
         </>

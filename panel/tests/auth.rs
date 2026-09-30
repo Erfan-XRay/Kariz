@@ -621,3 +621,59 @@ async fn a_backup_is_downloaded_locked_and_restored_through_the_api() {
         .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }
+
+#[tokio::test]
+async fn a_tunnel_with_many_ports_gets_through_but_a_huge_body_does_not() {
+    let panel = Panel::new();
+    auth::set_password(&panel.db, "correct horse battery", None).unwrap();
+    let mut b = panel.browser("10.0.0.1");
+    b.call(
+        &panel,
+        "POST",
+        "/api/login",
+        Some(json!({"password": "correct horse battery"})),
+        false,
+    )
+    .await;
+    let forwards: Vec<Value> = (0..200)
+        .map(|i| json!({"listen": format!("0.0.0.0:{}", 10000 + i), "target": format!("127.0.0.1:{}", 10000 + i), "protocol": "tcp+udp"}))
+        .collect();
+    let body = |pad: usize| {
+        json!({
+            "name": "big", "entry": "local", "exit": "nobody", "mode": "reverse", "transport": "tcpmux",
+            "listen": "0.0.0.0:3080", "dial": "203.0.113.5:3080", "forwards": forwards, "pad": "x".repeat(pad)
+        })
+    };
+    // 200 forwards are about 20 KB: more than the other calls take, and accepted here (the
+    // servers named are not there, so it is refused for that, not for its size)
+    let (status, ..) = b
+        .call(&panel, "POST", "/api/tunnels/check", Some(body(0)), true)
+        .await;
+    assert_ne!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "the ports of a real tunnel must fit"
+    );
+    // a body of hundreds of kilobytes is refused whatever it says
+    let (status, ..) = b
+        .call(
+            &panel,
+            "POST",
+            "/api/tunnels/check",
+            Some(body(200_000)),
+            true,
+        )
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    // and the small limit still holds for everything else
+    let (status, ..) = b
+        .call(
+            &panel,
+            "POST",
+            "/api/servers/remove",
+            Some(json!({"id": "x".repeat(20_000)})),
+            true,
+        )
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}

@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/Erfan-XRay/Kariz/actions/workflows/ci.yml"><img src="https://github.com/Erfan-XRay/Kariz/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/Erfan-XRay/Kariz/releases"><img src="https://img.shields.io/badge/version-0.11.0-34d0c3" alt="Version 0.11.0"></a>
+  <a href="https://github.com/Erfan-XRay/Kariz/releases"><img src="https://img.shields.io/badge/version-1.0.0-34d0c3" alt="Version 1.0.0"></a>
   <img src="https://img.shields.io/badge/rust-1.80%2B-e9c46a?logo=rust" alt="Rust 1.80+">
   <img src="https://img.shields.io/badge/platform-linux-12365e?logo=linux&logoColor=white" alt="Linux">
 </p>
@@ -88,7 +88,7 @@ kariz-manager update                # new release, running tunnels restarted
 
 <div dir="rtl">
 
-تا وقتی مخزن private است، قبل از اجرای اسکریپت `GITHUB_TOKEN` را (توکنی که به مخزن دسترسی دارد) تنظیم کنید. توضیح کامل در [docs/manager.md](docs/manager.md).
+توضیح کامل در [docs/fa/manager.md](docs/fa/manager.md). مستندات فارسی: [docs/fa](docs/fa/README.md).
 
 ### راه دستی
 
