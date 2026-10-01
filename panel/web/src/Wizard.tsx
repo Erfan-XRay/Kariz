@@ -6,9 +6,10 @@ import { useApp } from "./store";
 import { Icon, Seg, useFocusTrap } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { useNetworks } from "./Networks";
-import { MuxFields, emptyMux, muxToSpec } from "./MuxFields";
+import { MuxFields, MuxToggle, emptyMux, muxSpecOf, muxToSpec } from "./MuxFields";
+import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
+import { MUX_OPTIONAL, TRANSPORTS, joinTransport, transportLabel } from "./transport";
 
-export const TRANSPORTS = ["auto", "tcpmux", "tcp", "ws", "wss", "quic", "kcp"] as const;
 export const PROFILES = ["balanced", "ultraspeed", "gaming"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
@@ -66,7 +67,8 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [entry, setEntry] = useState("");
   const [exit, setExit] = useState("");
   const [mode, setMode] = useState("reverse");
-  const [transport, setTransport] = useState<string>("tcpmux");
+  const [transport, setTransport] = useState<string>("tcp");
+  const [muxOn, setMuxOn] = useState(true);
   const [profile, setProfile] = useState<string>("balanced");
   const [listenPort, setListenPort] = useState("3080");
   const [dialHost, setDialHost] = useState("");
@@ -79,6 +81,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [wsHost, setWsHost] = useState("");
   const [sni, setSni] = useState("");
   const [mux, setMux] = useState(emptyMux());
+  const [tls, setTls] = useState(emptyTls());
   // Once the address to dial is typed (or loaded from the tunnel), it is not guessed again.
   const [dialTouched, setDialTouched] = useState(false);
   const [ports, setPorts] = useState("");
@@ -122,7 +125,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     entry,
     exit,
     mode,
-    transport,
+    transport: joinTransport(transport, muxOn).core,
     profile,
     listen: `${listenHost}:${listenPort}`,
     dial: `${dialHost.includes(":") && !dialHost.startsWith("[") ? `[${dialHost}]` : dialHost}:${listenPort}`,
@@ -131,7 +134,9 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     ws_path: isWs ? wsPath : undefined,
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
     tls_sni: transport === "wss" && sni.trim() ? sni.trim() : undefined,
-    mux: muxToSpec(mux).spec,
+    mux: muxSpecOf(mux, transport, muxOn),
+    tls_cert: transport === "wss" && tls.mode === "real" && tls.cert ? tls.cert : undefined,
+    tls_key: transport === "wss" && tls.mode === "real" && tls.key ? tls.key : undefined,
     forwards: parsed.forwards,
   });
 
@@ -144,6 +149,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
       if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
       if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
       if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
+      if (transport === "wss" && !tlsReady(tls)) return t("tls.needCert");
     }
     if (s === 1 && muxToSpec(mux).bad) return t(`mux.${muxToSpec(mux).bad}`) + ": " + t("mux.badValue");
     if (s === 3 && parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
@@ -285,10 +291,15 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     </button>
                   ))}
                 </div>
-                <details className="adv">
-                  <summary>{t("mux.title")}</summary>
-                  <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />
-                </details>
+                <div style={{ marginTop: "var(--sp-5)" }}>
+                  <MuxToggle transport={transport} value={muxOn} onChange={setMuxOn} />
+                </div>
+                {(muxOn || !MUX_OPTIONAL.includes(transport)) && (
+                  <details className="adv">
+                    <summary>{t("mux.title")}</summary>
+                    <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />
+                  </details>
+                )}
               </>
             )}
 
@@ -372,13 +383,27 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     </div>
                   )}
                   {transport === "wss" && (
+                    <div style={{ gridColumn: "1 / -1" }}>
+                      <TlsChoice
+                        value={tls}
+                        onChange={setTls}
+                        server={acceptor}
+                        serverName={serverName(acceptor)}
+                        onHost={(h) => {
+                          setDialTouched(true);
+                          setDialHost(h);
+                        }}
+                      />
+                    </div>
+                  )}
+                  {transport === "wss" && tls.mode === "self" && (
                     <div className="field">
                       <label htmlFor="wz-sni">{t("wz.sni")}</label>
                       <input className="text mono" id="wz-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
                       <span className="help">{t("wz.sniHelp")}</span>
                     </div>
                   )}
-                  {transport === "tcp" && (
+                  {transport === "tcp" && !muxOn && (
                     <div className="field">
                       <label htmlFor="wz-pool">{t("wz.pool")}</label>
                       <input
@@ -448,7 +473,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                           <dl className="kv">
                             <dt>{t("wz.transport")}</dt>
                             <dd className="mono">
-                              {transport} · {mode} · {profile}
+                              {transportLabel(joinTransport(transport, muxOn).core)} · {mode} · {profile}
                             </dd>
                             <dt>{accepts ? "⇢" : "⇠"}</dt>
                             <dd className="mono" dir="ltr">

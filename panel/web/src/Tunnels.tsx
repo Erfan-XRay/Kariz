@@ -11,6 +11,7 @@ import { RouteScene } from "./RouteScene";
 import { SpeedTest } from "./SpeedTest";
 import { Wizard } from "./Wizard";
 import { TunnelEdit } from "./TunnelEdit";
+import { transportLabel } from "./transport";
 
 const stateKey = { up: "st.up", down: "st.down", off: "st.off" } as const;
 
@@ -121,7 +122,7 @@ function SideFacts({ side, label }: { side: Tunnel["entry"]; label: string }) {
         </dd>
         <dt>{t("wz.transport")}</dt>
         <dd className="mono">
-          {side.tunnel.transport} · {side.tunnel.mode}
+          {transportLabel(side.tunnel.transport, side.tunnel.status?.peer.transport)} · {side.tunnel.mode}
         </dd>
         {side.tunnel.listen && (
           <>
@@ -186,7 +187,9 @@ function TunnelPage({ tunnel, onBack, onAct, onEdit }: { tunnel: Tunnel; onBack:
             <h2 className="td-name mono">{tunnel.name}</h2>
             <div className="td-tags">
               <StateBadge state={tunnel.state} />
-              <span className="tag">{tunnel.transport}</span>
+              <span className={`tag ${tunnel.via ? "live" : ""}`} title={tunnel.via ? t("td.autoNow", { via: tunnel.via.replace(/tcpmux/g, "tcp") }) : undefined}>
+                {transportLabel(tunnel.transport, tunnel.via)}
+              </span>
               <span className="tag">{tunnel.profile}</span>
               {mode && <span className="tag">{t(`td.mode.${mode}`)}</span>}
             </div>
@@ -562,7 +565,7 @@ export function TunnelsPage({
                       </div>
                     </td>
                     <td className="c-transport">
-                      <span className="tag">{x.transport}</span> <span className="tag">{x.profile}</span>
+                      <span className={`tag ${x.via ? "live" : ""}`}>{transportLabel(x.transport, x.via)}</span> <span className="tag">{x.profile}</span>
                       {mode && <span className="tag soft hide-sm">{t(`td.mode.${mode}`)}</span>}
                     </td>
                     <td className="c-transport num hide-sm">{num((x.entry ?? x.exit)?.tunnel.forwards.length ?? 0)}</td>

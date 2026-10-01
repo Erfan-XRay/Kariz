@@ -14,10 +14,12 @@ export interface Health {
   tx_bps: number | null;
   uptime_secs: number | null;
   load1: number | null;
+  /** IPv4 networks the server already routes. */
+  routes?: string[];
 }
 
 export interface TunnelStatus {
-  peer: { connected: boolean; sessions: number | null; rtt_ms: number | null; last_error: { secs_ago: number; text: string } | null };
+  peer: { connected: boolean; transport?: string | null; sessions: number | null; rtt_ms: number | null; last_error: { secs_ago: number; text: string } | null };
   totals: { bytes_up: number; bytes_down: number; tcp_open: number; udp_flows: number };
 }
 
@@ -71,6 +73,22 @@ export interface SpeedResult {
   report?: SpeedReport | null;
 }
 
+/** A speed test that runs in the background (`start`), and what it has said since (`poll`). */
+export interface SpeedStart {
+  ok: boolean;
+  error: string | null;
+  id: string;
+}
+export interface SpeedPoll {
+  ok: boolean;
+  error: string | null;
+  /** The progress lines of `kariz::speedtest::run`, after the ones already seen. */
+  lines: string[];
+  next: number;
+  done: boolean;
+  report: SpeedReport | null;
+}
+
 /** How an agent reaches the panel: `auto` tries every transport in turn. */
 export type LinkTransport = "auto" | "tcpmux" | "kcp" | "wss";
 
@@ -112,6 +130,8 @@ export interface ForwardSpec {
 /** What the wizard sends: one tunnel, both sides. */
 /** A tunnel's mux settings; what is left out keeps the profile's value. */
 export interface MuxSpec {
+  /** Only ever false: mux off for ws, wss or kcp. */
+  enabled?: boolean;
   connections?: number;
   max_streams?: number;
   /** Bytes. */
@@ -135,6 +155,9 @@ export interface PairRequest {
   ws_host?: string;
   tls_sni?: string;
   mux?: MuxSpec;
+  /** wss: the files of a real certificate on the listening side. */
+  tls_cert?: string;
+  tls_key?: string;
   forwards: ForwardSpec[];
   rotate?: boolean;
   /** Direct mode: run over this private GRE network (its id). */
@@ -156,6 +179,8 @@ export interface Spec {
   tls_sni?: string;
   tls_pin?: string;
   mux?: MuxSpec;
+  tls_cert?: string;
+  tls_key?: string;
   forwards: ForwardSpec[];
 }
 
@@ -295,6 +320,8 @@ export const api = {
   revoke: (id: number) => call<object>("POST", "sessions/revoke", { id }),
   changePassword: (current: string | undefined, next: string) =>
     call<object>("POST", "password", { current, new: next }),
+  tunnelCert: (server: string, host: string, email?: string) =>
+    call<{ ok: boolean; error: string | null; cert: string | null; key: string | null }>("POST", "tunnels/cert", { server, host, email }),
   tunnelCheck: (body: PairRequest) => call<{ entry: CheckReply; exit: CheckReply }>("POST", "tunnels/check", body),
   createTunnel: (body: PairRequest) => call<{ op: string }>("POST", "tunnels", body),
   editTunnel: (body: PairRequest) => call<{ op: string }>("POST", "tunnels/edit", body),
@@ -307,6 +334,9 @@ export const api = {
   history: (key: string, range: string) => call<{ points: [number, number][] }>("GET", `history?key=${encodeURIComponent(key)}&range=${range}`),
   events: (limit = 100) => call<{ events: EventRow[] }>("GET", `events?limit=${limit}`),
   logs: (name: string, lines = 200) => call<{ lines: LogLine[] }>("GET", `logs?name=${encodeURIComponent(name)}&lines=${lines}`),
+  speedtestStart: (name: string, seconds: number, streams: number, udp: boolean) =>
+    call<SpeedStart>("POST", "tunnels/speedtest/start", { name, seconds, streams, udp }),
+  speedtestPoll: (name: string, id: string, after: number) => call<SpeedPoll>("POST", "tunnels/speedtest/poll", { name, id, after }),
   speedtest: (name: string, seconds: number, streams: number, udp: boolean) =>
     call<SpeedResult>("POST", "tunnels/speedtest", { name, seconds, streams, udp }),
   backup: (passphrase: string) => call<{ data: string }>("POST", "backup", { passphrase }),

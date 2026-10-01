@@ -293,6 +293,10 @@ fn speedtest(config: &Config, options: Options) -> Result<()> {
     let report = runtime.block_on(async {
         let connection = kariz::control::connect(&socket).await?;
         kariz::control::request(connection, options, |line| {
+            // Lines for programs (the panel) are not for a person.
+            if line.starts_with(kariz::speedtest::RESULT_LINE) {
+                return;
+            }
             // One line, rewritten, on a terminal.
             if live {
                 print!("\r\x1b[2K  {} {line}", style.paint(logging::TEAL, "⋯"));

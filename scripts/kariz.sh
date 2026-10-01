@@ -978,6 +978,29 @@ panel_cert() {
     panel_show "$CERT_IDENTITY"
 }
 
+# `tunnel-cert`: a Let's Encrypt certificate for a wss tunnel, with the same machinery as the
+# panel's (port 80 is freed for a moment, the renewal timer does the rest). The web panel runs
+# it on the server a tunnel listens on; it prints the files as `cert=` and `key=` lines.
+cmd_tunnel_cert() {
+    need_root
+    need_systemd
+    local domain="" ip="" email=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --domain) domain=${2:-} && shift 2 ;;
+            --ip) ip=${2:-} && shift 2 ;;
+            --email) email=${2:-} && shift 2 ;;
+            *) die "tunnel-cert: --domain D | --ip ADDRESS [--email E]" ;;
+        esac
+    done
+    [[ -n "$domain$ip" ]] || die "tunnel-cert: --domain D | --ip ADDRESS [--email E]"
+    choose_identity "$domain" "$ip" 1 || die "Cancelled."
+    get_cert "$CERT_IDENTITY" "$CERT_KIND" "$email" 1
+    printf 'cert=%s/fullchain.pem
+key=%s/privkey.pem
+' "$CERT_LIVE" "$CERT_LIVE"
+}
+
 cmd_panel() {
     local action=${1:-}
     shift || true
@@ -1304,6 +1327,8 @@ usage() {
                                                here already is replaced by the new one)
   agent status | logs | remove
   status                                       what runs here, and this server's addresses
+  tunnel-cert --domain D | --ip A [--email E]  a Let's Encrypt certificate for a wss tunnel (the
+                                               panel runs this on the server the tunnel listens on)
 
   Set GITHUB_TOKEN if GitHub limits your downloads.
 EOF
@@ -1319,6 +1344,7 @@ main() {
         agent) shift && cmd_agent "$@" ;;
         --agent) shift && agent_join "$@" ;;
         status) cmd_status ;;
+        tunnel-cert) shift && cmd_tunnel_cert "$@" ;;
         help | -h | --help) usage ;;
         *) usage && exit 1 ;;
     esac
