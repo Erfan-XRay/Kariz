@@ -86,7 +86,7 @@ test("a server is added with a join code and comes online", async ({ page }) => 
   await page.locator(".page-band .btn-primary").click();
   await page.locator("#add-name").fill("far-away");
   await page.getByRole("button", { name: /Make a join code/i }).click();
-  const shown = await page.locator("pre.code").innerText();
+  const shown = await page.locator("pre.code").first().innerText();
   const code = /kz1_[A-Za-z0-9_-]+/.exec(shown)?.[0];
   expect(code, "a join code is shown").toBeTruthy();
   agent = startAgent(code!);
