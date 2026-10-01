@@ -138,7 +138,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
     try {
       setOpId((await api.editTunnel(request())).op);
     } catch (e) {
-      setError(e instanceof ApiError && e.code === "busy" ? t("wz.busy") : e instanceof ApiError ? e.code : String(e));
+      setError(e instanceof ApiError && e.code === "busy" ? t("wz.busy") : e instanceof ApiError ? opError(t, e.code, new Map(servers.map((x) => [x.id, x.name]))) : String(e));
     }
   };
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **The manager offers updates.** Opening the menu (or `kariz-manager status`) looks for a newer
+  release and, if the core, the panel or the agent here is older, says which and asks to update
+  them all. `--agent CODE` updates an older program first (an old agent refuses what a newer
+  panel sends), and `update` fetches the newest `kariz-manager` script too.
+  `KARIZ_NO_UPDATE_CHECK=1` turns the look off.
+
+### Fixed
+
+- **A tunnel with `auto` (or mux settings) on a server that runs an older Kariz** failed with
+  `unknown variant auto` from that server. The panel now says which server is too old and to
+  update it first, before anything is written.
+- **Typing in a dialog jumped to its first field** every time the panel refreshed (every 2 s): the
+  dialog moved the focus on each render. It sets the focus once, when it opens.
+- Small controls (the tunnel switches, name links, the breadcrumb) have a bigger touch area on
+  phones.
+
 ## 1.5.0 - 2026-10-01
 
 Servers stay connected when a daemon is slow, a tunnel can be edited completely, and the manager

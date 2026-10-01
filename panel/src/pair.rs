@@ -92,6 +92,27 @@ impl PairRequest {
         }
     }
 
+    /// Whether this tunnel uses something older servers do not know (`auto`, mux settings):
+    /// both of its servers must run 1.5 or newer, or they would refuse the config.
+    fn needs_new_servers(&self) -> bool {
+        self.transport == "auto" || self.mux.as_ref().is_some_and(|m| !m.is_empty())
+    }
+
+    /// An error (`old_agent:SERVER:VERSION`) naming the first server that is too old.
+    fn require_new_enough(&self, hub: &Hub) -> Result<()> {
+        if !self.needs_new_servers() {
+            return Ok(());
+        }
+        for server in hub.snapshot()? {
+            if (server.id == self.entry || server.id == self.exit)
+                && !version_at_least(&server.version, (1, 5, 0))
+            {
+                bail!("old_agent:{}:{}", server.id, server.version);
+            }
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
         if !valid_name(&self.name) {
             bail!("bad_name");
@@ -103,6 +124,22 @@ impl PairRequest {
             bail!("bad_mode");
         }
         Ok(())
+    }
+}
+
+/// Whether `version` (`1.5.0`, maybe with a suffix after a dash) is at least `min`. One that
+/// cannot be read counts as too old.
+fn version_at_least(version: &str, min: (u32, u32, u32)) -> bool {
+    let mut parts = version
+        .trim_start_matches('v')
+        .split('-')
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .map(|p| p.parse::<u32>());
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(a)), Some(Ok(b)), Some(Ok(c))) => (a, b, c) >= min,
+        _ => false,
     }
 }
 
@@ -241,6 +278,7 @@ fn fail_text(reply: &Ack) -> String {
 /// Checks a request on both servers (nothing is written).
 pub async fn check(hub: &Hub, req: &PairRequest) -> Result<(CheckReply, CheckReply)> {
     req.validate()?;
+    req.require_new_enough(hub)?;
     let (entry, exit) = req.specs(None, None);
     let a = hub
         .ask_as(&req.entry, &Request::TunnelCheck { spec: entry })
@@ -358,6 +396,7 @@ fn describe(check: &CheckReply) -> String {
 /// Starts making a tunnel. The operation's id comes back at once.
 pub fn create(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
     req.validate()?;
+    req.require_new_enough(hub)?;
     let id = hub.ops.begin("create", &req.name)?;
     let hub = hub.clone();
     let op = id.clone();
@@ -529,6 +568,7 @@ async fn undo(hub: &Hub, servers: &[&str], name: &str) -> bool {
 /// again the old ones are put back.
 pub fn edit(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
     req.validate()?;
+    req.require_new_enough(hub)?;
     let id = hub.ops.begin("edit", &req.name)?;
     let hub = hub.clone();
     let op = id.clone();
@@ -868,4 +908,48 @@ pub async fn speedtest(
         .await?;
     serde_json::from_slice(&raw)
         .map_err(|_| anyhow::anyhow!("the server's answer was not understood"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versions_are_compared_by_their_numbers() {
+        let min = (1, 5, 0);
+        assert!(version_at_least("1.5.0", min) && version_at_least("v1.10.2", min));
+        assert!(version_at_least("2.0.0-rc1", min) && version_at_least("1.5.0-dev", min));
+        assert!(!version_at_least("1.4.0", min) && !version_at_least("1.4.99", min));
+        assert!(!version_at_least("", min) && !version_at_least("unknown", min));
+    }
+
+    #[test]
+    fn auto_and_mux_settings_need_new_servers() {
+        let req = |transport: &str, mux: Option<crate::wire::MuxSpec>| PairRequest {
+            name: "t".into(),
+            entry: "a".into(),
+            exit: "b".into(),
+            mode: "reverse".into(),
+            transport: transport.into(),
+            profile: None,
+            listen: "0.0.0.0:3080".into(),
+            dial: "1.2.3.4:3080".into(),
+            pool: None,
+            ws_path: None,
+            ws_host: None,
+            tls_sni: None,
+            mux,
+            forwards: Vec::new(),
+            rotate: false,
+            network: None,
+        };
+        assert!(req("auto", None).needs_new_servers());
+        let tuned = crate::wire::MuxSpec {
+            connections: Some(4),
+            ..Default::default()
+        };
+        assert!(req("tcpmux", Some(tuned)).needs_new_servers());
+        assert!(!req("tcpmux", Some(Default::default())).needs_new_servers());
+        assert!(!req("kcp", None).needs_new_servers());
+    }
 }

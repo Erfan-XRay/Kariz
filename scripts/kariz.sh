@@ -225,11 +225,14 @@ fetch() {
     if command -v curl >/dev/null; then
         local extra=()
         [[ -n "$header" ]] && extra=(-H "$header")
+        # FETCH_MAX: seconds one request may take (set for a quick look, never for a download).
+        [[ -n "${FETCH_MAX:-}" ]] && extra+=(--max-time "$FETCH_MAX")
         curl -fsSL --retry 3 "${auth[@]}" "${extra[@]}" -o "$out" "$url"
     elif command -v wget >/dev/null; then
         local extra=()
         [[ -n "${GITHUB_TOKEN:-}" ]] && extra+=(--header="Authorization: Bearer $GITHUB_TOKEN")
         [[ -n "$header" ]] && extra+=(--header="$header")
+        [[ -n "${FETCH_MAX:-}" ]] && extra+=(--timeout="$FETCH_MAX")
         wget -q "${extra[@]}" -O "$out" "$url"
     else
         die "Needs curl or wget."
@@ -393,12 +396,70 @@ cmd_install() {
     info "Manage it any time with: ${C_BOLD}kariz-manager${C_RESET}"
 }
 
+# The version number of an installed program ("kariz 1.4.0" gives 1.4.0), or nothing.
+bin_version() {
+    { "$1" --version 2>/dev/null || true; } | sed -n 's/^[^0-9]*\([0-9][0-9.]*\).*/\1/p' | head -n 1
+}
+
+# Looks for a newer release, and says what here is behind it. Returns 1 (and says nothing)
+# when nothing is, when GitHub does not answer in a few seconds, or with
+# KARIZ_NO_UPDATE_CHECK set. LATEST and BEHIND are left for the caller.
+update_available() {
+    [[ -z "${KARIZ_NO_UPDATE_CHECK:-}" ]] || return 1
+    LATEST=$(FETCH_MAX=6 latest_version 2>/dev/null || true)
+    LATEST=${LATEST#v}
+    [[ -n "$LATEST" ]] || return 1
+    BEHIND=""
+    local v
+    if [[ -x "$BIN" ]]; then
+        v=$(bin_version "$BIN")
+        if [[ -n "$v" ]] && version_lt "$v" "$LATEST"; then BEHIND="the tunnel core $v"; fi
+    fi
+    if [[ -x "$PANEL_BIN" ]]; then
+        v=$(bin_version "$PANEL_BIN")
+        if [[ -n "$v" ]] && version_lt "$v" "$LATEST"; then
+            BEHIND="${BEHIND:+$BEHIND, }the panel and agent program $v"
+        fi
+    fi
+    [[ -n "$BEHIND" ]]
+}
+
+# Tells the user a newer release is out and offers to update everything here (the core,
+# the panel and the agent). Asked only at a terminal: `kariz-manager update` does it by hand.
+offer_update() {
+    update_available || return 0
+    echo
+    warn "Kariz $LATEST is out. Here: $BEHIND."
+    info "An older agent or panel can refuse what the newer panel sends (an auto tunnel, mux settings)."
+    if confirm "Update everything on this server now? (running tunnels restart for a moment)" y; then
+        (cmd_update) || warn "The update did not finish: kariz-manager update shows why."
+    fi
+}
+
+# Puts the newest kariz-manager script in place (a best-effort; the running copy goes on).
+refresh_manager() {
+    local tmp
+    tmp=$(mktemp)
+    if FETCH_MAX=20 fetch "$RAW_URL" "$tmp" 2>/dev/null && bash -n "$tmp" 2>/dev/null; then
+        install -m 0755 "$tmp" "$MANAGER"
+    fi
+    rm -f "$tmp"
+}
+
 cmd_update() {
     need_root
     need_kariz
-    local before
+    local before local_install=0 a
     before=$("$BIN" --version)
+    for a in "$@"; do
+        [[ "$a" == --binary || "$a" == --panel-binary ]] && local_install=1
+    done
     cmd_install "$@"
+    # A copy of this script that is already installed is not replaced by an install: the
+    # newest one is fetched (not for an install from files of your own).
+    if ((!local_install)) && [[ -z "${KARIZ_NO_UPDATE_CHECK:-}" && "$(realpath "${BASH_SOURCE[0]}" 2>/dev/null)" == "$MANAGER" ]]; then
+        refresh_manager
+    fi
     local restarted=0
     for unit in $(systemctl list-units --type=service --state=active --plain --no-legend 'kariz@*' | awk '{print $1}'); do
         systemctl restart "$unit" && restarted=$((restarted + 1))
@@ -1022,6 +1083,10 @@ agent_join() {
     fi
     if [[ ! -x "$PANEL_BIN" ]]; then
         cmd_install "${version[@]}"
+    elif ((${#version[@]} == 0)) && update_available; then
+        # An agent program from an older release may not understand what the panel sends.
+        warn "Kariz $LATEST is out, and this server has an older one ($BEHIND): updating it first."
+        cmd_install
     fi
     [[ -x "$PANEL_BIN" ]] ||
         die "This Kariz release has no agent. Install 0.8 or later: kariz-manager update, then --agent CODE"
@@ -1088,6 +1153,10 @@ cmd_status() {
     fi
     if [[ -f "$PANEL_CONF" ]]; then
         panel_show "$(panel_host "")"
+    fi
+    if update_available; then
+        echo
+        warn "Kariz $LATEST is out. Here: $BEHIND. Update: kariz-manager update"
     fi
 }
 
@@ -1175,6 +1244,8 @@ menu() {
     if [[ ! -x "$BIN" ]]; then
         # An action that fails ends it, as in the menu; the menu opens after it.
         (first_run) || true
+    else
+        offer_update
     fi
     while true; do
         banner

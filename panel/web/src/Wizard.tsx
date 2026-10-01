@@ -164,7 +164,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
       try {
         setCheck(await api.tunnelCheck(request()));
       } catch (e) {
-        setError(e instanceof ApiError ? e.code : String(e));
+        setError(e instanceof ApiError ? opError(t, e.code, new Map(servers.map((x) => [x.id, x.name]))) : String(e));
       } finally {
         setChecking(false);
       }
@@ -184,7 +184,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
       const r = await api.createTunnel(request());
       setOpId(r.op);
     } catch (e) {
-      setError(e instanceof ApiError && e.code === "busy" ? t("wz.busy") : e instanceof ApiError ? e.code : String(e));
+      setError(e instanceof ApiError && e.code === "busy" ? t("wz.busy") : e instanceof ApiError ? opError(t, e.code, new Map(servers.map((x) => [x.id, x.name]))) : String(e));
     }
   };
 
