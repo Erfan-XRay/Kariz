@@ -55,7 +55,8 @@ kariz-manager install [--version vX.Y.Z] [--binary PATH]   # Kariz (and the pane
 kariz-manager update [--version vX.Y.Z]                    # a new release; what runs is restarted
 kariz-manager uninstall [--yes]                            # --yes also deletes the configs
 
-kariz-manager panel install [--port N] [--host H]   # the panel on this server: address, certificate, a login link
+kariz-manager panel install [--port N] [--host H] [--name NAME]   # the panel on this server: address, certificate, a login link; asks what to call this server (default: its host name)
+kariz-manager panel name [NAME]                    # rename this server in the panel
 kariz-manager panel link [--host H]                 # another one-time login link
 kariz-manager panel password [--stdin]              # a new admin password
 kariz-manager panel status | logs                   # the service, its address / follow the log

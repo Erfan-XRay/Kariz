@@ -41,6 +41,10 @@ enum Command {
         /// The key of `--cert-file`.
         #[arg(long, requires = "cert_file")]
         key_file: Option<PathBuf>,
+        /// What this server is called in the panel (letters, digits, - _ . up to 40);
+        /// default: its host name. Given again, it renames the server.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Run the agent that connects this server to a panel. The first time, give it the
     /// join code the panel shows (*Add server*); after that it remembers who it is.
@@ -171,9 +175,20 @@ fn main() -> Result<()> {
             port,
             cert_file,
             key_file,
+            name,
         } => {
+            if let Some(name) = name.as_deref() {
+                anyhow::ensure!(
+                    kariz_panel::join::valid_name(name),
+                    "the name is letters, digits, - _ . and at most 40 characters"
+                );
+            }
             let done =
                 kariz_panel::init_with_cert(&config, &data_dir, port, cert_file.zip(key_file))?;
+            if let Some(name) = name {
+                kariz_panel::db::Db::open(&done.config.database())?
+                    .set_meta("local_name", &name)?;
+            }
             println!("panel set up");
             println!("  settings    : {}", config.display());
             println!("  listen      : {}", done.config.listen);
