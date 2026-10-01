@@ -558,9 +558,8 @@ async fn remove_server(
 fn pair_error(e: anyhow::Error) -> Response {
     let code = format!("{e:#}");
     match code.as_str() {
-        "bad_name" | "same_server" | "bad_mode" | "bad_action" => {
-            error(StatusCode::BAD_REQUEST, &code)
-        }
+        "bad_name" | "same_server" | "bad_mode" | "bad_action" | "bad_encryption"
+        | "encryption_quic" => error(StatusCode::BAD_REQUEST, &code),
         "busy" => error(StatusCode::CONFLICT, "busy"),
         _ if code.starts_with("old_agent:") => error(StatusCode::CONFLICT, &code),
         _ => internal(e),

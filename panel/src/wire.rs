@@ -211,6 +211,10 @@ pub struct Spec {
     /// Mux settings; left out, the profile's apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mux: Option<MuxSpec>,
+    /// The cipher of the tunnel: `aes-256-gcm`, `chacha20-poly1305` or `none` (traffic in the
+    /// clear, authenticated only). Left out: `auto` (AES where the CPU has it, else ChaCha).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<String>,
     #[serde(default)]
     pub forwards: Vec<ForwardInfo>,
 }
@@ -376,6 +380,10 @@ pub struct TunnelInfo {
     pub mode: String,
     pub transport: String,
     pub profile: String,
+    /// The tunnel's `encryption` setting (`auto`, `aes-256-gcm`, `chacha20-poly1305`, `none`);
+    /// empty from an agent that does not say.
+    #[serde(default)]
+    pub encryption: String,
     pub listen: Option<String>,
     pub remote: Option<String>,
     pub forwards: Vec<ForwardInfo>,

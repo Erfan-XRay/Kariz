@@ -388,6 +388,7 @@ button {
   color: var(--text-2);
   white-space: nowrap;
 }
+.tag.risk { border-color: var(--danger); color: var(--danger); }
 .tag.soft { font-family: var(--font-ui); border-style: dashed; }
 
 kbd {

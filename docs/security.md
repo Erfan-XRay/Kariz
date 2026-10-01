@@ -48,7 +48,9 @@ signature does not verify.
 `kariz check` and the startup log warn about each:
 
 - `encryption = "none"`: authenticates, but the traffic is readable on the wire. Use it
-  only inside another encrypted layer.
+  only inside another encrypted layer. The panel offers it as *No encryption*, in red, and asks
+  you to confirm it; the choice is also *Automatic* (recommended), *AES-256-GCM* and
+  *ChaCha20-Poly1305*.
 - `tls.insecure = true`: the `wss` dialer accepts any certificate. Prefer
   `tls.pin_sha256`.
 
