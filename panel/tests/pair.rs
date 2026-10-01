@@ -160,6 +160,7 @@ async fn a_pair_is_made_edited_stopped_deleted_and_a_failure_leaves_nothing() {
         ws_path: None,
         ws_host: None,
         tls_sni: None,
+        mux: None,
         forwards: vec![ForwardInfo {
             listen: format!("127.0.0.1:{front}"),
             target: format!("127.0.0.1:{target}"),

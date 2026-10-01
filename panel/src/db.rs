@@ -101,6 +101,13 @@ const MIGRATIONS: &[&str] = &[
     // 7: the server a join code registered, until its agent confirms the identity (a link
     // that drops during enrollment tries again with the same identity).
     "ALTER TABLE joins ADD COLUMN server TEXT;",
+    // 8: tunnels deleted while their server was offline: the agent removes them when it
+    // comes back.
+    "CREATE TABLE pending_deletes (
+         server TEXT NOT NULL,
+         name TEXT NOT NULL,
+         PRIMARY KEY (server, name)
+     );",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

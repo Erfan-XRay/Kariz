@@ -2,14 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ApiError, api } from "./api";
 import type { CheckReply, ForwardSpec, PairRequest, ServerInfo } from "./api";
-import type { Tunnel } from "./derive";
 import { useApp } from "./store";
 import { Icon, Seg, useFocusTrap } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { useNetworks } from "./Networks";
+import { MuxFields, emptyMux, muxToSpec } from "./MuxFields";
 
-const TRANSPORTS = ["tcp", "tcpmux", "ws", "wss", "quic", "kcp"] as const;
-const PROFILES = ["balanced", "ultraspeed", "gaming"] as const;
+export const TRANSPORTS = ["auto", "tcpmux", "tcp", "ws", "wss", "quic", "kcp"] as const;
+export const PROFILES = ["balanced", "ultraspeed", "gaming"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 /** "443, 8080-8090, 2053=53" as forwards; the piece that is wrong if one is. */
@@ -37,22 +37,34 @@ export function parsePorts(text: string, protocol: string, host: string): { forw
   return { forwards };
 }
 
-/** The port part of an address like `0.0.0.0:3080`. */
-const portOf = (addr: string | undefined) => addr?.split(":").pop() ?? "";
-const hostOf = (addr: string | undefined) => (addr ? addr.slice(0, addr.lastIndexOf(":")) : "");
+/** The addresses a server can be dialed at, best first: the one set for it, the panel's own host name (for the panel's server), its public IPv4, its IPv6. */
+export function addressesOf(s: ServerInfo): string[] {
+  const out: string[] = [];
+  const add = (a?: string | null) => {
+    if (a && !out.includes(a)) out.push(a);
+  };
+  add(s.addr);
+  if (s.local && !/^(localhost|127\.|\[?::1\]?$)/.test(location.hostname)) add(location.hostname.replace(/^\[|\]$/g, ""));
+  add(s.ip4);
+  add(s.ip6);
+  return out;
+}
 
-export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit?: Tunnel; onClose: () => void }) {
+/** The port part of an address like `0.0.0.0:3080`. */
+export const portOf = (addr: string | undefined) => addr?.split(":").pop() ?? "";
+export const hostOf = (addr: string | undefined) => (addr ? addr.slice(0, addr.lastIndexOf(":")) : "");
+
+export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: () => void }) {
   const { t, num, lang } = useApp();
-  const editing = !!edit;
   const online = servers.filter((s) => s.online);
   const [on, setOn] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   useFocusTrap(box);
   const [step, setStep] = useState(0);
   const [back, setBack] = useState(false);
-  const [name, setName] = useState(edit?.name ?? "");
-  const [entry, setEntry] = useState(edit?.entry?.server.id ?? "");
-  const [exit, setExit] = useState(edit?.exit?.server.id ?? "");
+  const [name, setName] = useState("");
+  const [entry, setEntry] = useState("");
+  const [exit, setExit] = useState("");
   const [mode, setMode] = useState("reverse");
   const [transport, setTransport] = useState<string>("tcpmux");
   const [profile, setProfile] = useState<string>("balanced");
@@ -60,15 +72,19 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
   const [dialHost, setDialHost] = useState("");
   // The host the accepting side listens on: every address, or (for a tunnel that was made
   // over a private network) its private one.
-  const [listenHost, setListenHost] = useState("0.0.0.0");
+  const listenHost = "0.0.0.0";
   const [netId, setNetId] = useState("");
   const { networks, links } = useNetworks();
   const [wsPath, setWsPath] = useState("/");
+  const [wsHost, setWsHost] = useState("");
+  const [sni, setSni] = useState("");
+  const [mux, setMux] = useState(emptyMux());
+  // Once the address to dial is typed (or loaded from the tunnel), it is not guessed again.
+  const [dialTouched, setDialTouched] = useState(false);
   const [ports, setPorts] = useState("");
   const [protocol, setProtocol] = useState("tcp");
   const [target, setTarget] = useState("127.0.0.1");
   const [pool, setPool] = useState<number | undefined>();
-  const [loading, setLoading] = useState(editing);
   const [check, setCheck] = useState<{ entry: CheckReply; exit: CheckReply } | null>(null);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
@@ -79,42 +95,6 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
     const id = requestAnimationFrame(() => setOn(true));
     return () => cancelAnimationFrame(id);
   }, []);
-
-  // Editing: what the two servers hold now.
-  useEffect(() => {
-    if (!edit?.entry || !edit.exit) {
-      // A tunnel seen from one side only cannot be edited as a pair: say so instead of waiting.
-      if (edit) {
-        setError(t("wz.oneSide"));
-        setLoading(false);
-      }
-      return;
-    }
-    let alive = true;
-    void Promise.all([api.tunnelSpec(edit.entry.server.id, edit.name), api.tunnelSpec(edit.exit.server.id, edit.name)])
-      .then(([a, b]) => {
-        if (!alive) return;
-        const acceptor = a.mode === "reverse" ? a : b;
-        const dialer = a.mode === "reverse" ? b : a;
-        setMode(a.mode);
-        setTransport(a.transport);
-        setProfile(a.profile ?? "balanced");
-        setListenPort(portOf(acceptor.listen));
-        setListenHost(hostOf(acceptor.listen) || "0.0.0.0");
-        setDialHost(hostOf(dialer.remote));
-        setWsPath(a.ws_path ?? "/");
-        setPool(a.pool);
-        const list = a.forwards;
-        setPorts(list.map((f) => (portOf(f.listen) === portOf(f.target) ? portOf(f.listen) : `${portOf(f.listen)}=${portOf(f.target)}`)).join(", "));
-        setProtocol(list[0]?.protocol ?? "tcp");
-        setTarget(hostOf(list[0]?.target) || "127.0.0.1");
-      })
-      .catch(() => setError(t("tun.failed", { why: "no_such_tunnel" })))
-      .finally(() => alive && setLoading(false));
-    return () => {
-      alive = false;
-    };
-  }, [edit]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const serverName = (id: string) => servers.find((s) => s.id === id)?.name ?? id;
   const acceptor = mode === "reverse" ? entry : exit;
@@ -127,11 +107,15 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
   const udp = transport === "quic" || transport === "kcp";
   const isWs = transport === "ws" || transport === "wss";
 
-  // The accepting server's address, as the other one reaches it: the panel's own is the
-  // one the browser used.
+  // The accepting server's address, as the other one reaches it. A new tunnel starts from
+  // the best guess (the address set for it, else the one the panel sees) until one is typed.
+  const acceptorServer = servers.find((s) => s.id === acceptor);
+  const addrChoices = acceptorServer ? addressesOf(acceptorServer) : [];
   useEffect(() => {
-    if (!editing && !dialHost && acceptor && servers.find((s) => s.id === acceptor)?.local) setDialHost(location.hostname);
-  }, [acceptor]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (dialTouched || !acceptorServer) return;
+    const guess = addrChoices[0];
+    if (guess) setDialHost(guess);
+  }, [acceptor, servers]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const request = (): PairRequest => ({
     name,
@@ -145,6 +129,9 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
     network: mode === "direct" && netId ? netId : undefined,
     pool,
     ws_path: isWs ? wsPath : undefined,
+    ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
+    tls_sni: transport === "wss" && sni.trim() ? sni.trim() : undefined,
+    mux: muxToSpec(mux).spec,
     forwards: parsed.forwards,
   });
 
@@ -158,6 +145,7 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
       if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
       if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
     }
+    if (s === 1 && muxToSpec(mux).bad) return t(`mux.${muxToSpec(mux).bad}`) + ": " + t("mux.badValue");
     if (s === 3 && parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
     return "";
   };
@@ -193,7 +181,7 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
   const build = async () => {
     setError("");
     try {
-      const r = editing ? await api.editTunnel(request()) : await api.createTunnel(request());
+      const r = await api.createTunnel(request());
       setOpId(r.op);
     } catch (e) {
       setError(e instanceof ApiError && e.code === "busy" ? t("wz.busy") : e instanceof ApiError ? e.code : String(e));
@@ -205,9 +193,9 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
   const dir = lang === "fa" ? -1 : 1;
 
   return createPortal(
-    <div ref={box} className={`wizard ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label={editing ? t("wz.titleEdit", { name: edit!.name }) : t("wz.titleNew")}>
+    <div ref={box} className={`wizard ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label={t("wz.titleNew")}>
       <div className="wz-top">
-        <h2>{editing ? t("wz.titleEdit", { name: edit!.name }) : t("wz.titleNew")}</h2>
+        <h2>{t("wz.titleNew")}</h2>
         <button className="x-btn" type="button" onClick={onClose} disabled={running} aria-label={t("close")}>
           <Icon name="x" />
         </button>
@@ -230,32 +218,31 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
       <div className="wz-body">
         <div className="wz-inner">
           <div className={`wz-step ${back ? "back" : ""}`} key={step} style={{ ["--dir" as string]: dir }}>
-            {loading && <p className="muted">…</p>}
-
-            {!loading && step === 0 && (
+            
+            {step === 0 && (
               <>
                 <h3 className="wz-q">{t("wz.q1")}</h3>
                 <p className="wz-lead">{t("wz.lead1")}</p>
                 <div className="field" style={{ marginBottom: "var(--sp-5)", maxWidth: 360 }}>
                   <label htmlFor="wz-name">{t("wz.name")}</label>
-                  <input className="text mono" id="wz-name" dir="ltr" value={name} disabled={editing} placeholder="tehran-frankfurt" onChange={(e) => setName(e.target.value.toLowerCase())} />
+                  <input className="text mono" id="wz-name" dir="ltr" value={name} placeholder="tehran-frankfurt" onChange={(e) => setName(e.target.value.toLowerCase())} />
                   <span className="help">{t("wz.nameHelp")}</span>
                 </div>
                 <div className="pair">
-                  <Picker label={t("wz.entry")} servers={servers} value={entry} other={exit} locked={editing} onPick={setEntry} />
+                  <Picker label={t("wz.entry")} servers={servers} value={entry} other={exit} locked={false} onPick={setEntry} />
                   <div className="pair-mid">
                     <svg viewBox="0 0 90 36" aria-hidden="true">
                       <path d="M4 18 H80" stroke="var(--water)" strokeWidth="2" strokeDasharray="4 6" fill="none" />
                       <path d="M74 10 L86 18 L74 26" stroke="var(--water)" strokeWidth="2" fill="none" />
                     </svg>
                   </div>
-                  <Picker label={t("wz.exit")} servers={servers} value={exit} other={entry} locked={editing} onPick={setExit} />
+                  <Picker label={t("wz.exit")} servers={servers} value={exit} other={entry} locked={false} onPick={setExit} />
                 </div>
                 {online.length < 2 && <p className="err small">{t("tun.needTwo")}</p>}
               </>
             )}
 
-            {!loading && step === 1 && (
+            {step === 1 && (
               <>
                 <h3 className="wz-q">{t("wz.q2")}</h3>
                 <p className="wz-lead">{t("wz.lead2")}</p>
@@ -284,18 +271,32 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
                     </button>
                   ))}
                 </div>
-                <div className="field" style={{ marginTop: "var(--sp-6)" }}>
-                  <span className="label">{t("wz.profile")}</span>
-                  <Seg value={profile} options={PROFILES.map((p) => [p, p] as [string, string])} onChange={setProfile} />
+                <h3 className="wz-q" style={{ marginTop: "var(--sp-6)", fontSize: "var(--fs-lg)" }}>
+                  {t("wz.profile")}
+                </h3>
+                <div className="tiles" role="radiogroup" aria-label={t("wz.profile")}>
+                  {PROFILES.map((p) => (
+                    <button key={p} type="button" role="radio" aria-checked={profile === p} className="tile" onClick={() => setProfile(p)}>
+                      <span className="t1">{t(`wz.pf.${p}`)}</span>
+                      <span className="t2">{t(`wz.pf.${p}.d`)}</span>
+                      <span className="tick">
+                        <Icon name="check" size={14} />
+                      </span>
+                    </button>
+                  ))}
                 </div>
+                <details className="adv">
+                  <summary>{t("mux.title")}</summary>
+                  <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />
+                </details>
               </>
             )}
 
-            {!loading && step === 2 && (
+            {step === 2 && (
               <>
                 <h3 className="wz-q">{t("wz.q3")}</h3>
                 <p className="wz-lead">{t("wz.lead3", { acceptor: serverName(acceptor), dialer: serverName(dialer) })}</p>
-                {mode === "direct" && !editing && (
+                {mode === "direct" && (
                   <div className="field" style={{ marginBottom: "var(--sp-5)" }}>
                     <label className="check">
                       <input type="checkbox" checked={!!netId} disabled={networks.length === 0} onChange={(e) => setNetId(e.target.checked ? networks[0]?.id ?? "" : "")} /> {t("wz.gre")}
@@ -325,8 +326,37 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
                   </div>
                   <div className="field" hidden={!!netId}>
                     <label htmlFor="wz-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>
-                    <input className="text mono" id="wz-dial" dir="ltr" value={dialHost} placeholder="203.0.113.5" onChange={(e) => setDialHost(e.target.value.trim())} />
+                    <input
+                      className="text mono"
+                      id="wz-dial"
+                      dir="ltr"
+                      value={dialHost}
+                      placeholder="203.0.113.5"
+                      onChange={(e) => {
+                        setDialTouched(true);
+                        setDialHost(e.target.value.trim());
+                      }}
+                    />
                     <span className="help">{t("wz.dialHelp")}</span>
+                    {addrChoices.length > 0 && (
+                      <span className="addr-chips" aria-label={t("wz.dialSeen", { server: serverName(acceptor) })}>
+                        {addrChoices.map((a) => (
+                          <button
+                            key={a}
+                            type="button"
+                            className={`pchip as-btn ${a === dialHost ? "on" : ""}`}
+                            dir="ltr"
+                            onClick={() => {
+                              setDialTouched(true);
+                              setDialHost(a);
+                            }}
+                          >
+                            {a}
+                          </button>
+                        ))}
+                      </span>
+                    )}
+                    {mode === "direct" && <span className="help">{t("wz.directHelp", { server: serverName(acceptor), port: listenPort })}</span>}
                   </div>
                   {isWs && (
                     <div className="field">
@@ -334,12 +364,42 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
                       <input className="text mono" id="wz-ws" dir="ltr" value={wsPath} onChange={(e) => setWsPath(e.target.value.trim())} />
                     </div>
                   )}
+                  {isWs && (
+                    <div className="field">
+                      <label htmlFor="wz-wshost">{t("wz.wsHost")}</label>
+                      <input className="text mono" id="wz-wshost" dir="ltr" value={wsHost} placeholder="cdn.example.com" onChange={(e) => setWsHost(e.target.value.trim())} />
+                      <span className="help">{t("wz.wsHostHelp")}</span>
+                    </div>
+                  )}
+                  {transport === "wss" && (
+                    <div className="field">
+                      <label htmlFor="wz-sni">{t("wz.sni")}</label>
+                      <input className="text mono" id="wz-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
+                      <span className="help">{t("wz.sniHelp")}</span>
+                    </div>
+                  )}
+                  {transport === "tcp" && (
+                    <div className="field">
+                      <label htmlFor="wz-pool">{t("wz.pool")}</label>
+                      <input
+                        className="text mono"
+                        id="wz-pool"
+                        dir="ltr"
+                        inputMode="numeric"
+                        value={pool ?? ""}
+                        placeholder="8"
+                        onChange={(e) => setPool(/^\d{1,3}$/.test(e.target.value.trim()) ? +e.target.value.trim() : undefined)}
+                      />
+                      <span className="help">{t("wz.poolHelp")}</span>
+                    </div>
+                  )}
                 </div>
                 {udp && <p className="muted small">UDP</p>}
+                {transport === "auto" && <p className="muted small">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</p>}
               </>
             )}
 
-            {!loading && step === 3 && (
+            {step === 3 && (
               <>
                 <h3 className="wz-q">{t("wz.q4")}</h3>
                 <p className="wz-lead">{t("wz.lead4")}</p>
@@ -371,7 +431,7 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
               </>
             )}
 
-            {!loading && step === 4 && (
+            {step === 4 && (
               <>
                 <h3 className="wz-q">{opId ? name : t("wz.q5")}</h3>
                 {!opId && <p className="wz-lead">{t("wz.lead5")}</p>}
@@ -452,14 +512,14 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
           </>
         )}
         {!opId && step < 4 && (
-          <button className="btn btn-primary" type="button" disabled={loading} onClick={() => void go(step + 1)}>
+          <button className="btn btn-primary" type="button" onClick={() => void go(step + 1)}>
             {t("wz.next")}
           </button>
         )}
         {!opId && step === 4 && (
           <button className="btn btn-primary" type="button" disabled={checking || conflicts.length > 0} onClick={() => void build()}>
             <span className="shine" />
-            {editing ? t("wz.save") : t("wz.make")}
+            {t("wz.make")}
           </button>
         )}
       </div>

@@ -544,11 +544,12 @@ fn run_agent(path: &std::path::Path, join: Option<&str>, no_run: bool) -> Result
     tracing_subscriber::fmt().with_env_filter(filter).init();
     let config = match join {
         Some(code) => {
+            // A server that joined a panel before joins the new one in its place: the old
+            // identity goes (the panel it belonged to keeps listing this server as offline
+            // until it is removed there).
             if path.exists() && AgentConfig::load(path).is_ok_and(|c| c.id.is_some()) {
-                anyhow::bail!(
-                    "{} is registered already; delete it to join a panel again",
-                    path.display()
-                );
+                eprintln!("this server was joined to a panel already: the new code replaces that");
+                let _ = std::fs::remove_file(path.with_file_name("link-transport"));
             }
             let config = agent::enroll_from_code(code, path)?;
             eprintln!("settings written to {}", path.display());

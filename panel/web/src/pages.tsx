@@ -558,7 +558,12 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
         <>
           <div className="field">
             <span className="label">{t("add.run")}</span>
-            <CodeBlock text={`kariz-panel agent --join ${code}`} />
+            <CodeBlock text={`bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh) --agent ${code}`} />
+            <span className="help">{t("add.runHelp")}</span>
+            <span className="label" style={{ marginTop: "var(--sp-3)" }}>
+              {t("add.runInstalled")}
+            </span>
+            <CodeBlock text={`kariz-manager --agent ${code}`} />
             {transport !== "auto" && <span className="help">{t("add.via", { t: t(`add.x.${transport}`) })}</span>}
             <span className="countdown">{joined ? "" : t("add.valid", { m: digitsOf(mmss) })}</span>
           </div>
@@ -675,9 +680,23 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                     <dd className="mono">{s.local ? t("srv.localLink") : s.link ?? "—"}</dd>
                   </div>
                 </dl>
+                {(s.ip4 || s.ip6) && (
+                  <div className="srv-ips" dir="ltr">
+                    {s.ip4 && (
+                      <span className="srv-ip">
+                        <b>{t("srv.ip4")}</b> {s.ip4}
+                      </span>
+                    )}
+                    {s.ip6 && (
+                      <span className="srv-ip">
+                        <b>{t("srv.ip6")}</b> {s.ip6}
+                      </span>
+                    )}
+                  </div>
+                )}
                 <footer className="srv-foot">
                   <span className={`badge ${s.tunnels.length ? "" : "muted"}`}>{t(s.tunnels.length === 1 ? "srv.tn1" : "srv.tn", { n: num(s.tunnels.length) })}</span>
-                  {s.addr && (
+                  {s.addr && s.addr !== s.ip4 && s.addr !== s.ip6 && (
                     <span className="srv-ip" title={t("net.addresses")}>
                       {s.addr}
                     </span>

@@ -37,6 +37,9 @@ pub struct PairRequest {
     pub ws_path: Option<String>,
     pub ws_host: Option<String>,
     pub tls_sni: Option<String>,
+    /// Mux settings, the same on both sides; left out, the profile's apply.
+    #[serde(default)]
+    pub mux: Option<crate::wire::MuxSpec>,
     #[serde(default)]
     pub forwards: Vec<ForwardInfo>,
     /// Edit only: make a new token for both sides.
@@ -66,6 +69,7 @@ impl PairRequest {
             pool: self.pool,
             ws_path: self.ws_path.clone(),
             ws_host: self.ws_host.clone(),
+            mux: self.mux.clone().filter(|m| !m.is_empty()),
             tls_sni: (!accepts).then(|| self.tls_sni.clone()).flatten(),
             tls_pin: (!accepts && self.transport == "wss")
                 .then(|| pin.map(str::to_owned))
@@ -125,6 +129,9 @@ pub struct Op {
     pub error: Option<String>,
     /// After a failure: whether the earlier steps were undone.
     pub undone: Option<bool>,
+    /// Servers that could not be reached, and so were left out: a delete is kept for when
+    /// they connect again, a start, stop or restart did not touch them.
+    pub offline: Vec<String>,
 }
 
 /// The recent operations, for the browser to follow.
@@ -154,6 +161,7 @@ impl Ops {
             steps: Vec::new(),
             error: None,
             undone: None,
+            offline: Vec::new(),
         });
         Ok(id)
     }
@@ -173,6 +181,11 @@ impl Ops {
                 detail: None,
             })
         });
+    }
+
+    /// A server could not be reached and was left out.
+    pub(crate) fn left_out(&self, id: &str, server: &str) {
+        self.with(id, |op| op.offline.push(server.to_owned()));
     }
 
     /// The last step ends.
@@ -379,6 +392,9 @@ async fn run_create(
 
     // Nothing of that name exists yet, on either server.
     ops.run(op, "look");
+    if hub.delete_pending_for(&req.name) {
+        return Err((step_fail(ops, "name_pending".into()), true));
+    }
     match place(hub, &req.name) {
         Ok(p) if p.sides.is_empty() => ops.end(op, true, None),
         Ok(_) => return Err((step_fail(ops, "name_taken".into()), true)),
@@ -686,8 +702,19 @@ async fn run_control(hub: &Hub, op: &str, name: &str, action: &str) -> Result<()
     if action == "stop" {
         sides.reverse();
     }
+    // A tunnel can be stopped (or started) from the side that is reachable.
+    if sides.iter().all(|(s, _)| !hub.is_online(s)) {
+        ops.run(op, "look");
+        ops.end(op, false, Some("that server is not connected".into()));
+        return Err("that server is not connected".into());
+    }
     for (server, info) in sides {
         ops.run(op, &format!("{action}_{}", info.role));
+        if !hub.is_online(&server) {
+            ops.end(op, true, Some("offline".into()));
+            ops.left_out(op, &server);
+            continue;
+        }
         match ctl(hub, &server, name, action).await {
             Ok(()) => ops.end(op, true, None),
             Err(e) => {
@@ -734,6 +761,21 @@ async fn run_delete(hub: &Hub, op: &str, name: &str) -> Result<(), String> {
     let mut failed = None;
     for (server, info) in sides {
         ops.run(op, &format!("delete_{}", info.role));
+        // A server that is away cannot be asked. The delete is kept for it (its agent does
+        // it when it connects again) and the tunnel is gone from the lists now.
+        if !hub.is_online(&server) {
+            match hub.queue_delete(&server, name) {
+                Ok(()) => {
+                    ops.end(op, true, Some("queued".into()));
+                    ops.left_out(op, &server);
+                }
+                Err(e) => {
+                    ops.end(op, false, Some(format!("{e:#}")));
+                    failed = Some(format!("{e:#}"));
+                }
+            }
+            continue;
+        }
         match remove(hub, &server, name).await {
             Ok(()) => ops.end(op, true, None),
             Err(e) => {

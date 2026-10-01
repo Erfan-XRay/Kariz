@@ -88,6 +88,9 @@ export interface ServerInfo {
   /** The transport its agent's link uses now (tcpmux or kcp). */
   link?: string | null;
   health: Health | null;
+  /** Its public IPv4 and IPv6 addresses, when known. */
+  ip4?: string | null;
+  ip6?: string | null;
   tunnels: TunnelInfo[];
 }
 
@@ -107,6 +110,17 @@ export interface ForwardSpec {
 }
 
 /** What the wizard sends: one tunnel, both sides. */
+/** A tunnel's mux settings; what is left out keeps the profile's value. */
+export interface MuxSpec {
+  connections?: number;
+  max_streams?: number;
+  /** Bytes. */
+  stream_window?: number;
+  max_lifetime_secs?: number;
+  ping_interval_secs?: number;
+  coalesce?: boolean;
+}
+
 export interface PairRequest {
   name: string;
   entry: string;
@@ -120,6 +134,7 @@ export interface PairRequest {
   ws_path?: string;
   ws_host?: string;
   tls_sni?: string;
+  mux?: MuxSpec;
   forwards: ForwardSpec[];
   rotate?: boolean;
   /** Direct mode: run over this private GRE network (its id). */
@@ -140,6 +155,7 @@ export interface Spec {
   ws_host?: string;
   tls_sni?: string;
   tls_pin?: string;
+  mux?: MuxSpec;
   forwards: ForwardSpec[];
 }
 
@@ -172,6 +188,8 @@ export interface Op {
   steps: Step[];
   error: string | null;
   undone: boolean | null;
+  /** Servers that could not be reached and were left out. */
+  offline?: string[];
 }
 
 export interface EventRow {

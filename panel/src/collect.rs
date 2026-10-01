@@ -3,7 +3,7 @@
 //! runs this for its own server; agents run it for theirs.
 
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kariz::config::{mode_name, role_name, Config};
 
@@ -89,6 +89,55 @@ fn first_number(text: &str) -> Option<f64> {
 pub struct Sampler {
     cpu: Option<(u64, u64)>,
     net: Option<((u64, u64), Instant)>,
+    /// The server's addresses and when they were looked up (they change rarely).
+    ips: Option<(Instant, Option<String>, Option<String>)>,
+}
+
+/// The address a route to `probe` leaves from. A UDP socket is only connected, never
+/// written to: nothing goes out on the network.
+fn route_source(bind: &str, probe: &str) -> Option<String> {
+    let socket = std::net::UdpSocket::bind(bind).ok()?;
+    socket.connect(probe).ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_unspecified() && !ip.is_loopback()).then(|| ip.to_string())
+}
+
+/// This server's own IPv4 and IPv6 addresses (each `None` where there is no route).
+pub fn local_ips() -> (Option<String>, Option<String>) {
+    (
+        route_source("0.0.0.0:0", "1.1.1.1:80"),
+        route_source("[::]:0", "[2606:4700:4700::1111]:80"),
+    )
+}
+
+/// Whether an IPv4 address is one the internet can reach (not private, loopback,
+/// link-local, shared or reserved).
+pub fn public_ip4(ip: &str) -> bool {
+    let Ok(ip) = ip.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let [a, b, ..] = ip.octets();
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || a == 0
+        || (a == 100 && (64..=127).contains(&b)))
+}
+
+/// Whether an IPv6 address is a global one (not link-local, unique local or loopback).
+pub fn public_ip6(ip: &str) -> bool {
+    let Ok(ip) = ip.parse::<std::net::Ipv6Addr>() else {
+        return false;
+    };
+    let first = ip.segments()[0];
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || (first & 0xfe00) == 0xfc00
+        || (first & 0xffc0) == 0xfe80)
 }
 
 /// The files a sample reads (all `None` where there is no `/proc`).
@@ -118,7 +167,21 @@ impl Proc {
 
 impl Sampler {
     pub fn sample(&mut self) -> Health {
-        self.sample_from(&Proc::read(), Instant::now())
+        let now = Instant::now();
+        let mut health = self.sample_from(&Proc::read(), now);
+        let fresh = self
+            .ips
+            .as_ref()
+            .is_some_and(|(at, ..)| now.duration_since(*at) < Duration::from_secs(60));
+        if !fresh {
+            let (v4, v6) = local_ips();
+            self.ips = Some((now, v4, v6));
+        }
+        if let Some((_, v4, v6)) = &self.ips {
+            health.ip4 = v4.clone();
+            health.ip6 = v6.clone();
+        }
+        health
     }
 
     pub fn sample_from(&mut self, p: &Proc, now: Instant) -> Health {
@@ -204,15 +267,47 @@ pub async fn tunnels(dir: &Path, services: &dyn Services) -> Vec<TunnelInfo> {
         Err(_) => return Vec::new(),
     };
     files.sort();
-    let mut out = Vec::new();
-    for path in files {
+    // All at once: a tunnel that does not answer costs its own time limit, not the sum of
+    // them (the panel gives a whole request 10 s, and a stuck daemon or two was enough to
+    // go over it and end the link).
+    join_all(files.iter().map(|path| {
         let name = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        out.push(tunnel(&name, &path, services).await);
-    }
-    out
+        async move { tunnel(&name, path, services).await }
+    }))
+    .await
+}
+
+/// Runs the futures side by side; their outputs come back in the order they were given.
+async fn join_all<F: std::future::Future>(futures: impl IntoIterator<Item = F>) -> Vec<F::Output> {
+    use std::pin::Pin;
+    use std::task::Poll;
+    let mut pending: Vec<Option<Pin<Box<F>>>> =
+        futures.into_iter().map(|f| Some(Box::pin(f))).collect();
+    let mut done: Vec<Option<F::Output>> = (0..pending.len()).map(|_| None).collect();
+    std::future::poll_fn(|cx| {
+        let mut left = 0;
+        for (slot, out) in pending.iter_mut().zip(done.iter_mut()) {
+            if let Some(f) = slot {
+                match f.as_mut().poll(cx) {
+                    Poll::Ready(v) => {
+                        *out = Some(v);
+                        *slot = None;
+                    }
+                    Poll::Pending => left += 1,
+                }
+            }
+        }
+        if left == 0 {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    done.into_iter().flatten().collect()
 }
 
 async fn tunnel(name: &str, path: &Path, services: &dyn Services) -> TunnelInfo {
@@ -234,7 +329,7 @@ async fn tunnel(name: &str, path: &Path, services: &dyn Services) -> TunnelInfo 
             }
         }
     };
-    let status = tunnel_status(&config).await;
+    let (status, active) = tokio::join!(tunnel_status(&config), services.active(name.to_owned()));
     TunnelInfo {
         name: name.to_owned(),
         role: role_name(config.role).to_owned(),
@@ -252,7 +347,7 @@ async fn tunnel(name: &str, path: &Path, services: &dyn Services) -> TunnelInfo 
                 protocol: f.protocol.name().to_owned(),
             })
             .collect(),
-        active: services.active(name.to_owned()).await,
+        active,
         status,
         error: None,
     }
@@ -260,7 +355,6 @@ async fn tunnel(name: &str, path: &Path, services: &dyn Services) -> TunnelInfo 
 
 #[cfg(unix)]
 async fn tunnel_status(config: &Config) -> Option<kariz::stats::Status> {
-    use std::time::Duration;
     let socket = config.control_socket()?;
     let ask = async {
         let connection = kariz::control::connect(&socket).await.ok()?;
@@ -279,9 +373,32 @@ async fn tunnel_status(_: &Config) -> Option<kariz::stats::Status> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
+
+    #[test]
+    fn public_addresses_are_told_from_private_ones() {
+        for ip in ["8.8.8.8", "185.10.20.30", "100.63.0.1", "172.32.0.1"] {
+            assert!(public_ip4(ip), "{ip}");
+        }
+        for ip in [
+            "10.0.0.5",
+            "192.168.1.9",
+            "172.16.0.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "0.0.0.0",
+            "nope",
+        ] {
+            assert!(!public_ip4(ip), "{ip}");
+        }
+        assert!(public_ip6("2606:4700:4700::1111"));
+        for ip in [
+            "fe80::1", "fd00::1", "fc00::1", "::1", "::", "ff02::1", "nope",
+        ] {
+            assert!(!public_ip6(ip), "{ip}");
+        }
+    }
 
     #[test]
     fn routes_are_read_without_the_default_and_our_own_links() {

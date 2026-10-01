@@ -86,7 +86,7 @@ test("a server is added with a join code and comes online", async ({ page }) => 
   await page.locator(".page-band .btn-primary").click();
   await page.locator("#add-name").fill("far-away");
   await page.getByRole("button", { name: /Make a join code/i }).click();
-  const shown = await page.locator("pre.code").innerText();
+  const shown = await page.locator("pre.code").first().innerText();
   const code = /kz1_[A-Za-z0-9_-]+/.exec(shown)?.[0];
   expect(code, "a join code is shown").toBeTruthy();
   agent = startAgent(code!);
@@ -118,15 +118,13 @@ test.describe("the tunnel", () => {
     await expect(row).toContainText("far-away", { timeout: 30_000 });
     await row.click();
     await page.getByRole("button", { name: "Edit" }).click();
-    // the wizard is filled in from the servers: the ports step shows what is there now
-    for (let i = 0; i < 3; i++) await next(page);
-    await expect(page.locator("#wz-ports")).toHaveValue(`${front}=${echoPort}`);
+    // one page, filled in from the servers: the ports field shows what is there now
+    await expect(page.locator("#te-ports")).toHaveValue(`${front}=${echoPort}`);
     const newFront = await freePort();
-    await page.locator("#wz-ports").fill(`${newFront}=${echoPort}`);
-    await next(page);
-    await page.locator(".wz-foot .btn-primary").click(); // Save
-    await expect(page.locator(".wz-step p.ok")).toContainText(/Done/i, { timeout: 60_000 });
-    await closeDialog(page);
+    await page.locator("#te-ports").fill(`${newFront}=${echoPort}`);
+    await page.locator(".edit-bar .btn-primary").click(); // Save
+    await expect(page.locator(".tunnel-edit p.ok")).toContainText(/Done/i, { timeout: 60_000 });
+    await page.locator(".edit-bar").getByRole("button", { name: "Close" }).click();
     expect(await echoes(newFront, "after the edit")).toBe(true);
     expect(await refuses(front), "the old port is closed").toBe(true);
     front = newFront;
