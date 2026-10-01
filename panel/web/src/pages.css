@@ -843,6 +843,9 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
 .tls-real { display: grid; gap: var(--sp-3); padding: var(--sp-4); border: 1px solid var(--line); border-radius: 12px; background: var(--card-2); }
 .tls-act { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }
 .tls-ok { display: inline-flex; align-items: center; gap: 4px; }
+.addr-edit { display: grid; gap: var(--sp-2); min-width: 0; }
+.addr-edit .help { font-size: var(--fs-xs); color: var(--text-3); }
+.addr-btns { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-self: start; }
 .pchip.as-btn { border: 1px solid transparent; cursor: pointer; }
 .pchip.as-btn:hover { border-color: var(--accent); }
 .pchip.as-btn.on { border-color: var(--accent); background: var(--accent-soft); }

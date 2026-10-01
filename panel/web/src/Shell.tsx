@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { Route } from "./App";
 import { useApp } from "./store";
-import { Icon, useFocusTrap } from "./ui";
+import { Copyright, Icon, useFocusTrap } from "./ui";
 import logo from "./logo.svg";
 
 export type PageId = "map" | "servers" | "tunnels" | "networks" | "logs" | "settings";
@@ -159,6 +159,9 @@ export function Shell({
           </div>
         )}
         <div className="content">{children}</div>
+        <footer className="app-foot">
+          <Copyright />
+        </footer>
       </main>
 
       {palette && <Palette commands={commands} onClose={() => setPalette(false)} />}

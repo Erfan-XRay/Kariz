@@ -61,6 +61,8 @@ pub enum Request {
         streams: u32,
         udp: bool,
     },
+    /// Stop a started speed test now (its test streams end within half a second).
+    SpeedtestStop { id: String },
     /// The progress lines of a started speed test after the first `after`, and the report
     /// once it is done.
     SpeedtestPoll { id: String, after: u32 },
