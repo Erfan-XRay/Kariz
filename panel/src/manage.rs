@@ -166,17 +166,51 @@ fn is_acceptor(spec: &Spec) -> bool {
 
 /// The certificate and key of a listening wss side, beside its config.
 fn cert_files(dir: &Path, spec: &Spec) -> Option<(PathBuf, PathBuf)> {
-    (spec.transport == "wss" && is_acceptor(spec)).then(|| {
-        (
-            dir.join(format!("{}.crt", spec.name)),
-            dir.join(format!("{}.key", spec.name)),
-        )
-    })
+    if !(spec.transport == "wss" && is_acceptor(spec)) {
+        return None;
+    }
+    if let Some(own) = own_cert(spec) {
+        return Some(own);
+    }
+    Some((
+        dir.join(format!("{}.crt", spec.name)),
+        dir.join(format!("{}.key", spec.name)),
+    ))
+}
+
+/// Where Let's Encrypt keeps the certificates the manager gets (the only place a spec may
+/// name a certificate from: the agent never reads another file on the panel's say).
+const LIVE: &str = "/etc/letsencrypt/live/";
+
+/// Whether `path` is a certificate or key file under [`LIVE`].
+pub fn valid_cert_path(path: &str) -> bool {
+    path.starts_with(LIVE)
+        && path.ends_with(".pem")
+        && !path.contains("..")
+        && path.len() < 200
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b))
+}
+
+/// The files of a real certificate a spec names, if it names a valid pair.
+fn own_cert(spec: &Spec) -> Option<(PathBuf, PathBuf)> {
+    let (cert, key) = (spec.tls_cert.as_deref()?, spec.tls_key.as_deref()?);
+    (valid_cert_path(cert) && valid_cert_path(key))
+        .then(|| (PathBuf::from(cert), PathBuf::from(key)))
 }
 
 /// Every text field of a spec is one plain line: no control characters, so nothing a
 /// panel sends can break out of its value.
 fn plain_text(spec: &Spec) -> Result<()> {
+    if spec.tls_cert.is_some() != spec.tls_key.is_some() {
+        bail!("a certificate needs its key too");
+    }
+    if let (Some(cert), Some(key)) = (&spec.tls_cert, &spec.tls_key) {
+        if !valid_cert_path(cert) || !valid_cert_path(key) {
+            bail!("a certificate must be one the manager got (under {LIVE})");
+        }
+    }
     let optional = [
         &spec.profile,
         &spec.listen,
@@ -276,6 +310,14 @@ pub fn put(dir: &Path, spec: &Spec) -> Result<Option<String>> {
     let (text, _) = build(dir, spec, false)?;
     let path = config_path(dir, &spec.name)?;
     let pin = match cert_files(dir, spec) {
+        // A real certificate: its files must be there; nothing is pinned (the other side
+        // checks the certificate against the web's roots).
+        Some((cert, key)) if own_cert(spec).is_some() => {
+            if !cert.exists() || !key.exists() {
+                bail!("the certificate files are not there: get the certificate again");
+            }
+            None
+        }
         Some((cert, key)) => Some(crate::cert::ensure(&cert, &key)?),
         None => None,
     };
@@ -320,6 +362,20 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
         })
         .filter(|m| !m.is_empty()),
         tls_sni: c.tunnel.tls.as_ref().and_then(|t| t.sni.clone()),
+        tls_cert: c
+            .tunnel
+            .tls
+            .as_ref()
+            .and_then(|t| t.cert.as_ref())
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|p| valid_cert_path(p)),
+        tls_key: c
+            .tunnel
+            .tls
+            .as_ref()
+            .and_then(|t| t.key.as_ref())
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|p| valid_cert_path(p)),
         tls_pin: c.tunnel.tls.as_ref().and_then(|t| {
             t.pin_sha256.clone().or_else(|| {
                 t.cert
@@ -506,6 +562,104 @@ pub(crate) async fn run(program: &str, args: &[String], limit: Duration) -> Resu
     text.push_str(&String::from_utf8_lossy(&output.stderr));
     text.truncate(512 * 1024);
     Ok((output.status.success(), text))
+}
+
+/// The program that gets certificates (the manager script, installed with Kariz).
+const MANAGER: &str = "/usr/local/bin/kariz-manager";
+
+/// Whether `host` is a domain name or an IPv4 address the manager may ask a certificate for.
+pub fn valid_cert_host(host: &str) -> bool {
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
+    host.len() <= 253
+        && host.contains('.')
+        && host.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+        && !host
+            .split('.')
+            .next_back()
+            .is_some_and(|tld| tld.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Gets a Let's Encrypt certificate for `host` through the manager, which stops whatever
+/// holds port 80 for a few seconds, asks, and starts it again. The certificate renews by
+/// itself; a tunnel that names its files reloads it.
+pub async fn issue_cert(host: &str, email: Option<&str>) -> crate::wire::CertReply {
+    let failed = |e: String| crate::wire::CertReply {
+        ok: false,
+        error: Some(e),
+        ..Default::default()
+    };
+    let host = host.trim().to_ascii_lowercase();
+    if !valid_cert_host(&host) {
+        return failed("bad_host".into());
+    }
+    if let Some(mail) = email {
+        let ok = mail.len() <= 120
+            && mail.contains('@')
+            && mail
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"@.-_+".contains(&b));
+        if !ok {
+            return failed("bad_email".into());
+        }
+    }
+    let program = std::env::var("KARIZ_MANAGER").unwrap_or_else(|_| MANAGER.to_owned());
+    if !Path::new(&program).exists() {
+        return failed("no_manager".into());
+    }
+    let mut args = vec!["tunnel-cert".to_owned()];
+    args.push(
+        if host.parse::<std::net::Ipv4Addr>().is_ok() {
+            "--ip"
+        } else {
+            "--domain"
+        }
+        .into(),
+    );
+    args.push(host.clone());
+    if let Some(mail) = email.filter(|m| !m.is_empty()) {
+        args.extend(["--email".into(), mail.to_owned()]);
+    }
+    let (ok, text) = match run(&program, &args, Duration::from_secs(600)).await {
+        Ok(v) => v,
+        Err(e) => return failed(format!("{e:#}")),
+    };
+    let found = |key: &str| {
+        text.lines()
+            .rev()
+            .find_map(|l| l.strip_prefix(key))
+            .map(|p| p.trim().to_owned())
+            .filter(|p| valid_cert_path(p))
+    };
+    match (ok, found("cert="), found("key=")) {
+        (true, Some(cert), Some(key)) => crate::wire::CertReply {
+            ok: true,
+            error: None,
+            cert: Some(cert),
+            key: Some(key),
+        },
+        _ => {
+            // The last lines say why (Let's Encrypt's own words).
+            let tail: Vec<&str> = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            let tail = tail[tail.len().saturating_sub(6)..].join(" | ");
+            failed(if tail.is_empty() {
+                "failed".into()
+            } else {
+                tail
+            })
+        }
+    }
 }
 
 /// How a server runs its tunnels: `systemd` (the default) or `process`, as child
@@ -951,6 +1105,65 @@ mod tests {
             ..Default::default()
         });
         assert!(put(&d.0, &s).is_err());
+    }
+
+    #[test]
+    fn only_certificates_the_manager_got_can_be_named() {
+        let live = "/etc/letsencrypt/live/kariz-panel-tun-example-com/";
+        assert!(valid_cert_path(&format!("{live}fullchain.pem")));
+        assert!(valid_cert_path(&format!("{live}privkey.pem")));
+        for bad in [
+            "/etc/passwd",
+            "/etc/letsencrypt/live/../../shadow.pem",
+            "/etc/letsencrypt/live/x/key.txt",
+            "/etc/letsencrypt/live/x y/key.pem",
+            "/etc/kariz/main.toml",
+            "relative.pem",
+        ] {
+            assert!(!valid_cert_path(bad), "{bad}");
+        }
+        for ok in ["tun.example.com", "a-b.example.org", "203.0.113.5"] {
+            assert!(valid_cert_host(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "localhost",
+            "-a.example.com",
+            "a..com",
+            "a b.com",
+            "x.com/../",
+            "1.2.3",
+            "999.1.1.1",
+            "a.com;rm",
+        ] {
+            assert!(!valid_cert_host(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_wss_side_can_use_a_real_certificate_and_pins_nothing() {
+        let d = Dir::new();
+        let live = "/etc/letsencrypt/live/kariz-panel-tun-example-com/";
+        let mut s = spec("real");
+        s.transport = "wss".into();
+        s.tls_cert = Some(format!("{live}fullchain.pem"));
+        s.tls_key = Some(format!("{live}privkey.pem"));
+        let (text, _) = build(&d.0, &s, true).unwrap();
+        assert!(
+            text.contains("fullchain.pem") && text.contains("privkey.pem"),
+            "{text}"
+        );
+        // The files are not on this machine: nothing is written, and no self-signed one is made.
+        let err = put(&d.0, &s).unwrap_err();
+        assert!(format!("{err:#}").contains("certificate files"), "{err:#}");
+        assert!(!d.0.join("real.crt").exists() && !d.0.join("real.toml").exists());
+        // A cert and key go together, and only from the manager's directory.
+        let mut half = s.clone();
+        half.tls_key = None;
+        assert!(build(&d.0, &half, true).is_err());
+        let mut other = s.clone();
+        other.tls_cert = Some("/etc/passwd".into());
+        assert!(build(&d.0, &other, true).is_err());
     }
 
     #[test]

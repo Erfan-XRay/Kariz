@@ -836,6 +836,10 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
 .edit-sec:disabled { opacity: 0.75; }
 .edit-bar { position: sticky; bottom: 0; display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-4); background: var(--bg-elev, var(--card)); border: 1px solid var(--line); border-radius: var(--r-md, 12px); box-shadow: 0 -8px 24px color-mix(in srgb, var(--bg, #000) 70%, transparent); }
 @media (max-width: 720px) { .mux-fields .grid-3 { grid-template-columns: 1fr; } .tunnel-edit .grid-2 { grid-template-columns: 1fr; } }
+.tls-choice { gap: var(--sp-3); }
+.tls-real { display: grid; gap: var(--sp-3); padding: var(--sp-4); border: 1px solid var(--line); border-radius: 12px; background: var(--card-2); }
+.tls-act { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }
+.tls-ok { display: inline-flex; align-items: center; gap: 4px; }
 .pchip.as-btn { border: 1px solid transparent; cursor: pointer; }
 .pchip.as-btn:hover { border-color: var(--accent); }
 .pchip.as-btn.on { border-color: var(--accent); background: var(--accent-soft); }

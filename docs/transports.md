@@ -91,6 +91,16 @@ loss, where TCP collapses.
 KCP runs in user space, a packet at a time, so on localhost it reaches a fraction of
 TCP's speed (hundreds of Mbit/s). Between two servers this rarely matters.
 
+## `wss` with a real certificate
+
+By default a listening `wss` side serves a self-signed certificate that the dialing side pins.
+In the panel you can instead choose *Let's Encrypt*, give a domain (or a public IPv4 address) that
+points at the listening server, and press the button: the server runs
+`kariz-manager tunnel-cert`, which stops whatever holds port 80 for a few seconds, gets the
+certificate, and sets up the renewal timer. The tunnel then names the files under
+`/etc/letsencrypt/live/` (`tunnel.tls.cert` / `key`), reloads them when they are renewed, and the
+dialing side checks the certificate against the web's roots (no pin; it dials the domain).
+
 ## `auto`
 
 `transport = "auto"` is for networks where you do not know which way gets through, or where a
