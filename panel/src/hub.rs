@@ -34,6 +34,8 @@ use crate::wire::{Ack, Health, HelloReply, Request, TunnelInfo, MAX_REPLY};
 pub const POLL: Duration = Duration::from_secs(2);
 /// A request that takes longer than this ends the link.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How many times in a row the list of tunnels may fail before the link is given up.
+const LATE_TUNNELS: u32 = 3;
 
 /// One tunnel as the panel shows it: its config and state, and its traffic as a rate.
 #[derive(Debug, Clone, Serialize)]
@@ -61,7 +63,40 @@ pub struct ServerView {
     /// own server and for one that is offline.
     pub link: Option<String>,
     pub health: Option<Health>,
+    /// The server's public IPv4 and IPv6 addresses, when they are known: what its agent
+    /// reports, or the address its link comes from.
+    pub ip4: Option<String>,
+    pub ip6: Option<String>,
     pub tunnels: Vec<TunnelView>,
+}
+
+/// The public addresses of a server: its own (as its health reports them) when they are
+/// public, else the address its link was seen coming from.
+fn addresses(
+    health: Option<&Health>,
+    peer: Option<std::net::IpAddr>,
+) -> (Option<String>, Option<String>) {
+    let mut v4 = health.and_then(|h| h.ip4.clone());
+    let mut v6 = health.and_then(|h| h.ip6.clone());
+    if let Some(ip) = peer {
+        let text = ip.to_string();
+        match ip {
+            std::net::IpAddr::V4(_)
+                if collect::public_ip4(&text)
+                    && !v4.as_deref().is_some_and(collect::public_ip4) =>
+            {
+                v4 = Some(text);
+            }
+            std::net::IpAddr::V6(_)
+                if collect::public_ip6(&text)
+                    && !v6.as_deref().is_some_and(collect::public_ip6) =>
+            {
+                v6 = Some(text);
+            }
+            _ => {}
+        }
+    }
+    (v4, v6)
 }
 
 /// What a join secret is good for.
@@ -81,6 +116,8 @@ struct Live {
     arch: String,
     link: Option<&'static str>,
     health: Option<Health>,
+    /// Where the last link of this server came from.
+    peer_ip: Option<std::net::IpAddr>,
     tunnels: Vec<TunnelView>,
     /// Bytes counted at the last reading of each tunnel, for the rates.
     last_bytes: HashMap<String, (u64, Instant)>,
@@ -284,6 +321,73 @@ impl Hub {
         Ok(())
     }
 
+    /// Whether a server can be asked right now (the panel's own always can).
+    pub fn is_online(&self, server: &str) -> bool {
+        server == LOCAL || self.live().get(server).is_some_and(|l| l.online)
+    }
+
+    /// Remembers that a tunnel is to be removed from a server that cannot be reached now:
+    /// its agent does it when it connects again. The tunnel disappears from the lists at once.
+    pub fn queue_delete(&self, server: &str, name: &str) -> Result<()> {
+        self.db.conn().execute(
+            "INSERT OR IGNORE INTO pending_deletes (server, name) VALUES (?1, ?2)",
+            params![server, name],
+        )?;
+        Ok(())
+    }
+
+    /// The names waiting to be removed from `server`.
+    fn pending_deletes(&self, server: &str) -> Vec<String> {
+        let conn = self.db.conn();
+        let Ok(mut stmt) = conn.prepare("SELECT name FROM pending_deletes WHERE server = ?1")
+        else {
+            return Vec::new();
+        };
+        stmt.query_map([server], |r| r.get(0))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether a tunnel of this name is waiting to be removed from some server (the name
+    /// cannot be used again until it is gone).
+    pub fn delete_pending_for(&self, name: &str) -> bool {
+        self.db
+            .conn()
+            .query_row(
+                "SELECT 1 FROM pending_deletes WHERE name = ?1",
+                [name],
+                |_| Ok(()),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    /// Removes the tunnels that were deleted while this server was away.
+    async fn apply_pending_deletes(&self, id: &str) {
+        for name in self.pending_deletes(id) {
+            let done = self
+                .ask_as::<Ack>(id, &Request::TunnelDelete { name: name.clone() })
+                .await;
+            match done {
+                Ok(ack) if ack.ok => {
+                    let _ = self.db.conn().execute(
+                        "DELETE FROM pending_deletes WHERE server = ?1 AND name = ?2",
+                        params![id, name],
+                    );
+                    info!(server = %id, tunnel = %name, "a tunnel deleted while the server was away is removed");
+                }
+                Ok(ack) => {
+                    warn!(server = %id, tunnel = %name, error = ?ack.error, "could not remove a deleted tunnel")
+                }
+                Err(e) => {
+                    warn!(server = %id, tunnel = %name, error = %e, "could not remove a deleted tunnel")
+                }
+            }
+        }
+    }
+
     /// The networks each connected server already routes, by server id.
     pub fn routes(&self) -> crate::networks::Routes {
         self.live()
@@ -416,6 +520,7 @@ impl Hub {
             let conn = self.db.conn();
             conn.execute("DELETE FROM net_links WHERE a = ?1 OR b = ?1", [id])?;
             conn.execute("DELETE FROM server_addrs WHERE server = ?1", [id])?;
+            conn.execute("DELETE FROM pending_deletes WHERE server = ?1", [id])?;
         }
         let removed = self
             .db
@@ -450,8 +555,9 @@ impl Hub {
                     tokio::spawn(async move {
                         match pending.establish(Side::Client).await {
                             Ok(session) => {
-                                if let Err(e) = hub.run_session(Arc::new(session), link).await {
-                                    debug!(%peer, error = %e, "an agent link ended");
+                                let ip = peer.ip().to_canonical();
+                                if let Err(e) = hub.run_session(Arc::new(session), link, ip).await {
+                                    debug!(%peer, error = %e, "an agent session ended");
                                 }
                             }
                             Err(e) => debug!(%peer, error = %e, "an agent did not authenticate"),
@@ -466,7 +572,12 @@ impl Hub {
         }
     }
 
-    async fn run_session(&self, session: Arc<MuxSession>, link: &'static str) -> Result<()> {
+    async fn run_session(
+        &self,
+        session: Arc<MuxSession>,
+        link: &'static str,
+        peer_ip: std::net::IpAddr,
+    ) -> Result<()> {
         let identified = tokio::time::timeout(Duration::from_secs(20), self.identify(&session))
             .await
             .map_err(|_| anyhow!("the agent did not identify itself in time"))
@@ -489,17 +600,26 @@ impl Hub {
             }
             entry.online = true;
             entry.link = Some(link);
+            entry.peer_ip = Some(peer_ip);
             entry.hostname = hello.hostname.clone();
             entry.version = hello.version.clone();
             entry.arch = hello.arch.clone();
         }
         self.history.event("server_up", &id, "");
+        self.apply_pending_deletes(&id).await;
         // The server is told its private network links (they may have changed while it
         // was away).
         if let Err(e) = self.net_sync(&id).await {
             warn!(server = %id, error = %e, "the private network links could not be synced");
         }
         let result = self.poll(&id, &session).await;
+        // Said at warn, with the reason: when a server goes offline by itself, this is the
+        // line that tells why (the agent's own log has the other end of it).
+        if let Err(e) = &result {
+            warn!(server = %id, transport = link, error = %format!("{e:#}"), "an agent link ended");
+        }
+        // Closed from this side too, so the agent sees it end at once and comes back.
+        session.close();
         let mut live = self.live();
         if let Some(entry) = live.get_mut(&id) {
             // Only if this link is still the current one.
@@ -608,12 +728,28 @@ impl Hub {
 
     /// Asks the agent for its state every [`POLL`] until the link ends.
     async fn poll(&self, id: &str, session: &Arc<MuxSession>) -> Result<()> {
+        let mut tunnels: Vec<TunnelInfo> = Vec::new();
+        let mut late = 0u32;
         loop {
             let health: Health =
                 serde_json::from_slice(&request_on(session, &Request::Health).await?)?;
-            let tunnels: Vec<TunnelInfo> =
-                serde_json::from_slice(&request_on(session, &Request::Tunnels).await?)?;
-            self.update(id, Some(health), tunnels);
+            // The list of tunnels is the slow request (every daemon is asked). One that
+            // comes late is no reason to drop a link that answers everything else: the
+            // last list stays, and only a few in a row end the link.
+            match request_on(session, &Request::Tunnels).await {
+                Ok(raw) => {
+                    tunnels = serde_json::from_slice(&raw)?;
+                    late = 0;
+                }
+                Err(e) => {
+                    late += 1;
+                    if late >= LATE_TUNNELS {
+                        return Err(e);
+                    }
+                    debug!(server = %id, error = %e, "the tunnel list came late");
+                }
+            }
+            self.update(id, Some(health), tunnels.clone());
             let _ = self.db.conn().execute(
                 "UPDATE servers SET last_seen = ?2 WHERE id = ?1",
                 params![id, now()],
@@ -759,6 +895,9 @@ impl Hub {
         let view =
             |id: &str, name: String, local: bool, version: String, arch: String, host: String| {
                 let l = live.get(id);
+                let hidden = self.pending_deletes(id);
+                let (ip4, ip6) =
+                    addresses(l.and_then(|l| l.health.as_ref()), l.and_then(|l| l.peer_ip));
                 ServerView {
                     id: id.to_owned(),
                     name,
@@ -780,7 +919,17 @@ impl Hub {
                         .and_then(|l| l.link)
                         .map(str::to_owned),
                     health: l.and_then(|l| l.health.clone()),
-                    tunnels: l.map(|l| l.tunnels.clone()).unwrap_or_default(),
+                    ip4,
+                    ip6,
+                    tunnels: l
+                        .map(|l| {
+                            l.tunnels
+                                .iter()
+                                .filter(|t| !hidden.contains(&t.info.name))
+                                .cloned()
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 }
             };
         let local_name = live
@@ -845,4 +994,56 @@ pub async fn request_within(
     tokio::time::timeout(limit, ask)
         .await
         .map_err(|_| anyhow!("the agent did not answer in time"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn health(ip4: Option<&str>, ip6: Option<&str>) -> Health {
+        Health {
+            ip4: ip4.map(str::to_owned),
+            ip6: ip6.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_delete_for_a_server_that_is_away_is_kept_and_hides_the_tunnel() {
+        let hub = Hub::new(
+            Db::in_memory().unwrap(),
+            std::env::temp_dir().join("kariz-none"),
+        );
+        assert!(hub.is_online(LOCAL) && !hub.is_online("a1"));
+        assert!(!hub.delete_pending_for("main"));
+        hub.queue_delete("a1", "main").unwrap();
+        hub.queue_delete("a1", "main").unwrap();
+        assert!(hub.delete_pending_for("main") && !hub.delete_pending_for("other"));
+        assert_eq!(hub.pending_deletes("a1"), vec!["main".to_owned()]);
+        assert!(hub.pending_deletes("a2").is_empty());
+    }
+
+    #[test]
+    fn a_servers_public_addresses_are_its_own_or_the_ones_its_link_comes_from() {
+        let v4 = |s: &str| Some(std::net::IpAddr::V4(s.parse().unwrap()));
+        // Its own public address is kept.
+        let h = health(Some("5.9.10.11"), Some("2a01:4f8::1"));
+        assert_eq!(
+            addresses(Some(&h), v4("203.0.113.9")),
+            (Some("5.9.10.11".into()), Some("2a01:4f8::1".into()))
+        );
+        // Behind NAT (a private address), the address the link is seen from stands in.
+        let h = health(Some("10.0.0.5"), None);
+        assert_eq!(
+            addresses(Some(&h), v4("203.0.113.9")),
+            (Some("203.0.113.9".into()), None)
+        );
+        // A private peer (a test, a private network) says nothing.
+        assert_eq!(addresses(None, v4("192.168.1.4")), (None, None));
+        // No health yet: only the peer.
+        assert_eq!(
+            addresses(None, v4("203.0.113.9")),
+            (Some("203.0.113.9".into()), None)
+        );
+    }
 }

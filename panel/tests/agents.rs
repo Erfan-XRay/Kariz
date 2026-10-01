@@ -326,3 +326,49 @@ async fn a_code_can_pin_the_agent_to_wss() {
     .await;
     running.abort();
 }
+
+#[tokio::test]
+async fn a_tunnel_deleted_while_its_server_is_away_goes_when_the_server_is_back() {
+    let panel_dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let kariz_dir = dir.path().join("kariz");
+    std::fs::create_dir_all(&kariz_dir).unwrap();
+    std::fs::write(kariz_dir.join("main.toml"), TUNNEL).unwrap();
+    let (hub, addr) = start_hub(panel_dir.path()).await;
+
+    let code = hub.create_join(Some("away"), &addr).unwrap();
+    let (agent, path) = agent_for(&code, dir.path(), &kariz_dir);
+    let running = tokio::spawn(agent.run());
+    wait_for("the server to join", || {
+        remote(&hub).iter().any(|s| s.online)
+    })
+    .await;
+    wait_for("its tunnel", || remote(&hub)[0].tunnels.len() == 1).await;
+    let id = remote(&hub)[0].id.clone();
+
+    // It goes away; the tunnel is deleted from the panel meanwhile.
+    running.abort();
+    wait_for("the server to show offline", || !remote(&hub)[0].online).await;
+    let op = kariz_panel::pair::delete(&hub, "main").unwrap();
+    wait_for("the delete to finish", || {
+        hub.ops.get(&op).is_some_and(|o| o.state != "running")
+    })
+    .await;
+    let done = hub.ops.get(&op).unwrap();
+    assert!(done.state == "done" && done.error.is_none(), "{done:?}");
+    assert_eq!(done.offline, vec![id.clone()]);
+    // It is gone from the lists at once, its file is still there, and the name is kept.
+    assert!(remote(&hub)[0].tunnels.is_empty());
+    assert!(kariz_dir.join("main.toml").exists());
+    assert!(hub.delete_pending_for("main"));
+
+    // When the agent is back, it removes the tunnel and the panel forgets the delete.
+    let back = Agent::new(&path, AgentConfig::load(&path).unwrap());
+    let back = tokio::spawn(back.run());
+    wait_for("the file to go", || !kariz_dir.join("main.toml").exists()).await;
+    wait_for("the delete to be forgotten", || {
+        !hub.delete_pending_for("main")
+    })
+    .await;
+    back.abort();
+}

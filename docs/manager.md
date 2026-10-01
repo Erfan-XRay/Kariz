@@ -15,7 +15,10 @@ As root, on each server:
 bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh)
 ```
 
-It opens a menu:
+The first time on a server it installs the Kariz core by itself, then asks what else this
+server is for: only the core (tunnels are made from a panel on another server), the web panel
+here as well, or a connection to a panel that exists. Every run after that opens a menu, with
+the server's name and its IPv4 and IPv6 addresses at the top:
 
 | | |
 |---|---|
@@ -58,9 +61,14 @@ kariz-manager panel password [--stdin]              # a new admin password
 kariz-manager panel status | logs                   # the service, its address / follow the log
 kariz-manager panel uninstall [--yes]
 
-kariz-manager --agent kz1_...                       # connect this server to a panel (the code is from the panel)
+kariz-manager --agent kz1_... [--yes]               # connect this server to a panel (the code is from the panel)
 kariz-manager agent status | logs | remove
+kariz-manager status                                # what runs here and this server's addresses
 ```
+
+A server that already has an agent can be joined to another panel with a new code: the manager
+says so, asks (`--yes` skips the question), removes the old agent, and starts the new one in its
+place. The old panel keeps listing that server as offline until you remove it there.
 
 ## Update and uninstall
 
@@ -79,7 +87,12 @@ curl -fsSL -o /usr/local/bin/kariz-manager \
 chmod +x /usr/local/bin/kariz-manager
 ```
 
-`uninstall` asks before removing the configs in `/etc/kariz` (the tunnels' settings and tokens).
+`uninstall` removes Kariz from the server completely: every tunnel, the agent (its service, its
+identity and the private network links it made), the web panel if there is one, and the
+programs. It lists what it will remove and asks once, then asks whether the tunnel configs and
+the panel's data (tokens, servers, certificate) go too; `--yes` answers yes to everything. A
+server that is connected to a panel keeps showing there as offline until you remove it in the
+panel. `agent remove` removes only the agent.
 
 ## Logs
 

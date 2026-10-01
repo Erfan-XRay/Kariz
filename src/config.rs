@@ -71,6 +71,9 @@ pub enum TransportKind {
     Quic,
     /// KCP over UDP, every packet encrypted with a key from the token.
     Kcp,
+    /// All of tcpmux, kcp and ws at once, and the dialing side moves to the one that gets
+    /// through when a link stalls (see `auto.rs`). Always multiplexed.
+    Auto,
 }
 
 impl TransportKind {
@@ -82,6 +85,7 @@ impl TransportKind {
             Self::Wss => "wss",
             Self::Quic => "quic",
             Self::Kcp => "kcp",
+            Self::Auto => "auto",
         }
     }
 
@@ -756,6 +760,13 @@ impl MuxSettings {
         } else {
             connections
         };
+        // A stalled transport is noticed after twice the ping: auto pings fast, to move on
+        // to another one in a few seconds.
+        let ping_interval = if transport == TransportKind::Auto {
+            Duration::from_secs(crate::auto::PING_SECS)
+        } else {
+            tuning.keepalive
+        };
         Self {
             enabled: transport != TransportKind::Tcp,
             connections,
@@ -763,7 +774,7 @@ impl MuxSettings {
             stream_window,
             max_lifetime: None,
             coalesce: profile != Profile::Gaming,
-            ping_interval: tuning.keepalive,
+            ping_interval,
             datagram_buffer: tuning.udp.session_buffer,
             datagram_queue: tuning.udp.flow_queue,
             notsent_lowat: Some(NOTSENT_LOWAT),
@@ -1077,8 +1088,11 @@ impl Config {
         let Some(k) = &self.tunnel.kcp else {
             return Ok(());
         };
-        if self.tunnel.transport != TransportKind::Kcp {
-            bail!("[tunnel.kcp] is only used with transport = \"kcp\"");
+        if !matches!(
+            self.tunnel.transport,
+            TransportKind::Kcp | TransportKind::Auto
+        ) {
+            bail!("[tunnel.kcp] is only used with transport = \"kcp\" or \"auto\"");
         }
         let manual = [
             k.nodelay.is_some(),
@@ -1190,6 +1204,9 @@ impl Config {
     }
 
     fn validate_mux(&self) -> Result<()> {
+        if self.tunnel.transport == TransportKind::Auto && self.tunnel.mux.enabled == Some(false) {
+            bail!("transport = \"auto\" always uses mux; tunnel.mux cannot be disabled");
+        }
         if self.tunnel.transport == TransportKind::Tcpmux && self.tunnel.mux.enabled == Some(false)
         {
             bail!("transport = \"tcpmux\" always uses mux; use transport = \"tcp\" to disable it");
@@ -1550,6 +1567,50 @@ mod tests {
         ));
         assert!(!off.mux().enabled);
         assert_eq!(off.mux().connections, 3);
+    }
+
+    #[test]
+    fn auto_always_multiplexes_and_pings_fast() {
+        let c = Config::parse(&with_transport("entry", "auto", "")).unwrap();
+        let mux = c.mux();
+        assert!(mux.enabled);
+        assert_eq!(
+            mux.ping_interval,
+            Duration::from_secs(crate::auto::PING_SECS)
+        );
+        // An explicit ping still wins.
+        let slow = with_transport(
+            "entry",
+            "auto",
+            "[tunnel.mux]
+ping_interval_secs = 10",
+        );
+        assert_eq!(
+            Config::parse(&slow).unwrap().mux().ping_interval,
+            Duration::from_secs(10)
+        );
+        let err = parse_err(&with_transport(
+            "entry",
+            "auto",
+            "[tunnel.mux]
+enabled = false",
+        ));
+        assert!(err.contains("auto"), "{err}");
+        // Its own tables are only the KCP one.
+        assert!(Config::parse(&with_transport(
+            "entry",
+            "auto",
+            "[tunnel.kcp]
+mtu = 1200"
+        ))
+        .is_ok());
+        assert!(Config::parse(&with_transport(
+            "entry",
+            "auto",
+            "[tunnel.ws]
+path = \"/x\""
+        ))
+        .is_err());
     }
 
     #[test]

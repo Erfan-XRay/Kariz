@@ -1,5 +1,61 @@
 # Changelog
 
+## Unreleased
+
+Servers stay connected when a daemon is slow, a tunnel can be edited completely, and the manager
+script is friendlier.
+
+### Added
+
+- **`transport = "auto"`.** One tunnel over `tcpmux`, `kcp` and `ws` at once: the listening side
+  opens all three (TCP port, UDP port, TCP port + 1) and the dialing side moves to the one that
+  gets through when a link stalls (a stalled link is noticed in about 4 s). In the panel it is
+  the first transport in the wizard and the edit page.
+- **Mux settings in the panel**: connections, streams per connection, stream window, ping
+  interval, connection lifetime and write gathering, in the wizard and the edit page, with the
+  profile's values as the placeholders.
+- **A tunnel is edited on one page**, not in the wizard: how it connects (mode, transport,
+  profile), where, ports, mux settings and a new token, with Save enabled once something
+  changed. The wizard only makes tunnels.
+- **A tunnel can be deleted while one of its servers is offline.** The reachable side is
+  removed at once, the tunnel leaves the lists, and the other side is removed when that server's
+  agent connects again (the panel says so, and that `kariz-manager uninstall` on that server
+  does it now). Start, stop and restart also work from the side that is reachable. The name
+  stays taken until the delete is done.
+- **The join code is one command** that installs Kariz first if the server does not have it:
+  `bash <(curl -fsSL .../kariz.sh) --agent CODE`.
+- **The manager installs the core on the first run**, then asks whether this server should also
+  get the web panel, or join a panel that exists. Its banner and menu show the server's IPv4 and
+  IPv6 addresses and the project's GitHub; `kariz-manager status` prints what runs here.
+- **IPv4 and IPv6 of every server** are shown on its card in the panel (the address the agent
+  leaves from, or the one its link is seen coming from, when that is a private one).
+- **Choose the tunnel profile** with a description of each: *Balanced* (default), *Ultra speed*
+  and *Gaming*.
+- **Editing a tunnel is complete**: the WebSocket Host header, the TLS server name and the pool
+  are kept and can be changed, and the edit can make a new token for both sides.
+- A new tunnel's *address to dial* is filled in from the server's known address (and the
+  addresses can be picked with a click); a direct tunnel says which port must be open.
+
+### Changed
+
+- **`kariz-manager uninstall` removes everything**: tunnels, the agent (its service, identity and
+  private network links), the web panel and the programs. `agent remove` cleans up the same
+  files.
+- **Joining a server that has an agent already** no longer fails: the manager tells you, asks,
+  removes the old agent and starts the new one in its place (`--agent CODE --yes` skips the
+  question). `kariz-panel agent --join` replaces the old registration the same way.
+
+### Fixed
+
+- **Servers going offline by themselves.** The panel asked every tunnel's daemon one after the
+  other; a few that answered slowly went over the 10 s a request is allowed and the panel
+  dropped the link. They are asked side by side now, a late list of tunnels no longer ends a
+  link that answers everything else, and both ends close a finished link so the agent comes back
+  at once. Both ends now log why a link ended (`journalctl -u kariz-panel` and `-u kariz-agent`).
+- **A direct tunnel with the plain `tcp` transport never showed as connected** (nothing keeps a
+  connection open there), so the panel gave up creating it after 30 s. The entry now looks for
+  the exit every 10 s.
+
 ## 1.4.0 - 2026-09-30
 
 The panel has a new look, servers can join over IPv6 or with a transport you choose (now also

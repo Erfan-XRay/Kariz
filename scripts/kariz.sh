@@ -11,8 +11,10 @@
 #   kariz-manager update | uninstall [--yes]
 #   kariz-manager panel install [--domain D | --ip ADDRESS] | link | password | status | logs | uninstall
 #   kariz-manager panel cert [--domain D | --ip ADDRESS]   change the domain or address of the panel
-#   kariz-manager --agent CODE        connect this server to a panel (its join code)
+#   kariz-manager --agent CODE [--yes]   connect this server to a panel (its join code); a
+#                                        server that is connected already is switched to it
 #   kariz-manager agent status | logs | remove
+#   kariz-manager status              what runs here, and this server's addresses
 #
 # If GitHub limits your downloads, set GITHUB_TOKEN to a personal access token: it lifts the limit.
 set -euo pipefail
@@ -46,14 +48,27 @@ else
     C_RESET='' C_BOLD='' C_DIM='' C_TEAL='' C_AQUA='' C_SAND='' C_RED='' C_YELLOW='' C_GREEN=''
 fi
 
+# A line of $1 box-drawing dashes.
+rule() {
+    local line
+    printf -v line '%*s' "${1:-52}" ''
+    printf '%s' "${line// /─}"
+}
+
 banner() {
     printf '\n%s' "$C_BOLD$C_TEAL"
     printf '  %s\n' ' _  __   _   ___  ___  ____' '| |/ /  /_\ | _ \|_ _||_  /'
     printf '%s' "$C_AQUA"
     printf '  %s\n' "| ' <  / _ \\|   / | |  / / " '|_|\_\/_/ \_\_|_\|___|/___|'
     printf '%s' "$C_RESET"
-    printf '  %sKariz manager%s  %sdeveloped by%s %sErfanXRay%s\n\n' \
-        "$C_BOLD$C_SAND" "$C_RESET" "$C_DIM" "$C_RESET" "$C_BOLD$C_SAND" "$C_RESET"
+    printf '  %sKariz manager%s  %s·%s  %sgithub.com/%s%s\n' \
+        "$C_BOLD$C_SAND" "$C_RESET" "$C_DIM" "$C_RESET" "$C_AQUA" "$REPO" "$C_RESET"
+    printf '  %s%s%s\n' "$C_DIM" "$(rule 54)" "$C_RESET"
+}
+
+# A heading for a part of a longer job.
+section() {
+    printf '\n  %s%s%s %s%s%s\n' "$C_TEAL" "▌" "$C_RESET" "$C_BOLD" "$*" "$C_RESET"
 }
 
 info() { printf '  %s●%s %s\n' "$C_TEAL" "$C_RESET" "$*"; }
@@ -398,11 +413,43 @@ cmd_update() {
     done
 }
 
+# Removes the private network links (GRE interfaces named kz-...) the panel made here.
+remove_net_links() {
+    local link
+    command -v ip >/dev/null || return 0
+    for link in $({ ip -o link show 2>/dev/null || true; } | sed -n 's/^[0-9]*: \(kz-[a-z0-9]*\)[@:].*/\1/p'); do
+        ip link del "$link" 2>/dev/null && info "Removed the private network link $link."
+    done
+    return 0
+}
+
+# Removes the agent completely: its service, settings and identity, what it remembers, the
+# update files, and the private network links it made.
+agent_remove() {
+    systemctl disable --now kariz-agent 2>/dev/null || true
+    rm -f "$AGENT_UNIT" "$AGENT_CONF" "$PANEL_DIR/link-transport" "$PANEL_DIR/net.toml" "$PANEL_DIR/connected"
+    rm -rf "$PANEL_DIR/updates"
+    systemctl daemon-reload
+    remove_net_links
+}
+
+# Removes Kariz from this server completely: the tunnels, the agent, the web panel and the
+# programs. It asks once (--yes: no questions, and the configs and the panel's data go too).
 cmd_uninstall() {
     need_root
-    local yes=${1:-}
+    local yes=${1:-} purge=0 unit tunnels=0
+    tunnels=$(systemctl list-unit-files --plain --no-legend 'kariz@*' 2>/dev/null | grep -vc '@\.service' || true)
     if [[ "$yes" != --yes ]]; then
-        confirm "Stop all tunnels and remove Kariz?" || return 0
+        echo
+        warn "This removes Kariz from this server completely:"
+        info "every tunnel on it ($tunnels) is stopped and removed,"
+        has_agent && info "its agent is removed: the server disconnects from its panel (remove it in the panel too),"
+        [[ -f "$PANEL_UNIT" || -f "$PANEL_CONF" ]] && info "the web panel on it is removed,"
+        info "and the kariz, kariz-panel and kariz-manager programs go."
+        confirm "Remove Kariz completely?" || return 0
+        confirm "Also delete the tunnel configs and the panel's data (tokens, servers, certificate)?" && purge=1
+    else
+        purge=1
     fi
     for unit in $(systemctl list-unit-files --plain --no-legend 'kariz@*' | awk '{print $1}') \
         $(systemctl list-units --all --plain --no-legend 'kariz@*' | awk '{print $1}'); do
@@ -410,11 +457,19 @@ cmd_uninstall() {
         systemctl disable --now "$unit" 2>/dev/null || true
     done
     rm -f "$UNIT" "$BIN"
-    systemctl daemon-reload
-    if [[ "$yes" == --yes ]] || confirm "Also delete the tunnel configs in $CONF_DIR (tokens included)?"; then
-        rm -rf "$CONF_DIR"
+    if has_agent || [[ -f "$AGENT_UNIT" ]]; then
+        agent_remove
+        ok "The agent is removed."
     fi
-    ok "Kariz removed."
+    if [[ -f "$PANEL_UNIT" || -f "$PANEL_CONF" ]]; then
+        if ((purge)); then panel_uninstall --yes; else panel_uninstall --yes --keep-data; fi
+    fi
+    rm -f "$PANEL_BIN"
+    systemctl daemon-reload
+    if ((purge)); then
+        rm -rf "$CONF_DIR" "$PANEL_DIR" "$PANEL_DATA"
+    fi
+    ok "Kariz is removed."
     rm -f "$MANAGER"
 }
 
@@ -427,6 +482,34 @@ own_ip4() {
 
 own_ip6() {
     { ip -6 route get 2606:4700:4700::1111 2>/dev/null || true; } | sed -n 's/.* src \([0-9a-fA-F:]*\).*/\1/p' | head -n 1
+}
+
+# Whether $1 is a global IPv6 address (not link-local, unique local or loopback).
+public_ip6() {
+    local a=${1,,}
+    [[ "$a" == *:* ]] || return 1
+    case $a in
+        ::1 | :: | fe[89ab]* | f[cd]* | ff*) return 1 ;;
+    esac
+    return 0
+}
+
+# This server on one line: its name and the IPv4 and IPv6 addresses it has.
+server_line() {
+    local v4 v6
+    v4=$(own_ip4)
+    v6=$(own_ip6)
+    printf '  %s%s%s' "$C_BOLD" "$(hostname 2>/dev/null || echo this-server)" "$C_RESET"
+    if [[ -n "$v4" ]]; then
+        printf '   %sIPv4%s %s' "$C_DIM" "$C_RESET" "$v4"
+        public_ip4 "$v4" || printf ' %s(private)%s' "$C_DIM" "$C_RESET"
+    fi
+    if [[ -n "$v6" ]]; then
+        printf '   %sIPv6%s %s' "$C_DIM" "$C_RESET" "$v6"
+        public_ip6 "$v6" || printf ' %s(private)%s' "$C_DIM" "$C_RESET"
+    fi
+    [[ -n "$v4$v6" ]] || printf '   %sno network address found%s' "$C_DIM" "$C_RESET"
+    echo
 }
 
 # ---- The web panel and its agent ----
@@ -525,6 +608,8 @@ panel_install() {
         die "The panel did not start: journalctl -u kariz-panel -n 50"
     ok "The web panel is running."
     panel_show "$(panel_host "$host")" "$fingerprint"
+    echo
+    info "Next: open the sign-in link above. Servers, Add server shows the command that connects another server."
 }
 
 # ---- The panel's certificate (Let's Encrypt) ----
@@ -868,7 +953,13 @@ cmd_panel() {
 
 panel_uninstall() {
     need_root
-    local yes=${1:-}
+    local yes="" keep=0 a
+    for a in "$@"; do
+        case $a in
+            --yes) yes=--yes ;;
+            --keep-data) keep=1 ;;
+        esac
+    done
     if [[ "$yes" != --yes ]]; then
         confirm "Stop the web panel and remove it?" || return 0
     fi
@@ -889,25 +980,46 @@ panel_uninstall() {
     if [[ ! -f "$AGENT_CONF" ]]; then
         rm -f "$PANEL_BIN"
     fi
-    if [[ "$yes" == --yes ]] || confirm "Also delete the panel's database, certificate and settings (the servers it knows)?"; then
+    if ((!keep)) && { [[ "$yes" == --yes ]] || confirm "Also delete the panel's database, certificate and settings (the servers it knows)?"; }; then
         rm -rf "$PANEL_DATA" "$PANEL_CONF"
     fi
     ok "The web panel is removed."
 }
 
-# Connects this server to a panel: `kariz-manager --agent CODE`.
+# Whether this server already has an agent: its settings, or its service running.
+has_agent() {
+    [[ -f "$AGENT_CONF" ]] || systemctl is-active --quiet kariz-agent 2>/dev/null
+}
+
+# Connects this server to a panel: `kariz-manager --agent CODE`. A server that has an agent
+# already is switched to the new panel: the old agent is removed and the new one takes its
+# place (asked first, unless --yes).
 agent_join() {
     need_root
     need_systemd
-    local code=${1:-} version=()
+    local code=${1:-} version=() yes=0
     shift || true
     while [[ $# -gt 0 ]]; do
         case $1 in
             --version) version=(--version "$2") && shift 2 ;;
+            --yes | -y) yes=1 && shift ;;
             *) die "agent: unknown option $1" ;;
         esac
     done
     [[ "$code" == kz1_* ]] || die "That is not a join code (it starts with kz1_). Copy it whole from the panel: Servers, Add server."
+    if has_agent; then
+        echo
+        warn "This server already has a Kariz agent (it is connected to a panel)."
+        info "The new code replaces it: the old agent is removed, and the new one takes its place."
+        info "The old panel keeps listing this server as offline until you remove it there."
+        if ((!yes)); then
+            confirm "Replace the old agent with the new one?" y ||
+                die "Nothing changed. Run it again with --yes to replace the old agent without asking."
+        fi
+        systemctl disable --now kariz-agent 2>/dev/null || true
+        rm -f "$AGENT_CONF" "$PANEL_DIR/link-transport"
+        ok "The old agent is removed."
+    fi
     if [[ ! -x "$PANEL_BIN" ]]; then
         cmd_install "${version[@]}"
     fi
@@ -917,7 +1029,9 @@ agent_join() {
     chmod 700 "$PANEL_DIR"
     "$PANEL_BIN" agent --join "$code" --no-run -c "$AGENT_CONF"
     install_panel_units
-    systemctl enable --now kariz-agent
+    systemctl enable kariz-agent >/dev/null 2>&1
+    # A restart, not just a start: an agent that was running must not keep its old settings.
+    systemctl restart kariz-agent
     sleep 2
     systemctl is-active --quiet kariz-agent ||
         die "The agent did not start: journalctl -u kariz-agent -n 50"
@@ -937,16 +1051,72 @@ cmd_agent() {
         logs) journalctl -u kariz-agent -n 100 -f ;;
         remove)
             need_root
-            systemctl disable --now kariz-agent 2>/dev/null || true
-            rm -f "$AGENT_UNIT" "$AGENT_CONF"
-            systemctl daemon-reload
-            ok "The agent is removed. Remove the server in the panel too (Servers, Remove)."
+            agent_remove
+            ok "The agent is removed. Remove the server in the panel too (Servers, Remove). Its tunnels keep running."
             ;;
         *) die "agent: CODE | join CODE | status | logs | remove" ;;
     esac
 }
 
+# ---- Status ----
+
+# What runs on this server, in a few lines.
+cmd_status() {
+    banner
+    server_line
+    echo
+    if [[ ! -x "$BIN" ]]; then
+        warn "Kariz is not installed yet: run kariz-manager install."
+        return 0
+    fi
+    local running=0
+    running=$(systemctl list-units --type=service --state=active --plain --no-legend 'kariz@*' 2>/dev/null | wc -l)
+    printf '  %s core       %s %s  %s(%s tunnel service(s) running here)%s\n' "$C_TEAL" "$C_RESET" "$("$BIN" --version)" "$C_DIM" "$running" "$C_RESET"
+    if systemctl is-active --quiet kariz-panel 2>/dev/null; then
+        printf '  %s web panel  %s %srunning%s\n' "$C_TEAL" "$C_RESET" "$C_GREEN" "$C_RESET"
+    elif [[ -f "$PANEL_CONF" ]]; then
+        printf '  %s web panel  %s %sinstalled, not running%s (journalctl -u kariz-panel)\n' "$C_TEAL" "$C_RESET" "$C_YELLOW" "$C_RESET"
+    else
+        printf '  %s web panel  %s %snot installed%s (kariz-manager panel install)\n' "$C_TEAL" "$C_RESET" "$C_DIM" "$C_RESET"
+    fi
+    if systemctl is-active --quiet kariz-agent 2>/dev/null; then
+        printf '  %s agent      %s %sconnected to a panel%s\n' "$C_TEAL" "$C_RESET" "$C_GREEN" "$C_RESET"
+    elif [[ -f "$AGENT_CONF" ]]; then
+        printf '  %s agent      %s %sset up, not running%s (journalctl -u kariz-agent)\n' "$C_TEAL" "$C_RESET" "$C_YELLOW" "$C_RESET"
+    else
+        printf '  %s agent      %s %snot set up%s (kariz-manager --agent CODE)\n' "$C_TEAL" "$C_RESET" "$C_DIM" "$C_RESET"
+    fi
+    if [[ -f "$PANEL_CONF" ]]; then
+        panel_show "$(panel_host "")"
+    fi
+}
+
 # ---- Menu ----
+
+# The first time on a server: Kariz itself is installed at once, and what else this server
+# is for is asked: nothing (tunnels are made from a panel elsewhere), the web panel here, or
+# a connection to a panel that exists.
+first_run() {
+    banner
+    server_line
+    section "Welcome"
+    info "Kariz is not installed on this server yet: installing the core now."
+    cmd_install
+    section "What else should this server do?"
+    local what code
+    choose what "Pick one (you can add the others later from this menu)" core \
+        "core|only the Kariz core: tunnels are made from a web panel on another server" \
+        "panel|also install the web panel here (servers, tunnels and charts in a browser)" \
+        "agent|connect this server to a web panel that exists already (needs its join code)"
+    case $what in
+        panel) panel_install ;;
+        agent)
+            ask code "Join code (starts with kz1_)"
+            agent_join "$code"
+            ;;
+        *) ok "Done: the Kariz core is installed. Open the menu again with: kariz-manager" ;;
+    esac
+}
 
 menu_panel() {
     local action code
@@ -980,8 +1150,10 @@ on_interrupt() {
     fi
 }
 
-# "Kariz v1.0.0 · the panel is running" for the top of the menu.
+# "kariz 1.4.0 · the web panel is running" for the top of the menu.
 menu_status() {
+    server_line
+    echo
     if [[ ! -x "$BIN" ]]; then
         warn "Kariz is not installed yet: choose 1."
         return
@@ -1000,6 +1172,10 @@ menu() {
     need_systemd
     open_input
     trap on_interrupt INT
+    if [[ ! -x "$BIN" ]]; then
+        # An action that fails ends it, as in the menu; the menu opens after it.
+        (first_run) || true
+    fi
     while true; do
         banner
         menu_status
@@ -1053,8 +1229,10 @@ usage() {
   panel cert [--domain D | --ip ADDRESS]       change its domain or address (renewal is automatic)
   panel cert --cert-file F --key-file K        use a certificate of your own instead
   panel link | password [--stdin] | status | logs | uninstall [--yes]
-  --agent CODE [--version V]                   connect this server to a panel
+  --agent CODE [--version V] [--yes]           connect this server to a panel (an agent that is
+                                               here already is replaced by the new one)
   agent status | logs | remove
+  status                                       what runs here, and this server's addresses
 
   Set GITHUB_TOKEN if GitHub limits your downloads.
 EOF
@@ -1069,6 +1247,7 @@ main() {
         panel) shift && cmd_panel "$@" ;;
         agent) shift && cmd_agent "$@" ;;
         --agent) shift && agent_join "$@" ;;
+        status) cmd_status ;;
         help | -h | --help) usage ;;
         *) usage && exit 1 ;;
     esac

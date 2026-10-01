@@ -19,12 +19,29 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// A port free for both TCP and UDP: tunnel ports of UDP transports and `tcp+udp`
 /// forward ports need both.
 fn free_port() -> u16 {
+    free_ports(1)
+}
+
+/// A port like [`free_port`] whose next `following` ports are free (and kept) too: an
+/// `auto` tunnel also listens on the port after its own (WebSocket).
+fn free_ports(following: u16) -> u16 {
+    // Every port handed out is kept, so tests running side by side never get the same one
+    // or each other's neighbour.
+    static KEPT: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
     loop {
         let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = tcp.local_addr().unwrap().port();
-        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
-            return port;
+        let span = || port..=port.saturating_add(following.saturating_sub(1));
+        if port.checked_add(following).is_none()
+            || span().any(|p| kept.contains(&p))
+            || std::net::UdpSocket::bind(("127.0.0.1", port)).is_err()
+            || (1..following).any(|i| std::net::TcpListener::bind(("127.0.0.1", port + i)).is_err())
+        {
+            continue;
         }
+        kept.extend(span());
+        return port;
     }
 }
 
@@ -501,7 +518,8 @@ async fn start_via(
     target_port: u16,
     proxy: impl FnOnce(u16) -> (u16, Option<Proxy>),
 ) -> Tunnel {
-    let tunnel_port = free_port();
+    // Auto also listens on the port after the tunnel's (WebSocket).
+    let tunnel_port = free_ports(2);
     let (dial_port, proxy) = proxy(tunnel_port);
     let user_port = free_port();
     let mode = setup.mode;
@@ -831,6 +849,8 @@ tunnel_tests! {
     kcp_reverse_no_mux: Setup::kcp("reverse").no_mux();
     kcp_direct_no_mux_chacha: Setup::kcp("direct").no_mux().encryption("chacha20-poly1305");
     kcp_reverse_fec: Setup::kcp("reverse").fec(10, 3);
+    auto_reverse: Setup::tcp("reverse").transport("auto").mux();
+    auto_direct: Setup::tcp("direct").transport("auto").mux();
 }
 
 /// A `wss` dialer that pins another certificate refuses the listener, so nothing passes.
@@ -2114,6 +2134,37 @@ async fn status_shows_why_the_other_side_is_missing() {
     assert!(after.peer.handshakes_failed > 0, "{after:?}");
     let error = after.peer.last_error.unwrap();
     assert!(error.text.contains("refused"), "{error:?}");
+}
+
+/// A direct tunnel without mux keeps no connection open, yet `status` must say whether the
+/// exit side can be reached (a panel making the tunnel waits for exactly that): the entry
+/// looks for it by itself, and says so again when the exit goes away.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_tunnel_without_mux_says_it_is_connected_before_any_traffic() {
+    let setup = Setup::tcp("direct").control();
+    let target = echo_server().await;
+    let mut tunnel = start(setup, TOKEN, TOKEN, target).await;
+    let socket = tunnel.control.clone().unwrap();
+    let mut status = status_of(&socket).await;
+    for _ in 0..100 {
+        if status.peer.connected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        status = status_of(&socket).await;
+    }
+    assert!(status.peer.connected, "{status:?}");
+
+    tunnel.kill_exit();
+    for _ in 0..200 {
+        if !status.peer.connected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        status = status_of(&socket).await;
+    }
+    assert!(!status.peer.connected, "{status:?}");
 }
 
 /// An exit with `speedtest = false` refuses the test streams, and the client says why.

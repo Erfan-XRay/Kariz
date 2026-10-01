@@ -10,6 +10,7 @@ pub mod proto;
 pub mod session;
 pub mod transport;
 
+mod auto;
 mod channel;
 mod entry;
 mod exit;

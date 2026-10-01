@@ -434,6 +434,9 @@ fn print_summary(config: &Config) {
             quic.alpn
         );
     }
+    if config.tunnel.transport == TransportKind::Auto {
+        println!("  auto      : tcpmux, kcp and ws together; the dialing side moves to the one that gets through");
+    }
     if config.tunnel.transport == TransportKind::Kcp {
         let kcp = config.kcp();
         let t = kcp.timing();
