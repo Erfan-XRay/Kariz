@@ -12,6 +12,12 @@
   choose there. The same cipher is written on both sides; the tunnel's page shows it, and a tunnel
   without encryption is tagged. Needs a newer agent on both servers (the panel says which one to
   update).
+- **You choose the name of the panel's own server.** Installing the panel asks what this server
+  should be called in the panel, with its host name as the default (Enter keeps it);
+  `kariz-manager panel install --name NAME` gives it without asking, and `kariz-manager panel
+  name [NAME]` renames it later (`kariz-panel init --name`). A joining server never takes that
+  name.
+
 
 ## 1.5.2 - 2026-10-02
 
