@@ -10,6 +10,7 @@ import { Checklist, opError, useOp } from "./ops";
 import { RouteScene } from "./RouteScene";
 import { SpeedTest } from "./SpeedTest";
 import { Wizard } from "./Wizard";
+import { TunnelEdit } from "./TunnelEdit";
 
 const stateKey = { up: "st.up", down: "st.down", off: "st.off" } as const;
 
@@ -23,7 +24,9 @@ function RunDialog({
   confirm,
   start,
   onClose,
+  names,
 }: {
+  names: Map<string, string>;
   title: string;
   text: string;
   danger?: boolean;
@@ -74,7 +77,12 @@ function RunDialog({
       {error && <p className="err small">{error}</p>}
       <Checklist op={op} />
       {op?.state === "done" && <p className="ok small">{t("tun.done")}</p>}
-      {op?.state === "failed" && <p className="err small">{t("tun.failed", { why: opError(t, op.error) })}</p>}
+      {op?.state === "done" && !!op.offline?.length && (
+        <p className="warn-text small" role="status">
+          {t(op.kind === "delete" ? "tun.deleteLater" : "tun.offlineSkipped", { servers: op.offline.map((id) => names.get(id) ?? id).join(", ") })}
+        </p>
+      )}
+      {op?.state === "failed" && <p className="err small">{t("tun.failed", { why: opError(t, op.error, names) })}</p>}
     </Dialog>
   );
 }
@@ -353,7 +361,8 @@ export function TunnelsPage({
   const { t, num } = useApp();
   const tunnels = pairTunnels(servers);
   const online = servers.filter((s) => s.online);
-  const [wizard, setWizard] = useState<{ edit?: Tunnel } | null>(null);
+  const [wizard, setWizard] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
   const [act, setAct] = useState<{ name: string; action: Action } | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
@@ -381,6 +390,7 @@ export function TunnelsPage({
     <>
       {act && (
         <RunDialog
+          names={new Map(servers.map((x) => [x.id, x.name]))}
           key={`${act.name}-${act.action}`}
           title={t(act.action === "delete" ? "tun.deleteTitle" : act.action === "rotate" ? "tun.rotateTitle" : `tun.${act.action}`, { name: act.name })}
           text={act.action === "delete" ? t("tun.deleteText") : act.action === "rotate" ? t("tun.rotateText") : t(`tun.${act.action}Text`, { name: act.name })}
@@ -424,15 +434,28 @@ export function TunnelsPage({
       {wizard && (
         <Wizard
           servers={servers}
-          edit={wizard.edit}
           onClose={() => {
-            setWizard(null);
+            setWizard(false);
             onChanged();
           }}
         />
       )}
     </>
   );
+
+  if (openTunnel && editing === openTunnel.name) {
+    return (
+      <TunnelEdit
+        key={openTunnel.name}
+        tunnel={openTunnel}
+        servers={servers}
+        onBack={() => {
+          setEditing(null);
+          onChanged();
+        }}
+      />
+    );
+  }
 
   if (openTunnel) {
     return (
@@ -441,7 +464,7 @@ export function TunnelsPage({
           tunnel={openTunnel}
           onBack={() => setOpen(null)}
           onAct={(a) => setAct({ name: openTunnel.name, action: a })}
-          onEdit={() => setWizard({ edit: openTunnel })}
+          onEdit={() => setEditing(openTunnel.name)}
         />
         {dialogs}
       </>
@@ -461,7 +484,7 @@ export function TunnelsPage({
           <input type="search" placeholder={t("tl.search")} aria-label={t("tl.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
         </label>
         <div className="grow" />
-        <button className="btn btn-primary btn-sm" type="button" disabled={online.length < 2} title={online.length < 2 ? t("tun.needTwo") : undefined} onClick={() => setWizard({})}>
+        <button className="btn btn-primary btn-sm" type="button" disabled={online.length < 2} title={online.length < 2 ? t("tun.needTwo") : undefined} onClick={() => setWizard(true)}>
           <span className="shine" />
           <Icon name="plus" size={18} />
           {t("tun.new")}
@@ -479,7 +502,7 @@ export function TunnelsPage({
             text={online.length < 2 ? t("tun.needTwo") : t("tun.empty")}
             action={
               online.length >= 2 && (
-                <button className="btn btn-primary btn-sm" type="button" onClick={() => setWizard({})}>
+                <button className="btn btn-primary btn-sm" type="button" onClick={() => setWizard(true)}>
                   <Icon name="plus" size={18} />
                   {t("tun.new")}
                 </button>

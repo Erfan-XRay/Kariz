@@ -87,7 +87,12 @@ curl -fsSL -o /usr/local/bin/kariz-manager \
 chmod +x /usr/local/bin/kariz-manager
 ```
 
-`uninstall` asks before removing the configs in `/etc/kariz` (the tunnels' settings and tokens).
+`uninstall` removes Kariz from the server completely: every tunnel, the agent (its service, its
+identity and the private network links it made), the web panel if there is one, and the
+programs. It lists what it will remove and asks once, then asks whether the tunnel configs and
+the panel's data (tokens, servers, certificate) go too; `--yes` answers yes to everything. A
+server that is connected to a panel keeps showing there as offline until you remove it in the
+panel. `agent remove` removes only the agent.
 
 ## Logs
 

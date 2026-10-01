@@ -558,7 +558,12 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
         <>
           <div className="field">
             <span className="label">{t("add.run")}</span>
-            <CodeBlock text={`kariz-panel agent --join ${code}`} />
+            <CodeBlock text={`bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh) --agent ${code}`} />
+            <span className="help">{t("add.runHelp")}</span>
+            <span className="label" style={{ marginTop: "var(--sp-3)" }}>
+              {t("add.runInstalled")}
+            </span>
+            <CodeBlock text={`kariz-manager --agent ${code}`} />
             {transport !== "auto" && <span className="help">{t("add.via", { t: t(`add.x.${transport}`) })}</span>}
             <span className="countdown">{joined ? "" : t("add.valid", { m: digitsOf(mmss) })}</span>
           </div>

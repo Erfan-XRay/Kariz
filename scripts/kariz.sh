@@ -413,11 +413,43 @@ cmd_update() {
     done
 }
 
+# Removes the private network links (GRE interfaces named kz-...) the panel made here.
+remove_net_links() {
+    local link
+    command -v ip >/dev/null || return 0
+    for link in $({ ip -o link show 2>/dev/null || true; } | sed -n 's/^[0-9]*: \(kz-[a-z0-9]*\)[@:].*/\1/p'); do
+        ip link del "$link" 2>/dev/null && info "Removed the private network link $link."
+    done
+    return 0
+}
+
+# Removes the agent completely: its service, settings and identity, what it remembers, the
+# update files, and the private network links it made.
+agent_remove() {
+    systemctl disable --now kariz-agent 2>/dev/null || true
+    rm -f "$AGENT_UNIT" "$AGENT_CONF" "$PANEL_DIR/link-transport" "$PANEL_DIR/net.toml" "$PANEL_DIR/connected"
+    rm -rf "$PANEL_DIR/updates"
+    systemctl daemon-reload
+    remove_net_links
+}
+
+# Removes Kariz from this server completely: the tunnels, the agent, the web panel and the
+# programs. It asks once (--yes: no questions, and the configs and the panel's data go too).
 cmd_uninstall() {
     need_root
-    local yes=${1:-}
+    local yes=${1:-} purge=0 unit tunnels=0
+    tunnels=$(systemctl list-unit-files --plain --no-legend 'kariz@*' 2>/dev/null | grep -vc '@\.service' || true)
     if [[ "$yes" != --yes ]]; then
-        confirm "Stop all tunnels and remove Kariz?" || return 0
+        echo
+        warn "This removes Kariz from this server completely:"
+        info "every tunnel on it ($tunnels) is stopped and removed,"
+        has_agent && info "its agent is removed: the server disconnects from its panel (remove it in the panel too),"
+        [[ -f "$PANEL_UNIT" || -f "$PANEL_CONF" ]] && info "the web panel on it is removed,"
+        info "and the kariz, kariz-panel and kariz-manager programs go."
+        confirm "Remove Kariz completely?" || return 0
+        confirm "Also delete the tunnel configs and the panel's data (tokens, servers, certificate)?" && purge=1
+    else
+        purge=1
     fi
     for unit in $(systemctl list-unit-files --plain --no-legend 'kariz@*' | awk '{print $1}') \
         $(systemctl list-units --all --plain --no-legend 'kariz@*' | awk '{print $1}'); do
@@ -425,11 +457,19 @@ cmd_uninstall() {
         systemctl disable --now "$unit" 2>/dev/null || true
     done
     rm -f "$UNIT" "$BIN"
-    systemctl daemon-reload
-    if [[ "$yes" == --yes ]] || confirm "Also delete the tunnel configs in $CONF_DIR (tokens included)?"; then
-        rm -rf "$CONF_DIR"
+    if has_agent || [[ -f "$AGENT_UNIT" ]]; then
+        agent_remove
+        ok "The agent is removed."
     fi
-    ok "Kariz removed."
+    if [[ -f "$PANEL_UNIT" || -f "$PANEL_CONF" ]]; then
+        if ((purge)); then panel_uninstall --yes; else panel_uninstall --yes --keep-data; fi
+    fi
+    rm -f "$PANEL_BIN"
+    systemctl daemon-reload
+    if ((purge)); then
+        rm -rf "$CONF_DIR" "$PANEL_DIR" "$PANEL_DATA"
+    fi
+    ok "Kariz is removed."
     rm -f "$MANAGER"
 }
 
@@ -913,7 +953,13 @@ cmd_panel() {
 
 panel_uninstall() {
     need_root
-    local yes=${1:-}
+    local yes="" keep=0 a
+    for a in "$@"; do
+        case $a in
+            --yes) yes=--yes ;;
+            --keep-data) keep=1 ;;
+        esac
+    done
     if [[ "$yes" != --yes ]]; then
         confirm "Stop the web panel and remove it?" || return 0
     fi
@@ -934,7 +980,7 @@ panel_uninstall() {
     if [[ ! -f "$AGENT_CONF" ]]; then
         rm -f "$PANEL_BIN"
     fi
-    if [[ "$yes" == --yes ]] || confirm "Also delete the panel's database, certificate and settings (the servers it knows)?"; then
+    if ((!keep)) && { [[ "$yes" == --yes ]] || confirm "Also delete the panel's database, certificate and settings (the servers it knows)?"; }; then
         rm -rf "$PANEL_DATA" "$PANEL_CONF"
     fi
     ok "The web panel is removed."
@@ -1005,10 +1051,8 @@ cmd_agent() {
         logs) journalctl -u kariz-agent -n 100 -f ;;
         remove)
             need_root
-            systemctl disable --now kariz-agent 2>/dev/null || true
-            rm -f "$AGENT_UNIT" "$AGENT_CONF"
-            systemctl daemon-reload
-            ok "The agent is removed. Remove the server in the panel too (Servers, Remove)."
+            agent_remove
+            ok "The agent is removed. Remove the server in the panel too (Servers, Remove). Its tunnels keep running."
             ;;
         *) die "agent: CODE | join CODE | status | logs | remove" ;;
     esac

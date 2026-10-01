@@ -39,6 +39,11 @@ pub const LINK_TRANSPORTS: [TransportKind; 3] = [
 /// The `wss` address of a panel whose agents port is in `addr`: the next port, as the
 /// other transports use the agents port itself (TCP and UDP).
 pub fn wss_addr(addr: &str) -> io::Result<String> {
+    next_port(addr)
+}
+
+/// `addr` with its port one higher.
+pub fn next_port(addr: &str) -> io::Result<String> {
     let bad = || {
         io::Error::new(
             io::ErrorKind::InvalidInput,

@@ -7,6 +7,23 @@ script is friendlier.
 
 ### Added
 
+- **`transport = "auto"`.** One tunnel over `tcpmux`, `kcp` and `ws` at once: the listening side
+  opens all three (TCP port, UDP port, TCP port + 1) and the dialing side moves to the one that
+  gets through when a link stalls (a stalled link is noticed in about 4 s). In the panel it is
+  the first transport in the wizard and the edit page.
+- **Mux settings in the panel**: connections, streams per connection, stream window, ping
+  interval, connection lifetime and write gathering, in the wizard and the edit page, with the
+  profile's values as the placeholders.
+- **A tunnel is edited on one page**, not in the wizard: how it connects (mode, transport,
+  profile), where, ports, mux settings and a new token, with Save enabled once something
+  changed. The wizard only makes tunnels.
+- **A tunnel can be deleted while one of its servers is offline.** The reachable side is
+  removed at once, the tunnel leaves the lists, and the other side is removed when that server's
+  agent connects again (the panel says so, and that `kariz-manager uninstall` on that server
+  does it now). Start, stop and restart also work from the side that is reachable. The name
+  stays taken until the delete is done.
+- **The join code is one command** that installs Kariz first if the server does not have it:
+  `bash <(curl -fsSL .../kariz.sh) --agent CODE`.
 - **The manager installs the core on the first run**, then asks whether this server should also
   get the web panel, or join a panel that exists. Its banner and menu show the server's IPv4 and
   IPv6 addresses and the project's GitHub; `kariz-manager status` prints what runs here.
@@ -21,6 +38,9 @@ script is friendlier.
 
 ### Changed
 
+- **`kariz-manager uninstall` removes everything**: tunnels, the agent (its service, identity and
+  private network links), the web panel and the programs. `agent remove` cleans up the same
+  files.
 - **Joining a server that has an agent already** no longer fails: the manager tells you, asks,
   removes the old agent and starts the new one in its place (`--agent CODE --yes` skips the
   question). `kariz-panel agent --join` replaces the old registration the same way.

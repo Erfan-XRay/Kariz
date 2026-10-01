@@ -72,6 +72,29 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
         }
         tunnel.insert("ws".into(), Value::Table(ws));
     }
+    if let Some(mux) = spec.mux.as_ref().filter(|m| !m.is_empty()) {
+        let mut t = Table::new();
+        let int = |v: u64| Value::Integer(i64::try_from(v).unwrap_or(i64::MAX));
+        if let Some(v) = mux.connections {
+            t.insert("connections".into(), int(v.into()));
+        }
+        if let Some(v) = mux.max_streams {
+            t.insert("max_streams".into(), int(v.into()));
+        }
+        if let Some(v) = mux.stream_window {
+            t.insert("stream_window".into(), int(v.into()));
+        }
+        if let Some(v) = mux.max_lifetime_secs {
+            t.insert("max_lifetime_secs".into(), int(v));
+        }
+        if let Some(v) = mux.ping_interval_secs {
+            t.insert("ping_interval_secs".into(), int(v));
+        }
+        if let Some(v) = mux.coalesce {
+            t.insert("coalesce".into(), Value::Boolean(v));
+        }
+        tunnel.insert("mux".into(), Value::Table(t));
+    }
     if let Some((cert, key)) = cert_files {
         // A listening wss side serves the certificate this agent made for it.
         let mut tls = Table::new();
@@ -179,11 +202,20 @@ fn plain_text(spec: &Spec) -> Result<()> {
 /// The (protocol, port) pairs a spec listens on.
 pub fn wanted_ports(spec: &Spec) -> Vec<(&'static str, u16)> {
     let mut out = Vec::new();
-    let port = |addr: &str| addr.rsplit_once(':').map_or(addr, |(_, p)| p).parse().ok();
+    let port =
+        |addr: &str| -> Option<u16> { addr.rsplit_once(':').map_or(addr, |(_, p)| p).parse().ok() };
     if is_acceptor(spec) {
         let udp = matches!(spec.transport.as_str(), "quic" | "kcp");
         if let Some(p) = spec.listen.as_deref().and_then(port) {
             out.push((if udp { "udp" } else { "tcp" }, p));
+            // Auto listens for all of its transports: UDP on the port too, and a
+            // WebSocket on the next one.
+            if spec.transport == "auto" {
+                out.push(("udp", p));
+                if let Some(next) = p.checked_add(1) {
+                    out.push(("tcp", next));
+                }
+            }
         }
     }
     if spec.role == "entry" {
@@ -270,6 +302,19 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
         pool: Some(u32::try_from(c.tunnel.pool).unwrap_or(8)),
         ws_path: c.tunnel.ws.as_ref().map(|w| w.path.clone()),
         ws_host: c.tunnel.ws.as_ref().and_then(|w| w.host.clone()),
+        mux: Some(crate::wire::MuxSpec {
+            connections: c.tunnel.mux.connections.and_then(|v| u32::try_from(v).ok()),
+            max_streams: c.tunnel.mux.max_streams.and_then(|v| u32::try_from(v).ok()),
+            stream_window: c
+                .tunnel
+                .mux
+                .stream_window
+                .and_then(|v| u32::try_from(v).ok()),
+            max_lifetime_secs: c.tunnel.mux.max_lifetime_secs,
+            ping_interval_secs: c.tunnel.mux.ping_interval_secs,
+            coalesce: c.tunnel.mux.coalesce,
+        })
+        .filter(|m| !m.is_empty()),
         tls_sni: c.tunnel.tls.as_ref().and_then(|t| t.sni.clone()),
         tls_pin: c.tunnel.tls.as_ref().and_then(|t| {
             t.pin_sha256.clone().or_else(|| {
@@ -821,6 +866,50 @@ mod tests {
         let mut short = spec("main");
         short.token = Some("abc".into());
         assert!(put(&d.0, &short).is_err());
+    }
+
+    #[test]
+    fn mux_settings_are_written_and_read_back_and_an_empty_set_writes_nothing() {
+        let d = Dir::new();
+        let mut s = spec("tuned");
+        s.mux = Some(crate::wire::MuxSpec {
+            connections: Some(6),
+            stream_window: Some(512 * 1024),
+            ping_interval_secs: Some(5),
+            coalesce: Some(false),
+            ..Default::default()
+        });
+        put(&d.0, &s).unwrap();
+        let got = get(&d.0, "tuned").unwrap();
+        assert_eq!(got.mux, s.mux);
+        let text = std::fs::read_to_string(d.0.join("tuned.toml")).unwrap();
+        assert!(text.contains("[tunnel.mux]") && text.contains("connections = 6"));
+        // Back to the profile's values.
+        s.mux = Some(Default::default());
+        put(&d.0, &s).unwrap();
+        assert_eq!(get(&d.0, "tuned").unwrap().mux, None);
+        assert!(!std::fs::read_to_string(d.0.join("tuned.toml"))
+            .unwrap()
+            .contains("[tunnel.mux]"));
+        // A value the core refuses is refused here, before anything is written.
+        s.mux = Some(crate::wire::MuxSpec {
+            max_streams: Some(0),
+            ..Default::default()
+        });
+        assert!(put(&d.0, &s).is_err());
+    }
+
+    #[test]
+    fn an_auto_tunnel_wants_its_three_ports() {
+        let mut s = spec("a");
+        s.transport = "auto".into();
+        let own: Vec<_> = wanted_ports(&s)
+            .into_iter()
+            .filter(|(_, p)| *p < 8000)
+            .collect();
+        assert_eq!(own, vec![("tcp", 3080), ("udp", 3080), ("tcp", 3081)]);
+        let (text, _) = build(&Dir::new().0, &s, true).unwrap();
+        assert!(text.contains("transport = \"auto\""));
     }
 
     #[test]
