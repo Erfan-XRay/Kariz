@@ -268,16 +268,21 @@ export function Dialog({
   const ref = useRef<HTMLDivElement>(null);
   const [on, setOn] = useState(false);
   useFocusTrap(ref);
+  // The parent passes a new function every time it renders (the panel refreshes every 2 s):
+  // the latest one is kept here, and the effect runs once. Run on every render, it moved
+  // the focus to the first field while a person was typing in another.
+  const closing = useRef(onClose);
+  closing.current = onClose;
   useEffect(() => {
     const id = requestAnimationFrame(() => setOn(true));
-    const key = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const key = (e: KeyboardEvent) => e.key === "Escape" && closing.current();
     addEventListener("keydown", key);
     ref.current?.querySelector<HTMLElement>("input, button:not(.x-btn)")?.focus();
     return () => {
       cancelAnimationFrame(id);
       removeEventListener("keydown", key);
     };
-  }, [onClose]);
+  }, []);
   // On the page's body, so no moving parent can clip or shift it.
   return createPortal(
     <div className={`dialog-backdrop ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label={title} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>

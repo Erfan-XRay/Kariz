@@ -559,6 +559,7 @@ fn pair_error(e: anyhow::Error) -> Response {
             error(StatusCode::BAD_REQUEST, &code)
         }
         "busy" => error(StatusCode::CONFLICT, "busy"),
+        _ if code.starts_with("old_agent:") => error(StatusCode::CONFLICT, &code),
         _ => internal(e),
     }
 }

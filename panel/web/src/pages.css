@@ -951,3 +951,9 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
 .addr-pick code { font-family: var(--font-mono); color: var(--text); overflow-wrap: anywhere; }
 .addr-pick[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
 .field .help code { font-family: var(--font-mono); margin-inline-start: 4px; unicode-bidi: isolate; }
+
+/* Small controls get a bigger hit area on a touch screen or a narrow window, without moving anything. */
+@media (pointer: coarse), (max-width: 720px) {
+  .switch, .linklike, .crumb { position: relative; }
+  .switch::before, .linklike::before, .crumb::before { content: ""; position: absolute; inset: -9px -6px; }
+}

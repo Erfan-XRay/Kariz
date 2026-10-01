@@ -145,7 +145,7 @@ jobs:
             -d '{"name":"ci-agent","host":"127.0.0.1"}' "${base}api/servers/join-code" |
             sed -n 's/.*"code":"\([^"]*\)".*/\1/p')
           test -n "$code"
-          sudo kariz-manager --agent "$code"
+          sudo KARIZ_NO_UPDATE_CHECK=1 kariz-manager --agent "$code"
           for _ in $(seq 1 30); do
             curl -sk -b jar "${base}api/servers" > servers.json
             jq -e '.servers[] | select(.name == "ci-agent" and .online)' servers.json >/dev/null && break
