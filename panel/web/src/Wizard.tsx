@@ -6,9 +6,9 @@ import { useApp } from "./store";
 import { Icon, Seg, useFocusTrap } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { useNetworks } from "./Networks";
-import { MuxFields, emptyMux, muxToSpec } from "./MuxFields";
+import { MuxFields, MuxToggle, emptyMux, muxSpecOf, muxToSpec } from "./MuxFields";
+import { MUX_OPTIONAL, TRANSPORTS, joinTransport, transportLabel } from "./transport";
 
-export const TRANSPORTS = ["auto", "tcpmux", "tcp", "ws", "wss", "quic", "kcp"] as const;
 export const PROFILES = ["balanced", "ultraspeed", "gaming"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
@@ -66,7 +66,8 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [entry, setEntry] = useState("");
   const [exit, setExit] = useState("");
   const [mode, setMode] = useState("reverse");
-  const [transport, setTransport] = useState<string>("tcpmux");
+  const [transport, setTransport] = useState<string>("tcp");
+  const [muxOn, setMuxOn] = useState(true);
   const [profile, setProfile] = useState<string>("balanced");
   const [listenPort, setListenPort] = useState("3080");
   const [dialHost, setDialHost] = useState("");
@@ -122,7 +123,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     entry,
     exit,
     mode,
-    transport,
+    transport: joinTransport(transport, muxOn).core,
     profile,
     listen: `${listenHost}:${listenPort}`,
     dial: `${dialHost.includes(":") && !dialHost.startsWith("[") ? `[${dialHost}]` : dialHost}:${listenPort}`,
@@ -131,7 +132,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     ws_path: isWs ? wsPath : undefined,
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
     tls_sni: transport === "wss" && sni.trim() ? sni.trim() : undefined,
-    mux: muxToSpec(mux).spec,
+    mux: muxSpecOf(mux, transport, muxOn),
     forwards: parsed.forwards,
   });
 
@@ -285,10 +286,15 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     </button>
                   ))}
                 </div>
-                <details className="adv">
-                  <summary>{t("mux.title")}</summary>
-                  <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />
-                </details>
+                <div style={{ marginTop: "var(--sp-5)" }}>
+                  <MuxToggle transport={transport} value={muxOn} onChange={setMuxOn} />
+                </div>
+                {(muxOn || !MUX_OPTIONAL.includes(transport)) && (
+                  <details className="adv">
+                    <summary>{t("mux.title")}</summary>
+                    <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />
+                  </details>
+                )}
               </>
             )}
 
@@ -378,7 +384,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                       <span className="help">{t("wz.sniHelp")}</span>
                     </div>
                   )}
-                  {transport === "tcp" && (
+                  {transport === "tcp" && !muxOn && (
                     <div className="field">
                       <label htmlFor="wz-pool">{t("wz.pool")}</label>
                       <input
@@ -448,7 +454,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                           <dl className="kv">
                             <dt>{t("wz.transport")}</dt>
                             <dd className="mono">
-                              {transport} · {mode} · {profile}
+                              {transportLabel(joinTransport(transport, muxOn).core)} · {mode} · {profile}
                             </dd>
                             <dt>{accepts ? "⇢" : "⇠"}</dt>
                             <dd className="mono" dir="ltr">

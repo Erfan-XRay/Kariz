@@ -9,6 +9,7 @@ import { startMap } from "./scene-map";
 import type { MapData, MapHit } from "./scene-map";
 import { useApp } from "./store";
 import { BackupDialog, RestoreDialog } from "./Extras";
+import { transportLabel } from "./transport";
 import { Card, CodeBlock, Dialog, Empty, Icon, Odo, Seg, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
 
 // ---------------------------------------------------------------- the map
@@ -251,7 +252,7 @@ export function MapPage({
                   <div className="row">
                     <span>{t("t.transport")}</span>
                     <span className="mono">
-                      {hoveredTunnel.transport} · {hoveredTunnel.profile}
+                      {transportLabel(hoveredTunnel.transport, hoveredTunnel.via)} · {hoveredTunnel.profile}
                     </span>
                   </div>
                   {hoveredTunnel.error && hoveredTunnel.state !== "up" && <div className="tip-err">{hoveredTunnel.error}</div>}

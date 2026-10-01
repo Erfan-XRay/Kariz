@@ -6,8 +6,9 @@ import type { Tunnel } from "./derive";
 import { useApp } from "./store";
 import { Icon, Seg } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
-import { MuxFields, muxFromSpec, muxToSpec } from "./MuxFields";
-import { PROFILES, TRANSPORTS, addressesOf, hostOf, parsePorts, portOf } from "./Wizard";
+import { MuxFields, MuxToggle, muxFromSpec, muxSpecOf, muxToSpec } from "./MuxFields";
+import { MUX_OPTIONAL, TRANSPORTS, joinTransport, splitTransport } from "./transport";
+import { PROFILES, addressesOf, hostOf, parsePorts, portOf } from "./Wizard";
 
 /** Editing a tunnel: everything about it on one page, no steps. */
 export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; servers: ServerInfo[]; onBack: () => void }) {
@@ -18,7 +19,8 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
   // The tunnel cannot be edited now (a server is away, or it has one side only): say why.
   const [blocked, setBlocked] = useState(false);
   const [mode, setMode] = useState("reverse");
-  const [transport, setTransport] = useState("tcpmux");
+  const [transport, setTransport] = useState("tcp");
+  const [muxOn, setMuxOn] = useState(true);
   const [profile, setProfile] = useState("balanced");
   const [listenHost, setListenHost] = useState("0.0.0.0");
   const [listenPort, setListenPort] = useState("");
@@ -70,7 +72,9 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
         const acc = a.mode === "reverse" ? a : b;
         const dia = a.mode === "reverse" ? b : a;
         setMode(a.mode);
-        setTransport(a.transport);
+        const split = splitTransport(a.transport, a.mux ?? b.mux);
+        setTransport(split.transport);
+        setMuxOn(split.mux);
         setProfile(a.profile ?? "balanced");
         setListenHost(hostOf(acc.listen) || "0.0.0.0");
         setListenPort(portOf(acc.listen));
@@ -102,7 +106,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
     entry,
     exit,
     mode,
-    transport,
+    transport: joinTransport(transport, muxOn).core,
     profile,
     listen: `${listenHost}:${listenPort}`,
     dial: `${dialHost.includes(":") && !dialHost.startsWith("[") ? `[${dialHost}]` : dialHost}:${listenPort}`,
@@ -110,7 +114,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
     ws_path: isWs ? wsPath : undefined,
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
     tls_sni: transport === "wss" && sni.trim() ? sni.trim() : undefined,
-    mux: muxSpec.spec,
+    mux: muxSpecOf(mux, transport, muxOn),
     rotate: rotate ? true : undefined,
     forwards: parsed.forwards,
   });
@@ -199,7 +203,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
             <div className="field">
               <span className="label">{t("wz.transport")}</span>
               {choose(TRANSPORTS, transport, setTransport, (x) => [x, t(`wz.tr.${x}`)])}
-              {transport !== tunnel.transport && <span className="help warn-text">{t("te.transportChange")}</span>}
+              {joinTransport(transport, muxOn).core !== tunnel.transport && <span className="help warn-text">{t("te.transportChange")}</span>}
             </div>
             <div className="field">
               <span className="label">{t("wz.profile")}</span>
@@ -250,7 +254,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
                   <span className="help">{t("wz.sniHelp")}</span>
                 </div>
               )}
-              {transport === "tcp" && (
+              {transport === "tcp" && !muxOn && (
                 <div className="field">
                   <label htmlFor="te-pool">{t("wz.pool")}</label>
                   <input
@@ -300,7 +304,8 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
 
           <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>
             <legend>{t("mux.title")}</legend>
-            <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />
+            <MuxToggle transport={transport} value={muxOn} onChange={setMuxOn} />
+            {(muxOn || !MUX_OPTIONAL.includes(transport)) && <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />}
           </fieldset>
 
           <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>

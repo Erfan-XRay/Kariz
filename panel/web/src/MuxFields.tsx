@@ -1,5 +1,7 @@
 import type { MuxSpec } from "./api";
 import { useApp } from "./store";
+import { MUX_OPTIONAL } from "./transport";
+import { Seg } from "./ui";
 
 /** The mux settings as the form holds them: text, so a field can be empty (the profile's value). */
 export interface MuxForm {
@@ -49,6 +51,13 @@ export function muxToSpec(f: MuxForm): { spec?: MuxSpec; bad?: keyof MuxForm } {
   return { spec: Object.keys(spec).length ? spec : undefined };
 }
 
+/** The mux settings to send: the fields, and `enabled: false` where the switch is off (for a transport that multiplexes by itself, only what is filled in). */
+export function muxSpecOf(f: MuxForm, transport: string, on: boolean): MuxSpec | undefined {
+  const spec: MuxSpec = on || !MUX_OPTIONAL.includes(transport) ? { ...muxToSpec(f).spec } : {};
+  if (!on && MUX_OPTIONAL.includes(transport) && transport !== "tcp") spec.enabled = false;
+  return Object.keys(spec).length ? spec : undefined;
+}
+
 /** What the profile uses when a field is empty, as placeholders. */
 function defaults(profile: string, transport: string) {
   const p = profile === "ultraspeed" || profile === "throughput" ? 1 : profile === "gaming" ? 2 : 0;
@@ -59,6 +68,25 @@ function defaults(profile: string, transport: string) {
     ping_interval_secs: transport === "auto" ? 2 : p === 2 ? 10 : 30,
     coalesce: p !== 2,
   };
+}
+
+/** Whether the tunnel multiplexes: a switch for the transports that can go without it. */
+export function MuxToggle({ transport, value, onChange }: { transport: string; value: boolean; onChange: (v: boolean) => void }) {
+  const { t } = useApp();
+  const fixed = !MUX_OPTIONAL.includes(transport);
+  return (
+    <div className="field">
+      <span className="label">{t("mux.toggle")}</span>
+      {fixed ? (
+        <span className="help">{t("mux.always")}</span>
+      ) : (
+        <>
+          <Seg value={value ? "on" : "off"} options={[["on", t("mux.on")], ["off", t("mux.off")]]} onChange={(v) => onChange(v === "on")} />
+          <span className="help">{t("mux.toggle.d")}</span>
+        </>
+      )}
+    </div>
+  );
 }
 
 /** The mux settings of a tunnel, all optional. */

@@ -75,6 +75,9 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
     if let Some(mux) = spec.mux.as_ref().filter(|m| !m.is_empty()) {
         let mut t = Table::new();
         let int = |v: u64| Value::Integer(i64::try_from(v).unwrap_or(i64::MAX));
+        if let Some(v) = mux.enabled {
+            t.insert("enabled".into(), Value::Boolean(v));
+        }
         if let Some(v) = mux.connections {
             t.insert("connections".into(), int(v.into()));
         }
@@ -303,6 +306,7 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
         ws_path: c.tunnel.ws.as_ref().map(|w| w.path.clone()),
         ws_host: c.tunnel.ws.as_ref().and_then(|w| w.host.clone()),
         mux: Some(crate::wire::MuxSpec {
+            enabled: c.tunnel.mux.enabled,
             connections: c.tunnel.mux.connections.and_then(|v| u32::try_from(v).ok()),
             max_streams: c.tunnel.mux.max_streams.and_then(|v| u32::try_from(v).ok()),
             stream_window: c
@@ -710,28 +714,52 @@ pub async fn speedtest(
     streams: u32,
     udp: bool,
 ) -> SpeedReply {
+    speedtest_with(dir, name, seconds, streams, udp, |_: &str| {}).await
+}
+
+/// The entry config of a tunnel and the test's settings, or why there is no test.
+pub fn speedtest_setup(
+    dir: &Path,
+    name: &str,
+    seconds: u32,
+    streams: u32,
+    udp: bool,
+) -> Result<(Config, kariz::speedtest::Options)> {
+    let path = config_path(dir, name)?;
+    let config = match Config::load(&path) {
+        Ok(c) if c.role == Role::Entry => c,
+        Ok(_) => bail!("the speed test runs on the entry side"),
+        Err(e) => return Err(e),
+    };
+    let options = kariz::speedtest::Options {
+        seconds: u64::from(seconds.clamp(1, kariz::speedtest::MAX_SECONDS as u32)),
+        streams: (streams as usize).clamp(1, kariz::speedtest::MAX_STREAMS),
+        udp,
+    };
+    Ok((config, options))
+}
+
+/// Like [`speedtest`], and every progress line of the test goes to `on_progress` as it comes.
+pub async fn speedtest_with(
+    dir: &Path,
+    name: &str,
+    seconds: u32,
+    streams: u32,
+    udp: bool,
+    on_progress: impl FnMut(&str),
+) -> SpeedReply {
     let failed = |error: String| SpeedReply {
         ok: false,
         error: Some(error),
         text: String::new(),
         report: None,
     };
-    let path = match config_path(dir, name) {
-        Ok(p) => p,
+    let (config, options) = match speedtest_setup(dir, name, seconds, streams, udp) {
+        Ok(v) => v,
         Err(e) => return failed(format!("{e:#}")),
-    };
-    let config = match Config::load(&path) {
-        Ok(c) if c.role == Role::Entry => c,
-        Ok(_) => return failed("the speed test runs on the entry side".into()),
-        Err(e) => return failed(format!("{e:#}")),
-    };
-    let options = kariz::speedtest::Options {
-        seconds: u64::from(seconds.clamp(1, 60)),
-        streams: streams.clamp(1, 16) as usize,
-        udp,
     };
     let limit = Duration::from_secs(options.seconds * 3 + 40);
-    match tokio::time::timeout(limit, measure(&config, options)).await {
+    match tokio::time::timeout(limit, measure(&config, options, on_progress)).await {
         Ok(Ok(report)) => SpeedReply {
             ok: true,
             error: None,
@@ -747,6 +775,7 @@ pub async fn speedtest(
 async fn measure(
     config: &Config,
     options: kariz::speedtest::Options,
+    on_progress: impl FnMut(&str),
 ) -> Result<kariz::speedtest::Report> {
     let socket = config
         .control_socket()
@@ -754,11 +783,15 @@ async fn measure(
     let connection = kariz::control::connect(&socket)
         .await
         .context("the tunnel is not running")?;
-    Ok(kariz::control::request(connection, options, |_: &str| {}).await?)
+    Ok(kariz::control::request(connection, options, on_progress).await?)
 }
 
 #[cfg(not(unix))]
-async fn measure(_: &Config, _: kariz::speedtest::Options) -> Result<kariz::speedtest::Report> {
+async fn measure(
+    _: &Config,
+    _: kariz::speedtest::Options,
+    _: impl FnMut(&str),
+) -> Result<kariz::speedtest::Report> {
     bail!("the speed test needs a Linux server")
 }
 
@@ -894,6 +927,27 @@ mod tests {
         // A value the core refuses is refused here, before anything is written.
         s.mux = Some(crate::wire::MuxSpec {
             max_streams: Some(0),
+            ..Default::default()
+        });
+        assert!(put(&d.0, &s).is_err());
+    }
+
+    #[test]
+    fn mux_can_be_turned_off_for_a_transport_that_multiplexes_by_default() {
+        let d = Dir::new();
+        let mut s = spec("plain-ws");
+        s.transport = "ws".into();
+        s.mux = Some(crate::wire::MuxSpec {
+            enabled: Some(false),
+            ..Default::default()
+        });
+        put(&d.0, &s).unwrap();
+        let got = get(&d.0, "plain-ws").unwrap();
+        assert_eq!(got.mux.and_then(|m| m.enabled), Some(false));
+        // tcpmux cannot be turned off: the core refuses it before anything is written.
+        let mut s = spec("bad-tcpmux");
+        s.mux = Some(crate::wire::MuxSpec {
+            enabled: Some(false),
             ..Default::default()
         });
         assert!(put(&d.0, &s).is_err());
