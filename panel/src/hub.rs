@@ -321,6 +321,17 @@ impl Hub {
         Ok(())
     }
 
+    /// What the panel's own server is called: the name chosen at install (`kariz-manager panel
+    /// install`, or `kariz-panel init --name`), else its host name.
+    pub fn local_name(&self) -> String {
+        self.db
+            .meta("local_name")
+            .ok()
+            .flatten()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(collect::hostname)
+    }
+
     /// Whether a server can be asked right now (the panel's own always can).
     pub fn is_online(&self, server: &str) -> bool {
         server == LOCAL || self.live().get(server).is_some_and(|l| l.online)
@@ -466,6 +477,8 @@ impl Hub {
         } else {
             format!("server-{}", random_hex(2)?)
         };
+        // Read before the database is locked below (the lock is not re-entrant).
+        let local = self.local_name();
         let conn = self.db.conn();
         let exists = |n: &str| -> rusqlite::Result<bool> {
             conn.query_row("SELECT count(*) FROM servers WHERE name = ?1", [n], |r| {
@@ -475,7 +488,8 @@ impl Hub {
         };
         let mut name = base.clone();
         let mut n = 1;
-        while exists(&name)? {
+        // Not the panel's own server's name either.
+        while exists(&name)? || name == local {
             n += 1;
             name = format!("{base}-{n}");
         }
@@ -932,11 +946,7 @@ impl Hub {
                         .unwrap_or_default(),
                 }
             };
-        let local_name = live
-            .get(LOCAL)
-            .map(|l| l.hostname.clone())
-            .filter(|h| !h.is_empty())
-            .unwrap_or_else(collect::hostname);
+        let local_name = self.local_name();
         let mut out = vec![view(
             LOCAL,
             local_name,
@@ -1006,6 +1016,22 @@ mod tests {
             ip6: ip6.map(str::to_owned),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_panels_own_server_is_called_what_was_chosen_at_install() {
+        let hub = Hub::new(
+            Db::in_memory().unwrap(),
+            std::env::temp_dir().join("kariz-none"),
+        );
+        // Not chosen: the host name.
+        assert_eq!(hub.local_name(), collect::hostname());
+        assert_eq!(hub.snapshot().unwrap()[0].name, collect::hostname());
+        hub.db.set_meta("local_name", "tehran-main").unwrap();
+        assert_eq!(hub.snapshot().unwrap()[0].name, "tehran-main");
+        // A new server never takes that name.
+        assert_eq!(hub.unique_name("tehran-main").unwrap(), "tehran-main-2");
+        assert_eq!(hub.unique_name("frankfurt").unwrap(), "frankfurt");
     }
 
     #[test]

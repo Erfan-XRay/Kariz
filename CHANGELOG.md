@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **You choose the name of the panel's own server.** Installing the panel asks what this server
+  should be called in the panel, with its host name as the default (Enter keeps it);
+  `kariz-manager panel install --name NAME` gives it without asking, and `kariz-manager panel
+  name [NAME]` renames it later (`kariz-panel init --name`). A joining server never takes that
+  name.
+
 ## 1.5.2 - 2026-10-02
 
 ### Fixed
