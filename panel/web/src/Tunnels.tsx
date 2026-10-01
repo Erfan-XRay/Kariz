@@ -124,6 +124,12 @@ function SideFacts({ side, label }: { side: Tunnel["entry"]; label: string }) {
         <dd className="mono">
           {transportLabel(side.tunnel.transport, side.tunnel.status?.peer.transport)} · {side.tunnel.mode}
         </dd>
+        {side.tunnel.encryption && (
+          <>
+            <dt>{t("enc.title")}</dt>
+            <dd className={side.tunnel.encryption === "none" ? "err" : undefined}>{side.tunnel.transport === "quic" ? "TLS 1.3" : t(`enc.${side.tunnel.encryption}`)}</dd>
+          </>
+        )}
         {side.tunnel.listen && (
           <>
             <dt>{t("td.listen")}</dt>
@@ -192,6 +198,7 @@ function TunnelPage({ tunnel, onBack, onAct, onEdit }: { tunnel: Tunnel; onBack:
               </span>
               <span className="tag">{tunnel.profile}</span>
               {mode && <span className="tag">{t(`td.mode.${mode}`)}</span>}
+              {tunnel.encryption === "none" && tunnel.transport !== "quic" && <span className="tag risk">{t("enc.none")}</span>}
             </div>
           </div>
           <span className="grow" />

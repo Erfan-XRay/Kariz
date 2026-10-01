@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Choose a tunnel's encryption in the panel.** The wizard and the edit page offer *Automatic*
+  (recommended: AES-256-GCM where the CPU has AES instructions, ChaCha20-Poly1305 where it does
+  not), *AES-256-GCM*, *ChaCha20-Poly1305* and *No encryption*. No encryption is shown in red
+  with what it means (the traffic can be read on the way, and a network that looks for tunnels
+  spots it more easily) and has to be confirmed; QUIC always uses TLS 1.3, so there is nothing to
+  choose there. The same cipher is written on both sides; the tunnel's page shows it, and a tunnel
+  without encryption is tagged. Needs a newer agent on both servers (the panel says which one to
+  update).
 - **A speed test can be stopped.** While it runs the button becomes *Stop the test*; the test
   streams end within half a second (a test that is cut off no longer leaves streams pumping
   data), and leaving the page stops it too. An older agent runs the test to the end.
@@ -12,11 +20,13 @@
   each address the server has (IPv4 and IPv6) and a field for any other; *Use the default* undoes
   a saved one.
 - **© ErfanXRay** at the foot of every page and under the sign-in form, linking to the project.
+
 - **You choose the name of the panel's own server.** Installing the panel asks what this server
   should be called in the panel, with its host name as the default (Enter keeps it);
   `kariz-manager panel install --name NAME` gives it without asking, and `kariz-manager panel
   name [NAME]` renames it later (`kariz-panel init --name`). A joining server never takes that
   name.
+
 
 ## 1.5.2 - 2026-10-02
 
