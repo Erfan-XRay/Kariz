@@ -839,6 +839,13 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
 .edit-sec:disabled { opacity: 0.75; }
 .edit-bar { position: sticky; bottom: 0; display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-4); background: var(--bg-elev, var(--card)); border: 1px solid var(--line); border-radius: var(--r-md, 12px); box-shadow: 0 -8px 24px color-mix(in srgb, var(--bg, #000) 70%, transparent); }
 @media (max-width: 720px) { .mux-fields .grid-3 { grid-template-columns: 1fr; } .tunnel-edit .grid-2 { grid-template-columns: 1fr; } }
+.enc-choice { gap: var(--sp-3); }
+.enc-choice .tile .badge { margin-inline-start: var(--sp-2); }
+.tile.is-risk[aria-checked="true"] { border-color: var(--danger); background: var(--danger-soft); box-shadow: inset 0 0 0 1px var(--danger); }
+.tile.is-risk[aria-checked="true"] .tick { background: var(--danger); }
+.enc-warn { display: flex; gap: var(--sp-3); align-items: flex-start; padding: var(--sp-4); border: 1px solid var(--danger); border-radius: 12px; background: var(--danger-soft); color: var(--text); }
+.enc-warn svg { color: var(--danger); flex: none; margin-top: 2px; }
+.enc-warn p { margin: 0 0 var(--sp-3); font-size: var(--fs-sm); line-height: 1.6; }
 .tls-choice { gap: var(--sp-3); }
 .tls-real { display: grid; gap: var(--sp-3); padding: var(--sp-4); border: 1px solid var(--line); border-radius: 12px; background: var(--card-2); }
 .tls-act { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }

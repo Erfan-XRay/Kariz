@@ -20,6 +20,8 @@ export interface Tunnel {
   /** An auto tunnel: the transport its sessions use right now. */
   via: string | null;
   profile: string;
+  /** The cipher setting (`auto` when an older agent does not say). */
+  encryption: string;
   /// Mbit/s and connections, from the entry side's counters.
   rate: number;
   connections: number;
@@ -55,6 +57,7 @@ export function pairTunnels(servers: ServerInfo[]): Tunnel[] {
       transport: any.tunnel.transport,
       via: entry?.tunnel.status?.peer.transport ?? exit?.tunnel.status?.peer.transport ?? null,
       profile: any.tunnel.profile,
+      encryption: any.tunnel.encryption || "auto",
       rate: state === "up" ? entry?.tunnel.rate_mbps ?? exit?.tunnel.rate_mbps ?? 0 : 0,
       connections: status ? status.totals.tcp_open + status.totals.udp_flows : 0,
       rtt: status?.peer.rtt_ms ?? exit?.tunnel.status?.peer.rtt_ms ?? null,
