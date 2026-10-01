@@ -56,8 +56,11 @@ pub struct ServerView {
     pub version: String,
     pub arch: String,
     pub hostname: String,
-    /// The address other servers reach this one at (for private networks), if set.
+    /// The address other servers reach this one at (for private networks), if one was set.
     pub addr: Option<String>,
+    /// The address it is known by (its public IPv4, else IPv6): what private networks use
+    /// while none was set.
+    pub addr_default: Option<String>,
     pub seen_secs: Option<u64>,
     /// The transport its agent's link uses now (`tcpmux` or `kcp`); none for the panel's
     /// own server and for one that is offline.
@@ -276,8 +279,15 @@ impl Hub {
         Ok(token)
     }
 
-    /// The address other servers reach `server` at, if it has been set.
+    /// The address other servers reach `server` at: the one that was set, else the address
+    /// the server is known by (what it connected with), so a private network needs no typing.
     pub fn addr_of(&self, server: &str) -> Option<String> {
+        self.saved_addr(server)
+            .or_else(|| self.default_addr(server))
+    }
+
+    /// The address that was set for `server`, if one was.
+    fn saved_addr(&self, server: &str) -> Option<String> {
         self.db
             .conn()
             .query_row(
@@ -288,6 +298,15 @@ impl Hub {
             .optional()
             .ok()
             .flatten()
+    }
+
+    /// The address a server is known by: its public IPv4 (its own, or the one its link comes
+    /// from), else its IPv6. `None` while the panel knows neither.
+    fn default_addr(&self, server: &str) -> Option<String> {
+        let live = self.live();
+        let l = live.get(server)?;
+        let (v4, v6) = addresses(l.health.as_ref(), l.peer_ip);
+        v4.or(v6)
     }
 
     /// Sets (or with an empty address, clears) the address other servers reach `server`
@@ -927,6 +946,7 @@ impl Hub {
                         .filter(|l| !l.hostname.is_empty())
                         .map_or(host, |l| l.hostname.clone()),
                     addr: None,
+                    addr_default: ip4.clone().or_else(|| ip6.clone()),
                     seen_secs: l.and_then(|l| l.seen).map(|s| s.elapsed().as_secs()),
                     link: l
                         .filter(|l| l.online)

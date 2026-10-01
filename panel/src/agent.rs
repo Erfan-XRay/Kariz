@@ -139,6 +139,8 @@ struct SpeedJob {
     error: Option<String>,
     report: Option<kariz::speedtest::Report>,
     started: Option<std::time::Instant>,
+    /// Told to stop the test.
+    stop: Arc<tokio::sync::Notify>,
 }
 
 /// The agent's state while it runs.
@@ -268,6 +270,10 @@ impl Agent {
                 },
             );
         }
+        let stop = {
+            let jobs = self.speed_jobs.lock().unwrap_or_else(|e| e.into_inner());
+            jobs.get(&id).map(|j| j.stop.clone()).unwrap_or_default()
+        };
         let jobs = self.speed_jobs.clone();
         let job = id.clone();
         tokio::spawn(async move {
@@ -280,7 +286,17 @@ impl Agent {
                     }
                 }
             };
-            let reply = manage::speedtest_with(&dir, &name, seconds, streams, udp, push).await;
+            // Stopping drops the test: its connection to the daemon closes, the daemon sees the
+            // next write fail and ends the test.
+            let reply = tokio::select! {
+                reply = manage::speedtest_with(&dir, &name, seconds, streams, udp, push) => reply,
+                () = stop.notified() => crate::wire::SpeedReply {
+                    ok: false,
+                    error: Some("stopped".into()),
+                    text: String::new(),
+                    report: None,
+                },
+            };
             let mut jobs = jobs.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(j) = jobs.get_mut(&job) {
                 j.done = true;
@@ -442,6 +458,16 @@ impl Agent {
                 udp,
             } => to_json(&self.speedtest_start(name, seconds, streams, udp)),
             Request::SpeedtestPoll { id, after } => to_json(&self.speedtest_poll(&id, after)),
+            Request::SpeedtestStop { id } => {
+                let jobs = self.speed_jobs.lock().unwrap_or_else(|e| e.into_inner());
+                match jobs.get(&id) {
+                    Some(job) => {
+                        job.stop.notify_one();
+                        ack(Ok(()))
+                    }
+                    None => ack(Err(anyhow::anyhow!("no_such_test"))),
+                }
+            }
         }
     }
 
@@ -851,6 +877,23 @@ target = \"127.0.0.1:443\"
         }
         assert!(poll.ok && poll.done, "{poll:?}");
         assert!(poll.error.is_some() && poll.report.is_none(), "{poll:?}");
+        // A test can be told to stop (a finished one takes it quietly); an unknown one says so.
+        let stopped: Ack = serde_json::from_slice(
+            &ask(
+                &agent,
+                Request::SpeedtestStop {
+                    id: started.id.clone(),
+                },
+            )
+            .await,
+        )
+        .unwrap();
+        assert!(stopped.ok, "{stopped:?}");
+        let unknown: Ack = serde_json::from_slice(
+            &ask(&agent, Request::SpeedtestStop { id: "nope".into() }).await,
+        )
+        .unwrap();
+        assert!(!unknown.ok);
     }
 
     #[tokio::test]
