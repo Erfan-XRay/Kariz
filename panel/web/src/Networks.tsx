@@ -166,7 +166,7 @@ function AddLinks({ network, servers, onClose }: { network: Network; servers: Se
                   <span className="nm">{s.name}</span>
                   <br />
                   <span className="mt mono" dir="ltr">
-                    {s.addr ?? t("net.noAddr")}
+                    {s.addr ?? s.addr_default ?? t("net.noAddr")}
                   </span>
                 </span>
                 <span />
@@ -199,9 +199,12 @@ function AddLinks({ network, servers, onClose }: { network: Network; servers: Se
 /** A server's address for the others, with a way to set it. */
 function AddressRow({ server, onSaved }: { server: ServerInfo; onSaved: () => void }) {
   const { t, toast } = useApp();
-  const [value, setValue] = useState(server.addr ?? (server.local ? location.hostname : ""));
+  // What is used now: the address that was set, else the one the server is known by.
+  const known = server.addr_default ?? "";
+  const [value, setValue] = useState(server.addr ?? known ?? (server.local ? location.hostname : ""));
   const [busy, setBusy] = useState(false);
   const changed = value.trim() !== (server.addr ?? "");
+  const choices = [server.ip4, server.ip6].filter((a): a is string => !!a);
   const save = async () => {
     setBusy(true);
     try {
@@ -217,10 +220,42 @@ function AddressRow({ server, onSaved }: { server: ServerInfo; onSaved: () => vo
   return (
     <li className="addr-row">
       <span className="nm">{server.name}</span>
-      <input className="text mono" dir="ltr" aria-label={t("net.addrOf", { name: server.name })} placeholder="203.0.113.5" value={value} onChange={(e) => setValue(e.target.value)} />
-      <button className="btn btn-ghost btn-sm" type="button" disabled={busy || !value.trim() || (!changed && !!server.addr)} onClick={() => void save()}>
-        {t("net.addrSave")}
-      </button>
+      <div className="addr-edit">
+        <input className="text mono" dir="ltr" aria-label={t("net.addrOf", { name: server.name })} placeholder="203.0.113.5" value={value} onChange={(e) => setValue(e.target.value)} />
+        {choices.length > 0 && (
+          <span className="addr-chips">
+            {choices.map((a) => (
+              <button key={a} type="button" className={`pchip as-btn ${a === value.trim() ? "on" : ""}`} dir="ltr" onClick={() => setValue(a)}>
+                {a}
+              </button>
+            ))}
+          </span>
+        )}
+        <span className="help">{server.addr ? t("net.addrSet") : known ? t("net.addrDefault", { addr: known }) : t("net.noAddr")}</span>
+      </div>
+      <span className="addr-btns">
+        <button className="btn btn-ghost btn-sm" type="button" disabled={busy || !value.trim() || !changed} onClick={() => void save()}>
+          {t("net.addrSave")}
+        </button>
+        {server.addr && (
+          <button
+            className="btn btn-quiet btn-sm"
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setValue(known);
+              setBusy(true);
+              api
+                .setAddress(server.id, "")
+                .then(onSaved)
+                .catch(() => toast(t("net.addrBad")))
+                .finally(() => setBusy(false));
+            }}
+          >
+            {t("net.useDefault")}
+          </button>
+        )}
+      </span>
     </li>
   );
 }

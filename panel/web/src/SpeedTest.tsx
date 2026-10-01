@@ -288,14 +288,21 @@ export function SpeedTest({ tunnel }: { tunnel: Tunnel }) {
   const [last, setLast] = useState<Last | null>(() => readLast(tunnel.name));
   const [elapsed, setElapsed] = useState(0);
   const alive = useRef(true);
+  // The test that runs, to stop it: by the button, or when this page is left.
+  const job = useRef<string | null>(null);
+  const live_ = useRef(false);
+  const [stopping, setStopping] = useState(false);
+  const [stopped, setStopped] = useState(false);
   useEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
+      if (job.current && live_.current) void api.speedtestStop(tunnel.name, job.current).catch(() => {});
     };
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const running = phase !== "ready" && phase !== "done" && phase !== "failed";
+  live_.current = running;
   const steps = plan(seconds, udp);
   const total = steps.reduce((s, [, d]) => s + d, 0);
 
@@ -363,8 +370,33 @@ export function SpeedTest({ tunnel }: { tunnel: Tunnel }) {
     if (alive.current) finish(r);
   };
 
+  /** The test is stopped: back to ready, with a note. */
+  const wasStopped = () => {
+    job.current = null;
+    setStopping(false);
+    setStopped(true);
+    setPartial({});
+    setLive(0);
+    setSamples([]);
+    setPhase("ready");
+  };
+
+  const stop = async () => {
+    if (!job.current || stopping) return;
+    setStopping(true);
+    try {
+      await api.speedtestStop(tunnel.name, job.current);
+    } catch {
+      // It may have just ended: the poll tells.
+      setStopping(false);
+    }
+  };
+
   const go = async () => {
     setError("");
+    setStopped(false);
+    setStopping(false);
+    job.current = null;
     setResult(null);
     setElapsed(0);
     setLive(0);
@@ -381,6 +413,7 @@ export function SpeedTest({ tunnel }: { tunnel: Tunnel }) {
         setPhase("failed");
         return;
       }
+      job.current = started.id;
       let after = 0;
       for (let misses = 0; ; ) {
         let p;
@@ -402,6 +435,9 @@ export function SpeedTest({ tunnel }: { tunnel: Tunnel }) {
           return;
         }
         if (p.done) {
+          job.current = null;
+          setStopping(false);
+          if (p.error === "stopped") return wasStopped();
           finish({ ok: !p.error, error: p.error, text: "", report: p.report });
           return;
         }
@@ -571,12 +607,25 @@ export function SpeedTest({ tunnel }: { tunnel: Tunnel }) {
           <input type="checkbox" checked={udp} disabled={running} onChange={(e) => setUdp(e.target.checked)} /> {t("sp.udp")}
         </label>
         <span className="grow" />
-        <button className="btn btn-primary sp-go" type="button" disabled={!canRun || running} onClick={() => void go()}>
-          <span className="shine" />
-          <Icon name="bolt" size={18} />
-          {phase === "done" || phase === "failed" ? t("sp.again") : t("sp.go")}
-        </button>
+        {running && job.current ? (
+          <button className="btn btn-danger solid sp-go" type="button" disabled={stopping} onClick={() => void stop()}>
+            <Icon name="x" size={18} />
+            {stopping ? t("sp.stopping") : t("sp.stop")}
+          </button>
+        ) : (
+          <button className="btn btn-primary sp-go" type="button" disabled={!canRun || running} onClick={() => void go()}>
+            <span className="shine" />
+            <Icon name="bolt" size={18} />
+            {phase === "done" || phase === "failed" ? t("sp.again") : t("sp.go")}
+          </button>
+        )}
       </div>
+      {stopped && phase === "ready" && (
+        <p className="muted small" role="status">
+          {t("sp.stoppedNote")}
+        </p>
+      )}
+      {running && !job.current && <p className="muted small">{t("sp.cannotStop")}</p>}
       {presetOf(seconds, streams) === "max" && <p className="muted small">{t("sp.maxHint")}</p>}
       <p className="muted small sp-note">
         {canRun ? t("sp.idle") : t("sp.off")}
