@@ -719,6 +719,10 @@ kbd {
 
 .btn.is-busy { cursor: progress; }
 
+.copyright { display: flex; justify-content: center; align-items: center; gap: 8px; margin: 0; font-size: var(--fs-xs); color: var(--text-3); letter-spacing: 0.02em; }
+.copyright a { color: var(--text-2); text-decoration: none; border-bottom: 1px solid var(--line-strong); }
+.copyright a:hover { color: var(--accent); border-color: var(--accent); }
+.app-foot { padding: var(--sp-6) var(--sp-4) var(--sp-5); }
 .login-foot {
   margin: 0;
   display: flex;

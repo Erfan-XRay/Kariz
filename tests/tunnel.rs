@@ -27,11 +27,20 @@ fn free_port() -> u16 {
 fn free_ports(following: u16) -> u16 {
     // Every port handed out is kept, so tests running side by side never get the same one
     // or each other's neighbour.
+    use std::hash::{BuildHasher, Hasher};
     static KEPT: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
     let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
     loop {
-        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = tcp.local_addr().unwrap().port();
+        // Below the range the kernel hands out to outgoing connections (32768 and up): a port
+        // taken from there can be grabbed by another test's connection before it is bound.
+        let port = 20_000
+            + (std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish()
+                % 10_000) as u16;
+        let Ok(_held) = std::net::TcpListener::bind(("127.0.0.1", port)) else {
+            continue;
+        };
         let span = || port..=port.saturating_add(following.saturating_sub(1));
         if port.checked_add(following).is_none()
             || span().any(|p| kept.contains(&p))

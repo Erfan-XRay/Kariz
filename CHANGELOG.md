@@ -12,6 +12,15 @@
   choose there. The same cipher is written on both sides; the tunnel's page shows it, and a tunnel
   without encryption is tagged. Needs a newer agent on both servers (the panel says which one to
   update).
+- **A speed test can be stopped.** While it runs the button becomes *Stop the test*; the test
+  streams end within half a second (a test that is cut off no longer leaves streams pumping
+  data), and leaving the page stops it too. An older agent runs the test to the end.
+- **Private networks use the address a server connected with** by default (its public IPv4,
+  else its IPv6), so nothing has to be typed: the *Addresses* card shows it, with a button for
+  each address the server has (IPv4 and IPv6) and a field for any other; *Use the default* undoes
+  a saved one.
+- **© ErfanXRay** at the foot of every page and under the sign-in form, linking to the project.
+
 - **You choose the name of the panel's own server.** Installing the panel asks what this server
   should be called in the panel, with its host name as the default (Enter keeps it);
   `kariz-manager panel install --name NAME` gives it without asking, and `kariz-manager panel

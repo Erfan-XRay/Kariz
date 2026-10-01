@@ -301,6 +301,19 @@ export function Dialog({
   );
 }
 
+/** The credit line: shown at the foot of every page and under the sign-in form. */
+export function Copyright() {
+  return (
+    <p className="copyright" dir="ltr">
+      <span>© ErfanXRay</span>
+      <span aria-hidden="true">·</span>
+      <a href="https://github.com/Erfan-XRay/Kariz" target="_blank" rel="noopener noreferrer">
+        Kariz
+      </a>
+    </p>
+  );
+}
+
 /** A row of choices, one pressed. */
 export function Seg<T extends string>({ value, options, onChange }: { value: T; options: [T, string][]; onChange: (v: T) => void }) {
   return (
