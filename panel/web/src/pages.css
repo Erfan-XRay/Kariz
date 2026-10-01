@@ -433,6 +433,7 @@ pre.notes { max-height: 240px; overflow: auto; white-space: pre-wrap; }
 .td-title { display: grid; gap: 6px; min-width: 0; }
 .td-name { margin: 0; font-size: var(--fs-xl); font-weight: 600; letter-spacing: -0.01em; line-height: 1.1; overflow-wrap: anywhere; }
 .td-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.td-tags > * { flex: none; max-width: 100%; }
 .row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
 .actions-sep { width: 1px; height: 24px; margin-inline: 2px; background: var(--line-strong); }
 
@@ -527,9 +528,11 @@ pre.notes { max-height: 240px; overflow: auto; white-space: pre-wrap; }
 .sp-scale { fill: var(--text-3); font: 500 11px var(--font-ui); font-variant-numeric: tabular-nums; }
 .sp-tip { fill: var(--water-bright); }
 .sp-tip-glow { fill: var(--water-bright); opacity: 0.7; }
-.sp-label { fill: var(--text-3); font: 500 13px var(--font-ui); letter-spacing: var(--tracking-caps); text-transform: uppercase; }
+.sp-plate { fill: var(--card); opacity: 0.9; }
+.sp-gauge text.sp-label, .sp-gauge text.sp-value, .sp-gauge text.sp-unit, .sp-gauge text.sp-second { paint-order: stroke fill; stroke: var(--card); stroke-width: 5px; stroke-linejoin: round; }
+.sp-label { fill: var(--text-2); font: 500 13px var(--font-ui); letter-spacing: var(--tracking-caps); text-transform: uppercase; }
 .sp-value { fill: var(--text); font: 600 54px var(--font-ui); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
-.is-running .sp-value { fill: var(--water-bright); animation: sp-breathe 1.2s var(--ease-in-out) infinite; }
+.is-running .sp-value { fill: var(--text); }
 @keyframes sp-breathe { 50% { opacity: 0.35; } }
 .sp-unit { fill: var(--text-2); font: 500 14px var(--font-ui); }
 .sp-second { fill: var(--accent); font: 600 18px var(--font-ui); font-variant-numeric: tabular-nums; }

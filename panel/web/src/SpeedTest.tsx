@@ -158,6 +158,8 @@ function Gauge({ phase, down, up, scale }: { phase: Phase; down: number; up: num
           <circle className="sp-tip" cx={tip.x} cy={tip.y} r="5" />
         </>
       )}
+      {/* A plate under the numbers: the water behind the gauge never runs through them. */}
+      <circle className="sp-plate" cx={ARC.cx} cy={150} r="88" />
       <text className="sp-label" x={ARC.cx} y={98} textAnchor="middle">
         {running ? t(`sp.phase.${phase}`) : phase === "done" ? t("sp.phase.done") : t("sp.ready")}
       </text>

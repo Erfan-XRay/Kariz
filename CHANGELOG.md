@@ -21,6 +21,17 @@
   name [NAME]` renames it later (`kariz-panel init --name`). A joining server never takes that
   name.
 
+## 1.5.2 - 2026-10-02
+
+### Fixed
+
+- **The speed test's gauge is readable while it runs.** The water that runs behind the gauge went
+  through its numbers, and the number pulsed in a colour that was hard to read. The numbers now
+  sit on a plate with an outline, in the normal text colour, and do not pulse.
+- **The `auto → kcp` tag on a tunnel's page** (and in the tunnel list) overlapped the other tags on
+  a phone: a style of the top bar's live indicator reached it. It is its own style now, and the
+  tags wrap onto the next line instead of overlapping.
+
 ## 1.5.1 - 2026-10-02
 
 ### Added
