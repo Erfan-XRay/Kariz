@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 - 2026-10-01
 
 Servers stay connected when a daemon is slow, a tunnel can be edited completely, and the manager
 script is friendlier.
@@ -38,6 +38,9 @@ script is friendlier.
 
 ### Changed
 
+- **Update the agents too.** A tunnel made or edited with `auto` or with mux settings needs 1.5
+  on both servers (an older agent refuses the settings it does not know). Update the panel, then
+  its servers from *Settings, Updates*.
 - **`kariz-manager uninstall` removes everything**: tunnels, the agent (its service, identity and
   private network links), the web panel and the programs. `agent remove` cleans up the same
   files.
