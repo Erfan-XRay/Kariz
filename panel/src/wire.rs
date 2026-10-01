@@ -127,6 +127,31 @@ pub struct PingReply {
     pub error: Option<String>,
 }
 
+/// A tunnel's mux settings (`[tunnel.mux]`): every one is optional, and what is left out
+/// keeps the profile's value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MuxSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_streams: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_lifetime_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ping_interval_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coalesce: Option<bool>,
+}
+
+impl MuxSpec {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// What a tunnel is, as data: everything the manager's `add` takes, without free text
 /// going into the file. The agent turns it into the config.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +180,9 @@ pub struct Spec {
     pub tls_sni: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_pin: Option<String>,
+    /// Mux settings; left out, the profile's apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mux: Option<MuxSpec>,
     #[serde(default)]
     pub forwards: Vec<ForwardInfo>,
 }

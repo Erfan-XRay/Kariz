@@ -11,6 +11,7 @@ use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
+use crate::auto::{self, Dial};
 use crate::channel::{self, Channel, Link};
 use crate::config::{Config, Mode, TransportKind, Tuning};
 use crate::crypto::{Crypto, ReplayFilter};
@@ -98,7 +99,11 @@ pub async fn run(config: Config) -> Result<()> {
                     connections = mux.connections,
                     "exit: reverse mode with mux, keeping sessions to the entry side"
                 );
-                let dialer = Arc::new(Dialer::new(&transport, remote, &tuning)?);
+                let dialer = Arc::new(if config.tunnel.transport == TransportKind::Auto {
+                    Dial::auto(&transport, &config.tunnel.token, remote, &tuning)?
+                } else {
+                    Dial::one(&transport, remote, &tuning)?
+                });
                 for _ in 0..mux.connections {
                     let (exit, dialer) = (exit.clone(), dialer.clone());
                     let connect = {
@@ -107,7 +112,8 @@ pub async fn run(config: Config) -> Result<()> {
                             let (exit, dialer, sessions) =
                                 (exit.clone(), dialer.clone(), sessions.clone());
                             async move {
-                                let link = connect_once(&exit, &dialer).await?;
+                                let wait = exit.tuning.dial_timeout + exit.tuning.handshake_timeout;
+                                let link = dialer.connect(&exit.crypto, wait).await?;
                                 Ok(Session::Kmux(MuxSession::over(
                                     link,
                                     Side::Server,
@@ -140,18 +146,24 @@ pub async fn run(config: Config) -> Result<()> {
             }
             Mode::Direct => {
                 let addr = config.tunnel.listen.as_deref().expect("validated");
-                let listener = Listener::bind(&transport, addr, &tuning)
-                    .await
-                    .with_context(|| {
-                        format!("failed to listen for tunnel connections on {addr}")
-                    })?;
+                let listeners = if config.tunnel.transport == TransportKind::Auto {
+                    auto::bind_all(&transport, &config.tunnel.token, addr, &tuning).await?
+                } else {
+                    vec![Listener::bind(&transport, addr, &tuning)
+                        .await
+                        .with_context(|| {
+                            format!("failed to listen for tunnel connections on {addr}")
+                        })?]
+                };
                 info!(
-                    addr = %listener.local_addr()?,
+                    addr = %listeners[0].local_addr()?,
                     mux = mux.enabled,
                     "exit: direct mode, waiting for the entry side"
                 );
                 let sessions = mux.enabled.then_some(sessions);
-                tasks.spawn(accept_direct(exit.clone(), listener, sessions));
+                for listener in listeners {
+                    tasks.spawn(accept_direct(exit.clone(), listener, sessions.clone()));
+                }
             }
         }
     }

@@ -91,6 +91,25 @@ loss, where TCP collapses.
 KCP runs in user space, a packet at a time, so on localhost it reaches a fraction of
 TCP's speed (hundreds of Mbit/s). Between two servers this rarely matters.
 
+## `auto`
+
+`transport = "auto"` is for networks where you do not know which way gets through, or where a
+way that worked stops working. The listening side opens all of these at once:
+
+| Transport | Port |
+|---|---|
+| `tcpmux` | TCP, the tunnel's port |
+| `kcp` | UDP, the same port number |
+| `ws` | TCP, the next port (the WebSocket path is made from the token) |
+
+The dialing side starts with the one that worked last. If connecting stalls for four seconds,
+or fails, it tries the next, round and round, and remembers the one that got through. It
+always multiplexes and pings every 2 seconds (`tunnel.mux.ping_interval_secs` changes it), so
+a link that goes quiet is dropped after about 4 seconds and made again over whichever
+transport gets through. It needs the three ports open on the listening side; if the UDP or
+`ws` port cannot be bound, that transport is left out (and logged), and `tcpmux` must bind.
+`[tunnel.kcp]` applies to its KCP part; `[tunnel.ws]` and `[tunnel.tls]` are not used.
+
 ## Modes and transports
 
 Every transport works in both modes. The listening side needs its port reachable:

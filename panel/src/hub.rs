@@ -321,6 +321,73 @@ impl Hub {
         Ok(())
     }
 
+    /// Whether a server can be asked right now (the panel's own always can).
+    pub fn is_online(&self, server: &str) -> bool {
+        server == LOCAL || self.live().get(server).is_some_and(|l| l.online)
+    }
+
+    /// Remembers that a tunnel is to be removed from a server that cannot be reached now:
+    /// its agent does it when it connects again. The tunnel disappears from the lists at once.
+    pub fn queue_delete(&self, server: &str, name: &str) -> Result<()> {
+        self.db.conn().execute(
+            "INSERT OR IGNORE INTO pending_deletes (server, name) VALUES (?1, ?2)",
+            params![server, name],
+        )?;
+        Ok(())
+    }
+
+    /// The names waiting to be removed from `server`.
+    fn pending_deletes(&self, server: &str) -> Vec<String> {
+        let conn = self.db.conn();
+        let Ok(mut stmt) = conn.prepare("SELECT name FROM pending_deletes WHERE server = ?1")
+        else {
+            return Vec::new();
+        };
+        stmt.query_map([server], |r| r.get(0))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether a tunnel of this name is waiting to be removed from some server (the name
+    /// cannot be used again until it is gone).
+    pub fn delete_pending_for(&self, name: &str) -> bool {
+        self.db
+            .conn()
+            .query_row(
+                "SELECT 1 FROM pending_deletes WHERE name = ?1",
+                [name],
+                |_| Ok(()),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    /// Removes the tunnels that were deleted while this server was away.
+    async fn apply_pending_deletes(&self, id: &str) {
+        for name in self.pending_deletes(id) {
+            let done = self
+                .ask_as::<Ack>(id, &Request::TunnelDelete { name: name.clone() })
+                .await;
+            match done {
+                Ok(ack) if ack.ok => {
+                    let _ = self.db.conn().execute(
+                        "DELETE FROM pending_deletes WHERE server = ?1 AND name = ?2",
+                        params![id, name],
+                    );
+                    info!(server = %id, tunnel = %name, "a tunnel deleted while the server was away is removed");
+                }
+                Ok(ack) => {
+                    warn!(server = %id, tunnel = %name, error = ?ack.error, "could not remove a deleted tunnel")
+                }
+                Err(e) => {
+                    warn!(server = %id, tunnel = %name, error = %e, "could not remove a deleted tunnel")
+                }
+            }
+        }
+    }
+
     /// The networks each connected server already routes, by server id.
     pub fn routes(&self) -> crate::networks::Routes {
         self.live()
@@ -453,6 +520,7 @@ impl Hub {
             let conn = self.db.conn();
             conn.execute("DELETE FROM net_links WHERE a = ?1 OR b = ?1", [id])?;
             conn.execute("DELETE FROM server_addrs WHERE server = ?1", [id])?;
+            conn.execute("DELETE FROM pending_deletes WHERE server = ?1", [id])?;
         }
         let removed = self
             .db
@@ -538,6 +606,7 @@ impl Hub {
             entry.arch = hello.arch.clone();
         }
         self.history.event("server_up", &id, "");
+        self.apply_pending_deletes(&id).await;
         // The server is told its private network links (they may have changed while it
         // was away).
         if let Err(e) = self.net_sync(&id).await {
@@ -826,6 +895,7 @@ impl Hub {
         let view =
             |id: &str, name: String, local: bool, version: String, arch: String, host: String| {
                 let l = live.get(id);
+                let hidden = self.pending_deletes(id);
                 let (ip4, ip6) =
                     addresses(l.and_then(|l| l.health.as_ref()), l.and_then(|l| l.peer_ip));
                 ServerView {
@@ -851,7 +921,15 @@ impl Hub {
                     health: l.and_then(|l| l.health.clone()),
                     ip4,
                     ip6,
-                    tunnels: l.map(|l| l.tunnels.clone()).unwrap_or_default(),
+                    tunnels: l
+                        .map(|l| {
+                            l.tunnels
+                                .iter()
+                                .filter(|t| !hidden.contains(&t.info.name))
+                                .cloned()
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 }
             };
         let local_name = live
@@ -928,6 +1006,21 @@ mod tests {
             ip6: ip6.map(str::to_owned),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_delete_for_a_server_that_is_away_is_kept_and_hides_the_tunnel() {
+        let hub = Hub::new(
+            Db::in_memory().unwrap(),
+            std::env::temp_dir().join("kariz-none"),
+        );
+        assert!(hub.is_online(LOCAL) && !hub.is_online("a1"));
+        assert!(!hub.delete_pending_for("main"));
+        hub.queue_delete("a1", "main").unwrap();
+        hub.queue_delete("a1", "main").unwrap();
+        assert!(hub.delete_pending_for("main") && !hub.delete_pending_for("other"));
+        assert_eq!(hub.pending_deletes("a1"), vec!["main".to_owned()]);
+        assert!(hub.pending_deletes("a2").is_empty());
     }
 
     #[test]

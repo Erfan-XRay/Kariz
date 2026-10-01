@@ -88,7 +88,7 @@ impl Listener {
             _ => None,
         };
         match settings.kind {
-            TransportKind::Quic => return Err(not_a_stream_transport()),
+            TransportKind::Quic | TransportKind::Auto => return Err(not_a_stream_transport()),
             TransportKind::Kcp => {
                 let listener = kcp::KcpListener::bind(addr, &settings.kcp, tuning).await?;
                 return Ok(Self::Kcp(listener));
@@ -97,7 +97,9 @@ impl Listener {
         }
         let tcp = tcp::TcpTransportListener::bind(addr, tuning).await?;
         match settings.kind {
-            TransportKind::Quic | TransportKind::Kcp => unreachable!("handled above"),
+            TransportKind::Quic | TransportKind::Kcp | TransportKind::Auto => {
+                unreachable!("handled above")
+            }
             TransportKind::Tcp | TransportKind::Tcpmux => Ok(Self::Tcp(tcp)),
             TransportKind::Ws | TransportKind::Wss => Ok(Self::Ws(
                 tcp,
@@ -217,7 +219,7 @@ impl Dialer {
         let ws = settings.ws.as_ref();
         let (config, tls) = match settings.kind {
             TransportKind::Tcp | TransportKind::Tcpmux => return Ok(Self::Tcp(tcp)),
-            TransportKind::Quic => return Err(not_a_stream_transport()),
+            TransportKind::Quic | TransportKind::Auto => return Err(not_a_stream_transport()),
             TransportKind::Kcp => unreachable!("handled above"),
             TransportKind::Ws => (ws::ClientConfig::new(ws, addr, "http", 80), None),
             TransportKind::Wss => {
