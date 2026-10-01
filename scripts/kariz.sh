@@ -612,6 +612,12 @@ panel_show() {
     printf '  %s             %s (works once, for 60 minutes; make another with: kariz-manager panel link)\n' "$C_DIM" "$C_RESET"
 }
 
+# Whether there is a terminal to ask questions on (or the tests' answers): a run from a script
+# with no terminal, as in CI, goes on with the defaults instead of stopping to ask.
+have_terminal() {
+    [[ -n "${KARIZ_INPUT:-}" ]] || { : </dev/tty; } 2>/dev/null
+}
+
 # Whether $1 can be a server's name in the panel.
 valid_server_name() { [[ "$1" =~ ^[A-Za-z0-9._-]{1,40}$ ]]; }
 
@@ -659,7 +665,7 @@ panel_install() {
         die "This Kariz release has no web panel. Install 0.8 or later: kariz-manager update"
     # What this server is called in the panel: asked (the host name is the default), or given
     # with --name; with --yes the host name stays unless --name says otherwise.
-    if [[ -z "$name" ]] && ((!yes)) && [[ ! -f "$PANEL_CONF" ]]; then
+    if [[ -z "$name" ]] && ((!yes)) && [[ ! -f "$PANEL_CONF" ]] && have_terminal; then
         ask_server_name name
     fi
     [[ -z "$name" ]] || valid_server_name "$name" ||

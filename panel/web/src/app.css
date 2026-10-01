@@ -334,9 +334,9 @@ button {
 .dot { width: 8px; height: 8px; flex: none; border-radius: 50%; display: inline-block; }
 .dot.up { background: var(--water); box-shadow: 0 0 0 3px var(--water-soft); }
 .dot.warn { background: var(--warn); }
-.tag.live { border-color: color-mix(in srgb, var(--water) 55%, transparent); color: var(--water); }
-.tag.live::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--water); margin-inline-end: 6px; vertical-align: middle; animation: breathe 2s ease-in-out infinite; }
-@media (prefers-reduced-motion: reduce) { .tag.live::before { animation: none; } }
+.tag.via { border-color: color-mix(in srgb, var(--water) 55%, transparent); color: var(--water); }
+.tag.via::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--water); margin-inline-end: 6px; vertical-align: middle; animation: breathe 2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .tag.via::before { animation: none; } }
 .dot.down { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
 .dot.off { background: transparent; border: 1.5px dashed var(--text-3); }
 
