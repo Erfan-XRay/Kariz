@@ -4,6 +4,17 @@
 
 ### Added
 
+- **A nicer manager.** A banner with a box, the version and the project's address; cards with
+  the panel's address and sign-in link, and links in the colour of links (underlined) so they
+  stand out; headings with a rule. The look follows the terminal's width.
+- **You set the panel's admin password while installing it**, instead of a random one: it is
+  asked twice (hidden) and must have at least 12 characters, three of the four kinds (lower case,
+  UPPER CASE, digits, symbols), no common word and no run of one character. Or choose only the
+  one-time sign-in link. `kariz-manager panel password` asks the same way (`--random` makes one,
+  `--stdin` reads it) and `panel install --password-file F` reads it from a file.
+- **The manager asks once, when this server has the core but no panel and no agent, whether to
+  install the web panel** (the answer is remembered; `KARIZ_NO_OFFER=1` turns the question off).
+
 - **You choose the name of the panel's own server.** Installing the panel asks what this server
   should be called in the panel, with its host name as the default (Enter keeps it);
   `kariz-manager panel install --name NAME` gives it without asking, and `kariz-manager panel

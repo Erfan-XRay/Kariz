@@ -24,6 +24,7 @@ class Session:
     def __init__(self, argv):
         # The menu looks for a newer release at start; a test does not wait for GitHub.
         os.environ["KARIZ_NO_UPDATE_CHECK"] = "1"
+        os.environ["KARIZ_NO_OFFER"] = "1"
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.execvp(argv[0], argv)

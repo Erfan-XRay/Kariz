@@ -44,9 +44,41 @@ if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     C_RESET=$'\e[0m' C_BOLD=$'\e[1m' C_DIM=$'\e[2m'
     C_TEAL=$'\e[38;5;43m' C_AQUA=$'\e[38;5;86m' C_SAND=$'\e[38;5;179m'
     C_RED=$'\e[38;5;203m' C_YELLOW=$'\e[38;5;221m' C_GREEN=$'\e[38;5;78m'
+    C_GRAY=$'\e[38;5;245m' C_LINK=$'\e[4;38;5;51m' C_PINK=$'\e[38;5;213m'
 else
     C_RESET='' C_BOLD='' C_DIM='' C_TEAL='' C_AQUA='' C_SAND='' C_RED='' C_YELLOW='' C_GREEN=''
+    C_GRAY='' C_LINK='' C_PINK=''
 fi
+
+# A web address, in the colour of a link (underlined), so it stands out and is easy to find.
+url() { printf '%s%s%s' "$C_LINK" "$1" "$C_RESET"; }
+
+# The width of boxes and rules: the terminal's, between 44 and 76 columns, less the margins.
+box_width() {
+    local cols=${COLUMNS:-}
+    [[ "$cols" =~ ^[0-9]+$ ]] || cols=$(tput cols 2>/dev/null || echo 80)
+    [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+    ((cols > 76)) && cols=76
+    ((cols < 44)) && cols=44
+    echo $((cols - 4))
+}
+
+# One row of a card: a label and its value.
+kv() { printf '  %s│%s %s%-12s%s %s\n' "$C_DIM$C_TEAL" "$C_RESET" "$C_GRAY" "$1" "$C_RESET" "$2"; }
+
+# The top and the bottom of a card, with a title in the top.
+card_top() {
+    local title=$1 w line
+    w=$(box_width)
+    printf -v line '%*s' $((w - ${#title} - 5)) ''
+    printf '\n  %s╭─%s %s%s%s %s%s╮%s\n' "$C_DIM$C_TEAL" "$C_RESET" "$C_BOLD$C_TEAL" "$title" "$C_RESET" "$C_DIM$C_TEAL" "${line// /─}" "$C_RESET"
+}
+card_end() {
+    local w line
+    w=$(box_width)
+    printf -v line '%*s' $((w - 2)) ''
+    printf '  %s╰%s╯%s\n' "$C_DIM$C_TEAL" "${line// /─}" "$C_RESET"
+}
 
 # A line of $1 box-drawing dashes.
 rule() {
@@ -61,14 +93,24 @@ banner() {
     printf '%s' "$C_AQUA"
     printf '  %s\n' "| ' <  / _ \\|   / | |  / / " '|_|\_\/_/ \_\_|_\|___|/___|'
     printf '%s' "$C_RESET"
-    printf '  %sKariz manager%s  %s·%s  %sgithub.com/%s%s\n' \
-        "$C_BOLD$C_SAND" "$C_RESET" "$C_DIM" "$C_RESET" "$C_AQUA" "$REPO" "$C_RESET"
-    printf '  %s%s%s\n' "$C_DIM" "$(rule 54)" "$C_RESET"
+    # The text that sets the width is plain ASCII (the diamond is counted as 1), so the box
+    # fits whatever the locale.
+    local w inner title="Kariz manager" tag="tunnel core and web panel" version="" pad
+    w=$(box_width)
+    inner=$((w - 2))
+    [[ -x "$BIN" ]] && version="v$(bin_version "$BIN")"
+    pad=$((inner - 2 - 2 - ${#title} - 2 - ${#tag} - ${#version} - 2))
+    ((pad < 1)) && pad=1
+    printf '  %s╭%s╮%s\n' "$C_DIM$C_TEAL" "$(rule "$inner")" "$C_RESET"
+    printf '  %s│%s  %s%s%s  %s%s%s%*s%s%s%s  %s│%s\n' "$C_DIM$C_TEAL" "$C_RESET" "$C_BOLD$C_TEAL" "◆ $title" "$C_RESET" \
+        "$C_PINK" "$tag" "$C_RESET" "$pad" "" "$C_GRAY" "$version" "$C_RESET" "$C_DIM$C_TEAL" "$C_RESET"
+    printf '  %s╰%s╯%s\n' "$C_DIM$C_TEAL" "$(rule "$inner")" "$C_RESET"
+    printf '  %s© ErfanXRay%s  %s·%s  %s\n' "$C_BOLD$C_SAND" "$C_RESET" "$C_DIM" "$C_RESET" "$(url "github.com/$REPO")"
 }
 
 # A heading for a part of a longer job.
 section() {
-    printf '\n  %s%s%s %s%s%s\n' "$C_TEAL" "▌" "$C_RESET" "$C_BOLD" "$*" "$C_RESET"
+    printf '\n  %s◆ %s%s\n  %s%s%s\n' "$C_BOLD$C_TEAL" "$*" "$C_RESET" "$C_DIM$C_TEAL" "$(rule "$(box_width)")" "$C_RESET"
 }
 
 info() { printf '  %s●%s %s\n' "$C_TEAL" "$C_RESET" "$*"; }
@@ -594,22 +636,115 @@ panel_show() {
     listen=$(panel_setting listen)
     path=$(panel_setting path)
     agent=$(panel_setting agent_listen)
-    echo
-    printf '  %s address     %s https://%s:%s/%s/\n' "$C_TEAL" "$C_RESET" "$host" "${listen##*:}" "$path"
+    local link
+    card_top "Web panel"
+    kv "address" "$(url "https://$host:${listen##*:}/$path/")"
     if [[ -n "$(panel_setting cert_file)" ]]; then
-        printf '  %s certificate %s %s\n' "$C_TEAL" "$C_RESET" "$(panel_setting cert_file)"
-        printf '  %s             %s (not self-signed: no browser warning)\n' "$C_DIM" "$C_RESET"
+        kv "certificate" "$(panel_setting cert_file)"
+        kv "" "${C_DIM}not self-signed: no browser warning${C_RESET}"
     elif [[ -n "$fingerprint" ]]; then
-        printf '  %s certificate %s SHA-256 %s\n' "$C_TEAL" "$C_RESET" "$fingerprint"
-        printf '  %s             %s (self-signed: the browser warns; compare this fingerprint)\n' "$C_DIM" "$C_RESET"
-        printf '  %s             %s (no warning with a real one: kariz-manager panel cert)\n' "$C_DIM" "$C_RESET"
+        kv "certificate" "SHA-256 $fingerprint"
+        kv "" "${C_DIM}self-signed: the browser warns; compare this fingerprint${C_RESET}"
+        kv "" "${C_DIM}no warning with a real one: kariz-manager panel cert${C_RESET}"
     fi
     if [[ -n "$agent" ]]; then
-        printf '  %s agents      %s port %s: TCP and UDP, and TCP %s (open them for the servers you add)\n' "$C_TEAL" "$C_RESET" "${agent##*:}" "$((${agent##*:} + 1))"
+        kv "agents" "port ${agent##*:}: TCP and UDP, and TCP $((${agent##*:} + 1)) ${C_DIM}(open them for the servers you add)${C_RESET}"
     fi
-    printf '  %s sign in     %s ' "$C_TEAL" "$C_RESET"
-    "$PANEL_BIN" login-link -c "$PANEL_CONF" --host "$host" 2>/dev/null
-    printf '  %s             %s (works once, for 60 minutes; make another with: kariz-manager panel link)\n' "$C_DIM" "$C_RESET"
+    link=$("$PANEL_BIN" login-link -c "$PANEL_CONF" --host "$host" 2>/dev/null || true)
+    kv "sign in" "$(url "$link")"
+    kv "" "${C_DIM}works once, for 60 minutes; make another with: kariz-manager panel link${C_RESET}"
+    card_end
+}
+
+# Reads one line without echo into the variable named $1 (the answer comes from the terminal,
+# or from KARIZ_INPUT in the tests).
+ask_secret() {
+    local _var=$1 _prompt=$2 _s
+    open_input
+    printf '  %s?%s %s: ' "$C_AQUA" "$C_RESET" "$_prompt"
+    if ! IFS= read -r -s -u "$IN_FD" _s; then
+        echo
+        die "No answer to: $_prompt"
+    fi
+    echo
+    _s=${_s%$'\r'}
+    printf -v "$_var" '%s' "$_s"
+}
+
+# What is wrong with the password $1, or nothing if it will do: at least 12 characters, three of
+# the four kinds (lower case, UPPER CASE, digits, symbols), no common word, no run of one character.
+password_problem() {
+    local p=$1 low=${1,,} classes=0 w i
+    if ((${#p} < 12)); then
+        echo "it needs at least 12 characters"
+        return 0
+    fi
+    [[ $p =~ [a-z] ]] && classes=$((classes + 1))
+    [[ $p =~ [A-Z] ]] && classes=$((classes + 1))
+    [[ $p =~ [0-9] ]] && classes=$((classes + 1))
+    [[ $p =~ [^a-zA-Z0-9] ]] && classes=$((classes + 1))
+    if ((classes < 3)); then
+        echo "use at least three of: lower case, UPPER CASE, digits, symbols"
+        return 0
+    fi
+    for w in password qwerty letmein admin kariz 123456 abcdef iloveyou welcome; do
+        if [[ $low == *"$w"* ]]; then
+            echo "it holds a common word ($w)"
+            return 0
+        fi
+    done
+    for ((i = 0; i + 3 < ${#p}; i++)); do
+        if [[ ${p:i:1} == "${p:i+1:1}" && ${p:i:1} == "${p:i+2:1}" && ${p:i:1} == "${p:i+3:1}" ]]; then
+            echo "it repeats one character"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# Asks for a new admin password (twice, hidden) until it is good enough; into the variable named $1.
+ask_password() {
+    local _var=$1 _p1 _p2 _why
+    printf '  %sAt least 12 characters, with three of: lower case, UPPER CASE, digits, symbols.%s\n' "$C_DIM" "$C_RESET"
+    while true; do
+        ask_secret _p1 "Admin password"
+        _why=$(password_problem "$_p1")
+        if [[ -n "$_why" ]]; then
+            warn "Too weak: $_why."
+            continue
+        fi
+        ask_secret _p2 "Type it again"
+        if [[ "$_p1" != "$_p2" ]]; then
+            warn "They are not the same."
+            continue
+        fi
+        printf -v "$_var" '%s' "$_p1"
+        return
+    done
+}
+
+# Sets the panel's admin password from the variable named $1 (and signs every session out).
+apply_password() {
+    local -n _pw=$1
+    printf '%s\n' "$_pw" | "$PANEL_BIN" reset-password -c "$PANEL_CONF" --stdin 2>/dev/null
+}
+
+# Asked once on a server that has the core but no panel and no agent: should this server get the
+# web panel? The answer is remembered, so it is not asked at every start.
+PANEL_ASKED=$CONF_DIR/.panel-asked
+offer_panel() {
+    [[ -z "${KARIZ_NO_OFFER:-}" ]] || return 0
+    [[ -x "$BIN" ]] || return 0
+    [[ -f "$PANEL_CONF" || -f "$AGENT_CONF" || -f "$PANEL_ASKED" ]] && return 0
+    section "The web panel"
+    info "This server has no web panel. It is where servers and tunnels are made, in a browser."
+    mkdir -p "$CONF_DIR"
+    : >"$PANEL_ASKED"
+    if confirm "Install the web panel on this server now?" n; then
+        (panel_install) || warn "The panel was not installed: kariz-manager panel install shows why."
+    else
+        info "Any time later: kariz-manager, then 2 (Web panel and agent), then install."
+    fi
 }
 
 # Whether $1 can be a server's name in the panel.
@@ -634,11 +769,12 @@ ask_server_name() {
 panel_install() {
     need_root
     need_systemd
-    local port="" host="" domain="" ip="" email="" yes=0 cert="" key="" name="" version=()
+    local port="" host="" domain="" ip="" email="" yes=0 cert="" key="" name="" password_file="" version=()
     while [[ $# -gt 0 ]]; do
         case $1 in
             --port) port=$2 && shift 2 ;;
             --name) name=${2:-} && shift 2 ;;
+            --password-file) password_file=${2:-} && shift 2 ;;
             --host) host=$2 && shift 2 ;;
             --domain) domain=${2:-} && shift 2 ;;
             --ip) ip=${2:-} && shift 2 ;;
@@ -696,9 +832,28 @@ panel_install() {
     systemctl is-active --quiet kariz-panel ||
         die "The panel did not start: journalctl -u kariz-panel -n 50"
     ok "The web panel is running."
+    # An admin password of your own, so the panel can be opened without a link (a one-time
+    # sign-in link works without it): asked, or read from the first line of --password-file.
+    local pw="" how=link
+    if [[ -n "$password_file" ]]; then
+        [[ -f "$password_file" ]] || die "No such file: $password_file"
+        pw=$(head -n 1 "$password_file")
+        [[ -z "$(password_problem "$pw")" ]] || die "That password is too weak: $(password_problem "$pw")."
+    elif ((!yes)); then
+        section "Admin password"
+        choose how "How do you want to sign in?" password \
+            "password|set an admin password now (recommended)" \
+            "link|only the one-time sign-in link for now (set a password later: kariz-manager panel password)"
+        [[ "$how" != password ]] || ask_password pw
+    fi
+    if [[ -n "$pw" ]]; then
+        apply_password pw || die "The password could not be set."
+        pw=""
+        ok "The admin password is set."
+    fi
     panel_show "$(panel_host "$host")" "$fingerprint"
     echo
-    info "Next: open the sign-in link above. Servers, Add server shows the command that connects another server."
+    info "Next: open the address above and sign in. Servers, Add server shows the command that connects another server."
 }
 
 # ---- The panel's certificate (Let's Encrypt) ----
@@ -1050,12 +1205,24 @@ cmd_panel() {
             if [[ ${1:-} == --host ]]; then
                 host=${2:-}
             fi
-            "$PANEL_BIN" login-link -c "$PANEL_CONF" --host "$(panel_host "$host")"
+            printf '%s\n' "$(url "$("$PANEL_BIN" login-link -c "$PANEL_CONF" --host "$(panel_host "$host")")")"
             ;;
         password)
             need_root
             [[ -f "$PANEL_CONF" ]] || die "The panel is not installed: kariz-manager panel install"
-            "$PANEL_BIN" reset-password -c "$PANEL_CONF" "$@"
+            if (($# == 0)); then
+                # A password of your own, asked twice; --random makes one and shows it, --stdin reads it.
+                local pw=""
+                ask_password pw
+                apply_password pw || die "The password could not be set."
+                ok "The admin password is set; every session is signed out."
+            else
+                if [[ $1 == --random ]]; then
+                    "$PANEL_BIN" reset-password -c "$PANEL_CONF"
+                else
+                    "$PANEL_BIN" reset-password -c "$PANEL_CONF" "$@"
+                fi
+            fi
             ;;
         status)
             need_systemd
@@ -1068,7 +1235,7 @@ cmd_panel() {
         cert) panel_cert "$@" ;;
         cert-hook) cert_hook "$@" ;;
         uninstall) panel_uninstall "$@" ;;
-        *) die "panel: install [--port N] [--domain D | --ip A] [--name NAME] | name [NAME] | link | password [--stdin] | cert [--domain D | --ip A] | status | logs | uninstall [--yes]" ;;
+        *) die "panel: install [--port N] [--domain D | --ip A] [--name NAME] | name [NAME] | link | password [--stdin | --random] | cert [--domain D | --ip A] | status | logs | uninstall [--yes]" ;;
     esac
 }
 
@@ -1237,6 +1404,8 @@ first_run() {
         "core|only the Kariz core: tunnels are made from a web panel on another server" \
         "panel|also install the web panel here (servers, tunnels and charts in a browser)" \
         "agent|connect this server to a web panel that exists already (needs its join code)"
+    mkdir -p "$CONF_DIR"
+    : >"$PANEL_ASKED"
     case $what in
         panel) panel_install ;;
         agent)
@@ -1306,6 +1475,7 @@ menu() {
         (first_run) || true
     else
         offer_update
+        offer_panel
     fi
     while true; do
         banner
@@ -1355,6 +1525,7 @@ usage() {
   update  [--version vX.Y.Z]                   update Kariz and restart what runs
   uninstall [--yes]                            also deletes the configs with --yes
   panel install [--port N] [--domain D | --ip ADDRESS] [--email E] [--name NAME] [--yes]
+                                               [--password-file F: its first line is the admin password]
                                                the web panel on this server, with a Let's
                                                Encrypt certificate for the domain or IP address
   panel cert [--domain D | --ip ADDRESS]       change its domain or address (renewal is automatic)
