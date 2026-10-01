@@ -31,6 +31,9 @@ use crate::udp;
 
 /// How many idle reverse connections the entry may queue before it starts dropping them.
 const POOL_CAPACITY: usize = 1024;
+/// Direct mode without mux: how often the entry tries the exit side when idle, so the
+/// tunnel's state is the truth.
+const PROBE_EVERY: Duration = Duration::from_secs(10);
 
 struct Entry {
     crypto: Crypto,
@@ -107,6 +110,22 @@ pub async fn run(config: Config) -> Result<()> {
                     remote,
                     "entry: direct mode, dialing the exit side per connection"
                 );
+                // Nothing keeps a connection open here, so without this the tunnel would
+                // not say whether the exit side is reachable until someone used it (and a
+                // panel creating the tunnel would wait for a "connected" that never comes).
+                let probe = Dialer::new(&transport, remote, &tuning)?;
+                let (crypto, link) = (crypto.clone(), stats.peer.clone());
+                let wait = tuning.dial_timeout + tuning.handshake_timeout;
+                tasks.spawn(async move {
+                    loop {
+                        match timeout(wait, channel::connect(&probe, &crypto, &[])).await {
+                            Ok(Ok(_)) => link.link_up(),
+                            Ok(Err(e)) => link.failed(&e),
+                            Err(_) => link.failed(&"handshake timed out"),
+                        }
+                        sleep(PROBE_EVERY).await;
+                    }
+                });
                 Source::Direct(Dialer::new(&transport, remote, &tuning)?)
             }
             Mode::Reverse => {

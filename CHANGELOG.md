@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+Servers stay connected when a daemon is slow, a tunnel can be edited completely, and the manager
+script is friendlier.
+
+### Added
+
+- **The manager installs the core on the first run**, then asks whether this server should also
+  get the web panel, or join a panel that exists. Its banner and menu show the server's IPv4 and
+  IPv6 addresses and the project's GitHub; `kariz-manager status` prints what runs here.
+- **IPv4 and IPv6 of every server** are shown on its card in the panel (the address the agent
+  leaves from, or the one its link is seen coming from, when that is a private one).
+- **Choose the tunnel profile** with a description of each: *Balanced* (default), *Ultra speed*
+  and *Gaming*.
+- **Editing a tunnel is complete**: the WebSocket Host header, the TLS server name and the pool
+  are kept and can be changed, and the edit can make a new token for both sides.
+- A new tunnel's *address to dial* is filled in from the server's known address (and the
+  addresses can be picked with a click); a direct tunnel says which port must be open.
+
+### Changed
+
+- **Joining a server that has an agent already** no longer fails: the manager tells you, asks,
+  removes the old agent and starts the new one in its place (`--agent CODE --yes` skips the
+  question). `kariz-panel agent --join` replaces the old registration the same way.
+
+### Fixed
+
+- **Servers going offline by themselves.** The panel asked every tunnel's daemon one after the
+  other; a few that answered slowly went over the 10 s a request is allowed and the panel
+  dropped the link. They are asked side by side now, a late list of tunnels no longer ends a
+  link that answers everything else, and both ends close a finished link so the agent comes back
+  at once. Both ends now log why a link ended (`journalctl -u kariz-panel` and `-u kariz-agent`).
+- **A direct tunnel with the plain `tcp` transport never showed as connected** (nothing keeps a
+  connection open there), so the panel gave up creating it after 30 s. The entry now looks for
+  the exit every 10 s.
+
 ## 1.4.0 - 2026-09-30
 
 The panel has a new look, servers can join over IPv6 or with a transport you choose (now also

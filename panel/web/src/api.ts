@@ -88,6 +88,9 @@ export interface ServerInfo {
   /** The transport its agent's link uses now (tcpmux or kcp). */
   link?: string | null;
   health: Health | null;
+  /** Its public IPv4 and IPv6 addresses, when known. */
+  ip4?: string | null;
+  ip6?: string | null;
   tunnels: TunnelInfo[];
 }
 
