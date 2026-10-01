@@ -86,12 +86,12 @@ pub async fn run(config: Config) -> Result<()> {
                         let (dialer, crypto, sessions) =
                             (dialer.clone(), crypto.clone(), sessions.clone());
                         async move {
-                            let link = dialer.connect(&crypto, wait).await?;
-                            Ok(Session::Kmux(MuxSession::over(
-                                link,
-                                Side::Client,
-                                sessions,
-                            )))
+                            let (link, via) = dialer.connect(&crypto, wait).await?;
+                            let session = MuxSession::over(link, Side::Client, sessions);
+                            if let Some(via) = via {
+                                session.set_transport(via);
+                            }
+                            Ok(Session::Kmux(session))
                         }
                     };
                     let (lifetime, link) = (mux.max_lifetime, stats.peer.clone());
@@ -134,14 +134,17 @@ pub async fn run(config: Config) -> Result<()> {
                 let listeners = if config.tunnel.transport == TransportKind::Auto {
                     auto::bind_all(&transport, &config.tunnel.token, addr, &tuning).await?
                 } else {
-                    vec![Listener::bind(&transport, addr, &tuning)
-                        .await
-                        .with_context(|| {
-                            format!("failed to listen for tunnel connections on {addr}")
-                        })?]
+                    vec![(
+                        "",
+                        Listener::bind(&transport, addr, &tuning)
+                            .await
+                            .with_context(|| {
+                                format!("failed to listen for tunnel connections on {addr}")
+                            })?,
+                    )]
                 };
                 info!(
-                    addr = %listeners[0].local_addr()?,
+                    addr = %listeners[0].1.local_addr()?,
                     mux = mux.enabled,
                     "entry: reverse mode, waiting for the exit side"
                 );
@@ -149,27 +152,31 @@ pub async fn run(config: Config) -> Result<()> {
                 if mux.enabled {
                     let pool = Arc::new(SessionPool::default());
                     let (p, link_stats) = (pool.clone(), stats.peer.clone());
-                    let on_link = Arc::new(move |link: Link, peer: SocketAddr| {
-                        let session = MuxSession::over(link, Side::Client, sessions.clone());
-                        let session = Arc::new(Session::Kmux(session));
-                        link_stats.session_up(&session);
-                        p.add(session);
-                        info!(%peer, "mux session from the exit side established");
-                    });
-                    for listener in listeners {
+                    let on_link =
+                        Arc::new(move |link: Link, peer: SocketAddr, via: &'static str| {
+                            let session = MuxSession::over(link, Side::Client, sessions.clone());
+                            if !via.is_empty() {
+                                session.set_transport(via);
+                            }
+                            let session = Arc::new(Session::Kmux(session));
+                            link_stats.session_up(&session);
+                            p.add(session);
+                            info!(%peer, "mux session from the exit side established");
+                        });
+                    for (via, listener) in listeners {
                         let on_link = on_link.clone();
                         let accept = accept_reverse(
                             listener,
                             crypto.clone(),
                             hs,
                             stats.clone(),
-                            move |link, peer| on_link(link, peer),
+                            move |link, peer| on_link(link, peer, via),
                         );
                         tasks.spawn(accept);
                     }
                     Source::Mux(pool)
                 } else {
-                    let listener = listeners.into_iter().next().expect("a listener");
+                    let (_, listener) = listeners.into_iter().next().expect("a listener");
                     let (tx, rx) = mpsc::channel(POOL_CAPACITY);
                     let link_stats = stats.peer.clone();
                     let on_link = move |link: Link, peer: SocketAddr| {

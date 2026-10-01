@@ -215,12 +215,18 @@ impl Peer {
             let ok = last_ok.is_some_and(|ok| last_error.as_ref().map_or(true, |(e, _)| ok > *e));
             (ok, if ok { last_ok } else { None })
         };
+        // The transports the live sessions run over (only an `auto` tunnel names them).
+        let mut via: Vec<&'static str> =
+            sessions.iter().filter_map(|(_, s)| s.transport()).collect();
+        via.sort_unstable();
+        via.dedup();
         let rtts: Vec<Duration> = sessions.iter().filter_map(|(_, s)| s.rtt()).collect();
         let rtt_ms = (!rtts.is_empty()).then(|| {
             let mean = rtts.iter().sum::<Duration>() / rtts.len() as u32;
             (mean.as_secs_f64() * 10_000.0).round() / 10.0
         });
         PeerStatus {
+            transport: (!via.is_empty()).then(|| via.join("+")),
             connected,
             sessions: mux.then_some(sessions.len() as u64),
             sessions_wanted: (mux && self.wanted > 0).then_some(self.wanted),
@@ -380,6 +386,10 @@ pub struct Status {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerStatus {
+    /// An `auto` tunnel: the transport its live sessions use now (`kcp`, or `tcpmux+ws` while
+    /// they differ); `null` for the other transports and while down.
+    #[serde(default)]
+    pub transport: Option<String>,
     pub connected: bool,
     /// Live sessions; `null` without mux.
     pub sessions: Option<u64>,

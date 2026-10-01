@@ -17,6 +17,8 @@ export interface Tunnel {
   paired: boolean;
   state: TunnelState;
   transport: string;
+  /** An auto tunnel: the transport its sessions use right now. */
+  via: string | null;
   profile: string;
   /// Mbit/s and connections, from the entry side's counters.
   rate: number;
@@ -51,6 +53,7 @@ export function pairTunnels(servers: ServerInfo[]): Tunnel[] {
       paired: !!entry && !!exit,
       state,
       transport: any.tunnel.transport,
+      via: entry?.tunnel.status?.peer.transport ?? exit?.tunnel.status?.peer.transport ?? null,
       profile: any.tunnel.profile,
       rate: state === "up" ? entry?.tunnel.rate_mbps ?? exit?.tunnel.rate_mbps ?? 0 : 0,
       connections: status ? status.totals.tcp_open + status.totals.udp_flows : 0,

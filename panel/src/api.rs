@@ -61,6 +61,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/events", get(events))
         .route("/api/logs", get(tunnel_logs))
         .route("/api/tunnels/speedtest", post(tunnel_speedtest))
+        .route("/api/tunnels/cert", post(tunnel_cert))
+        .route("/api/tunnels/speedtest/start", post(tunnel_speedtest_start))
+        .route("/api/tunnels/speedtest/poll", post(tunnel_speedtest_poll))
         .route("/api/networks", get(networks_list).post(network_create))
         .route("/api/networks/delete", post(network_delete))
         .route("/api/networks/links", post(links_create))
@@ -559,6 +562,7 @@ fn pair_error(e: anyhow::Error) -> Response {
             error(StatusCode::BAD_REQUEST, &code)
         }
         "busy" => error(StatusCode::CONFLICT, "busy"),
+        _ if code.starts_with("old_agent:") => error(StatusCode::CONFLICT, &code),
         _ => internal(e),
     }
 }
@@ -857,6 +861,107 @@ async fn tunnel_speedtest(
         Ok(r) => reply(
             StatusCode::OK,
             json!({ "ok": r.ok, "error": r.error, "text": r.text, "report": r.report }),
+        ),
+        Err(e) => match format!("{e:#}").as_str() {
+            "no_such_tunnel" => error(StatusCode::NOT_FOUND, "no_such_tunnel"),
+            "bad_name" => error(StatusCode::BAD_REQUEST, "bad_name"),
+            _ => internal(e),
+        },
+    }
+}
+
+async fn tunnel_speedtest_start(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<SpeedBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    audit(
+        &state,
+        &format!("session {}", me.id),
+        &ip_of(&peer),
+        &format!("ran a speed test on {}", body.name),
+    );
+    match pair::speedtest_start(
+        &state.hub,
+        &body.name,
+        body.seconds.unwrap_or(10),
+        body.streams.unwrap_or(4),
+        body.udp.unwrap_or(true),
+    )
+    .await
+    {
+        Ok(r) => reply(
+            StatusCode::OK,
+            json!({ "ok": r.ok, "error": r.error, "id": r.id }),
+        ),
+        Err(e) => match format!("{e:#}").as_str() {
+            "no_such_tunnel" => error(StatusCode::NOT_FOUND, "no_such_tunnel"),
+            "bad_name" => error(StatusCode::BAD_REQUEST, "bad_name"),
+            _ => internal(e),
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct CertBody {
+    server: String,
+    host: String,
+    email: Option<String>,
+}
+
+/// Gets a certificate for a wss tunnel's listening server (it can take a minute).
+async fn tunnel_cert(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<CertBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    audit(
+        &state,
+        &format!("session {}", me.id),
+        &ip_of(&peer),
+        &format!(
+            "asked for a certificate for {} on {}",
+            body.host, body.server
+        ),
+    );
+    match pair::certificate(&state.hub, &body.server, &body.host, body.email.as_deref()).await {
+        Ok(r) => reply(
+            StatusCode::OK,
+            json!({ "ok": r.ok, "error": r.error, "cert": r.cert, "key": r.key }),
+        ),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct SpeedPollBody {
+    name: String,
+    id: String,
+    after: Option<u32>,
+}
+
+async fn tunnel_speedtest_poll(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SpeedPollBody>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, true) {
+        return r;
+    }
+    match pair::speedtest_poll(&state.hub, &body.name, &body.id, body.after.unwrap_or(0)).await {
+        Ok(r) => reply(
+            StatusCode::OK,
+            json!({ "ok": r.ok, "error": r.error, "lines": r.lines, "next": r.next, "done": r.done, "report": r.report }),
         ),
         Err(e) => match format!("{e:#}").as_str() {
             "no_such_tunnel" => error(StatusCode::NOT_FOUND, "no_such_tunnel"),

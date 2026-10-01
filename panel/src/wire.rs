@@ -46,6 +46,24 @@ pub enum Request {
         streams: u32,
         udp: bool,
     },
+    /// Get a Let's Encrypt certificate for a domain (or a public IPv4 address) on this
+    /// server, for a wss tunnel that listens here. Runs `kariz-manager tunnel-cert`.
+    TunnelCert {
+        domain: String,
+        #[serde(default)]
+        email: Option<String>,
+    },
+    /// Start the entry side's speed test in the background; its progress is read with
+    /// [`Request::SpeedtestPoll`] while it runs.
+    SpeedtestStart {
+        name: String,
+        seconds: u32,
+        streams: u32,
+        udp: bool,
+    },
+    /// The progress lines of a started speed test after the first `after`, and the report
+    /// once it is done.
+    SpeedtestPoll { id: String, after: u32 },
     /// Make (or make again) the GRE interface of a private network link.
     NetUp { net: NetSpec },
     /// Remove a link's interface.
@@ -132,6 +150,10 @@ pub struct PingReply {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MuxSpec {
+    /// Off for `ws`, `wss` and `kcp` when a tunnel should not multiplex (`tcp` is the
+    /// transport that is off by itself; `tcpmux` and `auto` cannot be turned off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connections: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -180,6 +202,12 @@ pub struct Spec {
     pub tls_sni: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_pin: Option<String>,
+    /// A listening wss side: the certificate and key files of a real certificate (made by
+    /// [`Request::TunnelCert`], under `/etc/letsencrypt/live/`) instead of a self-signed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_key: Option<String>,
     /// Mux settings; left out, the profile's apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mux: Option<MuxSpec>,
@@ -242,6 +270,47 @@ pub struct SpeedReply {
     pub error: Option<String>,
     #[serde(default)]
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<kariz::speedtest::Report>,
+}
+
+/// The answer to [`Request::TunnelCert`]: the files of the certificate, or why there are none.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CertReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// The answer to [`Request::SpeedtestStart`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpeedStarted {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub id: String,
+}
+
+/// The answer to [`Request::SpeedtestPoll`]: what a running speed test has said since the
+/// last poll (the lines are `kariz::speedtest::run`'s progress lines), and, once `done`, the
+/// report or why there is none.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpeedPoll {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub lines: Vec<String>,
+    /// What to pass as `after` next time.
+    #[serde(default)]
+    pub next: u32,
+    #[serde(default)]
+    pub done: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<kariz::speedtest::Report>,
 }

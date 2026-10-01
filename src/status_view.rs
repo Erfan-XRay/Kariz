@@ -114,6 +114,9 @@ pub fn render(style: &Style, name: &str, now: &Status, before: Option<(&Status, 
     let mut parts = Vec::new();
     if p.connected {
         parts.push(style.paint(&format!("{BOLD}{TEAL}"), "● connected"));
+        if let Some(via) = &p.transport {
+            parts.push(format!("via {}", style.paint(AQUA, via)));
+        }
         match (p.sessions, p.sessions_wanted) {
             (Some(n), Some(w)) => parts.push(format!("{n} of {w} sessions")),
             (Some(1), None) => parts.push("1 session".into()),
@@ -200,6 +203,7 @@ mod tests {
             profile: "balanced".into(),
             uptime_secs: 93_600,
             peer: PeerStatus {
+                transport: None,
                 connected: true,
                 sessions: Some(2),
                 sessions_wanted: Some(2),

@@ -26,10 +26,35 @@ export function useNetworks(): { networks: Network[]; links: Link[]; reload: () 
   return { ...data, reload: () => setTick((n) => n + 1) };
 }
 
+/** Ready-made address pools, from large to small. */
+const POOLS = ["10.77.0.0/16", "10.88.0.0/16", "10.200.0.0/16", "172.30.0.0/16", "192.168.222.0/24"] as const;
+
+/** `a.b.c.d/p` as its first and last address, or null. */
+function range(cidr: string): [number, number] | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(cidr.trim());
+  if (!m) return null;
+  const o = m.slice(1, 5).map(Number);
+  const p = Number(m[5]);
+  if (o.some((x) => x > 255) || p > 32) return null;
+  const ip = ((o[0] * 256 + o[1]) * 256 + o[2]) * 256 + o[3];
+  const size = 2 ** (32 - p);
+  const first = Math.floor(ip / size) * size;
+  return [first, first + size - 1];
+}
+
+const overlaps = (a: string, b: string) => {
+  const x = range(a);
+  const y = range(b);
+  return !!x && !!y && x[0] <= y[1] && y[0] <= x[1];
+};
+
 function NewNetwork({ onClose, servers }: { onClose: () => void; servers: ServerInfo[] }) {
-  const { t } = useApp();
+  const { t, num } = useApp();
   const [name, setName] = useState("main");
-  const [cidr, setCidr] = useState("10.77.0.0/16");
+  // The first pool that no server already routes.
+  const used = servers.flatMap((s) => s.health?.routes ?? []);
+  const free = (c: string) => !used.some((r) => overlaps(c, r));
+  const [cidr, setCidr] = useState<string>(POOLS.find(free) ?? POOLS[0]);
   const [error, setError] = useState("");
   const names = new Map(servers.map((s) => [s.id, s.name]));
   const make = async () => {
@@ -63,6 +88,19 @@ function NewNetwork({ onClose, servers }: { onClose: () => void; servers: Server
       </div>
       <div className="field">
         <label htmlFor="nn-cidr">{t("net.pool")}</label>
+        <div className="pool-picks" role="group" aria-label={t("net.pools")}>
+          {POOLS.map((c) => {
+            const r = range(c)!;
+            const links = Math.floor((r[1] - r[0] + 1) / 4);
+            const taken = !free(c);
+            return (
+              <button key={c} type="button" className="addr-pick" aria-pressed={cidr.trim() === c} disabled={taken} onClick={() => setCidr(c)}>
+                <code dir="ltr">{c}</code>
+                <span>{taken ? t("net.poolUsed") : t("net.poolLinks", { n: num(links) })}</span>
+              </button>
+            );
+          })}
+        </div>
         <input className="text mono" id="nn-cidr" dir="ltr" value={cidr} onChange={(e) => setCidr(e.target.value)} />
         <span className="help">{t("net.poolHelp")}</span>
         <span className="err">{error}</span>
