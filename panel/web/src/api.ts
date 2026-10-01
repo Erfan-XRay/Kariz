@@ -100,8 +100,10 @@ export interface ServerInfo {
   version: string;
   arch: string;
   hostname: string;
-  /** The address other servers reach it at (private networks), if set. */
+  /** The address other servers reach it at (private networks), if one was set. */
   addr: string | null;
+  /** The address it is known by (public IPv4, else IPv6): what private networks use until one is set. */
+  addr_default?: string | null;
   seen_secs: number | null;
   /** The transport its agent's link uses now (tcpmux or kcp). */
   link?: string | null;
@@ -336,6 +338,7 @@ export const api = {
   logs: (name: string, lines = 200) => call<{ lines: LogLine[] }>("GET", `logs?name=${encodeURIComponent(name)}&lines=${lines}`),
   speedtestStart: (name: string, seconds: number, streams: number, udp: boolean) =>
     call<SpeedStart>("POST", "tunnels/speedtest/start", { name, seconds, streams, udp }),
+  speedtestStop: (name: string, id: string) => call<{ ok: boolean }>("POST", "tunnels/speedtest/stop", { name, id }),
   speedtestPoll: (name: string, id: string, after: number) => call<SpeedPoll>("POST", "tunnels/speedtest/poll", { name, id, after }),
   speedtest: (name: string, seconds: number, streams: number, udp: boolean) =>
     call<SpeedResult>("POST", "tunnels/speedtest", { name, seconds, streams, udp }),
