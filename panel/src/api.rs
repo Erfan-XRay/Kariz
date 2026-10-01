@@ -64,6 +64,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/tunnels/cert", post(tunnel_cert))
         .route("/api/tunnels/speedtest/start", post(tunnel_speedtest_start))
         .route("/api/tunnels/speedtest/poll", post(tunnel_speedtest_poll))
+        .route("/api/tunnels/speedtest/stop", post(tunnel_speedtest_stop))
         .route("/api/networks", get(networks_list).post(network_create))
         .route("/api/networks/delete", post(network_delete))
         .route("/api/networks/links", post(links_create))
@@ -964,6 +965,31 @@ async fn tunnel_speedtest_poll(
         ),
         Err(e) => match format!("{e:#}").as_str() {
             "no_such_tunnel" => error(StatusCode::NOT_FOUND, "no_such_tunnel"),
+            "bad_name" => error(StatusCode::BAD_REQUEST, "bad_name"),
+            _ => internal(e),
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct SpeedStopBody {
+    name: String,
+    id: String,
+}
+
+/// Stops a speed test that is running.
+async fn tunnel_speedtest_stop(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SpeedStopBody>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, true) {
+        return r;
+    }
+    match pair::speedtest_stop(&state.hub, &body.name, &body.id).await {
+        Ok(()) => reply(StatusCode::OK, json!({ "ok": true })),
+        Err(e) => match format!("{e:#}").as_str() {
+            "no_such_tunnel" | "no_such_test" => error(StatusCode::NOT_FOUND, "no_such_test"),
             "bad_name" => error(StatusCode::BAD_REQUEST, "bad_name"),
             _ => internal(e),
         },

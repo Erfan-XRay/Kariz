@@ -979,6 +979,21 @@ pub async fn speedtest_start(
         .map_err(|_| anyhow::anyhow!("the server's answer was not understood"))
 }
 
+/// Stops a started speed test.
+pub async fn speedtest_stop(hub: &Hub, name: &str, id: &str) -> Result<()> {
+    let server = speedtest_server(hub, name)?;
+    let raw = hub
+        .ask(&server, &Request::SpeedtestStop { id: id.to_owned() })
+        .await?;
+    let ack: Ack = serde_json::from_slice(&raw)
+        .map_err(|_| anyhow::anyhow!("the server's answer was not understood"))?;
+    if ack.ok {
+        Ok(())
+    } else {
+        bail!(ack.error.unwrap_or_else(|| "failed".into()))
+    }
+}
+
 /// What a started speed test has said since `after` lines.
 pub async fn speedtest_poll(
     hub: &Hub,
