@@ -334,6 +334,15 @@ impl Agent {
     /// Returns how many requests the panel made; `working` is called once it has made
     /// [`GOOD_LINK`] of them.
     pub async fn serve(self: &Arc<Self>, session: MuxSession, working: impl FnOnce()) -> u32 {
+        self.serve_with(session, working).await.0
+    }
+
+    /// Like [`Agent::serve`], and why the session ended.
+    pub async fn serve_with(
+        self: &Arc<Self>,
+        session: MuxSession,
+        working: impl FnOnce(),
+    ) -> (u32, String) {
         let mut asked = 0u32;
         let mut working = Some(working);
         let session = Arc::new(session);
@@ -350,7 +359,7 @@ impl Agent {
                         "the panel asked nothing for a while; dropping the link"
                     );
                     session.close();
-                    break;
+                    return (asked, "the panel went quiet".into());
                 }
             };
             asked = asked.saturating_add(1);
@@ -400,7 +409,10 @@ impl Agent {
                 }
             });
         }
-        asked
+        let why = session
+            .close_reason()
+            .unwrap_or_else(|| "closed by the panel".into());
+        (asked, why)
     }
 
     /// Makes the private network links this server had (after a start or a reboot).
@@ -464,8 +476,8 @@ impl Agent {
                     info!(panel = %addr, transport = kind.name(), "connected to the panel");
                     crate::agent_update::touch(&self.path.with_file_name("connected"));
                     let started = std::time::Instant::now();
-                    let asked = self
-                        .serve(session, || {
+                    let (asked, why) = self
+                        .serve_with(session, || {
                             // This transport gets through: the one to start with next time.
                             if at != 0 || chosen.exists() {
                                 let _ = std::fs::write(&chosen, kind.name());
@@ -475,6 +487,8 @@ impl Agent {
                     warn!(
                         transport = kind.name(),
                         requests = asked,
+                        secs = started.elapsed().as_secs(),
+                        reason = %why,
                         "the link to the panel ended; reconnecting"
                     );
                     if asked >= GOOD_LINK {

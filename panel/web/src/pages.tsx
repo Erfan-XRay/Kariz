@@ -675,9 +675,23 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                     <dd className="mono">{s.local ? t("srv.localLink") : s.link ?? "—"}</dd>
                   </div>
                 </dl>
+                {(s.ip4 || s.ip6) && (
+                  <div className="srv-ips" dir="ltr">
+                    {s.ip4 && (
+                      <span className="srv-ip">
+                        <b>{t("srv.ip4")}</b> {s.ip4}
+                      </span>
+                    )}
+                    {s.ip6 && (
+                      <span className="srv-ip">
+                        <b>{t("srv.ip6")}</b> {s.ip6}
+                      </span>
+                    )}
+                  </div>
+                )}
                 <footer className="srv-foot">
                   <span className={`badge ${s.tunnels.length ? "" : "muted"}`}>{t(s.tunnels.length === 1 ? "srv.tn1" : "srv.tn", { n: num(s.tunnels.length) })}</span>
-                  {s.addr && (
+                  {s.addr && s.addr !== s.ip4 && s.addr !== s.ip6 && (
                     <span className="srv-ip" title={t("net.addresses")}>
                       {s.addr}
                     </span>

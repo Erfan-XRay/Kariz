@@ -14,7 +14,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh)
 ```
 
-یک منو باز می‌شود:
+بار اول روی یک سرور، هستهٔ کاریز را خودش نصب می‌کند و بعد می‌پرسد این سرور برای چه کاری است: فقط هسته (تانل‌ها از پنلی روی سرور دیگر ساخته می‌شوند)، پنل وب هم همین‌جا، یا وصل شدن به پنلی که هست. از آن به بعد هر اجرا یک منو باز می‌کند که بالایش نام سرور و آدرس‌های IPv4 و IPv6 آن است:
 
 | | |
 |---|---|
@@ -53,9 +53,12 @@ kariz-manager panel password [--stdin]              # a new admin password
 kariz-manager panel status | logs                   # the service, its address / follow the log
 kariz-manager panel uninstall [--yes]
 
-kariz-manager --agent kz1_...                       # connect this server to a panel (the code is from the panel)
+kariz-manager --agent kz1_... [--yes]               # connect this server to a panel (the code is from the panel)
 kariz-manager agent status | logs | remove
+kariz-manager status                                # what runs here and this server's addresses
 ```
+
+سروری که agent دارد را می‌شود با یک کد تازه به پنل دیگری وصل کرد: اسکریپت همین را می‌گوید، می‌پرسد (`--yes` پرسش را رد می‌کند)، agent قبلی را برمی‌دارد و agent تازه را جایش راه می‌اندازد. پنل قبلی تا وقتی آنجا حذفش نکنید این سرور را آفلاین نشان می‌دهد.
 
 ## به‌روزرسانی و حذف
 

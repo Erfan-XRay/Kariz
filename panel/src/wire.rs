@@ -255,6 +255,12 @@ pub struct Health {
     /// networks are never given a range that overlaps one.
     #[serde(default)]
     pub routes: Vec<String>,
+    /// This server's own IPv4 and IPv6 addresses: the ones its routes to the internet
+    /// leave from (a private one behind NAT; the panel shows the public one it sees).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip4: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip6: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

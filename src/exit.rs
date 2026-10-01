@@ -331,6 +331,10 @@ async fn accept_direct(
             let mut link = link;
             match timeout(hs_timeout, Open::read(&mut link)).await {
                 Ok(Ok(open)) => serve(&exit, link, open).await,
+                // The entry side's probe connects and leaves: not a fault.
+                Ok(Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                    debug!(%peer, "the entry side checked the link")
+                }
                 Ok(Err(e)) => warn!(%peer, error = %e, "bad open request"),
                 Err(_) => warn!(%peer, "open request timed out"),
             }

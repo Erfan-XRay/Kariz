@@ -2116,6 +2116,37 @@ async fn status_shows_why_the_other_side_is_missing() {
     assert!(error.text.contains("refused"), "{error:?}");
 }
 
+/// A direct tunnel without mux keeps no connection open, yet `status` must say whether the
+/// exit side can be reached (a panel making the tunnel waits for exactly that): the entry
+/// looks for it by itself, and says so again when the exit goes away.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_tunnel_without_mux_says_it_is_connected_before_any_traffic() {
+    let setup = Setup::tcp("direct").control();
+    let target = echo_server().await;
+    let mut tunnel = start(setup, TOKEN, TOKEN, target).await;
+    let socket = tunnel.control.clone().unwrap();
+    let mut status = status_of(&socket).await;
+    for _ in 0..100 {
+        if status.peer.connected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        status = status_of(&socket).await;
+    }
+    assert!(status.peer.connected, "{status:?}");
+
+    tunnel.kill_exit();
+    for _ in 0..200 {
+        if !status.peer.connected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        status = status_of(&socket).await;
+    }
+    assert!(!status.peer.connected, "{status:?}");
+}
+
 /// An exit with `speedtest = false` refuses the test streams, and the client says why.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]

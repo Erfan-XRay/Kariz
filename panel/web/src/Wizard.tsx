@@ -37,6 +37,19 @@ export function parsePorts(text: string, protocol: string, host: string): { forw
   return { forwards };
 }
 
+/** The addresses a server can be dialed at, best first: the one set for it, the panel's own host name (for the panel's server), its public IPv4, its IPv6. */
+function addressesOf(s: ServerInfo): string[] {
+  const out: string[] = [];
+  const add = (a?: string | null) => {
+    if (a && !out.includes(a)) out.push(a);
+  };
+  add(s.addr);
+  if (s.local && !/^(localhost|127\.|\[?::1\]?$)/.test(location.hostname)) add(location.hostname.replace(/^\[|\]$/g, ""));
+  add(s.ip4);
+  add(s.ip6);
+  return out;
+}
+
 /** The port part of an address like `0.0.0.0:3080`. */
 const portOf = (addr: string | undefined) => addr?.split(":").pop() ?? "";
 const hostOf = (addr: string | undefined) => (addr ? addr.slice(0, addr.lastIndexOf(":")) : "");
@@ -64,6 +77,11 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
   const [netId, setNetId] = useState("");
   const { networks, links } = useNetworks();
   const [wsPath, setWsPath] = useState("/");
+  const [wsHost, setWsHost] = useState("");
+  const [sni, setSni] = useState("");
+  const [rotate, setRotate] = useState(false);
+  // Once the address to dial is typed (or loaded from the tunnel), it is not guessed again.
+  const [dialTouched, setDialTouched] = useState(false);
   const [ports, setPorts] = useState("");
   const [protocol, setProtocol] = useState("tcp");
   const [target, setTarget] = useState("127.0.0.1");
@@ -102,7 +120,10 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
         setListenPort(portOf(acceptor.listen));
         setListenHost(hostOf(acceptor.listen) || "0.0.0.0");
         setDialHost(hostOf(dialer.remote));
+        setDialTouched(true);
         setWsPath(a.ws_path ?? "/");
+        setWsHost(a.ws_host ?? b.ws_host ?? "");
+        setSni(dialer.tls_sni ?? "");
         setPool(a.pool);
         const list = a.forwards;
         setPorts(list.map((f) => (portOf(f.listen) === portOf(f.target) ? portOf(f.listen) : `${portOf(f.listen)}=${portOf(f.target)}`)).join(", "));
@@ -127,11 +148,15 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
   const udp = transport === "quic" || transport === "kcp";
   const isWs = transport === "ws" || transport === "wss";
 
-  // The accepting server's address, as the other one reaches it: the panel's own is the
-  // one the browser used.
+  // The accepting server's address, as the other one reaches it. A new tunnel starts from
+  // the best guess (the address set for it, else the one the panel sees) until one is typed.
+  const acceptorServer = servers.find((s) => s.id === acceptor);
+  const addrChoices = acceptorServer ? addressesOf(acceptorServer) : [];
   useEffect(() => {
-    if (!editing && !dialHost && acceptor && servers.find((s) => s.id === acceptor)?.local) setDialHost(location.hostname);
-  }, [acceptor]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (editing || dialTouched || !acceptorServer) return;
+    const guess = addrChoices[0];
+    if (guess) setDialHost(guess);
+  }, [acceptor, servers]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const request = (): PairRequest => ({
     name,
@@ -145,6 +170,9 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
     network: mode === "direct" && netId ? netId : undefined,
     pool,
     ws_path: isWs ? wsPath : undefined,
+    ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
+    tls_sni: transport === "wss" && sni.trim() ? sni.trim() : undefined,
+    rotate: editing && rotate ? true : undefined,
     forwards: parsed.forwards,
   });
 
@@ -284,9 +312,19 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
                     </button>
                   ))}
                 </div>
-                <div className="field" style={{ marginTop: "var(--sp-6)" }}>
-                  <span className="label">{t("wz.profile")}</span>
-                  <Seg value={profile} options={PROFILES.map((p) => [p, p] as [string, string])} onChange={setProfile} />
+                <h3 className="wz-q" style={{ marginTop: "var(--sp-6)", fontSize: "var(--fs-lg)" }}>
+                  {t("wz.profile")}
+                </h3>
+                <div className="tiles" role="radiogroup" aria-label={t("wz.profile")}>
+                  {PROFILES.map((p) => (
+                    <button key={p} type="button" role="radio" aria-checked={profile === p} className="tile" onClick={() => setProfile(p)}>
+                      <span className="t1">{t(`wz.pf.${p}`)}</span>
+                      <span className="t2">{t(`wz.pf.${p}.d`)}</span>
+                      <span className="tick">
+                        <Icon name="check" size={14} />
+                      </span>
+                    </button>
+                  ))}
                 </div>
               </>
             )}
@@ -325,13 +363,71 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
                   </div>
                   <div className="field" hidden={!!netId}>
                     <label htmlFor="wz-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>
-                    <input className="text mono" id="wz-dial" dir="ltr" value={dialHost} placeholder="203.0.113.5" onChange={(e) => setDialHost(e.target.value.trim())} />
+                    <input
+                      className="text mono"
+                      id="wz-dial"
+                      dir="ltr"
+                      value={dialHost}
+                      placeholder="203.0.113.5"
+                      onChange={(e) => {
+                        setDialTouched(true);
+                        setDialHost(e.target.value.trim());
+                      }}
+                    />
                     <span className="help">{t("wz.dialHelp")}</span>
+                    {addrChoices.length > 0 && (
+                      <span className="addr-chips" aria-label={t("wz.dialSeen", { server: serverName(acceptor) })}>
+                        {addrChoices.map((a) => (
+                          <button
+                            key={a}
+                            type="button"
+                            className={`pchip as-btn ${a === dialHost ? "on" : ""}`}
+                            dir="ltr"
+                            onClick={() => {
+                              setDialTouched(true);
+                              setDialHost(a);
+                            }}
+                          >
+                            {a}
+                          </button>
+                        ))}
+                      </span>
+                    )}
+                    {mode === "direct" && <span className="help">{t("wz.directHelp", { server: serverName(acceptor), port: listenPort })}</span>}
                   </div>
                   {isWs && (
                     <div className="field">
                       <label htmlFor="wz-ws">{t("wz.wsPath")}</label>
                       <input className="text mono" id="wz-ws" dir="ltr" value={wsPath} onChange={(e) => setWsPath(e.target.value.trim())} />
+                    </div>
+                  )}
+                  {isWs && (
+                    <div className="field">
+                      <label htmlFor="wz-wshost">{t("wz.wsHost")}</label>
+                      <input className="text mono" id="wz-wshost" dir="ltr" value={wsHost} placeholder="cdn.example.com" onChange={(e) => setWsHost(e.target.value.trim())} />
+                      <span className="help">{t("wz.wsHostHelp")}</span>
+                    </div>
+                  )}
+                  {transport === "wss" && (
+                    <div className="field">
+                      <label htmlFor="wz-sni">{t("wz.sni")}</label>
+                      <input className="text mono" id="wz-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
+                      <span className="help">{t("wz.sniHelp")}</span>
+                    </div>
+                  )}
+                  {transport === "tcp" && (
+                    <div className="field">
+                      <label htmlFor="wz-pool">{t("wz.pool")}</label>
+                      <input
+                        className="text mono"
+                        id="wz-pool"
+                        dir="ltr"
+                        inputMode="numeric"
+                        value={pool ?? ""}
+                        placeholder="8"
+                        onChange={(e) => setPool(/^\d{1,3}$/.test(e.target.value.trim()) ? +e.target.value.trim() : undefined)}
+                      />
+                      <span className="help">{t("wz.poolHelp")}</span>
                     </div>
                   )}
                 </div>
@@ -407,6 +503,11 @@ export function Wizard({ servers, edit, onClose }: { servers: ServerInfo[]; edit
                       );
                     })}
                   </div>
+                )}
+                {editing && !opId && (
+                  <label className="check" style={{ marginTop: "var(--sp-4)" }}>
+                    <input type="checkbox" checked={rotate} onChange={(e) => setRotate(e.target.checked)} /> {t("wz.rotate")}
+                  </label>
                 )}
                 {checking && <p className="muted small">…</p>}
                 {!opId && conflicts.map((c) => (
