@@ -612,13 +612,33 @@ panel_show() {
     printf '  %s             %s (works once, for 60 minutes; make another with: kariz-manager panel link)\n' "$C_DIM" "$C_RESET"
 }
 
+# Whether $1 can be a server's name in the panel.
+valid_server_name() { [[ "$1" =~ ^[A-Za-z0-9._-]{1,40}$ ]]; }
+
+# Asks what this server is called in the panel and puts the answer in the variable named $1.
+# The host name is the default; Enter keeps it.
+ask_server_name() {
+    local _var=$1 _def _reply
+    _def=$(hostname 2>/dev/null | tr -c 'A-Za-z0-9._\n-' '-' | cut -c1-40)
+    [[ -n "$_def" ]] || _def=panel
+    while true; do
+        ask _reply "What should this server be called in the panel?" "$_def"
+        if valid_server_name "$_reply"; then
+            printf -v "$_var" '%s' "$_reply"
+            return
+        fi
+        warn "Letters, digits, - _ . and at most 40 characters."
+    done
+}
+
 panel_install() {
     need_root
     need_systemd
-    local port="" host="" domain="" ip="" email="" yes=0 cert="" key="" version=()
+    local port="" host="" domain="" ip="" email="" yes=0 cert="" key="" name="" version=()
     while [[ $# -gt 0 ]]; do
         case $1 in
             --port) port=$2 && shift 2 ;;
+            --name) name=${2:-} && shift 2 ;;
             --host) host=$2 && shift 2 ;;
             --domain) domain=${2:-} && shift 2 ;;
             --ip) ip=${2:-} && shift 2 ;;
@@ -637,7 +657,15 @@ panel_install() {
     fi
     [[ -x "$PANEL_BIN" ]] ||
         die "This Kariz release has no web panel. Install 0.8 or later: kariz-manager update"
+    # What this server is called in the panel: asked (the host name is the default), or given
+    # with --name; with --yes the host name stays unless --name says otherwise.
+    if [[ -z "$name" ]] && ((!yes)) && [[ ! -f "$PANEL_CONF" ]]; then
+        ask_server_name name
+    fi
+    [[ -z "$name" ]] || valid_server_name "$name" ||
+        die "The name is letters, digits, - _ . and at most 40 characters."
     local init_args=(-c "$PANEL_CONF" --data-dir "$PANEL_DATA")
+    [[ -z "$name" ]] || init_args+=(--name "$name")
     if [[ -n "$port" ]]; then
         init_args+=(--port "$port")
     fi
@@ -1006,6 +1034,15 @@ cmd_panel() {
     shift || true
     case $action in
         install) panel_install "$@" ;;
+        name)
+            need_root
+            [[ -f "$PANEL_CONF" ]] || die "The panel is not installed: kariz-manager panel install"
+            local new=${1:-}
+            [[ -n "$new" ]] || ask_server_name new
+            valid_server_name "$new" || die "The name is letters, digits, - _ . and at most 40 characters."
+            "$PANEL_BIN" init -c "$PANEL_CONF" --data-dir "$PANEL_DATA" --name "$new" >/dev/null
+            ok "This server is called $new in the panel."
+            ;;
         link)
             need_root
             [[ -f "$PANEL_CONF" ]] || die "The panel is not installed: kariz-manager panel install"
@@ -1031,7 +1068,7 @@ cmd_panel() {
         cert) panel_cert "$@" ;;
         cert-hook) cert_hook "$@" ;;
         uninstall) panel_uninstall "$@" ;;
-        *) die "panel: install [--port N] [--domain D | --ip A] | link | password [--stdin] | cert [--domain D | --ip A] | status | logs | uninstall [--yes]" ;;
+        *) die "panel: install [--port N] [--domain D | --ip A] [--name NAME] | name [NAME] | link | password [--stdin] | cert [--domain D | --ip A] | status | logs | uninstall [--yes]" ;;
     esac
 }
 
@@ -1317,7 +1354,7 @@ usage() {
   install [--version vX.Y.Z] [--binary PATH]   install Kariz (latest release by default)
   update  [--version vX.Y.Z]                   update Kariz and restart what runs
   uninstall [--yes]                            also deletes the configs with --yes
-  panel install [--port N] [--domain D | --ip ADDRESS] [--email E] [--yes]
+  panel install [--port N] [--domain D | --ip ADDRESS] [--email E] [--name NAME] [--yes]
                                                the web panel on this server, with a Let's
                                                Encrypt certificate for the domain or IP address
   panel cert [--domain D | --ip ADDRESS]       change its domain or address (renewal is automatic)
