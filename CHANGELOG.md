@@ -14,6 +14,14 @@
   `--stdin` reads it) and `panel install --password-file F` reads it from a file.
 - **The manager asks once, when this server has the core but no panel and no agent, whether to
   install the web panel** (the answer is remembered; `KARIZ_NO_OFFER=1` turns the question off).
+- **A speed test can be stopped.** While it runs the button becomes *Stop the test*; the test
+  streams end within half a second (a test that is cut off no longer leaves streams pumping
+  data), and leaving the page stops it too. An older agent runs the test to the end.
+- **Private networks use the address a server connected with** by default (its public IPv4,
+  else its IPv6), so nothing has to be typed: the *Addresses* card shows it, with a button for
+  each address the server has (IPv4 and IPv6) and a field for any other; *Use the default* undoes
+  a saved one.
+- **© ErfanXRay** at the foot of every page and under the sign-in form, linking to the project.
 
 - **You choose the name of the panel's own server.** Installing the panel asks what this server
   should be called in the panel, with its host name as the default (Enter keeps it);

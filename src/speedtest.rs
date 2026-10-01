@@ -350,6 +350,18 @@ where
     Ok(report)
 }
 
+/// Aborts its tasks when it is dropped: a test that is cut off (its client went away, or
+/// pressed stop) must not leave streams pumping data behind it.
+struct Reap(Vec<tokio::task::AbortHandle>);
+
+impl Drop for Reap {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 /// One phase in one direction: `streams` streams moving data for `seconds` while another
 /// stream measures latency under that load.
 async fn measure_rate<O, F>(
@@ -383,6 +395,13 @@ where
         }));
     }
     let prober = tokio::spawn(ping_loop(open("echo").await?, end));
+    let _reap = Reap(
+        tasks
+            .iter()
+            .map(|t| t.abort_handle())
+            .chain([prober.abort_handle()])
+            .collect(),
+    );
 
     // The first part of a transfer is slow start and window growth; it is not counted.
     let warm = start + Duration::from_secs_f64((options.seconds as f64 * 0.25).min(1.0));
@@ -608,6 +627,14 @@ pub(crate) mod tests {
         // The report survives the trip the control socket gives it.
         let text = toml::to_string(&report).unwrap();
         assert_eq!(toml::from_str::<Report>(&text).unwrap(), report);
+    }
+
+    #[tokio::test]
+    async fn a_test_that_is_cut_off_leaves_no_task_behind() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let reap = Reap(vec![task.abort_handle()]);
+        drop(reap);
+        assert!(task.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]
