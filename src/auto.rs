@@ -69,7 +69,7 @@ pub async fn bind_all(
     token: &str,
     addr: &str,
     tuning: &Tuning,
-) -> Result<Vec<Listener>> {
+) -> Result<Vec<(&'static str, Listener)>> {
     let mut listeners = Vec::new();
     for kind in KINDS {
         let at = addr_for(kind, addr)?;
@@ -77,7 +77,7 @@ pub async fn bind_all(
         match Listener::bind(&settings, &at, tuning).await {
             Ok(listener) => {
                 info!(transport = kind.name(), addr = %at, "auto: listening");
-                listeners.push(listener);
+                listeners.push((kind.name(), listener));
             }
             Err(e) if kind == KINDS[0] => {
                 return Err(e)
@@ -123,11 +123,17 @@ impl Dial {
 
     /// Connects and authenticates, within `wait`. Auto gives each transport a few seconds
     /// and goes on to the next; the last error comes back if none gets through.
-    pub async fn connect(&self, crypto: &Crypto, wait: Duration) -> io::Result<Link> {
+    /// The transport that connected comes back too, for an `auto` tunnel.
+    pub async fn connect(
+        &self,
+        crypto: &Crypto,
+        wait: Duration,
+    ) -> io::Result<(Link, Option<&'static str>)> {
         match self {
             Self::One(dialer) => timeout(wait, channel::connect(dialer, crypto, &[]))
                 .await
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))?,
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))?
+                .map(|link| (link, None)),
             Self::Auto { dialers, preferred } => {
                 let start = preferred.load(Ordering::Relaxed);
                 let mut last = None;
@@ -139,7 +145,7 @@ impl Dial {
                             if preferred.swap(at, Ordering::Relaxed) != at {
                                 info!(transport = kind.name(), "auto: now using this transport");
                             }
-                            return Ok(link);
+                            return Ok((link, Some(kind.name())));
                         }
                         Ok(Err(e)) => {
                             debug!(transport = kind.name(), error = %e, "auto: could not connect");

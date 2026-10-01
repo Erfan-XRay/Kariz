@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use crate::collect::{self, Sampler};
 use crate::join::{self, JoinCode};
 use crate::manage::{self, Services};
-use crate::wire::{Ack, HelloReply, Request, MAX_REQUEST};
+use crate::wire::{Ack, HelloReply, Request, SpeedPoll, SpeedStarted, MAX_REQUEST};
 
 pub const DEFAULT_AGENT_CONFIG: &str = "/etc/kariz-panel/agent.toml";
 pub const DEFAULT_KARIZ_DIR: &str = "/etc/kariz";
@@ -130,8 +130,20 @@ pub fn hex_to_key(hex: &str) -> Option<[u8; 32]> {
     Some(key)
 }
 
+/// A speed test running (or finished) in the background: what it has said, and its end.
+#[derive(Default)]
+struct SpeedJob {
+    name: String,
+    lines: Vec<String>,
+    done: bool,
+    error: Option<String>,
+    report: Option<kariz::speedtest::Report>,
+    started: Option<std::time::Instant>,
+}
+
 /// The agent's state while it runs.
 pub struct Agent {
+    speed_jobs: Arc<Mutex<std::collections::HashMap<String, SpeedJob>>>,
     path: PathBuf,
     config: Mutex<AgentConfig>,
     sampler: Mutex<Sampler>,
@@ -182,6 +194,7 @@ impl Agent {
     ) -> Arc<Self> {
         let config_key = config.release_key.clone();
         Arc::new(Self {
+            speed_jobs: Arc::default(),
             path: path.to_path_buf(),
             config: Mutex::new(config),
             sampler: Mutex::new(Sampler::default()),
@@ -209,6 +222,98 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Starts a speed test in the background; its id comes back at once.
+    fn speedtest_start(&self, name: String, seconds: u32, streams: u32, udp: bool) -> SpeedStarted {
+        let dir = self.config().kariz_dir;
+        // Said now, before anything runs, if the test cannot be made at all.
+        if let Err(e) = manage::speedtest_setup(&dir, &name, seconds, streams, udp) {
+            return SpeedStarted {
+                ok: false,
+                error: Some(format!("{e:#}")),
+                id: String::new(),
+            };
+        }
+        let id = match crate::config::random_hex(8) {
+            Ok(id) => id,
+            Err(e) => {
+                return SpeedStarted {
+                    ok: false,
+                    error: Some(format!("{e:#}")),
+                    id: String::new(),
+                }
+            }
+        };
+        {
+            let mut jobs = self.speed_jobs.lock().unwrap_or_else(|e| e.into_inner());
+            // Old ones go, and a tunnel is tested by one test at a time.
+            jobs.retain(|_, j| {
+                j.started
+                    .is_some_and(|t| t.elapsed() < Duration::from_secs(900))
+            });
+            if jobs.values().any(|j| j.name == name && !j.done) {
+                return SpeedStarted {
+                    ok: false,
+                    error: Some("busy".into()),
+                    id: String::new(),
+                };
+            }
+            jobs.insert(
+                id.clone(),
+                SpeedJob {
+                    name: name.clone(),
+                    started: Some(std::time::Instant::now()),
+                    ..Default::default()
+                },
+            );
+        }
+        let jobs = self.speed_jobs.clone();
+        let job = id.clone();
+        tokio::spawn(async move {
+            let push = {
+                let (jobs, job) = (jobs.clone(), job.clone());
+                move |line: &str| {
+                    let mut jobs = jobs.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(j) = jobs.get_mut(&job) {
+                        j.lines.push(line.to_owned());
+                    }
+                }
+            };
+            let reply = manage::speedtest_with(&dir, &name, seconds, streams, udp, push).await;
+            let mut jobs = jobs.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(j) = jobs.get_mut(&job) {
+                j.done = true;
+                j.report = reply.report;
+                j.error = if reply.ok { None } else { reply.error };
+            }
+        });
+        SpeedStarted {
+            ok: true,
+            error: None,
+            id,
+        }
+    }
+
+    /// What a started speed test has said after the first `after` lines.
+    fn speedtest_poll(&self, id: &str, after: u32) -> SpeedPoll {
+        let jobs = self.speed_jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(job) = jobs.get(id) else {
+            return SpeedPoll {
+                ok: false,
+                error: Some("no_such_test".into()),
+                ..Default::default()
+            };
+        };
+        let from = (after as usize).min(job.lines.len());
+        SpeedPoll {
+            ok: true,
+            error: job.error.clone(),
+            lines: job.lines[from..].to_vec(),
+            next: u32::try_from(job.lines.len()).unwrap_or(u32::MAX),
+            done: job.done,
+            report: job.report.clone(),
+        }
     }
 
     /// The answer to one request, as JSON.
@@ -327,6 +432,16 @@ impl Agent {
                 let dir = self.config().kariz_dir;
                 to_json(&manage::speedtest(&dir, &name, seconds, streams, udp).await)
             }
+            Request::TunnelCert { domain, email } => {
+                to_json(&manage::issue_cert(&domain, email.as_deref()).await)
+            }
+            Request::SpeedtestStart {
+                name,
+                seconds,
+                streams,
+                udp,
+            } => to_json(&self.speedtest_start(name, seconds, streams, udp)),
+            Request::SpeedtestPoll { id, after } => to_json(&self.speedtest_poll(&id, after)),
         }
     }
 
@@ -656,6 +771,86 @@ mod tests {
         )
         .unwrap();
         assert!(!bad.ok);
+    }
+
+    #[tokio::test]
+    async fn a_speed_test_runs_in_the_background_and_is_followed_by_polling() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.toml"),
+            "role = \"entry\"
+mode = \"reverse\"
+[tunnel]
+transport = \"tcpmux\"
+             listen = \"0.0.0.0:3080\"
+token = \"a-secret-token-0123456789\"
+             [[forward]]
+listen = \"0.0.0.0:443\"
+target = \"127.0.0.1:443\"
+",
+        )
+        .unwrap();
+        let mut config = AgentConfig::from_join(&JoinCode {
+            p: "x:1".into(),
+            t: "t".repeat(64),
+            j: "j".into(),
+            n: None,
+            x: None,
+        });
+        config.kariz_dir = dir.path().to_path_buf();
+        let agent = Agent::new(&dir.path().join("agent.toml"), config);
+        let ask = |agent: &Arc<Agent>, request: Request| {
+            let agent = agent.clone();
+            async move { agent.handle(request).await }
+        };
+        let start = |name: &str| Request::SpeedtestStart {
+            name: name.into(),
+            seconds: 1,
+            streams: 1,
+            udp: false,
+        };
+
+        // A tunnel that is not there cannot be tested, and says so at once.
+        let missing: SpeedStarted =
+            serde_json::from_slice(&ask(&agent, start("nope")).await).unwrap();
+        assert!(!missing.ok && missing.error.is_some());
+        let unknown: SpeedPoll = serde_json::from_slice(
+            &ask(
+                &agent,
+                Request::SpeedtestPoll {
+                    id: "x".into(),
+                    after: 0,
+                },
+            )
+            .await,
+        )
+        .unwrap();
+        assert!(!unknown.ok);
+
+        // One that is there starts; its daemon is not running here, so it ends with why.
+        let started: SpeedStarted =
+            serde_json::from_slice(&ask(&agent, start("main")).await).unwrap();
+        assert!(started.ok && !started.id.is_empty(), "{started:?}");
+        let mut poll = SpeedPoll::default();
+        for _ in 0..100 {
+            poll = serde_json::from_slice(
+                &ask(
+                    &agent,
+                    Request::SpeedtestPoll {
+                        id: started.id.clone(),
+                        after: 0,
+                    },
+                )
+                .await,
+            )
+            .unwrap();
+            if poll.done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(poll.ok && poll.done, "{poll:?}");
+        assert!(poll.error.is_some() && poll.report.is_none(), "{poll:?}");
     }
 
     #[tokio::test]
