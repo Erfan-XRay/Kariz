@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Choose a tunnel's encryption in the panel.** The wizard and the edit page offer *Automatic*
+  (recommended: AES-256-GCM where the CPU has AES instructions, ChaCha20-Poly1305 where it does
+  not), *AES-256-GCM*, *ChaCha20-Poly1305* and *No encryption*. No encryption is shown in red
+  with what it means (the traffic can be read on the way, and a network that looks for tunnels
+  spots it more easily) and has to be confirmed; QUIC always uses TLS 1.3, so there is nothing to
+  choose there. The same cipher is written on both sides; the tunnel's page shows it, and a tunnel
+  without encryption is tagged. Needs a newer agent on both servers (the panel says which one to
+  update).
+
 ## 1.5.2 - 2026-10-02
 
 ### Fixed

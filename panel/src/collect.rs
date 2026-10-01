@@ -320,6 +320,7 @@ async fn tunnel(name: &str, path: &Path, services: &dyn Services) -> TunnelInfo 
                 mode: String::new(),
                 transport: String::new(),
                 profile: String::new(),
+                encryption: String::new(),
                 listen: None,
                 remote: None,
                 forwards: Vec::new(),
@@ -336,6 +337,7 @@ async fn tunnel(name: &str, path: &Path, services: &dyn Services) -> TunnelInfo 
         mode: mode_name(config.mode).to_owned(),
         transport: config.tunnel.transport.name().to_owned(),
         profile: config.profile.name().to_owned(),
+        encryption: config.tunnel.encryption.name().to_owned(),
         listen: config.tunnel.listen.clone(),
         remote: config.tunnel.remote.clone(),
         forwards: config

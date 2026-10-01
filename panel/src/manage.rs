@@ -52,6 +52,9 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
     }
     let mut tunnel = Table::new();
     tunnel.insert("transport".into(), text(&spec.transport));
+    if let Some(cipher) = spec.encryption.as_deref().filter(|c| *c != "auto") {
+        tunnel.insert("encryption".into(), text(cipher));
+    }
     if let Some(listen) = &spec.listen {
         tunnel.insert("listen".into(), text(listen));
     }
@@ -212,6 +215,7 @@ fn plain_text(spec: &Spec) -> Result<()> {
         }
     }
     let optional = [
+        &spec.encryption,
         &spec.profile,
         &spec.listen,
         &spec.remote,
@@ -347,6 +351,8 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
         pool: Some(u32::try_from(c.tunnel.pool).unwrap_or(8)),
         ws_path: c.tunnel.ws.as_ref().map(|w| w.path.clone()),
         ws_host: c.tunnel.ws.as_ref().and_then(|w| w.host.clone()),
+        encryption: (c.tunnel.encryption != kariz::config::Encryption::Auto)
+            .then(|| c.tunnel.encryption.name().to_owned()),
         mux: Some(crate::wire::MuxSpec {
             enabled: c.tunnel.mux.enabled,
             connections: c.tunnel.mux.connections.and_then(|v| u32::try_from(v).ok()),
@@ -1164,6 +1170,34 @@ mod tests {
         let mut other = s.clone();
         other.tls_cert = Some("/etc/passwd".into());
         assert!(build(&d.0, &other, true).is_err());
+    }
+
+    #[test]
+    fn the_cipher_is_written_and_read_back_and_auto_writes_nothing() {
+        let d = Dir::new();
+        let mut s = spec("cipher");
+        s.encryption = Some("chacha20-poly1305".into());
+        put(&d.0, &s).unwrap();
+        assert_eq!(
+            get(&d.0, "cipher").unwrap().encryption.as_deref(),
+            Some("chacha20-poly1305")
+        );
+        assert!(std::fs::read_to_string(d.0.join("cipher.toml"))
+            .unwrap()
+            .contains("encryption = \"chacha20-poly1305\""));
+        // Back to auto: the line goes.
+        s.encryption = Some("auto".into());
+        put(&d.0, &s).unwrap();
+        assert_eq!(get(&d.0, "cipher").unwrap().encryption, None);
+        assert!(!std::fs::read_to_string(d.0.join("cipher.toml"))
+            .unwrap()
+            .contains("encryption"));
+        // The core refuses a cipher QUIC cannot have, before anything is written.
+        let mut q = spec("quic-none");
+        q.transport = "quic".into();
+        q.encryption = Some("none".into());
+        assert!(put(&d.0, &q).is_err());
+        assert!(!d.0.join("quic-none.toml").exists());
     }
 
     #[test]
