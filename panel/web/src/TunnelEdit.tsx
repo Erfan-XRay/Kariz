@@ -8,6 +8,7 @@ import { Icon, Seg } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { MuxFields, MuxToggle, muxFromSpec, muxSpecOf, muxToSpec } from "./MuxFields";
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
+import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, splitTransport } from "./transport";
 import { PROFILES, addressesOf, hostOf, parsePorts, portOf } from "./Wizard";
 
@@ -35,6 +36,8 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
   const [target, setTarget] = useState("127.0.0.1");
   const [mux, setMux] = useState(muxFromSpec());
   const [tls, setTls] = useState(emptyTls());
+  const [enc, setEnc] = useState("auto");
+  const [encAck, setEncAck] = useState(false);
   const [rotate, setRotate] = useState(false);
   const [error, setError] = useState("");
   const [opId, setOpId] = useState<string | null>(null);
@@ -90,6 +93,9 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
         setProtocol(list[0]?.protocol ?? "tcp");
         setTarget(hostOf(list[0]?.target) || "127.0.0.1");
         setMux(muxFromSpec(a.mux ?? b.mux));
+        setEnc(a.encryption ?? "auto");
+        // A tunnel that has no encryption already was confirmed when it was made.
+        setEncAck((a.encryption ?? "auto") === "none");
         const real = acc.tls_cert && acc.tls_key ? { cert: acc.tls_cert, key: acc.tls_key } : null;
         setTls(real ? { mode: "real", host: hostOf(dia.remote), email: "", ...real } : emptyTls());
         setInitial("");
@@ -119,6 +125,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
     tls_sni: transport === "wss" && sni.trim() ? sni.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
+    encryption: cipherOf(enc, transport),
     tls_cert: transport === "wss" && tls.mode === "real" && tls.cert ? tls.cert : undefined,
     tls_key: transport === "wss" && tls.mode === "real" && tls.key ? tls.key : undefined,
     rotate: rotate ? true : undefined,
@@ -137,6 +144,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
     if (!dialHost.trim()) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
     if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
     if (transport === "wss" && !tlsReady(tls)) return t("tls.needCert");
+    if (!cipherReady(enc, transport, encAck)) return t("enc.needAck");
     if (parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
     if (muxSpec.bad) return `${t(`mux.${muxSpec.bad}`)}: ${t("mux.badValue")}`;
     return "";
@@ -216,6 +224,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
               <span className="label">{t("wz.profile")}</span>
               {choose(PROFILES, profile, setProfile, (x) => [t(`wz.pf.${x}`), t(`wz.pf.${x}.d`)])}
             </div>
+            <EncryptionChoice value={enc} onChange={setEnc} transport={transport} ack={encAck} onAck={setEncAck} />
           </fieldset>
 
           <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>

@@ -40,6 +40,10 @@ pub struct PairRequest {
     /// Mux settings, the same on both sides; left out, the profile's apply.
     #[serde(default)]
     pub mux: Option<crate::wire::MuxSpec>,
+    /// `auto` (or left out), `aes-256-gcm`, `chacha20-poly1305` or `none`: the same on both
+    /// sides (a side that is not `auto` refuses a peer that uses another cipher).
+    #[serde(default)]
+    pub encryption: Option<String>,
     /// wss: the files of a real certificate on the listening side (from [`certificate`]),
     /// instead of a self-signed one the dialing side pins.
     #[serde(default)]
@@ -76,6 +80,7 @@ impl PairRequest {
             ws_path: self.ws_path.clone(),
             ws_host: self.ws_host.clone(),
             mux: self.mux.clone().filter(|m| !m.is_empty()),
+            encryption: self.chosen_encryption().map(str::to_owned),
             tls_sni: (!accepts).then(|| self.tls_sni.clone()).flatten(),
             tls_pin: (!accepts && self.transport == "wss" && self.tls_cert.is_none())
                 .then(|| pin.map(str::to_owned))
@@ -110,15 +115,27 @@ impl PairRequest {
         self.transport == "auto" || self.mux.as_ref().is_some_and(|m| !m.is_empty())
     }
 
-    /// An error (`old_agent:SERVER:VERSION`) naming the first server that is too old.
+    /// The cipher to write: `None` for `auto`.
+    fn chosen_encryption(&self) -> Option<&str> {
+        self.encryption.as_deref().filter(|e| *e != "auto")
+    }
+
+    /// An error (`old_agent:SERVER:VERSION`, or `old_agent_enc:...` for a cipher) naming the
+    /// first server that is too old.
     fn require_new_enough(&self, hub: &Hub) -> Result<()> {
-        if !self.needs_new_servers() {
+        let enc = self.chosen_encryption().is_some();
+        if !self.needs_new_servers() && !enc {
             return Ok(());
         }
         for server in hub.snapshot()? {
-            if (server.id == self.entry || server.id == self.exit)
-                && !version_at_least(&server.version, (1, 5, 0))
-            {
+            if server.id != self.entry && server.id != self.exit {
+                continue;
+            }
+            // A cipher setting came after 1.5.2; auto and mux settings with 1.5.0.
+            if enc && !version_at_least(&server.version, (1, 5, 3)) {
+                bail!("old_agent_enc:{}:{}", server.id, server.version);
+            }
+            if self.needs_new_servers() && !version_at_least(&server.version, (1, 5, 0)) {
                 bail!("old_agent:{}:{}", server.id, server.version);
             }
         }
@@ -134,6 +151,18 @@ impl PairRequest {
         }
         if !matches!(self.mode.as_str(), "reverse" | "direct") {
             bail!("bad_mode");
+        }
+        if let Some(e) = &self.encryption {
+            if !matches!(
+                e.as_str(),
+                "auto" | "aes-256-gcm" | "chacha20-poly1305" | "none"
+            ) {
+                bail!("bad_encryption");
+            }
+            // QUIC is always TLS 1.3: a cipher of its own does not exist there.
+            if self.transport == "quic" && e != "auto" {
+                bail!("encryption_quic");
+            }
         }
         Ok(())
     }
@@ -1032,6 +1061,64 @@ mod tests {
     }
 
     #[test]
+    fn a_cipher_must_be_one_the_core_knows_and_not_on_quic() {
+        let req = |transport: &str, enc: Option<&str>| PairRequest {
+            name: "t".into(),
+            entry: "a".into(),
+            exit: "b".into(),
+            mode: "reverse".into(),
+            transport: transport.into(),
+            profile: None,
+            listen: "0.0.0.0:3080".into(),
+            dial: "1.2.3.4:3080".into(),
+            pool: None,
+            ws_path: None,
+            ws_host: None,
+            tls_sni: None,
+            mux: None,
+            tls_cert: None,
+            tls_key: None,
+            encryption: enc.map(str::to_owned),
+            forwards: Vec::new(),
+            rotate: false,
+            network: None,
+        };
+        for ok in ["auto", "aes-256-gcm", "chacha20-poly1305", "none"] {
+            assert!(req("tcpmux", Some(ok)).validate().is_ok(), "{ok}");
+        }
+        assert!(req("tcpmux", None).validate().is_ok());
+        assert_eq!(
+            req("tcpmux", Some("rot13"))
+                .validate()
+                .unwrap_err()
+                .to_string(),
+            "bad_encryption"
+        );
+        // QUIC has no cipher of its own to choose, and auto is always fine.
+        assert_eq!(
+            req("quic", Some("none"))
+                .validate()
+                .unwrap_err()
+                .to_string(),
+            "encryption_quic"
+        );
+        assert!(req("quic", Some("auto")).validate().is_ok());
+        // `auto` is not written: the side stays on the default.
+        assert_eq!(
+            req("tcpmux", Some("auto")).specs(None, None).0.encryption,
+            None
+        );
+        assert_eq!(
+            req("tcpmux", Some("none"))
+                .specs(None, None)
+                .1
+                .encryption
+                .as_deref(),
+            Some("none")
+        );
+    }
+
+    #[test]
     fn auto_and_mux_settings_need_new_servers() {
         let req = |transport: &str, mux: Option<crate::wire::MuxSpec>| PairRequest {
             name: "t".into(),
@@ -1049,6 +1136,7 @@ mod tests {
             mux,
             tls_cert: None,
             tls_key: None,
+            encryption: None,
             forwards: Vec::new(),
             rotate: false,
             network: None,

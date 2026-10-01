@@ -29,6 +29,8 @@ export interface TunnelInfo {
   mode: string;
   transport: string;
   profile: string;
+  /** The tunnel's cipher setting; empty from an older agent. */
+  encryption?: string;
   listen: string | null;
   remote: string | null;
   forwards: { listen: string; target: string; protocol: string }[];
@@ -160,6 +162,8 @@ export interface PairRequest {
   /** wss: the files of a real certificate on the listening side. */
   tls_cert?: string;
   tls_key?: string;
+  /** `auto` (left out), `aes-256-gcm`, `chacha20-poly1305` or `none`. */
+  encryption?: string;
   forwards: ForwardSpec[];
   rotate?: boolean;
   /** Direct mode: run over this private GRE network (its id). */
@@ -183,6 +187,7 @@ export interface Spec {
   mux?: MuxSpec;
   tls_cert?: string;
   tls_key?: string;
+  encryption?: string;
   forwards: ForwardSpec[];
 }
 
