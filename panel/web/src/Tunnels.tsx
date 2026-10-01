@@ -187,7 +187,7 @@ function TunnelPage({ tunnel, onBack, onAct, onEdit }: { tunnel: Tunnel; onBack:
             <h2 className="td-name mono">{tunnel.name}</h2>
             <div className="td-tags">
               <StateBadge state={tunnel.state} />
-              <span className={`tag ${tunnel.via ? "live" : ""}`} title={tunnel.via ? t("td.autoNow", { via: tunnel.via.replace(/tcpmux/g, "tcp") }) : undefined}>
+              <span className={`tag ${tunnel.via ? "via" : ""}`} dir="ltr" title={tunnel.via ? t("td.autoNow", { via: tunnel.via.replace(/tcpmux/g, "tcp") }) : undefined}>
                 {transportLabel(tunnel.transport, tunnel.via)}
               </span>
               <span className="tag">{tunnel.profile}</span>
@@ -565,7 +565,7 @@ export function TunnelsPage({
                       </div>
                     </td>
                     <td className="c-transport">
-                      <span className={`tag ${x.via ? "live" : ""}`}>{transportLabel(x.transport, x.via)}</span> <span className="tag">{x.profile}</span>
+                      <span className={`tag ${x.via ? "via" : ""}`} dir="ltr">{transportLabel(x.transport, x.via)}</span> <span className="tag">{x.profile}</span>
                       {mode && <span className="tag soft hide-sm">{t(`td.mode.${mode}`)}</span>}
                     </td>
                     <td className="c-transport num hide-sm">{num((x.entry ?? x.exit)?.tunnel.forwards.length ?? 0)}</td>
