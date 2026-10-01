@@ -50,7 +50,7 @@ kariz-manager uninstall [--yes]                            # --yes also deletes 
 kariz-manager panel install [--port N] [--host H] [--name NAME]   # the panel on this server: address, certificate, a login link; asks what to call this server (default: its host name)
 kariz-manager panel name [NAME]                    # rename this server in the panel
 kariz-manager panel link [--host H]                 # another one-time login link
-kariz-manager panel password [--stdin]              # a new admin password
+kariz-manager panel password [--stdin | --random]  # a new admin password (asked twice, hidden)
 kariz-manager panel status | logs                   # the service, its address / follow the log
 kariz-manager panel uninstall [--yes]
 
