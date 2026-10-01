@@ -599,6 +599,8 @@ impl Batch {
 pub struct MuxSession {
     shared: Arc<Shared>,
     incoming: tokio::sync::Mutex<mpsc::UnboundedReceiver<(MuxStream, Bytes)>>,
+    /// The transport it runs over, when something wants to tell (`auto` does).
+    transport: std::sync::OnceLock<&'static str>,
 }
 
 impl MuxSession {
@@ -702,7 +704,18 @@ impl MuxSession {
         Self {
             shared,
             incoming: tokio::sync::Mutex::new(rx),
+            transport: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Notes which transport this session runs over (once; later calls change nothing).
+    pub fn set_transport(&self, name: &'static str) {
+        let _ = self.transport.set(name);
+    }
+
+    /// The transport noted by [`MuxSession::set_transport`], if any.
+    pub fn transport(&self) -> Option<&'static str> {
+        self.transport.get().copied()
     }
 
     /// Opens a stream. `syn` (the open request) and any data written right away are sent

@@ -40,6 +40,12 @@ pub struct PairRequest {
     /// Mux settings, the same on both sides; left out, the profile's apply.
     #[serde(default)]
     pub mux: Option<crate::wire::MuxSpec>,
+    /// wss: the files of a real certificate on the listening side (from [`certificate`]),
+    /// instead of a self-signed one the dialing side pins.
+    #[serde(default)]
+    pub tls_cert: Option<String>,
+    #[serde(default)]
+    pub tls_key: Option<String>,
     #[serde(default)]
     pub forwards: Vec<ForwardInfo>,
     /// Edit only: make a new token for both sides.
@@ -71,8 +77,14 @@ impl PairRequest {
             ws_host: self.ws_host.clone(),
             mux: self.mux.clone().filter(|m| !m.is_empty()),
             tls_sni: (!accepts).then(|| self.tls_sni.clone()).flatten(),
-            tls_pin: (!accepts && self.transport == "wss")
+            tls_pin: (!accepts && self.transport == "wss" && self.tls_cert.is_none())
                 .then(|| pin.map(str::to_owned))
+                .flatten(),
+            tls_cert: (accepts && self.transport == "wss")
+                .then(|| self.tls_cert.clone())
+                .flatten(),
+            tls_key: (accepts && self.transport == "wss")
+                .then(|| self.tls_key.clone())
                 .flatten(),
             forwards: if role == "entry" {
                 self.forwards.clone()
@@ -92,6 +104,27 @@ impl PairRequest {
         }
     }
 
+    /// Whether this tunnel uses something older servers do not know (`auto`, mux settings):
+    /// both of its servers must run 1.5 or newer, or they would refuse the config.
+    fn needs_new_servers(&self) -> bool {
+        self.transport == "auto" || self.mux.as_ref().is_some_and(|m| !m.is_empty())
+    }
+
+    /// An error (`old_agent:SERVER:VERSION`) naming the first server that is too old.
+    fn require_new_enough(&self, hub: &Hub) -> Result<()> {
+        if !self.needs_new_servers() {
+            return Ok(());
+        }
+        for server in hub.snapshot()? {
+            if (server.id == self.entry || server.id == self.exit)
+                && !version_at_least(&server.version, (1, 5, 0))
+            {
+                bail!("old_agent:{}:{}", server.id, server.version);
+            }
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
         if !valid_name(&self.name) {
             bail!("bad_name");
@@ -103,6 +136,22 @@ impl PairRequest {
             bail!("bad_mode");
         }
         Ok(())
+    }
+}
+
+/// Whether `version` (`1.5.0`, maybe with a suffix after a dash) is at least `min`. One that
+/// cannot be read counts as too old.
+fn version_at_least(version: &str, min: (u32, u32, u32)) -> bool {
+    let mut parts = version
+        .trim_start_matches('v')
+        .split('-')
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .map(|p| p.parse::<u32>());
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(a)), Some(Ok(b)), Some(Ok(c))) => (a, b, c) >= min,
+        _ => false,
     }
 }
 
@@ -241,6 +290,7 @@ fn fail_text(reply: &Ack) -> String {
 /// Checks a request on both servers (nothing is written).
 pub async fn check(hub: &Hub, req: &PairRequest) -> Result<(CheckReply, CheckReply)> {
     req.validate()?;
+    req.require_new_enough(hub)?;
     let (entry, exit) = req.specs(None, None);
     let a = hub
         .ask_as(&req.entry, &Request::TunnelCheck { spec: entry })
@@ -358,6 +408,7 @@ fn describe(check: &CheckReply) -> String {
 /// Starts making a tunnel. The operation's id comes back at once.
 pub fn create(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
     req.validate()?;
+    req.require_new_enough(hub)?;
     let id = hub.ops.begin("create", &req.name)?;
     let hub = hub.clone();
     let op = id.clone();
@@ -529,6 +580,7 @@ async fn undo(hub: &Hub, servers: &[&str], name: &str) -> bool {
 /// again the old ones are put back.
 pub fn edit(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
     req.validate()?;
+    req.require_new_enough(hub)?;
     let id = hub.ops.begin("edit", &req.name)?;
     let hub = hub.clone();
     let op = id.clone();
@@ -838,6 +890,87 @@ pub async fn logs(hub: &Hub, name: &str, lines: u32) -> Result<Vec<LogLine>> {
 }
 
 /// Runs the speed test of a tunnel on its entry side and returns what it printed.
+/// Gets a Let's Encrypt certificate for `host` on `server` (for a wss tunnel that listens
+/// there). It can take a minute: certbot is installed first if the server has none.
+pub async fn certificate(
+    hub: &Hub,
+    server: &str,
+    host: &str,
+    email: Option<&str>,
+) -> Result<crate::wire::CertReply> {
+    let raw = hub
+        .ask_within(
+            server,
+            &Request::TunnelCert {
+                domain: host.to_owned(),
+                email: email.map(str::to_owned),
+            },
+            Duration::from_secs(660),
+        )
+        .await?;
+    serde_json::from_slice(&raw)
+        .map_err(|_| anyhow::anyhow!("the server's answer was not understood (an older agent cannot get certificates: update it)"))
+}
+
+/// The server that runs a tunnel's speed test: the one with its entry side.
+fn speedtest_server(hub: &Hub, name: &str) -> Result<String> {
+    if !valid_name(name) {
+        bail!("bad_name");
+    }
+    let placement = place(hub, name)?;
+    placement
+        .sides
+        .into_iter()
+        .find(|(_, t)| t.role == "entry")
+        .map(|(server, _)| server)
+        .ok_or_else(|| anyhow::anyhow!("no_such_tunnel"))
+}
+
+/// Starts a speed test that can be followed while it runs; its id comes back.
+pub async fn speedtest_start(
+    hub: &Hub,
+    name: &str,
+    seconds: u32,
+    streams: u32,
+    udp: bool,
+) -> Result<crate::wire::SpeedStarted> {
+    let server = speedtest_server(hub, name)?;
+    let raw = hub
+        .ask(
+            &server,
+            &Request::SpeedtestStart {
+                name: name.to_owned(),
+                seconds,
+                streams,
+                udp,
+            },
+        )
+        .await?;
+    serde_json::from_slice(&raw)
+        .map_err(|_| anyhow::anyhow!("the server's answer was not understood"))
+}
+
+/// What a started speed test has said since `after` lines.
+pub async fn speedtest_poll(
+    hub: &Hub,
+    name: &str,
+    id: &str,
+    after: u32,
+) -> Result<crate::wire::SpeedPoll> {
+    let server = speedtest_server(hub, name)?;
+    let raw = hub
+        .ask(
+            &server,
+            &Request::SpeedtestPoll {
+                id: id.to_owned(),
+                after,
+            },
+        )
+        .await?;
+    serde_json::from_slice(&raw)
+        .map_err(|_| anyhow::anyhow!("the server's answer was not understood"))
+}
+
 pub async fn speedtest(
     hub: &Hub,
     name: &str,
@@ -868,4 +1001,50 @@ pub async fn speedtest(
         .await?;
     serde_json::from_slice(&raw)
         .map_err(|_| anyhow::anyhow!("the server's answer was not understood"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versions_are_compared_by_their_numbers() {
+        let min = (1, 5, 0);
+        assert!(version_at_least("1.5.0", min) && version_at_least("v1.10.2", min));
+        assert!(version_at_least("2.0.0-rc1", min) && version_at_least("1.5.0-dev", min));
+        assert!(!version_at_least("1.4.0", min) && !version_at_least("1.4.99", min));
+        assert!(!version_at_least("", min) && !version_at_least("unknown", min));
+    }
+
+    #[test]
+    fn auto_and_mux_settings_need_new_servers() {
+        let req = |transport: &str, mux: Option<crate::wire::MuxSpec>| PairRequest {
+            name: "t".into(),
+            entry: "a".into(),
+            exit: "b".into(),
+            mode: "reverse".into(),
+            transport: transport.into(),
+            profile: None,
+            listen: "0.0.0.0:3080".into(),
+            dial: "1.2.3.4:3080".into(),
+            pool: None,
+            ws_path: None,
+            ws_host: None,
+            tls_sni: None,
+            mux,
+            tls_cert: None,
+            tls_key: None,
+            forwards: Vec::new(),
+            rotate: false,
+            network: None,
+        };
+        assert!(req("auto", None).needs_new_servers());
+        let tuned = crate::wire::MuxSpec {
+            connections: Some(4),
+            ..Default::default()
+        };
+        assert!(req("tcpmux", Some(tuned)).needs_new_servers());
+        assert!(!req("tcpmux", Some(Default::default())).needs_new_servers());
+        assert!(!req("kcp", None).needs_new_servers());
+    }
 }

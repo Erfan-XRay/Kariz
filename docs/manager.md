@@ -72,6 +72,12 @@ place. The old panel keeps listing that server as offline until you remove it th
 
 ## Update and uninstall
 
+Opening the menu (and `kariz-manager status`) looks for a newer release. If one is out and the
+core, the panel or the agent here is older, it says which and asks whether to update all of them
+now. Joining a panel with `--agent CODE` updates an older program first, because an old agent
+can refuse what a newer panel sends. `KARIZ_NO_UPDATE_CHECK=1` turns the look off. `update` also
+fetches the newest `kariz-manager` script (unless you install from files of your own).
+
 `install` and `update` check the release's **signature** (from 0.11, a release without a valid
 one is not installed; older releases have none and are accepted with a warning) and its
 SHA-256. `update` restarts what runs: every tunnel, the panel and the agent, so they use the

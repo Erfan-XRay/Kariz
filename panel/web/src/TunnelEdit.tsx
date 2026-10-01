@@ -6,8 +6,10 @@ import type { Tunnel } from "./derive";
 import { useApp } from "./store";
 import { Icon, Seg } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
-import { MuxFields, muxFromSpec, muxToSpec } from "./MuxFields";
-import { PROFILES, TRANSPORTS, addressesOf, hostOf, parsePorts, portOf } from "./Wizard";
+import { MuxFields, MuxToggle, muxFromSpec, muxSpecOf, muxToSpec } from "./MuxFields";
+import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
+import { MUX_OPTIONAL, TRANSPORTS, joinTransport, splitTransport } from "./transport";
+import { PROFILES, addressesOf, hostOf, parsePorts, portOf } from "./Wizard";
 
 /** Editing a tunnel: everything about it on one page, no steps. */
 export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; servers: ServerInfo[]; onBack: () => void }) {
@@ -18,7 +20,8 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
   // The tunnel cannot be edited now (a server is away, or it has one side only): say why.
   const [blocked, setBlocked] = useState(false);
   const [mode, setMode] = useState("reverse");
-  const [transport, setTransport] = useState("tcpmux");
+  const [transport, setTransport] = useState("tcp");
+  const [muxOn, setMuxOn] = useState(true);
   const [profile, setProfile] = useState("balanced");
   const [listenHost, setListenHost] = useState("0.0.0.0");
   const [listenPort, setListenPort] = useState("");
@@ -31,6 +34,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
   const [protocol, setProtocol] = useState("tcp");
   const [target, setTarget] = useState("127.0.0.1");
   const [mux, setMux] = useState(muxFromSpec());
+  const [tls, setTls] = useState(emptyTls());
   const [rotate, setRotate] = useState(false);
   const [error, setError] = useState("");
   const [opId, setOpId] = useState<string | null>(null);
@@ -70,7 +74,9 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
         const acc = a.mode === "reverse" ? a : b;
         const dia = a.mode === "reverse" ? b : a;
         setMode(a.mode);
-        setTransport(a.transport);
+        const split = splitTransport(a.transport, a.mux ?? b.mux);
+        setTransport(split.transport);
+        setMuxOn(split.mux);
         setProfile(a.profile ?? "balanced");
         setListenHost(hostOf(acc.listen) || "0.0.0.0");
         setListenPort(portOf(acc.listen));
@@ -84,6 +90,8 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
         setProtocol(list[0]?.protocol ?? "tcp");
         setTarget(hostOf(list[0]?.target) || "127.0.0.1");
         setMux(muxFromSpec(a.mux ?? b.mux));
+        const real = acc.tls_cert && acc.tls_key ? { cert: acc.tls_cert, key: acc.tls_key } : null;
+        setTls(real ? { mode: "real", host: hostOf(dia.remote), email: "", ...real } : emptyTls());
         setInitial("");
       })
       .catch(() => {
@@ -102,7 +110,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
     entry,
     exit,
     mode,
-    transport,
+    transport: joinTransport(transport, muxOn).core,
     profile,
     listen: `${listenHost}:${listenPort}`,
     dial: `${dialHost.includes(":") && !dialHost.startsWith("[") ? `[${dialHost}]` : dialHost}:${listenPort}`,
@@ -110,7 +118,9 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
     ws_path: isWs ? wsPath : undefined,
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
     tls_sni: transport === "wss" && sni.trim() ? sni.trim() : undefined,
-    mux: muxSpec.spec,
+    mux: muxSpecOf(mux, transport, muxOn),
+    tls_cert: transport === "wss" && tls.mode === "real" && tls.cert ? tls.cert : undefined,
+    tls_key: transport === "wss" && tls.mode === "real" && tls.key ? tls.key : undefined,
     rotate: rotate ? true : undefined,
     forwards: parsed.forwards,
   });
@@ -126,6 +136,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
     if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
     if (!dialHost.trim()) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
     if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
+    if (transport === "wss" && !tlsReady(tls)) return t("tls.needCert");
     if (parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
     if (muxSpec.bad) return `${t(`mux.${muxSpec.bad}`)}: ${t("mux.badValue")}`;
     return "";
@@ -138,7 +149,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
     try {
       setOpId((await api.editTunnel(request())).op);
     } catch (e) {
-      setError(e instanceof ApiError && e.code === "busy" ? t("wz.busy") : e instanceof ApiError ? e.code : String(e));
+      setError(e instanceof ApiError && e.code === "busy" ? t("wz.busy") : e instanceof ApiError ? opError(t, e.code, new Map(servers.map((x) => [x.id, x.name]))) : String(e));
     }
   };
 
@@ -199,7 +210,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
             <div className="field">
               <span className="label">{t("wz.transport")}</span>
               {choose(TRANSPORTS, transport, setTransport, (x) => [x, t(`wz.tr.${x}`)])}
-              {transport !== tunnel.transport && <span className="help warn-text">{t("te.transportChange")}</span>}
+              {joinTransport(transport, muxOn).core !== tunnel.transport && <span className="help warn-text">{t("te.transportChange")}</span>}
             </div>
             <div className="field">
               <span className="label">{t("wz.profile")}</span>
@@ -244,13 +255,18 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
                 </div>
               )}
               {transport === "wss" && (
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <TlsChoice value={tls} onChange={setTls} server={acceptor} serverName={serverName(acceptor)} onHost={(h) => setDialHost(h)} />
+                </div>
+              )}
+              {transport === "wss" && tls.mode === "self" && (
                 <div className="field">
                   <label htmlFor="te-sni">{t("wz.sni")}</label>
                   <input className="text mono" id="te-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
                   <span className="help">{t("wz.sniHelp")}</span>
                 </div>
               )}
-              {transport === "tcp" && (
+              {transport === "tcp" && !muxOn && (
                 <div className="field">
                   <label htmlFor="te-pool">{t("wz.pool")}</label>
                   <input
@@ -300,7 +316,8 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
 
           <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>
             <legend>{t("mux.title")}</legend>
-            <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />
+            <MuxToggle transport={transport} value={muxOn} onChange={setMuxOn} />
+            {(muxOn || !MUX_OPTIONAL.includes(transport)) && <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />}
           </fieldset>
 
           <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>

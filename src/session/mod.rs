@@ -37,6 +37,14 @@ impl Session {
         }
     }
 
+    /// The transport an `auto` tunnel's session runs over; `None` for the others.
+    pub fn transport(&self) -> Option<&'static str> {
+        match self {
+            Self::Kmux(s) => s.transport(),
+            Self::Quic(_) => None,
+        }
+    }
+
     /// Opens a stream whose first bytes are `syn` (the open request). Data can be sent
     /// right away; the peer answers a failed open with a reset.
     pub fn open(&self, syn: Bytes) -> io::Result<SessionStream> {
