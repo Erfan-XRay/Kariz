@@ -845,7 +845,7 @@ panel_install() {
         [[ -f "$password_file" ]] || die "No such file: $password_file"
         pw=$(head -n 1 "$password_file")
         [[ -z "$(password_problem "$pw")" ]] || die "That password is too weak: $(password_problem "$pw")."
-    elif ((!yes)); then
+    elif ((!yes)) && have_terminal; then
         section "Admin password"
         choose how "How do you want to sign in?" password \
             "password|set an admin password now (recommended)" \
