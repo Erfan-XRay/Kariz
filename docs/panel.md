@@ -35,9 +35,10 @@ then writes the settings, makes the database, starts the service `kariz-panel`, 
   panel's port (for you) and the agents' port (for your other servers: TCP and UDP, and TCP on the next port for
   `wss`) in the firewall.
 
-Set a password in *Settings* if you want to sign in without a link (10 characters or
-more). Or from the server: `kariz-manager panel password` (makes a random one and shows
-it; `--stdin` reads yours).
+The installer asks for an admin password of your own (at least 12 characters, three of: lower
+case, UPPER CASE, digits, symbols); or choose the one-time sign-in link only. Change it in *Settings*
+(10 characters or more), or from the server: `kariz-manager panel password` (asks the same way;
+`--random` makes one and shows it, `--stdin` reads yours).
 
 ## The certificate
 
@@ -188,7 +189,7 @@ less motion) are in the top bar and in *Settings*. `Ctrl+K` opens commands.
 ```bash
 kariz-manager panel install [--port N] [--host H]   # settings, service, address and a link
 kariz-manager panel link [--host H]                 # a new one-time login link
-kariz-manager panel password [--stdin]              # a new admin password
+kariz-manager panel password [--stdin | --random]  # a new admin password (asked twice, hidden)
 kariz-manager panel status | logs                   # the service, its address / follow the log
 kariz-manager panel uninstall [--yes]
 kariz-manager --agent CODE                          # connect this server to a panel
