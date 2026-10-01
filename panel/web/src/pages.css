@@ -548,6 +548,9 @@ pre.notes { max-height: 240px; overflow: auto; white-space: pre-wrap; }
 .sp-step.done .sp-val { color: var(--text); }
 .sp-step.skip { opacity: 0.5; }
 
+.sp-now { margin: 0; text-align: center; font-size: var(--fs-md); font-weight: 600; color: var(--water); font-variant-numeric: tabular-nums; min-height: 1.5em; }
+.sp-spark { width: 100%; height: 36px; display: block; margin: 0 0 var(--sp-2); }
+.sp-spark polyline { fill: none; stroke: var(--water); stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
 .sp-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .sp-results { display: grid; grid-template-columns: repeat(6, 1fr); gap: var(--sp-3); }
 .sp-card { display: grid; gap: 2px; padding: var(--sp-4); border: var(--hairline) solid var(--line); border-radius: 12px; background: var(--card-2); animation: sp-rise 600ms var(--ease-out) both; }
@@ -948,6 +951,10 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
   transition: border-color var(--dur-short), background var(--dur-short);
 }
 .addr-pick:hover { border-color: var(--accent); }
+.addr-pick:disabled { opacity: 0.5; cursor: not-allowed; }
+.pool-picks { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--sp-2); }
+.pool-picks .addr-pick { display: grid; gap: 2px; justify-items: start; }
+.pool-picks .addr-pick span { font-size: var(--fs-xs); color: var(--text-3); }
 .addr-pick code { font-family: var(--font-mono); color: var(--text); overflow-wrap: anywhere; }
 .addr-pick[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
 .field .help code { font-family: var(--font-mono); margin-inline-start: 4px; unicode-bidi: isolate; }

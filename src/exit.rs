@@ -34,7 +34,7 @@ const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
 
 /// Speed test streams the exit serves at once.
-const SPEEDTEST_STREAMS: usize = 32;
+const SPEEDTEST_STREAMS: usize = 48;
 
 struct Exit {
     crypto: Crypto,
@@ -113,12 +113,12 @@ pub async fn run(config: Config) -> Result<()> {
                                 (exit.clone(), dialer.clone(), sessions.clone());
                             async move {
                                 let wait = exit.tuning.dial_timeout + exit.tuning.handshake_timeout;
-                                let link = dialer.connect(&exit.crypto, wait).await?;
-                                Ok(Session::Kmux(MuxSession::over(
-                                    link,
-                                    Side::Server,
-                                    sessions,
-                                )))
+                                let (link, via) = dialer.connect(&exit.crypto, wait).await?;
+                                let session = MuxSession::over(link, Side::Server, sessions);
+                                if let Some(via) = via {
+                                    session.set_transport(via);
+                                }
+                                Ok(Session::Kmux(session))
                             }
                         }
                     };
@@ -149,20 +149,23 @@ pub async fn run(config: Config) -> Result<()> {
                 let listeners = if config.tunnel.transport == TransportKind::Auto {
                     auto::bind_all(&transport, &config.tunnel.token, addr, &tuning).await?
                 } else {
-                    vec![Listener::bind(&transport, addr, &tuning)
-                        .await
-                        .with_context(|| {
-                            format!("failed to listen for tunnel connections on {addr}")
-                        })?]
+                    vec![(
+                        "",
+                        Listener::bind(&transport, addr, &tuning)
+                            .await
+                            .with_context(|| {
+                                format!("failed to listen for tunnel connections on {addr}")
+                            })?,
+                    )]
                 };
                 info!(
-                    addr = %listeners[0].local_addr()?,
+                    addr = %listeners[0].1.local_addr()?,
                     mux = mux.enabled,
                     "exit: direct mode, waiting for the entry side"
                 );
                 let sessions = mux.enabled.then_some(sessions);
-                for listener in listeners {
-                    tasks.spawn(accept_direct(exit.clone(), listener, sessions.clone()));
+                for (via, listener) in listeners {
+                    tasks.spawn(accept_direct(exit.clone(), listener, sessions.clone(), via));
                 }
             }
         }
@@ -312,6 +315,7 @@ async fn accept_direct(
     exit: Arc<Exit>,
     listener: Listener,
     sessions: Option<SessionConfig>,
+    via: &'static str,
 ) -> Result<()> {
     let replay = Arc::new(ReplayFilter::default());
     loop {
@@ -335,7 +339,11 @@ async fn accept_direct(
             };
             if let Some(config) = sessions {
                 info!(%peer, "mux session from the entry side established");
-                let session = Arc::new(Session::Kmux(MuxSession::over(link, Side::Server, config)));
+                let session = MuxSession::over(link, Side::Server, config);
+                if !via.is_empty() {
+                    session.set_transport(via);
+                }
+                let session = Arc::new(Session::Kmux(session));
                 exit.stats.peer.session_up(&session);
                 return run_session(exit, session).await;
             }

@@ -2167,6 +2167,36 @@ async fn a_direct_tunnel_without_mux_says_it_is_connected_before_any_traffic() {
     assert!(!status.peer.connected, "{status:?}");
 }
 
+/// An `auto` tunnel says which transport its sessions use now, on both sides.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_auto_tunnel_says_which_transport_it_uses() {
+    for mode in ["reverse", "direct"] {
+        let setup = Setup::tcp(mode).transport("auto").mux().control();
+        let target = echo_server().await;
+        let tunnel = start(setup, TOKEN, TOKEN, target).await;
+        for socket in [
+            tunnel.control.clone().unwrap(),
+            tunnel.exit_control.clone().unwrap(),
+        ] {
+            let mut status = status_of(&socket).await;
+            for _ in 0..50 {
+                if status.peer.transport.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                status = status_of(&socket).await;
+            }
+            // The first transport that gets through on localhost is tcpmux.
+            assert_eq!(
+                status.peer.transport.as_deref(),
+                Some("tcpmux"),
+                "{mode}: {status:?}"
+            );
+        }
+    }
+}
+
 /// An exit with `speedtest = false` refuses the test streams, and the client says why.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]

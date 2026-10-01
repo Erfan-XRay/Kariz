@@ -30,7 +30,7 @@ use crate::session::SessionStream;
 pub const MAX_STREAM: Duration = Duration::from_secs(120);
 /// Bounds for a test's settings.
 pub const MAX_SECONDS: u64 = 60;
-pub const MAX_STREAMS: usize = 16;
+pub const MAX_STREAMS: usize = 32;
 
 const CHUNK: usize = 64 * 1024;
 const PING_EVERY: Duration = Duration::from_millis(100);
@@ -280,8 +280,23 @@ fn mbps(bytes: u64, over: Duration) -> f64 {
     round1(bytes as f64 * 8.0 / over.as_secs_f64() / 1e6)
 }
 
+/// Prefix of the progress lines meant for programs (the panel), not for a person: `@idle`,
+/// `@download`, `@upload` and `@udp`, then the phase's result as JSON. `kariz speedtest` does
+/// not print them.
+pub const RESULT_LINE: char = '@';
+
+fn result_line(phase: &str, result: &impl Serialize) -> String {
+    format!(
+        "{RESULT_LINE}{phase} {}",
+        serde_json::to_string(result).unwrap_or_default()
+    )
+}
+
 /// Runs a whole test. `open` opens a test stream for a command (`down`, `up`, `echo`,
-/// `udp`) through the tunnel; `progress` gets a line now and then.
+/// `udp`) through the tunnel; `progress` gets a line now and then (the phases are
+/// `latency, idle`, `download, N streams`, `upload, N streams`, `UDP datagrams`; a rate is
+/// `↓ N Mbit/s` or `↑ N Mbit/s`, every half second; a finished phase sends its
+/// [`RESULT_LINE`] too).
 pub async fn run<O, F>(
     open: O,
     options: Options,
@@ -301,6 +316,7 @@ where
     progress("latency, idle".into());
     let idle_for = Duration::from_secs(options.seconds.min(2));
     report.idle = ping_loop(open("echo").await?, Instant::now() + idle_for).await;
+    progress(result_line("idle", &report.idle));
     if report.idle.received == 0 {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -312,15 +328,19 @@ where
     progress(format!("download, {} streams", options.streams));
     (report.download, report.download_latency) =
         measure_rate(&open, "down", options, &mut progress, "↓").await?;
+    progress(result_line("download", &report.download));
     progress(format!("upload, {} streams", options.streams));
     (report.upload, report.upload_latency) =
         measure_rate(&open, "up", options, &mut progress, "↑").await?;
+    progress(result_line("upload", &report.upload));
 
     if options.udp {
         progress("UDP datagrams".into());
         match open("udp").await {
             Ok(pipe) if pipe.datagrams().is_some() => {
-                report.udp = Some(udp_test(pipe, options.seconds.min(UDP_MAX_SECONDS)).await);
+                let udp = udp_test(pipe, options.seconds.min(UDP_MAX_SECONDS)).await;
+                progress(result_line("udp", &udp));
+                report.udp = Some(udp);
             }
             _ => report
                 .notes
@@ -379,7 +399,7 @@ where
             at_warm = Some((now, bytes));
         }
         let n = readings.len();
-        if n > 4 && (n - 1) % 4 == 0 {
+        if n > 4 && (n - 1) % 2 == 0 {
             let recent = mbps(bytes - readings[n - 5], SAMPLE_EVERY * 4);
             progress(format!("{arrow} {recent:.0} Mbit/s"));
         }
@@ -573,6 +593,17 @@ pub(crate) mod tests {
         assert!(udp.received >= 120, "{udp:?}");
         assert!(udp.p50_ms < 500.0);
         assert!(lines.iter().any(|l| l.contains("Mbit/s")), "{lines:?}");
+        // Each phase tells its result as it ends, for the panel to show at once.
+        for phase in ["idle", "download", "upload", "udp"] {
+            let prefix = format!("{RESULT_LINE}{phase} {{");
+            assert!(
+                lines.iter().any(|l| l.starts_with(&prefix)),
+                "{phase}: {lines:?}"
+            );
+        }
+        let download = lines.iter().find(|l| l.starts_with("@download ")).unwrap();
+        let rate: Rate = serde_json::from_str(&download["@download ".len()..]).unwrap();
+        assert_eq!(rate, report.download);
         assert!(report.notes.is_empty(), "{:?}", report.notes);
         // The report survives the trip the control socket gives it.
         let text = toml::to_string(&report).unwrap();

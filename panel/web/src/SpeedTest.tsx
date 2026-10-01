@@ -1,7 +1,8 @@
 // The speed test of a tunnel: water through the channel while it measures, and a gauge
-// that fills to what was measured. Nothing is made up: while the test runs the gauge only
-// shows which phase it is in (the phases have known lengths); the numbers come at the end,
-// from the entry server's report.
+// that fills to what is measured. Nothing is made up: the entry server runs the test in the
+// background and the panel follows its progress lines (the phase it is in, a rate twice a
+// second, the result of each phase as it ends). An agent older than 1.5 cannot be followed:
+// the test then runs as one request and the numbers come at the end.
 import { useEffect, useRef, useState } from "react";
 import { ApiError, api } from "./api";
 import type { SpeedReport, SpeedResult } from "./api";
@@ -31,6 +32,24 @@ interface Last {
   at: number;
   d: number;
   u: number;
+}
+
+/** Ready-made settings. Max opens the most streams for long enough to fill the tunnel. */
+const PRESETS = {
+  quick: { seconds: 5, streams: 4 },
+  standard: { seconds: 10, streams: 4 },
+  max: { seconds: 20, streams: 16 },
+} as const;
+type Preset = keyof typeof PRESETS | "custom";
+const presetOf = (seconds: number, streams: number): Preset =>
+  (Object.keys(PRESETS) as (keyof typeof PRESETS)[]).find((k) => PRESETS[k].seconds === seconds && PRESETS[k].streams === streams) ?? "custom";
+
+/** What a running test has reported so far. */
+interface Partial {
+  idle?: { p50_ms: number; p99_ms: number; jitter_ms: number };
+  download?: { mbps: number; peak_mbps: number };
+  upload?: { mbps: number; peak_mbps: number };
+  udp?: { sent: number; received: number };
 }
 
 const lastKey = (name: string) => `kariz.speed.${name}`;
@@ -92,6 +111,7 @@ function onArc(r: number, frac: number) {
 }
 
 function Gauge({ phase, down, up, scale }: { phase: Phase; down: number; up: number; scale: number }) {
+  // While a transfer runs the number is the rate right now.
   const { t, num, low } = useApp();
   const d = useCountUp(down, 1600, low);
   const u = useCountUp(up, 1900, low);
@@ -142,10 +162,10 @@ function Gauge({ phase, down, up, scale }: { phase: Phase; down: number; up: num
         {running ? t(`sp.phase.${phase}`) : phase === "done" ? t("sp.phase.done") : t("sp.ready")}
       </text>
       <text className="sp-value" x={ARC.cx} y={150} textAnchor="middle">
-        {running ? "···" : phase === "done" ? num(d, dp) : "—"}
+        {running ? (phase === "down" && d > 0 ? num(d, dp) : phase === "up" && u > 0 ? num(u, up >= 100 ? 0 : 1) : "···") : phase === "done" ? num(d, dp) : "—"}
       </text>
       <text className="sp-unit" x={ARC.cx} y={176} textAnchor="middle">
-        {running ? t("sp.measuring") : "Mbps ↓"}
+        {running ? (phase === "down" ? "Mbps ↓" : phase === "up" ? "Mbps ↑" : t("sp.measuring")) : "Mbps ↓"}
       </text>
       {phase === "done" && (
         <text className="sp-second" x={ARC.cx} y={206} textAnchor="middle">
@@ -255,6 +275,12 @@ export function SpeedTest({ tunnel }: { tunnel: Tunnel }) {
   const [streams, setStreams] = useState(4);
   const [udp, setUdp] = useState(true);
   const [phase, setPhase] = useState<Phase>("ready");
+  // The rate right now, what each phase has measured so far, and the rates of this phase.
+  const [live, setLive] = useState(0);
+  const [partial, setPartial] = useState<Partial>({});
+  const [samples, setSamples] = useState<number[]>([]);
+  const [best, setBest] = useState(0);
+  const [custom, setCustom] = useState(false);
   const [result, setResult] = useState<SpeedResult | null>(null);
   const [error, setError] = useState("");
   const [last, setLast] = useState<Last | null>(() => readLast(tunnel.name));
@@ -271,46 +297,114 @@ export function SpeedTest({ tunnel }: { tunnel: Tunnel }) {
   const steps = plan(seconds, udp);
   const total = steps.reduce((s, [, d]) => s + d, 0);
 
-  // While it runs: which phase it is in, from the known lengths of the phases.
+  // The time spent, for the bar under the gauge (the phase itself comes from the test).
   useEffect(() => {
     if (!running) return;
     const start = performance.now();
-    const id = setInterval(() => {
-      const e = (performance.now() - start) / 1000;
-      setElapsed(e);
-      let acc = 0;
-      let now: Step = steps[steps.length - 1][0];
-      for (const [s, d] of steps) {
-        acc += d;
-        if (e < acc) {
-          now = s;
-          break;
-        }
-      }
-      setPhase((p) => (p === "done" || p === "failed" ? p : now));
-    }, 200);
+    const id = setInterval(() => setElapsed((performance.now() - start) / 1000), 200);
     return () => clearInterval(id);
   }, [running && "on"]);
+
+  /** One progress line of the test: a phase starts, a rate, or the result of a phase. */
+  const apply = (line: string) => {
+    if (line.startsWith("@")) {
+      const [key, ...rest] = line.slice(1).split(" ");
+      try {
+        const data = JSON.parse(rest.join(" "));
+        setPartial((p) => ({ ...p, [key]: data }));
+      } catch {
+        // a line this panel does not know: ignored
+      }
+      return;
+    }
+    if (line.startsWith("latency")) setPhase("ping");
+    else if (line.startsWith("download")) {
+      setPhase("down");
+      setLive(0);
+      setSamples([]);
+      setBest(0);
+    } else if (line.startsWith("upload")) {
+      setPhase("up");
+      setLive(0);
+      setSamples([]);
+      setBest(0);
+    } else if (line.startsWith("UDP")) setPhase("udp");
+    else {
+      const m = /^[↓↑] (\d+(?:\.\d+)?) Mbit\/s/.exec(line);
+      if (m) {
+        const v = +m[1];
+        setLive(v);
+        setBest((b) => Math.max(b, v));
+        setSamples((s) => [...s.slice(-59), v]);
+      }
+    }
+  };
+
+  const finish = (r: SpeedResult) => {
+    setResult(r);
+    if (!r.ok) {
+      setError(r.error ?? t("speed.failed"));
+      setPhase("failed");
+      return;
+    }
+    if (r.report) {
+      setLast(readLast(tunnel.name));
+      saveLast(tunnel.name, r.report);
+    }
+    setPhase("done");
+  };
+
+  /** An agent that cannot be followed: one request, and the numbers come at the end. */
+  const goBlocking = async () => {
+    setPhase("ping");
+    const r = await api.speedtest(tunnel.name, seconds, streams, udp);
+    if (alive.current) finish(r);
+  };
 
   const go = async () => {
     setError("");
     setResult(null);
     setElapsed(0);
+    setLive(0);
+    setPartial({});
+    setSamples([]);
+    setBest(0);
     setPhase("ping");
     try {
-      const r = await api.speedtest(tunnel.name, seconds, streams, udp);
+      const started = await api.speedtestStart(tunnel.name, seconds, streams, udp);
       if (!alive.current) return;
-      setResult(r);
-      if (!r.ok) {
-        setError(r.error ?? t("speed.failed"));
+      if (!started.ok) {
+        if (/unknown request/i.test(started.error ?? "")) return await goBlocking();
+        setError(started.error === "busy" ? t("sp.busy") : started.error ?? t("speed.failed"));
         setPhase("failed");
         return;
       }
-      if (r.report) {
-        setLast(readLast(tunnel.name));
-        saveLast(tunnel.name, r.report);
+      let after = 0;
+      for (let misses = 0; ; ) {
+        let p;
+        try {
+          p = await api.speedtestPoll(tunnel.name, started.id, after);
+          misses = 0;
+        } catch (e) {
+          // A poll that fails now and then is not the end of the test.
+          if (++misses > 5) throw e;
+          await new Promise((r) => setTimeout(r, 600));
+          continue;
+        }
+        if (!alive.current) return;
+        after = p.next;
+        p.lines.forEach(apply);
+        if (!p.ok) {
+          setError(p.error ?? t("speed.failed"));
+          setPhase("failed");
+          return;
+        }
+        if (p.done) {
+          finish({ ok: !p.error, error: p.error, text: "", report: p.report });
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 400));
       }
-      setPhase("done");
     } catch (e) {
       if (!alive.current) return;
       setError(e instanceof ApiError ? e.code : String(e));
@@ -319,9 +413,10 @@ export function SpeedTest({ tunnel }: { tunnel: Tunnel }) {
   };
 
   const report = result?.report ?? null;
-  const down = report?.download.mbps ?? 0;
-  const up = report?.upload.mbps ?? 0;
-  const scale = scaleFor(Math.max(down, up, report ? 0 : Math.max(tunnel.rate, 50)));
+  // What the gauge shows: the report, else the rate right now in the phase that runs, else what the finished phases measured.
+  const down = report?.download.mbps ?? (phase === "down" ? live : partial.download?.mbps ?? 0);
+  const up = report?.upload.mbps ?? (phase === "up" ? live : partial.upload?.mbps ?? 0);
+  const scale = scaleFor(Math.max(down, up, best, report ? 0 : Math.max(tunnel.rate, 50)));
   const level = clamp(Math.log10(1 + down) / 4, 0, 1);
   const fmt = (v: number) => num(v, v >= 100 ? 0 : 1);
   const stepState = (s: Step) => {
@@ -333,11 +428,14 @@ export function SpeedTest({ tunnel }: { tunnel: Tunnel }) {
     return i < at ? "done" : i === at ? "active" : "wait";
   };
   const stepValue = (s: Step): string => {
-    if (!report) return "";
-    if (s === "ping") return `${num(report.idle.p50_ms, 0)} ms`;
-    if (s === "down") return `${fmt(report.download.mbps)} Mbps`;
-    if (s === "up") return `${fmt(report.upload.mbps)} Mbps`;
-    return report.udp ? `${num(lossOf(report.udp), 1)}%` : t("sp.noUdp");
+    const idle = report?.idle ?? partial.idle;
+    const dl = report?.download ?? partial.download;
+    const ul = report?.upload ?? partial.upload;
+    const u = report?.udp ?? partial.udp;
+    if (s === "ping") return idle ? `${num(idle.p50_ms, 0)} ms` : "";
+    if (s === "down") return dl ? `${fmt(dl.mbps)} Mbps` : stepState(s) === "active" && live > 0 ? `${fmt(live)} Mbps` : "";
+    if (s === "up") return ul ? `${fmt(ul.mbps)} Mbps` : stepState(s) === "active" && live > 0 ? `${fmt(live)} Mbps` : "";
+    return u ? `${num(lossOf(u), 1)}%` : report ? t("sp.noUdp") : "";
   };
   const canRun = tunnel.state === "up" && !!tunnel.entry;
 
@@ -364,25 +462,47 @@ export function SpeedTest({ tunnel }: { tunnel: Tunnel }) {
       </ol>
 
       <div className="sp-live" role="status" aria-live="polite">
-        {phase === "done" && report ? `↓ ${fmt(down)} Mbps, ↑ ${fmt(up)} Mbps` : running ? t(`sp.phase.${phase}`) : ""}
+        {phase === "done" && report
+          ? `↓ ${fmt(down)} Mbps, ↑ ${fmt(up)} Mbps`
+          : running
+            ? (phase === "down" || phase === "up") && live > 0
+              ? `${t(`sp.phase.${phase}`)}: ${fmt(live)} Mbps · ${t("sp.best", { v: fmt(best) })}`
+              : t(`sp.phase.${phase}`)
+            : ""}
       </div>
+      {running && (phase === "down" || phase === "up") && live > 0 && (
+        <p className="sp-now num" aria-hidden="true">
+          {phase === "down" ? "↓" : "↑"} {fmt(live)} Mbps · {t("sp.best", { v: fmt(best) })}
+        </p>
+      )}
+      {running && samples.length > 1 && (
+        <svg className="sp-spark" viewBox="0 0 120 24" preserveAspectRatio="none" aria-hidden="true">
+          <polyline points={samples.map((v, i) => `${(i / Math.max(1, samples.length - 1)) * 120},${22 - (v / Math.max(1, best)) * 20}`).join(" ")} />
+        </svg>
+      )}
 
       {phase === "done" && report && (
         <div className="sp-results">
           <div className="sp-card down">
-            <span className="label">↓ {t("sp.phase.down")}</span>
+            <span className="label"><bdi dir="ltr">↓</bdi> {t("sp.phase.down")}</span>
             <b className="num">{fmt(report.download.mbps)}</b>
-            <small>Mbps · {t("sp.peak", { v: fmt(report.download.peak_mbps) })}</small>
+            <small>
+              <bdi dir="ltr">Mbps</bdi> · {t("sp.peak", { v: fmt(report.download.peak_mbps) })}
+            </small>
           </div>
           <div className="sp-card up">
-            <span className="label">↑ {t("sp.phase.up")}</span>
+            <span className="label"><bdi dir="ltr">↑</bdi> {t("sp.phase.up")}</span>
             <b className="num">{fmt(report.upload.mbps)}</b>
-            <small>Mbps · {t("sp.peak", { v: fmt(report.upload.peak_mbps) })}</small>
+            <small>
+              <bdi dir="ltr">Mbps</bdi> · {t("sp.peak", { v: fmt(report.upload.peak_mbps) })}
+            </small>
           </div>
           <div className="sp-card">
             <span className="label">{t("sp.ping")}</span>
             <b className="num">{num(report.idle.p50_ms, 0)}</b>
-            <small>ms · p99 {num(report.idle.p99_ms, 0)}</small>
+            <small>
+              <bdi dir="ltr">ms · p99 {num(report.idle.p99_ms, 0)}</bdi>
+            </small>
           </div>
           <div className="sp-card">
             <span className="label">{t("sp.loaded")}</span>
@@ -418,13 +538,33 @@ export function SpeedTest({ tunnel }: { tunnel: Tunnel }) {
 
       <div className="sp-controls">
         <div className="sp-opt">
-          <span className="label">{t("sp.length")}</span>
-          <Seg value={String(seconds)} options={["5", "10", "20", "30"].map((v) => [v, `${num(+v)}s`] as [string, string])} onChange={(v) => !running && setSeconds(+v)} />
+          <span className="label">{t("sp.preset")}</span>
+          <Seg
+            value={presetOf(seconds, streams)}
+            options={(["quick", "standard", "max", "custom"] as Preset[]).map((p) => [p, t(`sp.preset.${p}`)] as [Preset, string])}
+            onChange={(p) => {
+              if (running) return;
+              if (p === "custom") setCustom(true);
+              else {
+                setCustom(false);
+                setSeconds(PRESETS[p].seconds);
+                setStreams(PRESETS[p].streams);
+              }
+            }}
+          />
         </div>
-        <div className="sp-opt">
-          <span className="label">{t("sp.streams")}</span>
-          <Seg value={String(streams)} options={["1", "4", "8"].map((v) => [v, num(+v)] as [string, string])} onChange={(v) => !running && setStreams(+v)} />
-        </div>
+        {(custom || presetOf(seconds, streams) === "custom") && (
+          <>
+            <div className="sp-opt">
+              <span className="label">{t("sp.length")}</span>
+              <Seg value={String(seconds)} options={["5", "10", "20", "30", "60"].map((v) => [v, `${num(+v)}s`] as [string, string])} onChange={(v) => !running && setSeconds(+v)} />
+            </div>
+            <div className="sp-opt">
+              <span className="label">{t("sp.streams")}</span>
+              <Seg value={String(streams)} options={["1", "4", "8", "16", "32"].map((v) => [v, num(+v)] as [string, string])} onChange={(v) => !running && setStreams(+v)} />
+            </div>
+          </>
+        )}
         <label className="check sp-opt">
           <input type="checkbox" checked={udp} disabled={running} onChange={(e) => setUdp(e.target.checked)} /> {t("sp.udp")}
         </label>
@@ -435,6 +575,7 @@ export function SpeedTest({ tunnel }: { tunnel: Tunnel }) {
           {phase === "done" || phase === "failed" ? t("sp.again") : t("sp.go")}
         </button>
       </div>
+      {presetOf(seconds, streams) === "max" && <p className="muted small">{t("sp.maxHint")}</p>}
       <p className="muted small sp-note">
         {canRun ? t("sp.idle") : t("sp.off")}
         {last && ` ${t("sp.last", { ago: ago((Date.now() - last.at) / 1000), d: fmt(last.d), u: fmt(last.u) })}`}

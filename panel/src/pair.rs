@@ -878,6 +878,65 @@ pub async fn logs(hub: &Hub, name: &str, lines: u32) -> Result<Vec<LogLine>> {
 }
 
 /// Runs the speed test of a tunnel on its entry side and returns what it printed.
+/// The server that runs a tunnel's speed test: the one with its entry side.
+fn speedtest_server(hub: &Hub, name: &str) -> Result<String> {
+    if !valid_name(name) {
+        bail!("bad_name");
+    }
+    let placement = place(hub, name)?;
+    placement
+        .sides
+        .into_iter()
+        .find(|(_, t)| t.role == "entry")
+        .map(|(server, _)| server)
+        .ok_or_else(|| anyhow::anyhow!("no_such_tunnel"))
+}
+
+/// Starts a speed test that can be followed while it runs; its id comes back.
+pub async fn speedtest_start(
+    hub: &Hub,
+    name: &str,
+    seconds: u32,
+    streams: u32,
+    udp: bool,
+) -> Result<crate::wire::SpeedStarted> {
+    let server = speedtest_server(hub, name)?;
+    let raw = hub
+        .ask(
+            &server,
+            &Request::SpeedtestStart {
+                name: name.to_owned(),
+                seconds,
+                streams,
+                udp,
+            },
+        )
+        .await?;
+    serde_json::from_slice(&raw)
+        .map_err(|_| anyhow::anyhow!("the server's answer was not understood"))
+}
+
+/// What a started speed test has said since `after` lines.
+pub async fn speedtest_poll(
+    hub: &Hub,
+    name: &str,
+    id: &str,
+    after: u32,
+) -> Result<crate::wire::SpeedPoll> {
+    let server = speedtest_server(hub, name)?;
+    let raw = hub
+        .ask(
+            &server,
+            &Request::SpeedtestPoll {
+                id: id.to_owned(),
+                after,
+            },
+        )
+        .await?;
+    serde_json::from_slice(&raw)
+        .map_err(|_| anyhow::anyhow!("the server's answer was not understood"))
+}
+
 pub async fn speedtest(
     hub: &Hub,
     name: &str,
