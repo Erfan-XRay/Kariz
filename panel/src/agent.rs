@@ -432,6 +432,9 @@ impl Agent {
                 let dir = self.config().kariz_dir;
                 to_json(&manage::speedtest(&dir, &name, seconds, streams, udp).await)
             }
+            Request::TunnelCert { domain, email } => {
+                to_json(&manage::issue_cert(&domain, email.as_deref()).await)
+            }
             Request::SpeedtestStart {
                 name,
                 seconds,

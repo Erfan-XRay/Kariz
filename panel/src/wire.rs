@@ -46,6 +46,13 @@ pub enum Request {
         streams: u32,
         udp: bool,
     },
+    /// Get a Let's Encrypt certificate for a domain (or a public IPv4 address) on this
+    /// server, for a wss tunnel that listens here. Runs `kariz-manager tunnel-cert`.
+    TunnelCert {
+        domain: String,
+        #[serde(default)]
+        email: Option<String>,
+    },
     /// Start the entry side's speed test in the background; its progress is read with
     /// [`Request::SpeedtestPoll`] while it runs.
     SpeedtestStart {
@@ -195,6 +202,12 @@ pub struct Spec {
     pub tls_sni: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_pin: Option<String>,
+    /// A listening wss side: the certificate and key files of a real certificate (made by
+    /// [`Request::TunnelCert`], under `/etc/letsencrypt/live/`) instead of a self-signed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_key: Option<String>,
     /// Mux settings; left out, the profile's apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mux: Option<MuxSpec>,
@@ -259,6 +272,18 @@ pub struct SpeedReply {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<kariz::speedtest::Report>,
+}
+
+/// The answer to [`Request::TunnelCert`]: the files of the certificate, or why there are none.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CertReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// The answer to [`Request::SpeedtestStart`].

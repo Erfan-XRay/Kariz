@@ -4,6 +4,25 @@
 
 ### Added
 
+- **A live speed test.** The entry server runs the test in the background and the panel follows
+  it: the phase it is in, the rate every half second (with the best so far and a small chart),
+  and the result of each step the moment it ends, instead of a loading animation until the
+  end. Older agents still work: their test shows its numbers at the end.
+- **Speed test settings to find the most a tunnel carries:** *Quick*, *Standard* and *Max*
+  (16 streams for 20 s), and *Custom* with up to 32 streams and 60 s.
+- **`wss` with a real certificate.** A wss tunnel can use a self-signed certificate (pinned, as
+  before) or a Let's Encrypt one for a domain or a public IPv4 address, got with one button on
+  the server that listens (`kariz-manager tunnel-cert`: port 80 is freed for a moment, the
+  renewal timer does the rest, the tunnel reloads the renewed files).
+- **An auto tunnel says which transport it uses now**, in the tunnel list and on its page
+  (`auto → kcp`), from the live sessions (`kariz status` shows `via kcp` too).
+- **Ready-made address pools** for a new private network (five, with how many links each
+  holds; one a server already routes is greyed out).
+- **Mux is a switch, and `tcpmux` is just `tcp`.** The transports are `auto`, `tcp`, `ws`,
+  `wss`, `quic` and `kcp`; *Mux* is on or off for `tcp`, `ws`, `wss` and `kcp` (always on for
+  `auto` and `quic`) and its settings show only while it is on. `tcp` with mux on is what the
+  core calls `tcpmux`; existing tunnels keep working and show as `tcp`.
+
 - **The manager offers updates.** Opening the menu (or `kariz-manager status`) looks for a newer
   release and, if the core, the panel or the agent here is older, says which and asks to update
   them all. `--agent CODE` updates an older program first (an old agent refuses what a newer

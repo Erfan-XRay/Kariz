@@ -40,6 +40,12 @@ pub struct PairRequest {
     /// Mux settings, the same on both sides; left out, the profile's apply.
     #[serde(default)]
     pub mux: Option<crate::wire::MuxSpec>,
+    /// wss: the files of a real certificate on the listening side (from [`certificate`]),
+    /// instead of a self-signed one the dialing side pins.
+    #[serde(default)]
+    pub tls_cert: Option<String>,
+    #[serde(default)]
+    pub tls_key: Option<String>,
     #[serde(default)]
     pub forwards: Vec<ForwardInfo>,
     /// Edit only: make a new token for both sides.
@@ -71,8 +77,14 @@ impl PairRequest {
             ws_host: self.ws_host.clone(),
             mux: self.mux.clone().filter(|m| !m.is_empty()),
             tls_sni: (!accepts).then(|| self.tls_sni.clone()).flatten(),
-            tls_pin: (!accepts && self.transport == "wss")
+            tls_pin: (!accepts && self.transport == "wss" && self.tls_cert.is_none())
                 .then(|| pin.map(str::to_owned))
+                .flatten(),
+            tls_cert: (accepts && self.transport == "wss")
+                .then(|| self.tls_cert.clone())
+                .flatten(),
+            tls_key: (accepts && self.transport == "wss")
+                .then(|| self.tls_key.clone())
                 .flatten(),
             forwards: if role == "entry" {
                 self.forwards.clone()
@@ -878,6 +890,28 @@ pub async fn logs(hub: &Hub, name: &str, lines: u32) -> Result<Vec<LogLine>> {
 }
 
 /// Runs the speed test of a tunnel on its entry side and returns what it printed.
+/// Gets a Let's Encrypt certificate for `host` on `server` (for a wss tunnel that listens
+/// there). It can take a minute: certbot is installed first if the server has none.
+pub async fn certificate(
+    hub: &Hub,
+    server: &str,
+    host: &str,
+    email: Option<&str>,
+) -> Result<crate::wire::CertReply> {
+    let raw = hub
+        .ask_within(
+            server,
+            &Request::TunnelCert {
+                domain: host.to_owned(),
+                email: email.map(str::to_owned),
+            },
+            Duration::from_secs(660),
+        )
+        .await?;
+    serde_json::from_slice(&raw)
+        .map_err(|_| anyhow::anyhow!("the server's answer was not understood (an older agent cannot get certificates: update it)"))
+}
+
 /// The server that runs a tunnel's speed test: the one with its entry side.
 fn speedtest_server(hub: &Hub, name: &str) -> Result<String> {
     if !valid_name(name) {
@@ -998,6 +1032,8 @@ mod tests {
             ws_host: None,
             tls_sni: None,
             mux,
+            tls_cert: None,
+            tls_key: None,
             forwards: Vec::new(),
             rotate: false,
             network: None,

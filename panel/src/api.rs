@@ -61,6 +61,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/events", get(events))
         .route("/api/logs", get(tunnel_logs))
         .route("/api/tunnels/speedtest", post(tunnel_speedtest))
+        .route("/api/tunnels/cert", post(tunnel_cert))
         .route("/api/tunnels/speedtest/start", post(tunnel_speedtest_start))
         .route("/api/tunnels/speedtest/poll", post(tunnel_speedtest_poll))
         .route("/api/networks", get(networks_list).post(network_create))
@@ -903,6 +904,42 @@ async fn tunnel_speedtest_start(
             "bad_name" => error(StatusCode::BAD_REQUEST, "bad_name"),
             _ => internal(e),
         },
+    }
+}
+
+#[derive(Deserialize)]
+struct CertBody {
+    server: String,
+    host: String,
+    email: Option<String>,
+}
+
+/// Gets a certificate for a wss tunnel's listening server (it can take a minute).
+async fn tunnel_cert(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<CertBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    audit(
+        &state,
+        &format!("session {}", me.id),
+        &ip_of(&peer),
+        &format!(
+            "asked for a certificate for {} on {}",
+            body.host, body.server
+        ),
+    );
+    match pair::certificate(&state.hub, &body.server, &body.host, body.email.as_deref()).await {
+        Ok(r) => reply(
+            StatusCode::OK,
+            json!({ "ok": r.ok, "error": r.error, "cert": r.cert, "key": r.key }),
+        ),
+        Err(e) => internal(e),
     }
 }
 

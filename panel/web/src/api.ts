@@ -155,6 +155,9 @@ export interface PairRequest {
   ws_host?: string;
   tls_sni?: string;
   mux?: MuxSpec;
+  /** wss: the files of a real certificate on the listening side. */
+  tls_cert?: string;
+  tls_key?: string;
   forwards: ForwardSpec[];
   rotate?: boolean;
   /** Direct mode: run over this private GRE network (its id). */
@@ -176,6 +179,8 @@ export interface Spec {
   tls_sni?: string;
   tls_pin?: string;
   mux?: MuxSpec;
+  tls_cert?: string;
+  tls_key?: string;
   forwards: ForwardSpec[];
 }
 
@@ -315,6 +320,8 @@ export const api = {
   revoke: (id: number) => call<object>("POST", "sessions/revoke", { id }),
   changePassword: (current: string | undefined, next: string) =>
     call<object>("POST", "password", { current, new: next }),
+  tunnelCert: (server: string, host: string, email?: string) =>
+    call<{ ok: boolean; error: string | null; cert: string | null; key: string | null }>("POST", "tunnels/cert", { server, host, email }),
   tunnelCheck: (body: PairRequest) => call<{ entry: CheckReply; exit: CheckReply }>("POST", "tunnels/check", body),
   createTunnel: (body: PairRequest) => call<{ op: string }>("POST", "tunnels", body),
   editTunnel: (body: PairRequest) => call<{ op: string }>("POST", "tunnels/edit", body),
