@@ -9,6 +9,7 @@ import { Checklist, opError, useOp } from "./ops";
 import { MuxFields, MuxToggle, muxFromSpec, muxSpecOf, muxToSpec } from "./MuxFields";
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
+import { QuicObfs, obfsOf } from "./QuicObfs";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, splitTransport } from "./transport";
 import { PROFILES, addressesOf, hostOf, parsePorts, portOf } from "./Wizard";
 
@@ -38,6 +39,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
   const [tls, setTls] = useState(emptyTls());
   const [enc, setEnc] = useState("auto");
   const [encAck, setEncAck] = useState(false);
+  const [obfs, setObfs] = useState(false);
   const [rotate, setRotate] = useState(false);
   const [error, setError] = useState("");
   const [opId, setOpId] = useState<string | null>(null);
@@ -94,6 +96,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
         setTarget(hostOf(list[0]?.target) || "127.0.0.1");
         setMux(muxFromSpec(a.mux ?? b.mux));
         setEnc(a.encryption ?? "auto");
+        setObfs(!!(a.quic_obfs ?? b.quic_obfs));
         // A tunnel that has no encryption already was confirmed when it was made.
         setEncAck((a.encryption ?? "auto") === "none");
         const real = acc.tls_cert && acc.tls_key ? { cert: acc.tls_cert, key: acc.tls_key } : null;
@@ -126,6 +129,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
     tls_sni: transport === "wss" && sni.trim() ? sni.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
     encryption: cipherOf(enc, transport),
+    quic_obfs: obfsOf(obfs, transport),
     tls_cert: transport === "wss" && tls.mode === "real" && tls.cert ? tls.cert : undefined,
     tls_key: transport === "wss" && tls.mode === "real" && tls.key ? tls.key : undefined,
     rotate: rotate ? true : undefined,
@@ -225,6 +229,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
               {choose(PROFILES, profile, setProfile, (x) => [t(`wz.pf.${x}`), t(`wz.pf.${x}.d`)])}
             </div>
             <EncryptionChoice value={enc} onChange={setEnc} transport={transport} ack={encAck} onAck={setEncAck} />
+            {transport === "quic" && <QuicObfs value={obfs} onChange={setObfs} />}
           </fieldset>
 
           <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>

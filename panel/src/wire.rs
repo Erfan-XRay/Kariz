@@ -217,6 +217,11 @@ pub struct Spec {
     /// clear, authenticated only). Left out: `auto` (AES where the CPU has it, else ChaCha).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption: Option<String>,
+    /// A `quic` tunnel's `[tunnel.quic] obfs`: every UDP packet sealed with a key from the token,
+    /// so the traffic does not look like QUIC. Left out: off. Only an agent of 1.7 or newer
+    /// reads it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quic_obfs: bool,
     #[serde(default)]
     pub forwards: Vec<ForwardInfo>,
 }

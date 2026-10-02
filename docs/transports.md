@@ -82,7 +82,8 @@ inside: the TLS 1.3 handshake and the streams run as before.
 - It costs 28 bytes a packet (QUIC's packet size is lowered by as much, so the packets on
   the wire stay the same size) and some CPU.
 - Both sides must agree. A side that does not speak it sees noise, and the other side
-  times out connecting.
+  times out connecting. In the panel's tunnel wizard it is a switch under the transport,
+  on by default for `quic`.
 - It hides the protocol, not the fact that UDP flows to this address; where all UDP is
   blocked it does not help (use `tcpmux` or `wss`).
 
