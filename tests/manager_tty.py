@@ -16,7 +16,9 @@ import time
 
 ANSI = re.compile(rb"\x1b\[[0-9;]*m")
 TIMEOUT = 20
-MENU = "Install or update Kariz"
+# The menu's own key line: always on the screen (the list scrolls on a small terminal, so an
+# item's name may not be), and no screen of an action has it.
+MENU = "a number jumps"
 
 
 class Session:
