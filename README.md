@@ -104,6 +104,20 @@ cargo build --release --no-default-features   # without quic and kcp
 The panel's web app is in `panel/web` (`npm ci && npm run build`), the website in `site/`. The design and the
 protocol are described in [docs/ROADMAP.md](docs/ROADMAP.md).
 
+## Support
+
+Kariz is made by one person and is free to run on your own servers. If it helps you and you want it to go on,
+you can donate; it is never required. Send each coin **only on the network shown next to it**: a coin sent on
+another network cannot be recovered. (The same, in [English](docs/support.md) and [Persian](docs/fa/support.md), is on the website.)
+
+| Coin | Network | Address |
+|---|---|---|
+| USDT | TRON (TRC20) | `TKM87mEXhUpEBzqvNxs1qjM4EddX6VMXmw` |
+| Gram | TON | `UQDfjT-h4ENIrt_Sq5-zBy9TvhckniwSLCkS7zIVX4fVSaFw` |
+| Bitcoin (BTC) | Bitcoin | `bc1qc4cgy5etuwj2375c5zqma7xmjtk59s5s49rfp5` |
+
+A star on the repository, a report of a problem with its log, and a word to other server operators help just as much.
+
 ## License
 
 Kariz is **source-available, not open source**. You may read the code and run the official releases on your

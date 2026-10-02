@@ -27,6 +27,7 @@ export const ui = {
     docs: "Documentation",
     tryPanel: "Try the panel",
     github: "GitHub",
+    support: "Support",
     search: "Search the docs",
     searchPlaceholder: "Search the documentation",
     searchNone: "Nothing found for",
@@ -63,6 +64,7 @@ export const ui = {
     docs: "مستندات",
     tryPanel: "پنل را امتحان کنید",
     github: "گیت‌هاب",
+    support: "حمایت",
     search: "جستجو در مستندات",
     searchPlaceholder: "جستجو در مستندات",
     searchNone: "چیزی پیدا نشد برای",
@@ -108,7 +110,7 @@ export const SECTIONS: Section[] = [
   { id: "guides", title: { en: "Guides", fa: "راهنماها" }, pages: ["networks", "troubleshooting", "speedtest", "performance"] },
   { id: "reference", title: { en: "Reference", fa: "مرجع" }, pages: ["configuration", "status", "accessibility"] },
   { id: "security", title: { en: "Security", fa: "امنیت" }, pages: ["security", "security-review"] },
-  { id: "project", title: { en: "Project", fa: "پروژه" }, pages: ["changelog", "roadmap"] },
+  { id: "project", title: { en: "Project", fa: "پروژه" }, pages: ["changelog", "roadmap", "support"] },
 ];
 
 /** Short names for the sidebar; a page not listed uses its own heading. */
@@ -134,6 +136,7 @@ export const LABELS: Record<string, Record<Lang, string>> = {
   "security-review": { en: "Security review", fa: "بازبینی امنیتی" },
   changelog: { en: "Changelog", fa: "تغییرات" },
   roadmap: { en: "Design and protocol", fa: "طراحی و پروتکل" },
+  support: { en: "Support Kariz", fa: "حمایت از کاریز" },
 };
 
 /** Pages made by the site itself (not a file of docs/): they exist in both languages. */
