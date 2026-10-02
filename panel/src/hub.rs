@@ -282,9 +282,45 @@ impl Hub {
 
     /// The address other servers reach `server` at: the one that was set, else the address
     /// the server is known by (what it connected with), so a private network needs no typing.
+    ///
+    /// A server that is not connected (the panel has just restarted and its agents have not
+    /// come back yet) is still known by the address it had last, so a link to it is never
+    /// treated as one without an address.
     pub fn addr_of(&self, server: &str) -> Option<String> {
-        self.saved_addr(server)
-            .or_else(|| self.default_addr(server))
+        if let Some(saved) = self.saved_addr(server) {
+            return Some(saved);
+        }
+        match self.default_addr(server) {
+            Some(addr) => {
+                self.remember_seen(server, &addr);
+                Some(addr)
+            }
+            None => self.seen_addr(server),
+        }
+    }
+
+    /// The address `server` was last known by while it was connected.
+    fn seen_addr(&self, server: &str) -> Option<String> {
+        self.db
+            .conn()
+            .query_row(
+                "SELECT addr FROM server_seen WHERE server = ?1",
+                [server],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// Keeps the address a server is known by, for after a restart. Nothing is written
+    /// while it is the same.
+    fn remember_seen(&self, server: &str, addr: &str) {
+        let _ = self.db.conn().execute(
+            "INSERT INTO server_seen (server, addr) VALUES (?1, ?2)
+             ON CONFLICT (server) DO UPDATE SET addr = excluded.addr WHERE addr != excluded.addr",
+            params![server, addr],
+        );
     }
 
     /// The address that was set for `server`, if one was.
@@ -554,6 +590,7 @@ impl Hub {
             let conn = self.db.conn();
             conn.execute("DELETE FROM net_links WHERE a = ?1 OR b = ?1", [id])?;
             conn.execute("DELETE FROM server_addrs WHERE server = ?1", [id])?;
+            conn.execute("DELETE FROM server_seen WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM pending_deletes WHERE server = ?1", [id])?;
         }
         let removed = self
@@ -607,7 +644,7 @@ impl Hub {
     }
 
     async fn run_session(
-        &self,
+        self: &Arc<Self>,
         session: Arc<Session>,
         link: &'static str,
         peer_ip: std::net::IpAddr,
@@ -646,6 +683,9 @@ impl Hub {
         if let Err(e) = self.net_sync(&id).await {
             warn!(server = %id, error = %e, "the private network links could not be synced");
         }
+        // And the servers at the other ends of those links: this one may have a new address,
+        // and a link that went down on their side while it was away is made again.
+        self.net_sync_peers(&id);
         let result = self.poll(&id, &session).await;
         // Said at warn, with the reason: when a server goes offline by itself, this is the
         // line that tells why (the agent's own log has the other end of it).
@@ -909,6 +949,12 @@ impl Hub {
                 entry.arch = std::env::consts::ARCH.to_owned();
             }
             self.update(LOCAL, Some(health), tunnels);
+            // The first sync went with the address this server had last; now it knows its own.
+            if round == 1 {
+                if let Err(e) = self.net_sync(LOCAL).await {
+                    warn!(error = %e, "the private network links could not be synced");
+                }
+            }
             tokio::time::sleep(POLL).await;
         }
     }
@@ -1053,6 +1099,58 @@ mod tests {
         // A new server never takes that name.
         assert_eq!(hub.unique_name("tehran-main").unwrap(), "tehran-main-2");
         assert_eq!(hub.unique_name("frankfurt").unwrap(), "frankfurt");
+    }
+
+    /// What an update of the panel looks like to it: it starts, and no agent is connected yet.
+    #[test]
+    fn after_a_restart_a_link_is_not_dropped_for_a_server_that_has_not_connected_yet() {
+        let hub = Hub::new(
+            Db::in_memory().unwrap(),
+            std::env::temp_dir().join("kariz-none"),
+        );
+        let net = hub
+            .networks
+            .create_network("main", "10.77.0.0/24", &[])
+            .unwrap();
+        // The two servers were connected, and the panel knew where they were.
+        hub.live().entry("far".into()).or_default().health =
+            Some(health(Some("203.0.113.9"), None));
+        hub.live().entry(LOCAL.into()).or_default().health = Some(health(Some("192.0.2.1"), None));
+        assert_eq!(hub.addr_of("far").as_deref(), Some("203.0.113.9"));
+        assert_eq!(hub.addr_of(LOCAL).as_deref(), Some("192.0.2.1"));
+        hub.networks
+            .create_links(
+                &net.id,
+                &[(LOCAL.to_owned(), "far".to_owned())],
+                &Default::default(),
+            )
+            .unwrap();
+        assert_eq!(hub.net_specs(LOCAL).unwrap().len(), 1);
+
+        // The panel restarts: nothing is connected, and no health has come in.
+        hub.live().clear();
+        let specs = hub.net_specs(LOCAL).unwrap();
+        assert_eq!(
+            specs.len(),
+            1,
+            "the link is still in the list the agent gets"
+        );
+        assert_eq!(
+            (specs[0].local.as_str(), specs[0].remote.as_str()),
+            ("192.0.2.1", "203.0.113.9")
+        );
+        assert_eq!(hub.net_specs("far").unwrap().len(), 1);
+        assert_eq!(hub.net_peers(LOCAL), vec!["far".to_owned()]);
+
+        // A server whose address was never known gives no list at all, never a partial one.
+        hub.db
+            .conn()
+            .execute("DELETE FROM server_seen WHERE server = 'far'", [])
+            .unwrap();
+        assert!(hub.net_specs(LOCAL).is_err());
+        assert!(hub.net_specs("far").is_err());
+        // A server with no link is not held back by it.
+        assert!(hub.net_specs("other").unwrap().is_empty());
     }
 
     #[test]

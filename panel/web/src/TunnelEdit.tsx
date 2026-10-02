@@ -10,6 +10,8 @@ import { MuxFields, MuxToggle, muxFromSpec, muxSpecOf, muxToSpec } from "./MuxFi
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
+import { GreChoice, linkWithAddress } from "./GreChoice";
+import { useNetworks } from "./Networks";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, splitTransport } from "./transport";
 import { PROFILES, addressesOf, hostOf, parsePorts, portOf } from "./Wizard";
 
@@ -40,6 +42,12 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
   const [enc, setEnc] = useState("auto");
   const [encAck, setEncAck] = useState(false);
   const [obfs, setObfs] = useState(false);
+  // The private GRE network the tunnel runs over (its id), or none: found from the address the
+  // tunnel listens on once the networks have come in.
+  const [netId, setNetId] = useState("");
+  const [loadedHost, setLoadedHost] = useState<string | null>(null);
+  const [netReady, setNetReady] = useState(false);
+  const { networks, links, loaded: netsLoaded } = useNetworks();
   const [rotate, setRotate] = useState(false);
   const [error, setError] = useState("");
   const [opId, setOpId] = useState<string | null>(null);
@@ -83,6 +91,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
         setTransport(split.transport);
         setMuxOn(split.mux);
         setProfile(a.profile ?? "balanced");
+        setLoadedHost(hostOf(acc.listen));
         setListenHost(hostOf(acc.listen) || "0.0.0.0");
         setListenPort(portOf(acc.listen));
         setDialHost(hostOf(dia.remote));
@@ -113,6 +122,24 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
     };
   }, [tunnel.name]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A tunnel that listens on the private address of a link runs over that link's network.
+  useEffect(() => {
+    if (loadedHost === null || !netsLoaded || netReady) return;
+    const link = linkWithAddress(links, loadedHost);
+    if (link) setNetId(link.network);
+    setNetReady(true);
+  }, [loadedHost, netsLoaded, netReady, links]);
+
+  // Off the network, the tunnel goes back to the public addresses: it listens on every address and
+  // dials the one the panel knows the accepting server by (changeable below).
+  const chooseNetwork = (id: string) => {
+    if (!id && netId) {
+      setListenHost("0.0.0.0");
+      setDialHost(choices[0] ?? "");
+    }
+    setNetId(id);
+  };
+
   const muxSpec = muxToSpec(mux);
   const request = (): PairRequest => ({
     name: tunnel.name,
@@ -123,6 +150,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
     profile,
     listen: `${listenHost}:${listenPort}`,
     dial: `${dialHost.includes(":") && !dialHost.startsWith("[") ? `[${dialHost}]` : dialHost}:${listenPort}`,
+    network: netId || undefined,
     pool,
     ws_path: isWs ? wsPath : undefined,
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
@@ -137,15 +165,16 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
   });
 
   // What was loaded, to tell whether anything changed.
-  const now = loading ? "" : JSON.stringify(request());
+  const ready = !loading && (blocked || netReady);
+  const now = ready ? JSON.stringify(request()) : "";
   useEffect(() => {
-    if (!loading && !initial) setInitial(now);
-  }, [loading, now]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (ready && !initial) setInitial(now);
+  }, [ready, now]); // eslint-disable-line react-hooks/exhaustive-deps
   const dirty = !!initial && now !== initial;
 
   const problem = (): string => {
     if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
-    if (!dialHost.trim()) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
+    if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
     if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
     if (transport === "wss" && !tlsReady(tls)) return t("tls.needCert");
     if (!cipherReady(enc, transport, encAck)) return t("enc.needAck");
@@ -235,13 +264,15 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
           <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>
             <legend>{t("te.where")}</legend>
             <p className="muted small">{t("wz.lead3", { acceptor: serverName(acceptor), dialer: serverName(dialer) })}</p>
+            <GreChoice value={netId} onChange={chooseNetwork} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} />
+            {!netId && loadedHost !== null && !!linkWithAddress(links, loadedHost) && <p className="help warn-text">{t("te.greOff")}</p>}
             <div className="grid-2">
               <div className="field">
                 <label htmlFor="te-port">{t("wz.port", { server: serverName(acceptor) })}</label>
                 <input className="text mono" id="te-port" dir="ltr" inputMode="numeric" value={listenPort} onChange={(e) => setListenPort(e.target.value.trim())} />
                 {transport === "auto" && <span className="help">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</span>}
               </div>
-              <div className="field">
+              <div className="field" hidden={!!netId}>
                 <label htmlFor="te-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>
                 <input className="text mono" id="te-dial" dir="ltr" value={dialHost} placeholder="203.0.113.5" onChange={(e) => setDialHost(e.target.value.trim())} />
                 {choices.length > 0 && (

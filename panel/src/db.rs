@@ -108,6 +108,10 @@ const MIGRATIONS: &[&str] = &[
          name TEXT NOT NULL,
          PRIMARY KEY (server, name)
      );",
+    // 9: the address each server was last known by. After the panel restarts nothing is
+    // connected yet, and a private network link whose other end has no address would be
+    // left out of the list an agent is sent (and the agent removes what is not in it).
+    "CREATE TABLE server_seen (server TEXT PRIMARY KEY, addr TEXT NOT NULL);",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a
