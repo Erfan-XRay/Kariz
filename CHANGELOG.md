@@ -1,9 +1,26 @@
 # Changelog
 
-## Unreleased
+## 1.8.0 - 2026-10-02
+
+### Fixed
+
+- **A private GRE network no longer goes dead when the panel's server is updated.** After the panel
+  restarted, nothing was connected yet, so a link whose other end had no address was left out of the
+  list its server was sent, and the agent removes every link that is not in the list: the panel's own
+  server lost its links and never got them back. The panel now keeps the address each server was last
+  known by, never sends a partial list (if an address is missing it sends none, and the agent keeps
+  what it has), and tells the servers at the other end of a link when one connects. An agent that is
+  only restarted (an update) leaves GRE interfaces the kernel already has alone, instead of deleting
+  and making them again, so the tunnels over them keep their connections.
 
 ### Added
 
+- **A private GRE network for a reverse tunnel too.** The wizard offers the network for both kinds of
+  tunnel; the tunnel listens on and dials the private address of the server that accepts its
+  connections (the entry when reverse, the exit when direct).
+- **GRE on the edit page.** It shows the network a tunnel runs over, lets you move a tunnel onto a
+  network or off it (it then goes back to the public addresses; the link stays for other tunnels), and
+  makes the link first if the two servers have none. A link made for an edit that fails is removed again.
 - **Sealed QUIC in the tunnel wizard and the edit page.** When the transport is `quic`, a switch *Seal
   every packet (obfs)* writes `[tunnel.quic] obfs = true` on both sides. It is on by default in the
   wizard, since that is what makes QUIC usable on a network that filters it; turn it off to get plain
