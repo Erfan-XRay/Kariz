@@ -92,7 +92,7 @@ export interface SpeedPoll {
 }
 
 /** How an agent reaches the panel: `auto` tries every transport in turn. */
-export type LinkTransport = "auto" | "tcpmux" | "kcp" | "wss";
+export type LinkTransport = "auto" | "tcpmux" | "kcp" | "wss" | "quic";
 
 export interface ServerInfo {
   id: string;

@@ -10,7 +10,7 @@ import type { MapData, MapHit } from "./scene-map";
 import { useApp } from "./store";
 import { BackupDialog, RestoreDialog } from "./Extras";
 import { transportLabel } from "./transport";
-import { Card, CodeBlock, Dialog, Empty, Icon, Odo, Seg, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
+import { Card, CodeBlock, CopyValue, Dialog, Empty, Icon, Odo, Seg, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
 
 // ---------------------------------------------------------------- the map
 
@@ -474,15 +474,17 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
     ...(own?.v6 ? [[t("add.addr.v6"), own.v6] as [string, string]] : []),
     ...(here && here !== own?.v4 && here !== own?.v6 ? [[t("add.addr.here"), here] as [string, string]] : []),
   ];
-  const portText = (x: LinkTransport) => (port == null ? "?" : String(x === "wss" ? port + 1 : port));
+  const portText = (x: LinkTransport) => (port == null ? "?" : String(x === "wss" || x === "quic" ? port + 1 : port));
   const openList =
     port == null
       ? ""
       : transport === "auto"
-        ? `TCP ${port}, UDP ${port}, TCP ${port + 1}`
+        ? `TCP ${port}, UDP ${port}, TCP ${port + 1}, UDP ${port + 1}`
         : transport === "kcp"
           ? `UDP ${port}`
-          : `TCP ${portText(transport)}`;
+          : transport === "quic"
+            ? `UDP ${port + 1}`
+            : `TCP ${portText(transport)}`;
   return (
     <Dialog
       title={t("add.title")}
@@ -541,7 +543,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
             <span className="label">{t("add.transport")}</span>
             <Seg
               value={transport}
-              options={(["auto", "tcpmux", "kcp", "wss"] as LinkTransport[]).map((x) => [x, t(`add.x.${x}`)] as [LinkTransport, string])}
+              options={(["auto", "tcpmux", "kcp", "wss", "quic"] as LinkTransport[]).map((x) => [x, t(`add.x.${x}`)] as [LinkTransport, string])}
               onChange={setTransport}
             />
             <span className="help">{t(`add.x.${transport}.d`, { p: portText(transport) })}</span>
@@ -551,7 +553,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
                 <code dir="ltr">{openList}</code>
               </span>
             )}
-            {transport !== "auto" && <span className="help">{t("add.newAgent")}</span>}
+            {transport !== "auto" && <span className="help">{t(transport === "quic" ? "add.newAgentQuic" : "add.newAgent")}</span>}
           </div>
         </>
       )}
@@ -683,25 +685,13 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                 </dl>
                 {(s.ip4 || s.ip6) && (
                   <div className="srv-ips" dir="ltr">
-                    {s.ip4 && (
-                      <span className="srv-ip">
-                        <b>{t("srv.ip4")}</b> {s.ip4}
-                      </span>
-                    )}
-                    {s.ip6 && (
-                      <span className="srv-ip">
-                        <b>{t("srv.ip6")}</b> {s.ip6}
-                      </span>
-                    )}
+                    {s.ip4 && <CopyValue what={t("srv.ip4")} label={t("srv.ip4")} value={s.ip4} />}
+                    {s.ip6 && <CopyValue what={t("srv.ip6")} label={t("srv.ip6")} value={s.ip6} />}
                   </div>
                 )}
                 <footer className="srv-foot">
                   <span className={`badge ${s.tunnels.length ? "" : "muted"}`}>{t(s.tunnels.length === 1 ? "srv.tn1" : "srv.tn", { n: num(s.tunnels.length) })}</span>
-                  {s.addr && s.addr !== s.ip4 && s.addr !== s.ip6 && (
-                    <span className="srv-ip" title={t("net.addresses")}>
-                      {s.addr}
-                    </span>
-                  )}
+                  {s.addr && s.addr !== s.ip4 && s.addr !== s.ip6 && <CopyValue what={t("srv.address")} value={s.addr} />}
                   <span className="grow" />
                   {!s.local && (
                     <button className="btn btn-quiet btn-sm" type="button" onClick={() => setRemoving(s)}>

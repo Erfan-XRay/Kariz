@@ -13,6 +13,8 @@ pub mod kcp;
 pub mod kcp;
 #[cfg(feature = "quic")]
 pub mod quic;
+#[cfg(feature = "quic")]
+mod quic_obfs;
 pub mod tcp;
 pub mod tls;
 pub mod ws;
