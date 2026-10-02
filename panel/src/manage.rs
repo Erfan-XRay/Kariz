@@ -55,6 +55,11 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
     if let Some(cipher) = spec.encryption.as_deref().filter(|c| *c != "auto") {
         tunnel.insert("encryption".into(), text(cipher));
     }
+    if spec.quic_obfs && spec.transport == "quic" {
+        let mut quic = Table::new();
+        quic.insert("obfs".into(), Value::Boolean(true));
+        tunnel.insert("quic".into(), Value::Table(quic));
+    }
     if let Some(listen) = &spec.listen {
         tunnel.insert("listen".into(), text(listen));
     }
@@ -353,6 +358,7 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
         ws_host: c.tunnel.ws.as_ref().and_then(|w| w.host.clone()),
         encryption: (c.tunnel.encryption != kariz::config::Encryption::Auto)
             .then(|| c.tunnel.encryption.name().to_owned()),
+        quic_obfs: c.tunnel.quic.as_ref().is_some_and(|q| q.obfs),
         mux: Some(crate::wire::MuxSpec {
             enabled: c.tunnel.mux.enabled,
             connections: c.tunnel.mux.connections.and_then(|v| u32::try_from(v).ok()),
@@ -1198,6 +1204,36 @@ mod tests {
         q.encryption = Some("none".into());
         assert!(put(&d.0, &q).is_err());
         assert!(!d.0.join("quic-none.toml").exists());
+    }
+
+    #[test]
+    fn sealed_quic_is_written_and_read_back_and_only_for_quic() {
+        let d = Dir::new();
+        let mut s = spec("sealed");
+        s.transport = "quic".into();
+        s.quic_obfs = true;
+        put(&d.0, &s).unwrap();
+        assert!(get(&d.0, "sealed").unwrap().quic_obfs);
+        let text = std::fs::read_to_string(d.0.join("sealed.toml")).unwrap();
+        assert!(
+            text.contains("[tunnel.quic]") && text.contains("obfs = true"),
+            "{text}"
+        );
+        // Off again: the table goes.
+        s.quic_obfs = false;
+        put(&d.0, &s).unwrap();
+        assert!(!get(&d.0, "sealed").unwrap().quic_obfs);
+        assert!(!std::fs::read_to_string(d.0.join("sealed.toml"))
+            .unwrap()
+            .contains("obfs"));
+        // Over another transport it is not written (the core refuses [tunnel.quic] there).
+        let mut other = spec("tcp-sealed");
+        other.quic_obfs = true;
+        put(&d.0, &other).unwrap();
+        assert!(!get(&d.0, "tcp-sealed").unwrap().quic_obfs);
+        // A spec without it reads as before: the field is left out of what is sent.
+        let json = serde_json::to_string(&get(&d.0, "tcp-sealed").unwrap()).unwrap();
+        assert!(!json.contains("quic_obfs"), "{json}");
     }
 
     #[test]

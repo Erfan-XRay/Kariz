@@ -164,6 +164,8 @@ export interface PairRequest {
   tls_key?: string;
   /** `auto` (left out), `aes-256-gcm`, `chacha20-poly1305` or `none`. */
   encryption?: string;
+  /** quic: seal every UDP packet with a key from the token (`[tunnel.quic] obfs`). */
+  quic_obfs?: boolean;
   forwards: ForwardSpec[];
   rotate?: boolean;
   /** Direct mode: run over this private GRE network (its id). */
@@ -188,6 +190,7 @@ export interface Spec {
   tls_cert?: string;
   tls_key?: string;
   encryption?: string;
+  quic_obfs?: boolean;
   forwards: ForwardSpec[];
 }
 

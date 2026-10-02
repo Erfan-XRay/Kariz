@@ -37,7 +37,7 @@ Open **Tunnels**, then **New tunnel**. The wizard asks five short things and exp
 | Step | You choose |
 |---|---|
 | **Servers** | a name, the *entry* (where your users connect) and the *exit* (which reaches the real services) |
-| **Kind** | *reverse* (the exit dials the entry; the exit opens no port) or *direct*; the transport; the profile |
+| **Kind** | *reverse* (the exit dials the entry; the exit opens no port) or *direct*; the transport (for `quic`, whether every packet is sealed, on by default); the profile |
 | **Connection** | the port the accepting side listens on, and the address the other side reaches it at |
 | **Ports** | what the entry opens for your users: `443, 8080-8090, 2053=53`, TCP, UDP or both |
 | **Build** | a review, then the panel builds both sides and shows every step |
