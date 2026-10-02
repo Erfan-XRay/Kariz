@@ -237,12 +237,7 @@ async fn login(
     }
     // A password check costs real CPU and memory (that is its point): only a few at once, so
     // a flood of tries from many addresses cannot make the panel unusable.
-    static GATE: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
-        std::sync::OnceLock::new();
-    let gate = GATE
-        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)))
-        .clone();
-    let Ok(_permit) = gate.try_acquire_owned() else {
+    let Ok(_permit) = state.login_gate.clone().try_acquire_owned() else {
         return error(StatusCode::TOO_MANY_REQUESTS, "busy");
     };
     let db = state.db.clone();

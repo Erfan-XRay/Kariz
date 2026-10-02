@@ -157,6 +157,8 @@ pub struct Net {
     /// Where the links are kept between runs; `None` keeps them in memory only.
     state: Option<PathBuf>,
     lock: tokio::sync::Mutex<()>,
+    /// Where the kernel lists the interfaces (`/sys/class/net`).
+    sys: PathBuf,
 }
 
 impl Net {
@@ -169,7 +171,19 @@ impl Net {
             exec,
             state,
             lock: tokio::sync::Mutex::new(()),
+            sys: PathBuf::from("/sys/class/net"),
         }
+    }
+
+    /// Like [`Net::with_exec`], with the interfaces looked for in `sys` (for the tests).
+    pub fn with_sys(mut self, sys: PathBuf) -> Self {
+        self.sys = sys;
+        self
+    }
+
+    /// Whether the kernel has an interface of that name.
+    fn exists(&self, name: &str) -> bool {
+        self.sys.join(name).exists()
     }
 
     fn load(&self) -> State {
@@ -262,8 +276,7 @@ impl Net {
         let mut failed = Vec::new();
         for spec in &wanted {
             let same = state.link.iter().any(|l| l == spec);
-            let there = std::path::Path::new(&format!("/sys/class/net/{}", spec.name)).exists();
-            if same && there {
+            if same && self.exists(&spec.name) {
                 continue;
             }
             if let Err(e) = self.apply(spec).await {
@@ -280,12 +293,23 @@ impl Net {
 
     /// Makes every saved link again (the agent's start, after a reboot). Returns how many
     /// came up; the ones that did not are logged by the caller through the errors.
+    ///
+    /// An interface the kernel already has (the agent was only restarted, for an update) is
+    /// left as it is and only set up: making it again would cut the traffic of every tunnel
+    /// that runs over it for no reason.
     pub async fn restore(&self) -> Vec<(String, Result<()>)> {
         let _guard = self.lock.lock().await;
         let mut out = Vec::new();
         for spec in self.load().link {
             let name = spec.name.clone();
-            out.push((name, self.apply(&spec).await));
+            let made = if self.exists(&name) && validate(&spec).is_ok() {
+                self.ip(vec!["link".into(), "set".into(), name.clone(), "up".into()])
+                    .await
+                    .map(|_| ())
+            } else {
+                self.apply(&spec).await
+            };
+            out.push((name, made));
         }
         out
     }
@@ -588,6 +612,32 @@ mod tests {
         assert!(calls(&fake)
             .iter()
             .any(|c| c.starts_with("ip tunnel add kz-a1b2c")));
+    }
+
+    #[tokio::test]
+    async fn a_restart_leaves_an_interface_that_is_already_there_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("net.toml");
+        Net::with_exec(Some(file.clone()), Arc::new(Fake::default()))
+            .up(spec())
+            .await
+            .unwrap();
+        // The agent restarts and the kernel still has the interface: it is only set up, so
+        // the tunnels over it do not lose their connections for an update.
+        let sys = dir.path().join("sys");
+        std::fs::create_dir_all(sys.join("kz-a1b2c")).unwrap();
+        let fake = Arc::new(Fake::default());
+        let after = Net::with_exec(Some(file.clone()), fake.clone()).with_sys(sys.clone());
+        let done = after.restore().await;
+        assert!(done.len() == 1 && done[0].1.is_ok());
+        assert_eq!(calls(&fake), vec!["ip link set kz-a1b2c up".to_owned()]);
+        // After a reboot it is not there, and it is made again.
+        let fake = Arc::new(Fake::default());
+        let reboot = Net::with_exec(Some(file), fake.clone()).with_sys(dir.path().join("empty"));
+        assert!(reboot.restore().await[0].1.is_ok());
+        assert!(calls(&fake)
+            .iter()
+            .any(|c| c.starts_with("ip tunnel add kz-a1b2c mode gre")));
     }
 
     #[tokio::test]
