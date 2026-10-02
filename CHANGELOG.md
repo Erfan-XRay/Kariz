@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Sealed QUIC in the tunnel wizard and the edit page.** When the transport is `quic`, a switch *Seal
+  every packet (obfs)* writes `[tunnel.quic] obfs = true` on both sides. It is on by default in the
+  wizard, since that is what makes QUIC usable on a network that filters it; turn it off to get plain
+  QUIC. The edit page shows what a tunnel has, and both servers need Kariz 1.7 or newer (the wizard
+  says which one is behind).
+
 ## 1.7.0 - 2026-10-02
 
 ### Added

@@ -114,7 +114,9 @@ panel within seconds.
    your users connect) and which the *exit* (which reaches the real services).
 2. **Kind:** *reverse* (the exit dials the entry, so the exit opens no port) or *direct* (the
    entry dials the exit), the transport (`tcp`, `tcpmux`, `ws`, `wss`, `quic`, `kcp`) and the
-   profile (`balanced`, `ultraspeed`, `gaming`).
+   profile (`balanced`, `ultraspeed`, `gaming`). For `quic` there is a switch, on by default, to
+   **seal every packet** (`obfs`, see [Transports](transports.md#obfs)); both servers need Kariz
+   1.7 or newer for it.
 3. **Connection:** the port the accepting side listens on and its address as the other side
    reaches it. For `ws`/`wss`, the path. In *direct* mode you can tick **Use a private GRE
    network** and the tunnel runs over private addresses the panel hands out
