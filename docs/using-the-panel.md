@@ -20,9 +20,13 @@ the browser shows no warning.
 Open **Servers**, then **Add server**.
 
 1. Give the server a name, and check the address (the panel's address as that server reaches it).
-2. The panel shows a **join code** and a command. On the other server, as root, run it:
+2. Leave the **link transport** on *Auto*, or pick one: *TCP*, *KCP*, *WSS* or *QUIC*. This is how the
+   server talks to the panel, not how tunnels work. *Auto* tries them in turn and keeps the one that
+   gets through. *QUIC* is always sealed, so it is the one to try where plain QUIC is filtered; it
+   needs UDP open on the panel's port after the agents port.
+3. The panel shows a **join code** and a command. On the other server, as root, run it:
    `kariz-manager --agent kz1_...`
-3. Within seconds the server appears in the list, with its CPU, memory and network.
+4. Within seconds the server appears in the list, with its CPU, memory and network.
 
 The new server opens no port: it connects to the panel. Codes work once, for 10 minutes.
 
@@ -37,6 +41,9 @@ Open **Tunnels**, then **New tunnel**. The wizard asks five short things and exp
 | **Connection** | the port the accepting side listens on, and the address the other side reaches it at |
 | **Ports** | what the entry opens for your users: `443, 8080-8090, 2053=53`, TCP, UDP or both |
 | **Build** | a review, then the panel builds both sides and shows every step |
+
+The wizard picks the port for you: 3080 for the first tunnel on a server, then 3081, 3082 and so on, the
+first one that none of that server's tunnels holds. You can type another.
 
 Not sure what to pick? The default (reverse, `tcpmux`, `balanced`) is right for most paths; the
 [transport chooser](https://erfan-xray.github.io/Kariz/docs/how-it-works/) answers in four questions.
@@ -54,6 +61,9 @@ step failed and why. You cannot end with half a tunnel.
   version, each with a button to go there) and every server's load.
 - **The top bar** says *Live* while the panel answers. If it stops answering, a notice says
   so and the page keeps the last numbers until it is back.
+- **Servers:** a card per server with its load, version and link. Click or tap its **IPv4** or
+  **IPv6** address (or the address set for it) to copy it: the chip shows a check and a note says
+  what was copied. On a phone each address is a full-width row, easy to hit.
 - **Tunnels:** click a row. You see both sides, live charts of throughput and round trip (1 hour to
   30 days), and the ports it forwards with their traffic.
 - **Logs:** pick a tunnel and read both sides interleaved by time. Filter by level or text.
