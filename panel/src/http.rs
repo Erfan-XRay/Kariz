@@ -36,6 +36,10 @@ pub struct AppState {
     pub hub: std::sync::Arc<crate::hub::Hub>,
     /// Where agents connect, if the panel takes them (for the join codes).
     pub agent_port: Option<u16>,
+    /// How many password checks (which cost real CPU and memory) run at once. Each panel has its
+    /// own, so a flood of tries cannot make this panel unusable, and two panels in one process
+    /// (the tests) do not take each other's turns.
+    pub login_gate: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -47,6 +51,7 @@ impl AppState {
             db,
             hub,
             agent_port: None,
+            login_gate: Arc::new(Semaphore::new(4)),
         }
     }
 }
