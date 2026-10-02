@@ -44,6 +44,10 @@ pub struct PairRequest {
     /// sides (a side that is not `auto` refuses a peer that uses another cipher).
     #[serde(default)]
     pub encryption: Option<String>,
+    /// quic: seal every UDP packet with a key from the token (`[tunnel.quic] obfs`), the same
+    /// on both sides. Ignored for other transports.
+    #[serde(default)]
+    pub quic_obfs: bool,
     /// wss: the files of a real certificate on the listening side (from [`certificate`]),
     /// instead of a self-signed one the dialing side pins.
     #[serde(default)]
@@ -81,6 +85,7 @@ impl PairRequest {
             ws_host: self.ws_host.clone(),
             mux: self.mux.clone().filter(|m| !m.is_empty()),
             encryption: self.chosen_encryption().map(str::to_owned),
+            quic_obfs: self.sealed(),
             tls_sni: (!accepts).then(|| self.tls_sni.clone()).flatten(),
             tls_pin: (!accepts && self.transport == "wss" && self.tls_cert.is_none())
                 .then(|| pin.map(str::to_owned))
@@ -115,16 +120,23 @@ impl PairRequest {
         self.transport == "auto" || self.mux.as_ref().is_some_and(|m| !m.is_empty())
     }
 
+    /// Whether the tunnel's QUIC packets are sealed.
+    fn sealed(&self) -> bool {
+        self.quic_obfs && self.transport == "quic"
+    }
+
     /// The cipher to write: `None` for `auto`.
     fn chosen_encryption(&self) -> Option<&str> {
         self.encryption.as_deref().filter(|e| *e != "auto")
     }
 
-    /// An error (`old_agent:SERVER:VERSION`, or `old_agent_enc:...` for a cipher) naming the
+    /// An error (`old_agent:SERVER:VERSION`, or `old_agent_enc:...` for a cipher and
+    /// `old_agent_obfs:...` for sealed QUIC) naming the
     /// first server that is too old.
     fn require_new_enough(&self, hub: &Hub) -> Result<()> {
         let enc = self.chosen_encryption().is_some();
-        if !self.needs_new_servers() && !enc {
+        let obfs = self.sealed();
+        if !self.needs_new_servers() && !enc && !obfs {
             return Ok(());
         }
         for server in hub.snapshot()? {
@@ -134,6 +146,10 @@ impl PairRequest {
             // A cipher setting came after 1.5.2; auto and mux settings with 1.5.0.
             if enc && !version_at_least(&server.version, (1, 5, 3)) {
                 bail!("old_agent_enc:{}:{}", server.id, server.version);
+            }
+            // Sealing QUIC came with 1.7: an older agent refuses a spec that has it.
+            if obfs && !version_at_least(&server.version, (1, 7, 0)) {
+                bail!("old_agent_obfs:{}:{}", server.id, server.version);
             }
             if self.needs_new_servers() && !version_at_least(&server.version, (1, 5, 0)) {
                 bail!("old_agent:{}:{}", server.id, server.version);
@@ -1079,6 +1095,7 @@ mod tests {
             tls_cert: None,
             tls_key: None,
             encryption: enc.map(str::to_owned),
+            quic_obfs: false,
             forwards: Vec::new(),
             rotate: false,
             network: None,
@@ -1119,6 +1136,44 @@ mod tests {
     }
 
     #[test]
+    fn sealed_quic_is_for_quic_only_and_needs_a_new_agent() {
+        let req = |transport: &str, obfs: bool| PairRequest {
+            name: "t".into(),
+            entry: "a".into(),
+            exit: "b".into(),
+            mode: "reverse".into(),
+            transport: transport.into(),
+            profile: None,
+            listen: "0.0.0.0:3080".into(),
+            dial: "1.2.3.4:3080".into(),
+            pool: None,
+            ws_path: None,
+            ws_host: None,
+            tls_sni: None,
+            mux: None,
+            encryption: None,
+            quic_obfs: obfs,
+            tls_cert: None,
+            tls_key: None,
+            forwards: Vec::new(),
+            rotate: false,
+            network: None,
+        };
+        // Both sides get it over quic, and nobody over another transport.
+        let (entry, exit) = req("quic", true).specs(None, None);
+        assert!(entry.quic_obfs && exit.quic_obfs);
+        let (entry, exit) = req("tcpmux", true).specs(None, None);
+        assert!(!entry.quic_obfs && !exit.quic_obfs);
+        let (entry, _) = req("quic", false).specs(None, None);
+        assert!(!entry.quic_obfs);
+        assert!(req("quic", true).validate().is_ok());
+        // Before 1.7 an agent does not know the field, and 1.7 and later do.
+        assert!(!version_at_least("1.6.0", (1, 7, 0)));
+        assert!(version_at_least("1.7.0", (1, 7, 0)));
+        assert!(version_at_least("v1.8.2", (1, 7, 0)));
+    }
+
+    #[test]
     fn auto_and_mux_settings_need_new_servers() {
         let req = |transport: &str, mux: Option<crate::wire::MuxSpec>| PairRequest {
             name: "t".into(),
@@ -1134,6 +1189,7 @@ mod tests {
             ws_host: None,
             tls_sni: None,
             mux,
+            quic_obfs: false,
             tls_cert: None,
             tls_key: None,
             encryption: None,

@@ -9,6 +9,7 @@ import { useNetworks } from "./Networks";
 import { MuxFields, MuxToggle, emptyMux, muxSpecOf, muxToSpec } from "./MuxFields";
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
+import { QuicObfs, obfsOf } from "./QuicObfs";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, transportLabel } from "./transport";
 import { FIRST_TUNNEL_PORT, freeTunnelPort, hostOf, portOf, portsInUse } from "./ports";
 
@@ -86,6 +87,8 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [tls, setTls] = useState(emptyTls());
   const [enc, setEnc] = useState<string>("auto");
   const [encAck, setEncAck] = useState(false);
+  // Sealed QUIC (obfs) is on unless it is turned off: it is what makes QUIC work where it is filtered.
+  const [obfs, setObfs] = useState(true);
   // Once the address to dial is typed (or loaded from the tunnel), it is not guessed again.
   const [dialTouched, setDialTouched] = useState(false);
   const [ports, setPorts] = useState("");
@@ -149,6 +152,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     tls_sni: transport === "wss" && sni.trim() ? sni.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
     encryption: cipherOf(enc, transport),
+    quic_obfs: obfsOf(obfs, transport),
     tls_cert: transport === "wss" && tls.mode === "real" && tls.cert ? tls.cert : undefined,
     tls_key: transport === "wss" && tls.mode === "real" && tls.key ? tls.key : undefined,
     forwards: parsed.forwards,
@@ -309,6 +313,11 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                 <div style={{ marginTop: "var(--sp-6)" }}>
                   <EncryptionChoice value={enc} onChange={setEnc} transport={transport} ack={encAck} onAck={setEncAck} />
                 </div>
+                {transport === "quic" && (
+                  <div style={{ marginTop: "var(--sp-5)" }}>
+                    <QuicObfs value={obfs} onChange={setObfs} />
+                  </div>
+                )}
                 <div style={{ marginTop: "var(--sp-5)" }}>
                   <MuxToggle transport={transport} value={muxOn} onChange={setMuxOn} />
                 </div>
