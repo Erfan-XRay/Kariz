@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Drives the kariz-manager menu through a real terminal (a pty), the way a person does.
 
-Checks what only a terminal shows: every question is printed before its answer is read,
-numbered choices, port lists and IPv6 addresses in the wizard, the tunnel list is not
-taken for a tunnel name, and Ctrl+C: during an action it returns to the menu at once
-(no Enter needed), at the menu it leaves. Usage:
+Checks what only a terminal shows: the menu is drawn and a number jumps to its item, a screen
+ends with "press any key", and Ctrl+C: during a screen it returns to the menu at once (no key
+needed), at the menu it leaves, as q does. Usage:
 sudo python3 tests/manager_tty.py [command...] (default: kariz-manager).
 """
 
@@ -61,17 +60,10 @@ class Session:
     def expect(self, text):
         return self.expect_any(text)[1]
 
-    def send(self, reply):
-        os.write(self.fd, reply.encode() + b"\r")
-
-    def answer(self, question, reply):
-        self.expect(question)
-        self.send(reply)
-
-    def pick(self, heading, reply):
-        """A numbered choice: its heading, then its own `Choose` prompt."""
-        self.expect(heading)
-        self.answer("Choose", reply)
+    def key(self, text):
+        """Keys as they are typed: no Enter is added (the menu reacts to each key)."""
+        time.sleep(0.3)
+        os.write(self.fd, text.encode())
 
     def ctrl_c(self):
         time.sleep(0.5)
@@ -96,31 +88,35 @@ class Session:
         self.fail("the manager did not exit")
 
     def back_in_menu(self):
-        """After Ctrl+C: the menu again, without an Enter in between."""
+        """After Ctrl+C: the menu again, without a key in between."""
         _, before = self.expect_any(MENU)
-        if "Enter: back to the menu" in before:
-            self.fail("Ctrl+C asked for Enter before the menu")
+        if "Press any key" in before or "Enter: back to the menu" in before:
+            self.fail("Ctrl+C asked for a key before the menu")
 
 
 def main():
-    s = Session(sys.argv[1:] or ["kariz-manager"])
+    argv = sys.argv[1:] or ["kariz-manager"]
+    s = Session(argv)
 
-    # A wrong number is said so, and the menu stays.
+    # The menu is drawn with its first item highlighted; a number jumps to its item (and shows
+    # what it does), without Enter.
     s.expect(MENU)
-    s.answer("Choose", "9")
-    s.expect("Choose 0-3")
+    s.key("9")
+    s.expect("Disconnect from the panel")
 
-    # 2: the web panel's submenu, a numbered choice by name: its status.
-    s.expect(MENU)
-    s.answer("Choose", "2")
-    s.pick("Web panel", "status")
-    s.expect("Enter: back to the menu")
-    s.send("")
+    # 2 and Enter: the status screen, and "press any key" before the menu comes back.
+    s.key("2")
+    s.key("\r")
+    s.expect("Press any key to continue")
+    s.key(" ")
 
-    # Ctrl+C inside the submenu: straight back to the menu, no Enter in between.
+    # Ctrl+C inside a screen (10 is the logs, which asks which log first): straight back to
+    # the menu, no key in between.
     s.expect(MENU)
-    s.answer("Choose", "2")
-    s.expect("Web panel")
+    s.key("1")
+    s.key("0")
+    s.key("\r")
+    s.expect("Which log?")
     s.ctrl_c()
     s.back_in_menu()
 
@@ -128,8 +124,15 @@ def main():
     if b"New tunnel" in s.seen:
         s.fail("the menu still offers tunnels")
 
-    # Ctrl+C at the menu itself leaves the manager.
-    s.expect("Choose")
+    # q leaves the manager.
+    s.key("q")
+    code = s.wait()
+    if code != 0:
+        s.fail(f"the manager exited with {code} after q")
+
+    # Ctrl+C at the menu itself leaves it too.
+    s = Session(argv)
+    s.expect(MENU)
     s.ctrl_c()
     code = s.wait()
     if code != 0:

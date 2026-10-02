@@ -124,6 +124,8 @@ struct Setup {
     mux_connections: usize,
     /// `tunnel.quic.congestion`; empty keeps the default.
     congestion: &'static str,
+    /// `tunnel.quic.obfs`.
+    obfs: bool,
     /// `tunnel.mux.stream_window`; 0 keeps the default.
     stream_window: usize,
     /// `tunnel.kcp.fec_data` / `fec_parity`; 0 keeps FEC off.
@@ -156,6 +158,7 @@ impl Setup {
             udp_max_flows: 0,
             mux_connections: 0,
             congestion: "",
+            obfs: false,
             stream_window: 0,
             fec: (0, 0),
             kcp_options: "",
@@ -205,6 +208,10 @@ impl Setup {
             fec: (data, parity),
             ..self
         }
+    }
+
+    const fn obfs(self) -> Self {
+        Self { obfs: true, ..self }
     }
 
     const fn congestion(self, congestion: &'static str) -> Self {
@@ -366,8 +373,14 @@ impl Setup {
             options += self.kcp_options;
             options += "\n";
         }
-        if !self.congestion.is_empty() {
-            options += &format!("[tunnel.quic]\ncongestion = \"{}\"\n", self.congestion);
+        if !self.congestion.is_empty() || self.obfs {
+            options += "[tunnel.quic]\n";
+            if !self.congestion.is_empty() {
+                options += &format!("congestion = \"{}\"\n", self.congestion);
+            }
+            if self.obfs {
+                options += "obfs = true\n";
+            }
         }
         options += "[tuning]\n";
         if self.keepalive_secs > 0 {
@@ -853,6 +866,8 @@ tunnel_tests! {
     wss_direct_early: Setup::wss("direct").early_data();
     quic_reverse: Setup::quic("reverse");
     quic_direct: Setup::quic("direct");
+    quic_reverse_obfs: Setup::quic("reverse").obfs();
+    quic_direct_obfs: Setup::quic("direct").obfs();
     kcp_reverse: Setup::kcp("reverse");
     kcp_direct: Setup::kcp("direct");
     kcp_reverse_no_mux: Setup::kcp("reverse").no_mux();

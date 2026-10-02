@@ -353,11 +353,40 @@ pre.notes { max-height: 240px; overflow: auto; white-space: pre-wrap; }
 .srv-facts dd small { color: var(--text-3); }
 .down-c { color: var(--water); }
 .up-c { color: var(--accent); }
-.srv-foot { display: flex; align-items: center; gap: var(--sp-2); min-height: 36px; }
+.srv-foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); min-height: 36px; }
 .srv-ip { font-family: var(--font-mono); font-size: 12px; color: var(--text-3); direction: ltr; unicode-bidi: isolate; }
-.srv-ips { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-4); padding-top: var(--sp-3); }
-.srv-ips .srv-ip { user-select: all; overflow-wrap: anywhere; }
-.srv-ips .srv-ip b { color: var(--text-2); font-weight: 600; margin-inline-end: 4px; }
+.srv-ips { display: flex; flex-wrap: wrap; gap: var(--sp-2); padding-top: var(--sp-3); }
+/* An address that copies itself on a click or a tap (IPv4, IPv6, a server's address). */
+.copy-val {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: var(--hairline) solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: start;
+  cursor: pointer;
+  direction: ltr;
+  unicode-bidi: isolate;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: border-color var(--dur-short), background var(--dur-short), color var(--dur-short), transform var(--dur-short);
+}
+.copy-val b { color: var(--text-2); font-weight: 600; }
+.copy-val-text { min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.copy-val svg { flex: none; color: var(--text-3); }
+.copy-val:hover { border-color: var(--accent); background: var(--accent-soft); }
+.copy-val:hover svg { color: var(--accent); }
+.copy-val:active { transform: scale(0.98); }
+.copy-val.done, .copy-val.done b, .copy-val.done svg { color: var(--water); }
+.copy-val.done { border-color: var(--water); }
 .srv-add button {
   display: grid;
   justify-items: center;
@@ -980,4 +1009,15 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
 @media (pointer: coarse), (max-width: 720px) {
   .switch, .linklike, .crumb { position: relative; }
   .switch::before, .linklike::before, .crumb::before { content: ""; position: absolute; inset: -9px -6px; }
+}
+
+/* On a touch screen the address is a full-width row at least 44px tall, so it is easy to hit, and a long IPv6 wraps inside it. */
+@media (pointer: coarse), (max-width: 720px) {
+  .copy-val { min-height: 44px; padding: 8px 14px; font-size: 13px; }
+  .srv-ips .copy-val { flex: 1 1 100%; }
+  .srv-ips .copy-val svg { margin-inline-start: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .copy-val { transition: none; }
+  .copy-val:active { transform: none; }
 }

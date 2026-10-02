@@ -156,7 +156,8 @@ test.describe("the tunnel", () => {
     await page.locator("#run-confirm").fill("demo");
     await page.locator(".dialog .btn-danger").click();
     await expect(page.locator(".dialog p.ok")).toContainText(/Done/i, { timeout: 60_000 });
-    await closeDialog(page);
+    // the dialog of a finished delete closes by itself
+    await expect(page.locator(".dialog")).toHaveCount(0, { timeout: 10_000 });
     await expect(page.locator(".tunnels tr", { hasText: "demo" })).toHaveCount(0, { timeout: 30_000 });
     expect(await refuses(front), "a deleted tunnel listens nowhere").toBe(true);
   });

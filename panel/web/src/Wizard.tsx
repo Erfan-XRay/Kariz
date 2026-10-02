@@ -10,6 +10,7 @@ import { MuxFields, MuxToggle, emptyMux, muxSpecOf, muxToSpec } from "./MuxField
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, transportLabel } from "./transport";
+import { FIRST_TUNNEL_PORT, freeTunnelPort, hostOf, portOf, portsInUse } from "./ports";
 
 export const PROFILES = ["balanced", "ultraspeed", "gaming"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -52,9 +53,7 @@ export function addressesOf(s: ServerInfo): string[] {
   return out;
 }
 
-/** The port part of an address like `0.0.0.0:3080`. */
-export const portOf = (addr: string | undefined) => addr?.split(":").pop() ?? "";
-export const hostOf = (addr: string | undefined) => (addr ? addr.slice(0, addr.lastIndexOf(":")) : "");
+export { hostOf, portOf };
 
 export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: () => void }) {
   const { t, num, lang } = useApp();
@@ -71,7 +70,9 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [transport, setTransport] = useState<string>("tcp");
   const [muxOn, setMuxOn] = useState(true);
   const [profile, setProfile] = useState<string>("balanced");
-  const [listenPort, setListenPort] = useState("3080");
+  const [listenPort, setListenPort] = useState(String(FIRST_TUNNEL_PORT));
+  // Until a port is typed, the wizard picks a free one.
+  const [portTouched, setPortTouched] = useState(false);
   const [dialHost, setDialHost] = useState("");
   // The host the accepting side listens on: every address, or (for a tunnel that was made
   // over a private network) its private one.
@@ -122,6 +123,15 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     const guess = addrChoices[0];
     if (guess) setDialHost(guess);
   }, [acceptor, servers]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The port a new tunnel listens on starts at 3080 and moves up past the ports the accepting
+  // server's other tunnels hold: 3080, then 3081, then 3082. It follows the choice of server
+  // and transport (auto needs one more port), and stops once a port is typed.
+  const takenPorts = useMemo(() => portsInUse(acceptorServer), [acceptorServer]);
+  const suggestedPort = String(freeTunnelPort(takenPorts, transport));
+  useEffect(() => {
+    if (!portTouched) setListenPort(suggestedPort);
+  }, [portTouched, suggestedPort]);
 
   const request = (): PairRequest => ({
     name,
@@ -341,7 +351,20 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                 <div className="grid-2" style={{ display: "grid", gap: "var(--sp-5)", gridTemplateColumns: "1fr 1fr" }}>
                   <div className="field">
                     <label htmlFor="wz-port">{t("wz.port", { server: serverName(acceptor) })}</label>
-                    <input className="text mono" id="wz-port" dir="ltr" inputMode="numeric" value={listenPort} onChange={(e) => setListenPort(e.target.value.trim())} />
+                    <input
+                      className="text mono"
+                      id="wz-port"
+                      dir="ltr"
+                      inputMode="numeric"
+                      value={listenPort}
+                      onChange={(e) => {
+                        setPortTouched(true);
+                        setListenPort(e.target.value.trim());
+                      }}
+                    />
+                    {!portTouched && suggestedPort !== String(FIRST_TUNNEL_PORT) && (
+                      <span className="help">{t("wz.portMoved", { first: String(FIRST_TUNNEL_PORT), server: serverName(acceptor), port: suggestedPort })}</span>
+                    )}
                   </div>
                   <div className="field" hidden={!!netId}>
                     <label htmlFor="wz-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>

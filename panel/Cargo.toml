@@ -25,8 +25,8 @@ clap = { version = "4.6", features = ["derive"] }
 getrandom = "0.4"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["server-auto", "http1", "tokio", "service"] }
-# kcp: the agents' link falls back to it where TCP is stalled.
-kariz = { path = "..", default-features = false, features = ["kcp"] }
+# kcp and quic: the agents' link falls back to them where TCP is stalled (quic is always sealed).
+kariz = { path = "..", default-features = false, features = ["kcp", "quic"] }
 ring = "0.17"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 rust-embed = "8"

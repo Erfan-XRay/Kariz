@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { ReactNode, RefObject } from "react";
 import { FA_DIGITS } from "./i18n";
 import { useApp } from "./store";
+import { copyText } from "./clipboard";
 
 const ICONS: Record<string, ReactNode> = {
   map: (
@@ -339,14 +340,45 @@ export function CodeBlock({ text }: { text: string }) {
         type="button"
         aria-label={t("copied")}
         onClick={() => {
-          navigator.clipboard?.writeText(text).catch(() => {});
-          setDone(true);
-          setTimeout(() => setDone(false), 1600);
+          void copyText(text).then((ok) => {
+            if (!ok) return;
+            setDone(true);
+            setTimeout(() => setDone(false), 1600);
+          });
         }}
       >
         <Icon name={done ? "check" : "copy"} size={18} />
       </button>
     </pre>
+  );
+}
+
+/**
+ * A value (an IP address) that copies itself when it is clicked or tapped. The chip shows a
+ * check for a moment and a toast says what was copied; if the browser refuses, the toast says
+ * so and shows the value, which can still be selected by hand.
+ */
+export function CopyValue({ what, value, label }: { what: string; value: string; label?: string }) {
+  const { t, toast } = useApp();
+  const [done, setDone] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const copy = async () => {
+    if (!(await copyText(value))) {
+      toast(t("copy.failed", { value }), "err");
+      return;
+    }
+    setDone(true);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setDone(false), 1600);
+    toast(t("copy.done", { what }), "ok");
+  };
+  return (
+    <button type="button" className={`copy-val ${done ? "done" : ""}`} dir="ltr" aria-label={t("copy.label", { what, value })} onClick={() => void copy()}>
+      {label && <b>{label}</b>}
+      <span className="copy-val-text">{value}</span>
+      <Icon name={done ? "check" : "copy"} size={14} />
+    </button>
   );
 }
 
