@@ -53,6 +53,10 @@ fs.writeFileSync(
   ),
 );
 cp(path.join(repo, "assets/logo.svg"), path.join(site, "public/logo.svg"));
+// The tab icon: a simpler drawing of the logo that stays readable at 16 pixels.
+for (const icon of ["favicon.svg", "favicon.ico", "favicon-32.png", "apple-touch-icon.png"]) {
+  cp(path.join(repo, "assets", icon), path.join(site, "public", icon));
+}
 // The card that link previews show (the repository's social image).
 cp(path.join(repo, "assets/social-preview.png"), path.join(site, "public/social-preview.png"));
 console.log("site assets ready");
