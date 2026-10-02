@@ -474,6 +474,33 @@ pub fn create(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
     Ok(id)
 }
 
+/// A request that asks for a private network, with its addresses filled in: the link between
+/// the two servers is found (or made now, and put in `made_link`), and the tunnel listens on
+/// and dials the address of its end on the server that accepts the connections (the exit in
+/// direct mode, the entry in reverse mode). `None` when the request names no network.
+pub async fn over_network(
+    hub: &Hub,
+    op: &str,
+    req: &PairRequest,
+    made_link: &mut Option<crate::networks::Link>,
+) -> Result<Option<PairRequest>, String> {
+    let Some(network) = &req.network else {
+        return Ok(None);
+    };
+    let (link, fresh) = crate::netops::ensure_link(hub, op, network, &req.entry, &req.exit).await?;
+    if fresh {
+        *made_link = Some(link.clone());
+    }
+    let [acceptor, _] = req.acceptor_first();
+    let endpoint = crate::netops::tunnel_endpoint(&link, acceptor, &req.listen);
+    Ok(Some(PairRequest {
+        listen: endpoint.clone(),
+        dial: endpoint,
+        network: None,
+        ..req.clone()
+    }))
+}
+
 async fn run_create(
     hub: &Hub,
     op: &str,
@@ -499,31 +526,11 @@ async fn run_create(
 
     // Over a private network: the link between the two servers (made now if it is not
     // there), and the tunnel listens on and dials its addresses.
-    let resolved;
-    let req = if let Some(network) = &req.network {
-        if req.mode != "direct" {
-            return Err(("gre_needs_direct".into(), true));
-        }
-        let (link, fresh) =
-            match crate::netops::ensure_link(hub, op, network, &req.entry, &req.exit).await {
-                Ok(v) => v,
-                Err(e) => return Err((e, true)),
-            };
-        if fresh {
-            *made_link = Some(link.clone());
-        }
-        // The exit listens in direct mode: on its end of the link.
-        let endpoint = crate::netops::tunnel_endpoint(&link, &req.exit, &req.listen);
-        resolved = PairRequest {
-            listen: endpoint.clone(),
-            dial: endpoint,
-            network: None,
-            ..req.clone()
-        };
-        &resolved
-    } else {
-        req
+    let resolved = match over_network(hub, op, req, made_link).await {
+        Ok(r) => r,
+        Err(e) => return Err((e, true)),
     };
+    let req = resolved.as_ref().unwrap_or(req);
 
     // Both servers agree it is valid, and its ports are free.
     for (step, server, spec) in [
@@ -630,15 +637,27 @@ pub fn edit(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
     let hub = hub.clone();
     let op = id.clone();
     tokio::spawn(async move {
-        match run_edit(&hub, &op, &req).await {
+        // A link made for this edit goes again if the edit cannot be made.
+        let mut made_link = None;
+        match run_edit(&hub, &op, &req, &mut made_link).await {
             Ok(()) => hub.ops.finish(&op, None, None),
-            Err((error, undone)) => hub.ops.finish(&op, Some(error), Some(undone)),
+            Err((error, undone)) => {
+                if let Some(link) = made_link {
+                    crate::netops::tear_down(&hub, &link).await;
+                }
+                hub.ops.finish(&op, Some(error), Some(undone));
+            }
         }
     });
     Ok(id)
 }
 
-async fn run_edit(hub: &Hub, op: &str, req: &PairRequest) -> Result<(), (String, bool)> {
+async fn run_edit(
+    hub: &Hub,
+    op: &str,
+    req: &PairRequest,
+    made_link: &mut Option<crate::networks::Link>,
+) -> Result<(), (String, bool)> {
     let ops = &hub.ops;
     let step_fail = |ops: &Ops, e: String| {
         ops.end(op, false, Some(e.clone()));
@@ -662,6 +681,14 @@ async fn run_edit(hub: &Hub, op: &str, req: &PairRequest) -> Result<(), (String,
         }
     }
     ops.end(op, true, None);
+
+    // Over a private network (or back off it, when the request names none): the addresses
+    // the tunnel listens on and dials.
+    let resolved = match over_network(hub, op, req, made_link).await {
+        Ok(r) => r,
+        Err(e) => return Err((e, true)),
+    };
+    let req = resolved.as_ref().unwrap_or(req);
 
     let token = if req.rotate {
         match random_hex(24) {
