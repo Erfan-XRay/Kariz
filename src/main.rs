@@ -432,8 +432,9 @@ fn print_summary(config: &Config) {
             Some(sni) => format!(" sni={sni}"),
             None => String::new(),
         };
+        let obfs = if quic.obfs { " obfs=on" } else { "" };
         println!(
-            "  quic      : congestion={} alpn={}{sni}",
+            "  quic      : congestion={} alpn={}{sni}{obfs}",
             quic.congestion.name(),
             quic.alpn
         );

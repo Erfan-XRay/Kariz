@@ -479,13 +479,13 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
         state.hub = hub.clone();
         if let Some(listen) = &config.agent_listen {
             // Every link transport, so an agent can use the one that gets through its
-            // network: tcpmux and kcp on the agents port (TCP and UDP), wss on the next.
+            // network: tcpmux and kcp on the agents port (TCP and UDP), wss (TCP) and quic
+            // (UDP, always sealed) on the next.
             let token = hub.link_token()?;
             let (cert, key) = (config.cert(), config.key());
-            let wss = kariz::link::wss_addr(listen)?;
             for kind in kariz::link::LINK_TRANSPORTS {
                 let wss_kind = kind == kariz::config::TransportKind::Wss;
-                let addr = if wss_kind { &wss } else { listen };
+                let addr = &kariz::link::address_for(listen, kind)?;
                 let mut bound = 0;
                 let mut last = None;
                 for one in dual_stack(addr) {

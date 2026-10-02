@@ -34,7 +34,7 @@ fails:
 bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh)
 ```
 
-Choose **2** (web panel), then **install**, and open the link it prints. Then read
+In the menu choose **3** (Install the web panel here) and open the link it prints. Then read
 [Using the panel](using-the-panel.md); [The manager script](manager.md) explains the menu.
 
 The rest of this page is the same thing by hand, for a server without the panel or to see what

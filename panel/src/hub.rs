@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
-use kariz::mux::{MuxSession, Side};
+use kariz::mux::Side;
+use kariz::session::Session;
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use tracing::{debug, info, warn};
@@ -62,7 +63,7 @@ pub struct ServerView {
     /// while none was set.
     pub addr_default: Option<String>,
     pub seen_secs: Option<u64>,
-    /// The transport its agent's link uses now (`tcpmux` or `kcp`); none for the panel's
+    /// The transport its agent's link uses now (`tcpmux`, `kcp`, `wss` or `quic`); none for the panel's
     /// own server and for one that is offline.
     pub link: Option<String>,
     pub health: Option<Health>,
@@ -124,7 +125,7 @@ struct Live {
     tunnels: Vec<TunnelView>,
     /// Bytes counted at the last reading of each tunnel, for the rates.
     last_bytes: HashMap<String, (u64, Instant)>,
-    session: Option<Arc<MuxSession>>,
+    session: Option<Arc<Session>>,
     /// Whether each tunnel was connected at the last reading, to notice it changing.
     connected: HashMap<String, bool>,
 }
@@ -607,7 +608,7 @@ impl Hub {
 
     async fn run_session(
         &self,
-        session: Arc<MuxSession>,
+        session: Arc<Session>,
         link: &'static str,
         peer_ip: std::net::IpAddr,
     ) -> Result<()> {
@@ -672,7 +673,7 @@ impl Hub {
 
     /// Checks who is on the other end of a new link: a registered agent proves its key, a
     /// new one is registered with its join secret.
-    async fn identify(&self, session: &Arc<MuxSession>) -> Result<(String, HelloReply)> {
+    async fn identify(&self, session: &Arc<Session>) -> Result<(String, HelloReply)> {
         let challenge = random_hex(16)?;
         let raw = request_on(
             session,
@@ -760,7 +761,7 @@ impl Hub {
     }
 
     /// Asks the agent for its state every [`POLL`] until the link ends.
-    async fn poll(&self, id: &str, session: &Arc<MuxSession>) -> Result<()> {
+    async fn poll(&self, id: &str, session: &Arc<Session>) -> Result<()> {
         let mut tunnels: Vec<TunnelInfo> = Vec::new();
         let mut late = 0u32;
         loop {
@@ -993,13 +994,13 @@ impl Hub {
 
 /// One request to an agent: a stream with the request in its open bytes and the answer
 /// in what comes back.
-pub async fn request_on(session: &MuxSession, request: &Request) -> Result<Vec<u8>> {
+pub async fn request_on(session: &Session, request: &Request) -> Result<Vec<u8>> {
     request_within(session, request, REQUEST_TIMEOUT).await
 }
 
 /// Like [`request_on`], with its own time limit (a speed test takes a while).
 pub async fn request_within(
-    session: &MuxSession,
+    session: &Session,
     request: &Request,
     limit: Duration,
 ) -> Result<Vec<u8>> {

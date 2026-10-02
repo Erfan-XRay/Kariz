@@ -24,7 +24,7 @@ pub struct JoinCode {
     /// The name the server is to have, if it was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n: Option<String>,
-    /// The one link transport to use (`tcpmux`, `kcp`, `wss`); none: try them all.
+    /// The one link transport to use (`tcpmux`, `kcp`, `wss`, `quic`); none: try them all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x: Option<String>,
 }
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn a_code_can_name_one_transport() {
-        for x in ["tcpmux", "kcp", "wss"] {
+        for x in ["tcpmux", "kcp", "wss", "quic"] {
             let one = JoinCode {
                 x: Some(x.into()),
                 ..code()

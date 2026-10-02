@@ -65,10 +65,29 @@ QUIC (quinn), over UDP:
   certificate files.
 - Congestion control: `cubic` (default), `bbr` (keeps its speed under random loss, but
   fills queues; experimental in quinn) or `newreno`.
-- The handshake reads as HTTP/3 (ALPN `h3`, SNI of the remote host).
+- The handshake reads as HTTP/3 (ALPN `h3`, SNI of the remote host), unless `obfs` is on.
 
 Some networks throttle or block UDP, and UDP on port 443 in particular. Treat `quic` as
 an option for paths where UDP works, with `tcpmux` or `wss` as the fallback.
+
+### `obfs`
+
+QUIC's first packets can be read by anyone, so a network that looks for QUIC (and filters
+by the SNI in it) can spot and drop it even where other UDP passes. `obfs = true` in
+`[tunnel.quic]`, on both sides, seals every UDP packet with a key derived from the token
+(ChaCha20-Poly1305, as `kcp` does): on the wire there is no QUIC header or version to
+match, and the port answers nothing that was not sealed with the token. It changes nothing
+inside: the TLS 1.3 handshake and the streams run as before.
+
+- It costs 28 bytes a packet (QUIC's packet size is lowered by as much, so the packets on
+  the wire stay the same size) and some CPU.
+- Both sides must agree. A side that does not speak it sees noise, and the other side
+  times out connecting.
+- It hides the protocol, not the fact that UDP flows to this address; where all UDP is
+  blocked it does not help (use `tcpmux` or `wss`).
+
+The link between the panel and a server can be `quic` too, and that one is always sealed, with no
+setting: [The web panel](panel.md#connect-another-server).
 
 ## `kcp`
 

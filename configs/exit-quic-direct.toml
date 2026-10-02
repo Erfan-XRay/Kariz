@@ -10,5 +10,9 @@ transport = "quic"
 listen = "0.0.0.0:443"             # UDP port
 token = "CHANGE-ME-run-kariz-token"
 
+# [tunnel.quic]
+# obfs = true                      # same on both sides: seals every UDP packet, so it does
+                                   # not look like QUIC (28 bytes and some CPU a packet)
+
 [log]
 level = "info"

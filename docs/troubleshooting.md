@@ -49,7 +49,15 @@ transports make game packets wait for every lost segment. See
 `tunnel.mux.ping_interval_secs` (or `tuning.keepalive_secs`) at 90 or less.
 
 **`quic` or `kcp` never connects.** UDP may be blocked or throttled on the path, UDP on
-port 443 in particular. Try another port, or fall back to `tcpmux` or `wss`.
+port 443 in particular. Try another port, or fall back to `tcpmux` or `wss`. If `kcp`
+connects and `quic` does not, the path is probably recognising QUIC: set
+`obfs = true` in `[tunnel.quic]` on both sides. With `obfs` on one side only, the connect
+times out.
+
+**A server joined with *QUIC* never shows up.** The link uses UDP on the port after the
+panel's agents port, so that UDP port has to be open on the panel's server and in any cloud
+firewall. If UDP is blocked on the path altogether, choose *Auto* (or *TCP* or *WSS*) in *Add
+server*. More in [The web panel](panel.md#troubleshooting).
 
 ## Warnings from `kariz check`
 

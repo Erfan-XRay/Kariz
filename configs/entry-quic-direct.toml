@@ -18,6 +18,8 @@ congestion = "cubic"               # cubic | bbr | newreno; bbr keeps the rate o
                                    # but can overfill queues
 # sni = "www.example.com"          # server name in the handshake; default: the remote host
 # alpn = "h3"                      # same on both sides
+# obfs = true                      # same on both sides: seals every UDP packet, so it does
+                                   # not look like QUIC (28 bytes and some CPU a packet)
 
 [[forward]]
 listen = "0.0.0.0:443"

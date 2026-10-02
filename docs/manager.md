@@ -18,13 +18,24 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/script
 The first time on a server it installs the Kariz core by itself, then asks what else this
 server is for: only the core (tunnels are made from a panel on another server), the web panel
 here as well, or a connection to a panel that exists. Every run after that opens a menu, with
-the server's name and its IPv4 and IPv6 addresses at the top:
+the server's name and its IPv4 and IPv6 addresses at the top, and below it what runs here (the
+core, the web panel and the agent, each with a green dot when it is running).
+
+In a terminal, **move with the arrow keys** (or `j` / `k`) and press **Enter**; a number jumps
+to its item (`1` then `0` reaches 10), and `q` or Esc leaves. The line under the list says what
+the highlighted item does. Each item opens its own cleared screen with the title on top and ends
+with "Press any key"; Ctrl+C in it comes back to the menu. Questions with options (how to sign
+in to the panel, which log) are lists to move in the same way. Without a terminal (a pipe, a
+script) the menu and the questions are numbered and read as lines.
 
 | | |
 |---|---|
 | **1** Install or update Kariz | finds your CPU (x86_64, aarch64 or armv7), downloads the latest release, checks its SHA-256 and its signature, and installs `kariz`, `kariz-panel`, the systemd units and the `kariz-manager` command |
-| **2** Web panel and agent | install the panel on this server, make a login link, set a password, or connect this server to a panel with a join code |
-| **3** Uninstall Kariz | stops and removes what it installed |
+| **2** Status and addresses | what runs on this server, its addresses and the panel's address |
+| **3** to **7** Web panel | install the panel here, make a login link, set the admin password, change the domain or IP and its certificate, remove the panel |
+| **8**, **9** Agent | connect this server to a panel with a join code, or disconnect it |
+| **10** Live logs | follow the panel's or the agent's log |
+| **11** Uninstall Kariz | stops and removes what it installed |
 
 If GitHub limits your downloads (many servers behind one address), set `GITHUB_TOKEN` to any
 personal access token before running the script: it is used only to lift that limit.
@@ -38,11 +49,11 @@ kariz-manager install --binary ./kariz        # a binary you built yourself
 
 ## The usual path
 
-1. On the server that will hold the panel: run the one-liner, choose **2**, then **install**. It
+1. On the server that will hold the panel: run the one-liner, choose **3** (Install the web panel here). It
    prints the panel's address and a one-time login link.
 2. Open the link in a browser and sign in. From here on, work in the panel:
    [Using the panel](using-the-panel.md).
-3. On every other server: run the one-liner and choose **2**, then **agent**, and paste the join
+3. On every other server: run the one-liner and choose **8** (Connect to a panel), and paste the join
    code the panel gave you (Servers, Add server). That server now shows up in the panel.
 4. Make tunnels in the panel, between any two of its servers.
 

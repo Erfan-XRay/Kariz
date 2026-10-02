@@ -357,6 +357,11 @@ pub struct QuicConfig {
     /// Application protocol announced in the handshake (both sides must agree).
     #[serde(default = "default_alpn")]
     pub alpn: String,
+    /// Seal every UDP packet with a key from the token, so the traffic does not look
+    /// like QUIC to a middlebox (and the port answers nothing else). Both sides must
+    /// agree; costs 28 bytes a packet and some CPU.
+    #[serde(default)]
+    pub obfs: bool,
 }
 
 fn default_alpn() -> String {
@@ -370,6 +375,7 @@ impl Default for QuicConfig {
             congestion: Congestion::default(),
             sni: None,
             alpn: default_alpn(),
+            obfs: false,
         }
     }
 }
@@ -2038,6 +2044,12 @@ keepalive_secs = 1
         assert_eq!(q.alpn, "hq-29");
         let text = with_transport("entry", "quic", "[tunnel.quic]\ncongestion = \"bbr\"");
         assert_eq!(Config::parse(&text).unwrap().warnings().len(), 1);
+        // `obfs` is off unless asked for, and asking for it is no warning.
+        assert!(!QuicConfig::default().obfs);
+        let text = with_transport("entry", "quic", "[tunnel.quic]\nobfs = true");
+        let c = Config::parse(&text).unwrap();
+        assert!(c.tunnel.quic.as_ref().unwrap().obfs);
+        assert!(c.warnings().is_empty());
         // An empty table means the defaults, as no table does.
         let text = with_transport("exit", "quic", "[tunnel.quic]");
         assert_eq!(

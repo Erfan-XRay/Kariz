@@ -42,12 +42,14 @@ RAW_URL="https://raw.githubusercontent.com/$REPO/main/scripts/kariz.sh"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     C_RESET=$'\e[0m' C_BOLD=$'\e[1m' C_DIM=$'\e[2m'
-    C_TEAL=$'\e[38;5;43m' C_AQUA=$'\e[38;5;86m' C_SAND=$'\e[38;5;179m'
-    C_RED=$'\e[38;5;203m' C_YELLOW=$'\e[38;5;221m' C_GREEN=$'\e[38;5;78m'
+    C_TEAL=$'\e[38;5;45m' C_AQUA=$'\e[38;5;75m' C_PURPLE=$'\e[38;5;141m' C_SAND=$'\e[38;5;179m'
+    C_RED=$'\e[38;5;203m' C_YELLOW=$'\e[38;5;220m' C_GREEN=$'\e[38;5;84m'
     C_GRAY=$'\e[38;5;245m' C_LINK=$'\e[4;38;5;51m' C_PINK=$'\e[38;5;213m'
+    # The background of the highlighted row in the menu and the pickers.
+    C_SEL=$'\e[48;5;237m'
 else
-    C_RESET='' C_BOLD='' C_DIM='' C_TEAL='' C_AQUA='' C_SAND='' C_RED='' C_YELLOW='' C_GREEN=''
-    C_GRAY='' C_LINK='' C_PINK=''
+    C_RESET='' C_BOLD='' C_DIM='' C_TEAL='' C_AQUA='' C_PURPLE='' C_SAND='' C_RED='' C_YELLOW='' C_GREEN=''
+    C_GRAY='' C_LINK='' C_PINK='' C_SEL=''
 fi
 
 # A web address, in the colour of a link (underlined), so it stands out and is easy to find.
@@ -87,12 +89,8 @@ rule() {
     printf '%s' "${line// /─}"
 }
 
-banner() {
-    printf '\n%s' "$C_BOLD$C_TEAL"
-    printf '  %s\n' ' _  __   _   ___  ___  ____' '| |/ /  /_\ | _ \|_ _||_  /'
-    printf '%s' "$C_AQUA"
-    printf '  %s\n' "| ' <  / _ \\|   / | |  / / " '|_|\_\/_/ \_\_|_\|___|/___|'
-    printf '%s' "$C_RESET"
+# The box with the name, what it is and the version: the top of every screen.
+title_box() {
     # The text that sets the width is plain ASCII (the diamond is counted as 1), so the box
     # fits whatever the locale.
     local w inner title="Kariz manager" tag="tunnel core and web panel" version="" pad
@@ -101,10 +99,27 @@ banner() {
     [[ -x "$BIN" ]] && version="v$(bin_version "$BIN")"
     pad=$((inner - 2 - 2 - ${#title} - 2 - ${#tag} - ${#version} - 2))
     ((pad < 1)) && pad=1
-    printf '  %s╭%s╮%s\n' "$C_DIM$C_TEAL" "$(rule "$inner")" "$C_RESET"
-    printf '  %s│%s  %s%s%s  %s%s%s%*s%s%s%s  %s│%s\n' "$C_DIM$C_TEAL" "$C_RESET" "$C_BOLD$C_TEAL" "◆ $title" "$C_RESET" \
-        "$C_PINK" "$tag" "$C_RESET" "$pad" "" "$C_GRAY" "$version" "$C_RESET" "$C_DIM$C_TEAL" "$C_RESET"
-    printf '  %s╰%s╯%s\n' "$C_DIM$C_TEAL" "$(rule "$inner")" "$C_RESET"
+    printf '  %s╭%s╮%s\n' "$C_DIM$C_AQUA" "$(rule "$inner")" "$C_RESET"
+    printf '  %s│%s  %s%s%s  %s%s%s%*s%s%s%s  %s│%s\n' "$C_DIM$C_AQUA" "$C_RESET" "$C_BOLD$C_TEAL" "◆ $title" "$C_RESET" \
+        "$C_PINK" "$tag" "$C_RESET" "$pad" "" "$C_GRAY" "$version" "$C_RESET" "$C_DIM$C_AQUA" "$C_RESET"
+    printf '  %s╰%s╯%s\n' "$C_DIM$C_AQUA" "$(rule "$inner")" "$C_RESET"
+}
+
+# The big one, for the first screens and for the menu when the terminal is tall enough.
+banner() {
+    local -a art=(
+        ' _  __   _   ___  ___  ____'
+        '| |/ /  /_\ | _ \|_ _||_  /'
+        "| ' <  / _ \\|   / | |  / / "
+        '|_|\_\/_/ \_\_|_\|___|/___|'
+    )
+    local -a tint=("$C_TEAL" "$C_TEAL" "$C_AQUA" "$C_PURPLE")
+    local i
+    printf '\n'
+    for i in "${!art[@]}"; do
+        printf '  %s%s%s\n' "$C_BOLD${tint[i]}" "${art[i]}" "$C_RESET"
+    done
+    title_box
     printf '  %s© ErfanXRay%s  %s·%s  %s\n' "$C_BOLD$C_SAND" "$C_RESET" "$C_DIM" "$C_RESET" "$(url "github.com/$REPO")"
 }
 
@@ -158,6 +173,10 @@ ask() {
 choose() {
     local _var=$1 _prompt=$2 _default=$3 _pick _o _n=0 _def=""
     shift 3
+    if ui_interactive; then
+        choose_arrow "$_var" "$_prompt" "$_default" "$@"
+        return
+    fi
     local _words=()
     printf '  %s%s%s\n' "$C_BOLD" "$_prompt" "$C_RESET"
     for _o in "$@"; do
@@ -189,6 +208,174 @@ confirm() {
     local _yes
     ask _yes "$1 (y/n)" "${2:-n}"
     [[ "$_yes" == y* || "$_yes" == Y* ]]
+}
+
+# ---- The terminal: keys, pickers and screens ----
+# On a real terminal a question with options is a list to move in with the arrow keys, and the
+# menu is drawn in place. Anywhere else (a pipe, the tests' answers in KARIZ_INPUT) the same
+# questions are numbered and read as lines, so nothing here needs a terminal.
+
+UI_ROWS=24 UI_COLS=80 UI_KEY=""
+
+# Whether this is a terminal that can take arrow keys.
+ui_interactive() {
+    [[ -z "${KARIZ_INPUT:-}" && -t 1 ]] || return 1
+    if [[ -z "$IN_FD" ]]; then
+        { exec {IN_FD}</dev/tty; } 2>/dev/null || IN_FD=""
+    fi
+    [[ -n "$IN_FD" && -t "$IN_FD" ]]
+}
+
+# The terminal's size, in UI_ROWS and UI_COLS (and COLUMNS, which the boxes follow).
+ui_term_size() {
+    local size=""
+    if [[ -n "$IN_FD" ]]; then
+        size=$(stty size <&"$IN_FD" 2>/dev/null || true)
+    fi
+    UI_ROWS=${size%% *}
+    UI_COLS=${size##* }
+    [[ "$UI_ROWS" =~ ^[0-9]+$ ]] && ((UI_ROWS > 0)) || UI_ROWS=24
+    [[ "$UI_COLS" =~ ^[0-9]+$ ]] && ((UI_COLS > 0)) || UI_COLS=80
+    COLUMNS=$UI_COLS
+}
+
+# Undoes what the menu and the pickers change: the hidden cursor, no line wrap, no echo.
+ui_restore_terminal() {
+    if [[ -t 1 ]]; then
+        printf '\e[?25h\e[?7h'
+    fi
+    if [[ -n "$IN_FD" ]]; then
+        stty echo icanon <&"$IN_FD" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# The top of a screen: the screen is cleared and the title box drawn. The scrollback is kept,
+# so a long output (an install, an error) can still be scrolled back to.
+screen_header() {
+    printf '\e[H\e[2J'
+    title_box
+}
+
+# Waits up to a second for a key and stores it in UI_KEY: up, down, home, end, pgup, pgdn,
+# enter, esc, backspace, other, or the character. Returns 1 at the end of the input, 2 when
+# no key was pressed.
+read_key() {
+    local key="" rest="" status=0
+    UI_KEY=""
+    IFS= read -rsn1 -t 1 -u "$IN_FD" key || status=$?
+    ((status > 128)) && return 2
+    ((status == 0)) || return 1
+    case "$key" in
+        "") UI_KEY=enter && return 0 ;;
+        $'\177' | $'\b') UI_KEY=backspace && return 0 ;;
+        $'\e') ;;
+        *) UI_KEY=$key && return 0 ;;
+    esac
+    IFS= read -rsn2 -t 0.05 -u "$IN_FD" rest || true
+    case "$rest" in
+        '[A' | 'OA') UI_KEY=up ;;
+        '[B' | 'OB') UI_KEY=down ;;
+        '[H' | 'OH' | '[1' | '[7') UI_KEY=home ;;
+        '[F' | 'OF' | '[4' | '[8') UI_KEY=end ;;
+        '[5') UI_KEY=pgup ;;
+        '[6') UI_KEY=pgdn ;;
+        '') UI_KEY=esc ;;
+        *) UI_KEY=other ;;
+    esac
+    # The rest of Home, End and Page Up / Down: a "~", or modifiers up to a letter. The
+    # short sequences (the arrows) are whole already, so a key typed right after one is kept.
+    case "$rest" in
+        '[1' | '[4' | '[5' | '[6' | '[7' | '[8')
+            local c="" n=0
+            while ((n++ < 4)) && IFS= read -rsn1 -t 0.01 -u "$IN_FD" c; do
+                [[ "$c" == "~" || "$c" =~ [A-Za-z] ]] && break
+            done
+            ;;
+    esac
+    return 0
+}
+
+# "Press any key" at the end of a screen. Without a terminal it waits for a line, as before.
+pause() {
+    if ui_interactive; then
+        printf '\n  %s╰─ Press any key to continue%s ' "$C_DIM$C_GRAY" "$C_RESET"
+        IFS= read -rsn1 -u "$IN_FD" _ || true
+        # The rest of an arrow key, so the menu does not get it.
+        while IFS= read -rsn1 -t 0.02 -u "$IN_FD" _; do :; done
+        printf '\n'
+    else
+        printf '\n  %sEnter: back to the menu%s' "$C_DIM" "$C_RESET"
+        read -r -u "$IN_FD" _ || true
+    fi
+}
+
+# The picker of `choose` on a terminal: the options are rows to move in, drawn in place.
+# Esc or q leaves the command (Ctrl+C does too).
+choose_arrow() {
+    local _var=$1 _prompt=$2 _default=$3 _o _i _sel=0 _n _drawn=0 _w _pad _fill _line _frame _status
+    shift 3
+    local _words=() _descs=() _wide=4
+    for _o in "$@"; do
+        _words+=("${_o%%|*}")
+        if [[ "$_o" == *"|"* ]]; then _descs+=("${_o#*|}"); else _descs+=(""); fi
+        ((${#_words[-1]} > _wide)) && _wide=${#_words[-1]}
+    done
+    _n=${#_words[@]}
+    for _i in "${!_words[@]}"; do
+        [[ "${_words[_i]}" == "$_default" ]] && _sel=$_i
+    done
+    open_input
+    ui_term_size
+    _w=$(box_width)
+    printf '  %s%s%s\n' "$C_BOLD" "$_prompt" "$C_RESET"
+    # No cursor and no line wrap, so every option is one line to redraw; no echo of keys.
+    printf '\e[?25l\e[?7l'
+    stty -echo <&"$IN_FD" 2>/dev/null || true
+    while true; do
+        _frame=""
+        ((_drawn)) && _frame+=$'\e'"[${_drawn}A"$'\r'
+        for _i in "${!_words[@]}"; do
+            if ((_i == _sel)); then
+                _pad=$((_w - 11 - _wide - ${#_descs[_i]}))
+                ((_pad < 1)) && _pad=1
+                printf -v _fill '%*s' "$_pad" ''
+                printf -v _line '  %s❯%s %s %d  %-*s  %s%s%s' "$C_TEAL" "$C_RESET" "$C_SEL$C_BOLD" $((_i + 1)) \
+                    "$_wide" "${_words[_i]}" "${_descs[_i]}" "$_fill" "$C_RESET"
+            else
+                printf -v _line '     %s%d%s  %-*s  %s%s%s' "$C_GRAY" $((_i + 1)) "$C_RESET" \
+                    "$_wide" "${_words[_i]}" "$C_DIM" "${_descs[_i]}" "$C_RESET"
+            fi
+            _frame+="$_line"$'\e[K\n'
+        done
+        _frame+="  ${C_DIM}${C_GRAY}↑/↓ move · Enter select · Esc cancel${C_RESET}"$'\e[K\n'
+        printf '%s' "$_frame"
+        _drawn=$((_n + 1))
+        _status=0
+        read_key || _status=$?
+        case $_status in
+            1) UI_KEY=esc ;;
+            2) continue ;;
+        esac
+        case "$UI_KEY" in
+            up | k) _sel=$(((_sel - 1 + _n) % _n)) ;;
+            down | j | $'\t') _sel=$(((_sel + 1) % _n)) ;;
+            home | pgup) _sel=0 ;;
+            end | pgdn) _sel=$((_n - 1)) ;;
+            [1-9]) ((UI_KEY <= _n)) && _sel=$((UI_KEY - 1)) ;;
+            enter) break ;;
+            esc | q | Q)
+                printf '\e[%dA\r\e[J' $((_drawn + 1))
+                ui_restore_terminal
+                printf '  %s‹ Cancelled%s\n' "$C_DIM$C_GRAY" "$C_RESET"
+                exit 130
+                ;;
+        esac
+    done
+    printf '\e[%dA\r\e[J' $((_drawn + 1))
+    ui_restore_terminal
+    printf '  %s✔%s %s %s%s%s\n' "$C_GREEN" "$C_RESET" "$_prompt" "$C_BOLD$C_TEAL" "${_words[_sel]}" "$C_RESET"
+    printf -v "$_var" '%s' "${_words[_sel]}"
 }
 
 # ---- Checks ----
@@ -470,6 +657,7 @@ update_available() {
 # the panel and the agent). Asked only at a terminal: `kariz-manager update` does it by hand.
 offer_update() {
     update_available || return 0
+    OFFERED=1
     echo
     warn "Kariz $LATEST is out. Here: $BEHIND."
     info "An older agent or panel can refuse what the newer panel sends (an auto tunnel, mux settings)."
@@ -648,7 +836,7 @@ panel_show() {
         kv "" "${C_DIM}no warning with a real one: kariz-manager panel cert${C_RESET}"
     fi
     if [[ -n "$agent" ]]; then
-        kv "agents" "port ${agent##*:}: TCP and UDP, and TCP $((${agent##*:} + 1)) ${C_DIM}(open them for the servers you add)${C_RESET}"
+        kv "agents" "port ${agent##*:}: TCP and UDP, and TCP and UDP $((${agent##*:} + 1)) ${C_DIM}(open them for the servers you add)${C_RESET}"
     fi
     link=$("$PANEL_BIN" login-link -c "$PANEL_CONF" --host "$host" 2>/dev/null || true)
     kv "sign in" "$(url "$link")"
@@ -736,6 +924,7 @@ offer_panel() {
     [[ -z "${KARIZ_NO_OFFER:-}" ]] || return 0
     [[ -x "$BIN" ]] || return 0
     [[ -f "$PANEL_CONF" || -f "$AGENT_CONF" || -f "$PANEL_ASKED" ]] && return 0
+    OFFERED=1
     section "The web panel"
     info "This server has no web panel. It is where servers and tunnels are made, in a browser."
     mkdir -p "$CONF_DIR"
@@ -743,7 +932,7 @@ offer_panel() {
     if confirm "Install the web panel on this server now?" n; then
         (panel_install) || warn "The panel was not installed: kariz-manager panel install shows why."
     else
-        info "Any time later: kariz-manager, then 2 (Web panel and agent), then install."
+        info "Any time later: kariz-manager, then 3 (Install the web panel here)."
     fi
 }
 
@@ -1360,30 +1549,14 @@ cmd_agent() {
 
 # What runs on this server, in a few lines.
 cmd_status() {
-    banner
+    [[ -n "$IN_SCREEN" ]] || banner
     server_line
     echo
     if [[ ! -x "$BIN" ]]; then
         warn "Kariz is not installed yet: run kariz-manager install."
         return 0
     fi
-    local running=0
-    running=$(systemctl list-units --type=service --state=active --plain --no-legend 'kariz@*' 2>/dev/null | wc -l)
-    printf '  %s core       %s %s  %s(%s tunnel service(s) running here)%s\n' "$C_TEAL" "$C_RESET" "$("$BIN" --version)" "$C_DIM" "$running" "$C_RESET"
-    if systemctl is-active --quiet kariz-panel 2>/dev/null; then
-        printf '  %s web panel  %s %srunning%s\n' "$C_TEAL" "$C_RESET" "$C_GREEN" "$C_RESET"
-    elif [[ -f "$PANEL_CONF" ]]; then
-        printf '  %s web panel  %s %sinstalled, not running%s (journalctl -u kariz-panel)\n' "$C_TEAL" "$C_RESET" "$C_YELLOW" "$C_RESET"
-    else
-        printf '  %s web panel  %s %snot installed%s (kariz-manager panel install)\n' "$C_TEAL" "$C_RESET" "$C_DIM" "$C_RESET"
-    fi
-    if systemctl is-active --quiet kariz-agent 2>/dev/null; then
-        printf '  %s agent      %s %sconnected to a panel%s\n' "$C_TEAL" "$C_RESET" "$C_GREEN" "$C_RESET"
-    elif [[ -f "$AGENT_CONF" ]]; then
-        printf '  %s agent      %s %sset up, not running%s (journalctl -u kariz-agent)\n' "$C_TEAL" "$C_RESET" "$C_YELLOW" "$C_RESET"
-    else
-        printf '  %s agent      %s %snot set up%s (kariz-manager --agent CODE)\n' "$C_TEAL" "$C_RESET" "$C_DIM" "$C_RESET"
-    fi
+    status_rows
     if [[ -f "$PANEL_CONF" ]]; then
         panel_show "$(panel_host "")"
     fi
@@ -1422,100 +1595,463 @@ first_run() {
     esac
 }
 
-menu_panel() {
-    local action code
-    choose action "Web panel" install \
-        "install|install the web panel on this server" \
-        "link|make a one-time login link" \
-        "password|set a new admin password" \
-        "cert|change the domain or IP address (Let's Encrypt certificate)" \
-        "status|its address and state" \
-        "agent|connect this server to a panel (with a join code)" \
-        "uninstall|remove the web panel"
-    case $action in
-        install) panel_install ;;
-        agent)
-            ask code "Join code (starts with kz1_)"
-            agent_join "$code"
+# One row per line: "id|number|label|hint", "#Section", or "" for a gap. The labels and the
+# hints are plain ASCII (no "|"), so their length is their width on the screen.
+MENU_ROWS=(
+    "#KARIZ"
+    "install|1|Install or update Kariz|Download the newest release, check it and install it."
+    "status|2|Status and addresses|What runs here, this server's addresses and the panel's address."
+    ""
+    "#WEB PANEL"
+    "panel|3|Install the web panel here|The panel: servers, tunnels and charts in a browser, over HTTPS."
+    "link|4|Login link|A one-time login link for the panel (works once, for 60 minutes)."
+    "password|5|Admin password|Set a new admin password for the panel."
+    "cert|6|Domain or IP and certificate|Change the panel's domain or IP, with a Let's Encrypt certificate."
+    "premove|7|Remove the web panel|Stop and remove the panel. Asks first."
+    ""
+    "#AGENT"
+    "agent|8|Connect to a panel|Paste a panel's join code: this server then shows up in that panel."
+    "aremove|9|Remove the agent|Disconnect from the panel; its tunnels keep running. Asks first."
+    ""
+    "#SYSTEM"
+    "logs|10|Live logs|Follow the panel's or the agent's log. Ctrl+C comes back here."
+    "uninstall|11|Uninstall Kariz|Remove what Kariz installed on this server. Asks first."
+    "exit|0|Exit|Close the menu. Run kariz-manager to open it again."
+)
+# The items whose number is drawn in red.
+MENU_DANGER=" premove aremove uninstall "
+
+MENU_SEL=1     # index in MENU_ROWS of the highlighted item
+MENU_TOP=0     # the first row on the screen when the list scrolls
+MENU_CHOICE="" # the id of the item that was chosen
+MENU_STATUS="" # the status lines, rebuilt each time the menu is shown
+MENU_SERVER_LINE=""
+MENU_RESIZED=0
+MENU_HEAD=() # the logo or the title box, and the status lines, for the current size
+
+menu_is_item() {
+    local row=${MENU_ROWS[$1]}
+    [[ -n "$row" && "$row" != \#* ]]
+}
+
+# menu_move <-1|1>: the highlight goes to the previous or the next item, round the ends.
+menu_move() {
+    local n=${#MENU_ROWS[@]} i=$MENU_SEL step
+    for ((step = 0; step < n; step++)); do
+        i=$(((i + $1 + n) % n))
+        if menu_is_item "$i"; then
+            MENU_SEL=$i
+            return 0
+        fi
+    done
+}
+
+# menu_jump <number>: highlights the item with that number; 1 if there is none.
+menu_jump() {
+    local i row num
+    for i in "${!MENU_ROWS[@]}"; do
+        menu_is_item "$i" || continue
+        row=${MENU_ROWS[i]#*|}
+        num=${row%%|*}
+        if [[ "$num" == "$1" ]]; then
+            MENU_SEL=$i
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Whether some number starts with $1 and is longer (1 is, with 10 and 11).
+menu_has_longer() {
+    local i row num
+    for i in "${!MENU_ROWS[@]}"; do
+        menu_is_item "$i" || continue
+        row=${MENU_ROWS[i]#*|}
+        num=${row%%|*}
+        [[ "$num" == "$1"?* ]] && return 0
+    done
+    return 1
+}
+
+# One line of the status: a dot (green when systemd says "active"), a name and its detail.
+state_row() {
+    local mark='○' colour=$C_GRAY
+    if [[ "$1" == active ]]; then
+        mark='●' colour=$C_GREEN
+    fi
+    printf '  %s%s%s %-10s %s\n' "$colour" "$mark" "$C_RESET" "$2" "$3"
+}
+
+# What runs here: the core, the web panel and the agent. $1 = short: the menu's version, with
+# the panel's address, and without the commands that would change things.
+status_rows() {
+    local short=${1:-} running state listen path tip=""
+    if [[ -x "$BIN" ]]; then
+        running=$(systemctl list-units --type=service --state=active --plain --no-legend 'kariz@*' 2>/dev/null | wc -l)
+        state_row active "core" "$("$BIN" --version)  ${C_DIM}·  $((running + 0)) tunnel service(s) running here${C_RESET}"
+    else
+        state_row inactive "core" "${C_YELLOW}not installed${C_RESET}${C_DIM}: choose 1${C_RESET}"
+    fi
+    state=$(systemctl is-active kariz-panel 2>/dev/null || true)
+    if [[ "$state" == active ]]; then
+        if [[ -n "$short" && -f "$PANEL_CONF" ]]; then
+            listen=$(panel_setting listen)
+            path=$(panel_setting path)
+            state_row active "web panel" "$(url "https://$(panel_host ""):${listen##*:}/$path/")"
+        else
+            state_row active "web panel" "${C_GREEN}running${C_RESET}"
+        fi
+    elif [[ -f "$PANEL_CONF" ]]; then
+        [[ -n "$short" ]] || tip=" ${C_DIM}(journalctl -u kariz-panel)${C_RESET}"
+        state_row inactive "web panel" "${C_YELLOW}installed, not running${C_RESET}$tip"
+    else
+        [[ -n "$short" ]] || tip=" ${C_DIM}(kariz-manager panel install)${C_RESET}"
+        state_row inactive "web panel" "${C_DIM}not installed${C_RESET}$tip"
+    fi
+    tip=""
+    state=$(systemctl is-active kariz-agent 2>/dev/null || true)
+    if [[ "$state" == active ]]; then
+        state_row active "agent" "${C_GREEN}connected to a panel${C_RESET}"
+    elif [[ -f "$AGENT_CONF" ]]; then
+        [[ -n "$short" ]] || tip=" ${C_DIM}(journalctl -u kariz-agent)${C_RESET}"
+        state_row inactive "agent" "${C_YELLOW}set up, not running${C_RESET}$tip"
+    else
+        [[ -n "$short" ]] || tip=" ${C_DIM}(kariz-manager --agent CODE)${C_RESET}"
+        state_row inactive "agent" "${C_DIM}not set up${C_RESET}$tip"
+    fi
+}
+
+menu_status_lines() {
+    printf '%s\n' "$MENU_SERVER_LINE"
+    status_rows short
+}
+
+# The part above the list for the current size: the big logo when all of it fits, the title
+# box when not.
+menu_prepare() {
+    local -a lines=()
+    mapfile -t lines <<<"$MENU_STATUS"
+    if ((UI_ROWS >= 10 + ${#lines[@]} + 1 + ${#MENU_ROWS[@]} + 4 && UI_COLS >= 56)); then
+        mapfile -t MENU_HEAD < <(banner)
+    else
+        mapfile -t MENU_HEAD < <(title_box)
+    fi
+    MENU_HEAD+=("" "${lines[@]}" "")
+}
+
+# menu_draw [typed digits]: the whole menu, in one write, from the top left corner.
+menu_draw() {
+    local digits=${1:-} w n list_h cap top i row id num label hint title pad colour fill frame=""
+    local -a lines=()
+    w=$(box_width)
+    n=${#MENU_ROWS[@]}
+    lines=("${MENU_HEAD[@]}")
+
+    # The list gets the rows that are left; it scrolls, with ▲ and ▼, when they are too few.
+    list_h=$((UI_ROWS - ${#MENU_HEAD[@]} - 4))
+    ((list_h < 5)) && list_h=5
+    if ((n <= list_h)); then
+        top=0
+        cap=$n
+    else
+        cap=$((list_h - 2))
+        top=$MENU_TOP
+        ((MENU_SEL < top)) && top=$MENU_SEL
+        ((MENU_SEL >= top + cap)) && top=$((MENU_SEL - cap + 1))
+        # The title of a section stays in sight above its first item.
+        if ((top > 0 && top == MENU_SEL)) && [[ "${MENU_ROWS[top - 1]}" == \#* ]]; then
+            top=$((top - 1))
+        fi
+        ((top > n - cap)) && top=$((n - cap))
+        ((top < 0)) && top=0
+        MENU_TOP=$top
+        if ((top > 0)); then
+            lines+=("  ${C_DIM}${C_GRAY}▲ more${C_RESET}")
+        else
+            lines+=("")
+        fi
+    fi
+
+    for ((i = top; i < top + cap && i < n; i++)); do
+        row=${MENU_ROWS[i]}
+        if [[ -z "$row" ]]; then
+            lines+=("")
+        elif [[ "$row" == \#* ]]; then
+            title=${row#\#}
+            pad=$((w - ${#title} - 1))
+            ((pad < 1)) && pad=1
+            printf -v fill '%*s' "$pad" ''
+            lines+=("  ${C_BOLD}${C_PURPLE}${title}${C_RESET} ${C_DIM}${C_AQUA}${fill// /─}${C_RESET}")
+        else
+            IFS='|' read -r id num label hint <<<"$row"
+            colour=$C_TEAL
+            [[ "$MENU_DANGER" == *" ${id} "* ]] && colour=$C_RED
+            [[ "$id" == exit ]] && colour=$C_GRAY
+            ((${#num} < 2)) && num=" ${num}"
+            if ((i == MENU_SEL)); then
+                # "  ❯ ", then the bar: " NN  label", as wide as the box.
+                pad=$((w - 7 - ${#label}))
+                ((pad < 1)) && pad=1
+                printf -v fill '%*s' "$pad" ''
+                lines+=("  ${C_BOLD}${C_TEAL}❯${C_RESET} ${C_SEL}${C_BOLD}${colour} ${num}${C_RESET}${C_SEL}${C_BOLD}  ${label}${fill}${C_RESET}")
+            else
+                lines+=("     ${colour}${num}${C_RESET}  ${label}")
+            fi
+        fi
+    done
+
+    if ((n > list_h)); then
+        if ((top + cap < n)); then
+            lines+=("  ${C_DIM}${C_GRAY}▼ more${C_RESET}")
+        else
+            lines+=("")
+        fi
+    fi
+
+    IFS='|' read -r _ _ _ hint <<<"${MENU_ROWS[MENU_SEL]}"
+    printf -v fill '%*s' "$w" ''
+    lines+=("  ${C_DIM}${C_AQUA}${fill// /─}${C_RESET}")
+    lines+=("  ${C_TEAL}›${C_RESET} ${hint}")
+    if [[ -n "$digits" ]]; then
+        lines+=("  ${C_DIM}${C_GRAY}↑/↓ move · Enter open · q quit${C_RESET}   ${C_BOLD}${C_YELLOW}#${digits}${C_RESET}")
+    else
+        lines+=("  ${C_DIM}${C_GRAY}↑/↓ move · Enter open · a number jumps · q quit${C_RESET}")
+    fi
+
+    for row in "${lines[@]}"; do
+        frame+="${row}"$'\e[K\n'
+    done
+    printf '\e[H%s\e[J' "$frame"
+}
+
+# The user picks an item; its id goes to MENU_CHOICE.
+menu_select() {
+    local digits="" last_digit=0 now status=0 _
+
+    if ! ui_interactive; then
+        menu_select_plain
+        return
+    fi
+
+    ui_term_size
+    menu_prepare
+    # No cursor, no line wrap (each row stays one line), no echo of the keys.
+    printf '\e[?25l\e[?7l\e[H\e[2J'
+    stty -echo <&"$IN_FD" 2>/dev/null || true
+    local redraw=1
+    while true; do
+        # Drawn again only when something changed: a key, a resize, forgotten digits.
+        if ((redraw)); then
+            menu_draw "$digits"
+            redraw=0
+        fi
+        status=0
+        read_key || status=$?
+        if ((status == 1)); then
+            MENU_CHOICE="exit"
+            break
+        fi
+        now=${EPOCHREALTIME:-}
+        now=${now//[!0-9]/}
+        [[ -n "$now" ]] || now=$((SECONDS * 1000000))
+        if ((status == 2)); then
+            if ((MENU_RESIZED)); then
+                MENU_RESIZED=0
+                ui_term_size
+                menu_prepare
+                printf '\e[H\e[2J'
+                redraw=1
+            fi
+            # Half-typed digits are forgotten after a pause.
+            if [[ -n "$digits" ]] && ((now - last_digit > 1500000)); then
+                digits=""
+                redraw=1
+            fi
+            continue
+        fi
+        redraw=1
+        case "$UI_KEY" in
+            up | k) menu_move -1 ;;
+            down | j | $'\t') menu_move 1 ;;
+            home)
+                MENU_SEL=0
+                menu_move 1
+                ;;
+            end) MENU_SEL=$((${#MENU_ROWS[@]} - 1)) ;;
+            pgup) for _ in 1 2 3 4 5; do menu_move -1; done ;;
+            pgdn) for _ in 1 2 3 4 5; do menu_move 1; done ;;
+            [0-9])
+                # "1" and then "0" within a moment reaches item 10.
+                if [[ -n "$digits" ]] && ((now - last_digit < 1500000)) && menu_jump "${digits}${UI_KEY}"; then
+                    digits+="$UI_KEY"
+                else
+                    digits=$UI_KEY
+                    menu_jump "$digits" || digits=""
+                fi
+                last_digit=$now
+                # Nothing longer can follow (the 5 in 1-11, or 10): the buffer is dropped.
+                if [[ -n "$digits" ]] && ! menu_has_longer "$digits"; then
+                    digits=""
+                fi
+                ;;
+            backspace) digits="" ;;
+            enter | ' ')
+                IFS='|' read -r MENU_CHOICE _ <<<"${MENU_ROWS[MENU_SEL]}"
+                break
+                ;;
+            q | Q | esc)
+                MENU_CHOICE="exit"
+                break
+                ;;
+        esac
+    done
+    ui_restore_terminal
+}
+
+# The menu as numbers and lines, for input that is not a terminal.
+menu_select_plain() {
+    local row id num label answer
+    banner
+    printf '%s\n\n' "$MENU_STATUS"
+    for row in "${MENU_ROWS[@]}"; do
+        if [[ "$row" == \#* ]]; then
+            printf '  %s%s%s\n' "$C_PURPLE" "${row#\#}" "$C_RESET"
+        elif [[ -n "$row" ]]; then
+            IFS='|' read -r id num label _ <<<"$row"
+            printf '   %s%2s%s) %s\n' "$C_TEAL" "$num" "$C_RESET" "$label"
+        fi
+    done
+    echo
+    ask answer "Choose"
+    MENU_CHOICE=""
+    case $answer in
+        0 | q) MENU_CHOICE="exit" ;;
+        "") ;;
+        *)
+            if menu_jump "$answer"; then
+                IFS='|' read -r MENU_CHOICE _ <<<"${MENU_ROWS[MENU_SEL]}"
+            else
+                warn "Choose a number from the list (0 leaves)."
+            fi
             ;;
-        *) cmd_panel "$action" ;;
     esac
 }
 
-# Ctrl+C at the menu's own question leaves the manager. During an action (which runs in
-# a subshell, and so ends on it) it comes back to the menu at once.
-MENU_BUSY=0 INTERRUPTED=0
+menu_goodbye() {
+    ui_restore_terminal
+    if [[ -t 1 ]]; then
+        printf '\e[H\e[2J'
+    fi
+    printf '\n  %sKariz manager closed. Run %s%skariz-manager%s%s to open the menu again.%s\n\n' \
+        "$C_TEAL" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_TEAL" "$C_RESET"
+    exit 0
+}
+
+# Ctrl+C at the menu itself leaves the manager. During a screen (which runs in a subshell,
+# and so ends on it) it comes back to the menu at once.
+MENU_BUSY=0 INTERRUPTED=0 IN_SCREEN="" OFFERED=0
 on_interrupt() {
-    echo
     if ((MENU_BUSY)); then
         INTERRUPTED=1
     else
-        exit 0
+        menu_goodbye
     fi
 }
 
-# "kariz 1.4.0 · the web panel is running" for the top of the menu.
-menu_status() {
-    server_line
-    echo
-    if [[ ! -x "$BIN" ]]; then
-        warn "Kariz is not installed yet: choose 1."
-        return
+# One screen of the menu: cleared, the title on top, the action, and "press any key" before
+# the menu is drawn over it. The action runs in a subshell, so an error or Ctrl+C in it
+# returns to the menu.
+run_screen() {
+    MENU_BUSY=1 INTERRUPTED=0 IN_SCREEN=1
+    ui_restore_terminal
+    if ui_interactive; then
+        screen_header
     fi
-    local panel="no web panel here"
-    if systemctl is-active --quiet kariz-panel; then
-        panel="${C_GREEN}the web panel is running${C_RESET}"
-    elif systemctl is-active --quiet kariz-agent; then
-        panel="${C_GREEN}connected to a panel (agent)${C_RESET}"
+    ("$@") || true
+    ui_restore_terminal
+    if ((INTERRUPTED)); then
+        printf '\n  %s‹ Back to the menu%s\n' "$C_DIM$C_GRAY" "$C_RESET"
+        ui_interactive && sleep 0.4
+    else
+        (pause) || true
     fi
-    info "$("$BIN" --version)  ${C_DIM}·${C_RESET}  $panel"
+    MENU_BUSY=0 IN_SCREEN=""
+}
+
+screen_install() {
+    if [[ -x "$BIN" ]]; then
+        cmd_update
+    else
+        cmd_install
+    fi
+}
+
+screen_agent() {
+    local code
+    ask code "Join code (starts with kz1_)"
+    agent_join "$code"
+}
+
+screen_agent_remove() {
+    has_agent || {
+        warn "This server has no agent."
+        return 0
+    }
+    confirm "Disconnect this server from its panel? (its tunnels keep running)" || return 0
+    cmd_agent remove
+}
+
+screen_logs() {
+    local which
+    choose which "Which log?" panel \
+        "panel|the web panel" \
+        "agent|the agent (this server's link to a panel)"
+    info "Following the $which's log: Ctrl+C comes back to the menu."
+    journalctl -u "kariz-$which" -n 100 -f
 }
 
 menu() {
     need_root
     need_systemd
     open_input
+    set +e
     trap on_interrupt INT
+    trap 'MENU_RESIZED=1' WINCH
+    trap ui_restore_terminal EXIT
     if [[ ! -x "$BIN" ]]; then
         # An action that fails ends it, as in the menu; the menu opens after it.
         (first_run) || true
+        OFFERED=1
     else
         offer_update
         offer_panel
     fi
+    # The menu clears the screen: what was printed before it (the panel's address and login
+    # link, an update) stays until a key is pressed.
+    if ((OFFERED)) && ui_interactive; then
+        (pause) || true
+    fi
+    # Looked up once: the addresses can take a moment to find behind NAT.
+    MENU_SERVER_LINE=$(server_line)
+    MENU_SEL=1
     while true; do
-        banner
-        menu_status
-        cat <<EOF
-
-   ${C_TEAL}1${C_RESET}) Install or update Kariz
-   ${C_TEAL}2${C_RESET}) Web panel and agent   ${C_DIM}(tunnels are made there)${C_RESET}
-   ${C_TEAL}3${C_RESET}) Uninstall Kariz
-   ${C_TEAL}0${C_RESET}) Exit         ${C_DIM}(Ctrl+C: back to the menu, or out from here)${C_RESET}
-
-EOF
-        local choice
-        ask choice "Choose"
-        MENU_BUSY=1 INTERRUPTED=0
-        # Each action runs in a subshell, so an error or Ctrl+C returns to the menu.
-        case $choice in
-            1) (if [[ -x "$BIN" ]]; then cmd_update; else cmd_install; fi) || true ;;
-            2) (menu_panel) || true ;;
-            3) (cmd_uninstall) || true ;;
-            0 | q) exit 0 ;;
-            "") ;;
-            *) warn "Choose 0-3." ;;
+        MENU_STATUS=$(menu_status_lines)
+        menu_select
+        case $MENU_CHOICE in
+            install) run_screen screen_install ;;
+            status) run_screen cmd_status ;;
+            panel) run_screen panel_install ;;
+            link) run_screen cmd_panel link ;;
+            password) run_screen cmd_panel password ;;
+            cert) run_screen cmd_panel cert ;;
+            premove) run_screen cmd_panel uninstall ;;
+            agent) run_screen screen_agent ;;
+            aremove) run_screen screen_agent_remove ;;
+            logs) run_screen screen_logs ;;
+            uninstall) run_screen cmd_uninstall ;;
+            exit) menu_goodbye ;;
+            *) ;;
         esac
-        # Wait for Enter before the menu hides what the action printed, unless it was
-        # left with Ctrl+C or was no action at all (a wrong number shows the menu again).
-        # The wait runs in a subshell too: Ctrl+C there returns at once.
-        if ((!INTERRUPTED)) && [[ "$choice" =~ ^[1-3]$ ]]; then
-            (
-                printf '\n  %sEnter: back to the menu%s' "$C_DIM" "$C_RESET"
-                read -r -u "$IN_FD" _
-            ) || true
-        fi
-        MENU_BUSY=0
     done
 }
 

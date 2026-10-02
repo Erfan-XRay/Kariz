@@ -32,7 +32,7 @@ profile = "ultraspeed"            # balanced (default) | ultraspeed | gaming
 برای بیشترین سرعت، ترنسپورت را هم متناسب با مسیر انتخاب کنید:
 
 - **مسیر تمیز:** `tcp` یا `tcpmux`، با `encryption = "auto"` (روی CPUهای دارای دستورهای AES، AES-256-GCM).
-- **مسیر پرتلفات:** `kcp`، یا `quic` با `congestion = "bbr"`؛ ترنسپورت‌های مبتنی بر TCP زیر اتلاف تصادفی فرو می‌ریزند.
+- **مسیر پراتلاف:** `kcp`، یا `quic` با `congestion = "bbr"`؛ ترنسپورت‌های مبتنی بر TCP زیر اتلاف تصادفی فرو می‌ریزند.
 - **فراتر از پیش‌فرض‌ها:** `tunnel.mux.stream_window` تا ۱۶ MiB بالا می‌رود. یک stream تقریباً به پهنای‌باند × RTT نیاز دارد: ۱۰۰ Mbit/s با ۱۰۰ms برابر ۱٫۲۵ MB است.
 
 `throughput`، نام قدیمی آن پیش از v0.5.1، هنوز پذیرفته می‌شود.
