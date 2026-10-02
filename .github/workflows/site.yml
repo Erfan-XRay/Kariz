@@ -2,7 +2,9 @@ name: site
 
 # The documentation site (site/, built from docs/). Every pull request that touches it must
 # build, keep its links, and say which pages are missing in Persian. It is published to
-# GitHub Pages on a release tag and on pushes to main that touch the docs or the site.
+# GitHub Pages on pushes to main that touch the docs or the site (a release changes
+# Cargo.toml and CHANGELOG.md, so merging it publishes the new version). A release tag does not
+# run it: the github-pages environment only lets main deploy, so a tag run always failed.
 on:
   pull_request:
     paths: &paths
@@ -21,7 +23,6 @@ on:
   push:
     branches: [main]
     paths: *paths
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
