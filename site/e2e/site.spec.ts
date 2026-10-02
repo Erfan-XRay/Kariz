@@ -69,7 +69,9 @@ test("a translated page is Persian all the way, code stays left to right", async
   await expect(page.locator("article.prose")).toHaveAttribute("dir", "rtl");
   await expect(page.locator(".notice")).toHaveCount(0);
   await expect(page.locator(".prose .code").first()).toBeVisible(); // wrapped by the page script
-  const dir = await page.locator("article.prose pre").first().evaluate((el) => getComputedStyle(el).direction);
+  // A block the page script wrapped: the first <pre> of the page is a mermaid diagram that is
+  // replaced by its drawing once it is ready, and an element that went away has no direction.
+  const dir = await page.locator("article.prose .code pre").first().evaluate((el) => getComputedStyle(el).direction);
   expect(dir).toBe("ltr");
 });
 
