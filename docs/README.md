@@ -1,7 +1,8 @@
 # Kariz documentation
 
-For Kariz **v1.6.0**. Start with [Getting started](getting-started.md); come back to the
-reference pages when you need a specific setting. The same pages are a website, with search,
+These pages describe Kariz as of its next release; what changed since 1.6.0 is listed under
+*Unreleased* in the [changelog](../CHANGELOG.md). Start with [Getting started](getting-started.md)
+and come back to the reference pages when you need a specific setting. The same pages are a website, with search,
 animated diagrams and a live demo of the panel, in English and Persian:
 <https://erfan-xray.github.io/Kariz/> (built from these files; see [`site/`](../site/README.md)).
 

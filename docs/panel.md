@@ -20,7 +20,7 @@ then writes the settings, makes the database, starts the service `kariz-panel`, 
 ```text
   address       https://203.0.113.5:28443/k-7f3a9c2e/
   certificate   /etc/letsencrypt/live/kariz-panel-203-0-113-5/fullchain.pem
-  agents        port 22230: TCP and UDP, and TCP 22231 (open them for the servers you add)
+  agents        port 22230: TCP and UDP, and TCP and UDP 22231 (open them for the servers you add)
   sign in       https://203.0.113.5:28443/k-7f3a9c2e/#t=...
 ```
 
@@ -32,8 +32,8 @@ then writes the settings, makes the database, starts the service `kariz-panel`, 
   and disappears from the address bar. Make another any time with
   `kariz-manager panel link`.
 - **The ports** are random (above 20000). `--port N` chooses the panel's. Open both the
-  panel's port (for you) and the agents' port (for your other servers: TCP and UDP, and TCP on the next port for
-  `wss`) in the firewall.
+  panel's port (for you) and the agents' port (for your other servers: TCP and UDP, and TCP and UDP on the next port
+  for `wss` and `quic`) in the firewall.
 
 The installer asks for an admin password of your own (at least 12 characters, three of: lower
 case, UPPER CASE, digits, symbols); or choose the one-time sign-in link only. Change it in *Settings*
@@ -91,12 +91,15 @@ panel within seconds.
   the agents port listens on both.
 - **The link's transport is automatic by default.** The panel takes agents over `tcpmux`
   (TCP on the agents port), `kcp` (UDP on the same port) and `wss` (WebSocket over TLS with
-  the panel's certificate, on the next port; it looks like an ordinary HTTPS site). With
-  *Auto*, an agent tries them in that order, moves on after two links in a row that carry no
+  the panel's certificate, on the next port; it looks like an ordinary HTTPS site) and
+  `quic` (UDP on the next port, **always sealed**: every packet is encrypted with a key from
+  the link token, so a network that filters QUIC does not recognise it, and the port answers
+  nothing that was not made with the token; there is no setting for it, it is never plain
+  QUIC). With *Auto*, an agent tries them in that order, moves on after two links in a row that carry no
   requests (it drops a link the panel has been quiet on for 20 s), and remembers the one
-  that worked in `/etc/kariz-panel/link-transport`. Pick *TCP*, *KCP* or *WSS* instead to
-  make the code use only that one (the agent must be 1.4 or newer). *Servers* shows which
-  one each server uses.
+  that worked in `/etc/kariz-panel/link-transport`. Pick *TCP*, *KCP*, *WSS* or *QUIC* instead to
+  make the code use only that one (the agent must be 1.4 or newer, and newer than 1.6 for
+  *QUIC*). *Servers* shows which one each server uses.
 - **A code works once**, for 10 minutes. It carries a token, so keep it as secret as a
   password until it is used.
 - The agent runs as the service `kariz-agent`: `kariz-manager agent status | logs | remove`.
@@ -196,7 +199,7 @@ kariz-manager --agent CODE                          # connect this server to a p
 kariz-manager agent status | logs | remove
 ```
 
-The menu has the same under *2*. Without the manager: `kariz-panel init`, `serve`,
+The menu has the same (items 3 to 10). Without the manager: `kariz-panel init`, `serve`,
 `login-link`, `reset-password`, `agent --join CODE` (see `kariz-panel --help`).
 
 ## Backup and restore
@@ -306,9 +309,9 @@ checks the signature too).
 ## Troubleshooting
 
 - **A server does not show up:** `kariz-manager agent logs` on it. "could not connect"
-  usually means the panel's agents ports (TCP and UDP, and TCP on the next port) are closed
+  usually means the panel's agents ports (TCP and UDP, and TCP and UDP on the next port) are closed
   in a firewall between them; "connected" repeating every 20 s or so means the path stalls
-  TCP: with *Auto* the agent moves to `kcp`, then `wss`, by itself; a join
+  TCP: with *Auto* the agent moves to `kcp`, then `wss`, then `quic`, by itself; a join
   code that was already used or has expired is refused (make a new one).
 - **The map shows no tunnel:** both servers must be connected and the tunnel must have the
   same name on both. A tunnel with one side connected is listed in the table as

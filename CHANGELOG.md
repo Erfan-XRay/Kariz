@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`quic` as a link between the panel and a server, always sealed.** *Add server* now offers *QUIC*
+  beside *TCP*, *KCP* and *WSS*, and *Auto* tries it after them. The link runs over UDP on the port
+  after the agents port (open UDP there too). Every packet is sealed with a key from the link token:
+  there is no setting, so a link is never plain QUIC. A network that filters QUIC does not recognise
+  it, and the port answers nothing that was not made with the token. An agent from before this
+  release simply does not try it.
+- **`obfs = true` in `[tunnel.quic]`** does the same for a tunnel. Each UDP packet is sealed with a key
+  derived from the token (ChaCha20-Poly1305, as `kcp` does), so the wire shows no QUIC header, version
+  or server name. It is off by default and must match on both sides. It costs 28 bytes a packet (QUIC's
+  packet size is lowered to match) and a little CPU; GSO and GRO keep working.
+- **Click an address to copy it.** On a server's card the IPv4, the IPv6 and an address you set for
+  the server are buttons: one click or tap copies the address, the button shows a check, and a note
+  says what was copied (if the browser refuses, the note shows the address to copy by hand). It also
+  works on a page opened over plain http. On a phone each address is a full-width row at least 44 px
+  tall, a long IPv6 wraps inside it, and the card's footer wraps instead of overflowing.
+- **A new look for the install script's menu**, in the style of XRayMesh. Move with the arrow keys (or
+  `j` and `k`) and press Enter; a number jumps to its item, `q` or Esc leaves, and the line under the
+  list says what the highlighted item does. The items are grouped (Kariz, Web panel, Agent, System),
+  what runs here (core, panel, agent) is shown at the top, and the list scrolls on a small terminal.
+  Every item opens on a cleared screen and ends with "Press any key"; Ctrl+C in it returns to the menu.
+  Questions with options are lists to move in too, and Esc cancels them. Without a terminal (a pipe,
+  the tests) the menu and the questions are numbered as before.
+
+### Changed
+
+- **The tunnel wizard picks a free port.** A new tunnel's port starts at 3080 and moves up past the ports
+  the accepting server's other tunnels already hold (their own ports, an auto tunnel's next port, and
+  the ports they forward): 3080 for the first tunnel, 3081 for the second, 3082 for the third. The wizard
+  says so when it moved the port, and leaves the port alone once you type one. A port held by something
+  that is not a Kariz tunnel is still caught at the review step.
+- **The documentation and the README were rewritten** around the website. The README is now a short
+  introduction that points to the site; the Persian pages were edited to read as Persian, not as a
+  translation.
+
+### Fixed
+
+- **The delete dialog closes by itself.** After a tunnel was deleted, the dialog where its name is typed
+  stayed on screen until it was closed by hand. It now closes a moment after the deletion is done. If a
+  server was offline it stays, so that the note about it can be read.
+
 ## 1.6.0 - 2026-10-02
 
 ### Added
