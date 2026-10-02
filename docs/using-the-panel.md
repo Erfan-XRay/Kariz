@@ -84,7 +84,7 @@ Open the tunnel, then:
 ## 6. Private networks
 
 *Networks* makes private addresses between your servers (over GRE) that are never repeated, so a
-direct tunnel can run over them: [Private networks](networks.md).
+tunnel (direct or reverse) can run over them, and the tunnel's edit page can move it on or off a network: [Private networks](networks.md).
 
 ## 7. Keep it safe
 

@@ -6,15 +6,15 @@ import { useApp } from "./store";
 import { Card, Dialog, Empty, Icon } from "./ui";
 
 /** The networks and links of the panel, kept fresh while the page is open. */
-export function useNetworks(): { networks: Network[]; links: Link[]; reload: () => void } {
-  const [data, setData] = useState<{ networks: Network[]; links: Link[] }>({ networks: [], links: [] });
+export function useNetworks(): { networks: Network[]; links: Link[]; loaded: boolean; reload: () => void } {
+  const [data, setData] = useState<{ networks: Network[]; links: Link[]; loaded: boolean }>({ networks: [], links: [], loaded: false });
   const [tick, setTick] = useState(0);
   useEffect(() => {
     let alive = true;
     const load = () =>
       api
         .networks()
-        .then((r) => alive && setData(r))
+        .then((r) => alive && setData({ ...r, loaded: true }))
         .catch(() => {});
     void load();
     const id = setInterval(load, 3000);

@@ -2,8 +2,8 @@
 
 The panel can join your servers into a **private network**: each pair gets a GRE link with
 private addresses (`10.77.0.1`, `10.77.0.2`, ...) that the panel hands out so that **no two are
-ever the same**, however many servers there are. A direct tunnel can then listen on and dial
-those private addresses, so it never uses the servers' public ones.
+ever the same**, however many servers there are. A tunnel, direct or reverse, can then listen on
+and dial those private addresses, so it never uses the servers' public ones.
 
 ## What GRE is, and what it is not
 
@@ -32,10 +32,15 @@ if they do not.
    links), for many servers. For each link the panel checks that both servers can make GRE,
    takes the first free `/30` (two usable addresses and nothing else), makes the interface on
    both, and pings across it. If the ping fails the link is removed again and you are told why.
-4. **Use it in a tunnel:** in the wizard, a *direct* tunnel has *Use a private GRE network
-   between these servers*. The tunnel then listens on the exit's end of the link and the entry
+4. **Use it in a tunnel:** in the wizard, a tunnel (reverse or direct) has *Use a private GRE
+   network between these servers*. The tunnel then listens on the private address of the server
+   that accepts its connections (the entry when reverse, the exit when direct) and the other server
    dials it. If the two servers have no link yet in that network, the panel makes one first
    (and removes it again if the tunnel cannot be made).
+5. **Change it later:** the tunnel's edit page shows the network it runs over. Tick or untick it,
+   or pick another network, and save: both sides are changed together and put back if they do not
+   connect. Unticked, the tunnel goes back to the public addresses (you give the address to dial);
+   the link stays for other tunnels.
 
 ## The rules the panel keeps
 
@@ -51,6 +56,10 @@ if they do not.
 - A link a tunnel still uses (its listen or dial address is one of the link's) cannot be
   deleted. Deleting a tunnel keeps its link (the panel does not guess you are done with it).
 - Removing a server removes its links, and the servers on their other ends are told.
+- An update does not break a network. The panel remembers the address each server was last known
+  by, so after it restarts it still sends every server its whole list of links, and it never sends
+  a partial one (an agent removes what is not in the list). An agent that only restarts leaves
+  GRE interfaces the kernel already has alone, so the tunnels over them keep their connections.
 
 ## On the servers
 

@@ -6,6 +6,7 @@ import { useApp } from "./store";
 import { Icon, Seg, useFocusTrap } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { useNetworks } from "./Networks";
+import { GreChoice, linkBetween } from "./GreChoice";
 import { MuxFields, MuxToggle, emptyMux, muxSpecOf, muxToSpec } from "./MuxFields";
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
@@ -110,10 +111,9 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const acceptor = mode === "reverse" ? entry : exit;
   const dialer = mode === "reverse" ? exit : entry;
   const parsed = useMemo(() => parsePorts(ports, protocol, target.trim() || "127.0.0.1"), [ports, protocol, target]);
-  const greLink = netId
-    ? links.find((l) => l.network === netId && [l.a, l.b].sort().join() === [entry, exit].sort().join())
-    : undefined;
-  const greAddr = greLink ? (greLink.a === exit ? greLink.addr_a : greLink.addr_b) : "";
+  const greLink = netId ? linkBetween(links, netId, entry, exit) : undefined;
+  // The tunnel listens on the private address of the server that accepts it, in either mode.
+  const greAddr = greLink ? (greLink.a === acceptor ? greLink.addr_a : greLink.addr_b) : "";
   const udp = transport === "quic" || transport === "kcp";
   const isWs = transport === "ws" || transport === "wss";
 
@@ -145,7 +145,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     profile,
     listen: `${listenHost}:${listenPort}`,
     dial: `${dialHost.includes(":") && !dialHost.startsWith("[") ? `[${dialHost}]` : dialHost}:${listenPort}`,
-    network: mode === "direct" && netId ? netId : undefined,
+    network: netId || undefined,
     pool,
     ws_path: isWs ? wsPath : undefined,
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
@@ -334,29 +334,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
               <>
                 <h3 className="wz-q">{t("wz.q3")}</h3>
                 <p className="wz-lead">{t("wz.lead3", { acceptor: serverName(acceptor), dialer: serverName(dialer) })}</p>
-                {mode === "direct" && (
-                  <div className="field" style={{ marginBottom: "var(--sp-5)" }}>
-                    <label className="check">
-                      <input type="checkbox" checked={!!netId} disabled={networks.length === 0} onChange={(e) => setNetId(e.target.checked ? networks[0]?.id ?? "" : "")} /> {t("wz.gre")}
-                    </label>
-                    {networks.length === 0 && <span className="help">{t("wz.greNone")}</span>}
-                    {netId && (
-                      <>
-                        <select className="select" aria-label={t("wz.greNet")} value={netId} onChange={(e) => setNetId(e.target.value)} style={{ maxWidth: 360 }}>
-                          {networks.map((n) => (
-                            <option key={n.id} value={n.id}>
-                              {n.name} ({n.cidr})
-                            </option>
-                          ))}
-                        </select>
-                        <span className="help">{t("wz.greText")}</span>
-                        <span className="help mono" dir="ltr">
-                          {greLink ? t("wz.greAddrs", { addr: `${greAddr}:${listenPort}`, server: serverName(exit) }) : t("wz.greNew")}
-                        </span>
-                      </>
-                    )}
-                  </div>
-                )}
+                <GreChoice value={netId} onChange={setNetId} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} />
                 <div className="grid-2" style={{ display: "grid", gap: "var(--sp-5)", gridTemplateColumns: "1fr 1fr" }}>
                   <div className="field">
                     <label htmlFor="wz-port">{t("wz.port", { server: serverName(acceptor) })}</label>

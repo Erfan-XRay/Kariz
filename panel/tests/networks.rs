@@ -13,6 +13,7 @@ use kariz_panel::hub::{Hub, LOCAL};
 use kariz_panel::manage::{Fut, Systemd};
 use kariz_panel::net::Exec;
 use kariz_panel::netops;
+use kariz_panel::pair::{self, PairRequest};
 
 #[derive(Default)]
 struct Fake {
@@ -180,6 +181,79 @@ async fn links_are_made_on_both_servers_reused_undone_and_protected() {
     let op = netops::create_links(&hub, &net.id, both.clone(), None).unwrap();
     assert_eq!(finished(&hub, &op).await.state, "done");
     assert_eq!(hub.networks.links(None).unwrap().len(), 1);
+
+    // ---- a tunnel over the link listens on the end of the server that accepts it ----
+    let end = |server: &str| {
+        if link.a == server {
+            link.addr_a.clone()
+        } else {
+            link.addr_b.clone()
+        }
+    };
+    let tunnel = |mode: &str, network: Option<String>| PairRequest {
+        name: "over".into(),
+        entry: LOCAL.into(),
+        exit: remote.clone(),
+        mode: mode.into(),
+        transport: "tcpmux".into(),
+        profile: None,
+        listen: "0.0.0.0:3080".into(),
+        dial: "203.0.113.5:3080".into(),
+        pool: None,
+        ws_path: None,
+        ws_host: None,
+        tls_sni: None,
+        mux: None,
+        encryption: None,
+        quic_obfs: false,
+        tls_cert: None,
+        tls_key: None,
+        forwards: Vec::new(),
+        rotate: false,
+        network,
+    };
+    let mut made = None;
+    let direct = pair::over_network(
+        &hub,
+        "x",
+        &tunnel("direct", Some(net.id.clone())),
+        &mut made,
+    )
+    .await
+    .unwrap()
+    .expect("a network was named");
+    assert_eq!(
+        direct.listen,
+        format!("{}:3080", end(&remote)),
+        "the exit listens"
+    );
+    assert_eq!(direct.dial, direct.listen);
+    let reverse = pair::over_network(
+        &hub,
+        "x",
+        &tunnel("reverse", Some(net.id.clone())),
+        &mut made,
+    )
+    .await
+    .unwrap()
+    .expect("a network was named");
+    assert_eq!(
+        reverse.listen,
+        format!("{}:3080", end(LOCAL)),
+        "the entry listens"
+    );
+    assert_eq!(reverse.dial, reverse.listen);
+    assert!(
+        reverse.network.is_none() && made.is_none(),
+        "the link was there already"
+    );
+    // No network: the request is used as it is (a tunnel taken off a network).
+    assert!(
+        pair::over_network(&hub, "x", &tunnel("reverse", None), &mut made)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // ---- removing a link takes its interface down on both servers ----
     let (fake_a, fake_b) = (&local_fake, &agent_fake);

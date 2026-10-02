@@ -40,10 +40,11 @@ fn spec_for(link: &Link, server: &str, local: &str, remote: &str) -> NetSpec {
     }
 }
 
-/// The address a tunnel over `link` listens on and dials: the exit's end of the link (in
-/// direct mode the exit listens), with the port of the wizard's listen address.
-pub fn tunnel_endpoint(link: &Link, exit: &str, listen: &str) -> String {
-    let addr = if link.a == exit {
+/// The address a tunnel over `link` listens on and dials: the end of the link on the server
+/// that accepts the tunnel's connections (the exit in direct mode, the entry in reverse
+/// mode), with the port of the wizard's listen address.
+pub fn tunnel_endpoint(link: &Link, acceptor: &str, listen: &str) -> String {
+    let addr = if link.a == acceptor {
         &link.addr_a
     } else {
         &link.addr_b
@@ -52,7 +53,9 @@ pub fn tunnel_endpoint(link: &Link, exit: &str, listen: &str) -> String {
 }
 
 impl Hub {
-    /// The specs of every link of `server` whose two public addresses are known.
+    /// The specs of every link of `server`. An agent removes the links that are not in the
+    /// list it is sent, so the list is never partial: if the public address of either end of
+    /// a link is not known, no list is made (and the agent keeps the links it has).
     pub fn net_specs(&self, server: &str) -> Result<Vec<NetSpec>> {
         let mut out = Vec::new();
         for link in self.networks.links(None)? {
@@ -61,11 +64,49 @@ impl Hub {
             }
             let other = if link.a == server { &link.b } else { &link.a };
             let (Some(local), Some(remote)) = (self.addr_of(server), self.addr_of(other)) else {
-                continue;
+                bail!("no_address:{}", link.ifname);
             };
             out.push(spec_for(&link, server, &local, &remote));
         }
         Ok(out)
+    }
+
+    /// The servers at the other end of `server`'s links, once each.
+    pub fn net_peers(&self, server: &str) -> Vec<String> {
+        let mut peers: Vec<String> = self
+            .networks
+            .links(None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|l| {
+                if l.a == server {
+                    Some(l.b)
+                } else if l.b == server {
+                    Some(l.a)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        peers.sort();
+        peers.dedup();
+        peers
+    }
+
+    /// Tells the servers at the other ends of `server`'s links their lists again, in the
+    /// background (the ones that are connected; the others are told when they connect).
+    pub fn net_sync_peers(self: &Arc<Self>, server: &str) {
+        for peer in self.net_peers(server) {
+            if !self.is_online(&peer) {
+                continue;
+            }
+            let hub = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = hub.net_sync(&peer).await {
+                    tracing::warn!(server = %peer, error = %e, "the private network links could not be synced");
+                }
+            });
+        }
     }
 
     /// Tells a server its whole list of links (an agent that just connected, a change).
@@ -271,6 +312,39 @@ mod tests {
             "10.77.0.2:3080"
         );
         assert_eq!(tunnel_endpoint(&link(), "aaa", "[::]:443"), "10.77.0.1:443");
+    }
+
+    #[test]
+    fn the_accepting_server_is_the_exit_when_direct_and_the_entry_when_reverse() {
+        let req = |mode: &str| crate::pair::PairRequest {
+            name: "t".into(),
+            entry: "aaa".into(),
+            exit: "bbb".into(),
+            mode: mode.into(),
+            transport: "tcpmux".into(),
+            profile: None,
+            listen: "0.0.0.0:3080".into(),
+            dial: String::new(),
+            pool: None,
+            ws_path: None,
+            ws_host: None,
+            tls_sni: None,
+            mux: None,
+            encryption: None,
+            quic_obfs: false,
+            tls_cert: None,
+            tls_key: None,
+            forwards: Vec::new(),
+            rotate: false,
+            network: Some("n".into()),
+        };
+        let at = |mode: &str| {
+            let r = req(mode);
+            let [acceptor, _] = r.acceptor_first();
+            tunnel_endpoint(&link(), acceptor, &r.listen)
+        };
+        assert_eq!(at("direct"), "10.77.0.2:3080", "the exit (bbb) listens");
+        assert_eq!(at("reverse"), "10.77.0.1:3080", "the entry (aaa) listens");
     }
 
     #[test]
