@@ -16,13 +16,16 @@ import { transportLabel } from "./transport";
 const stateKey = { up: "st.up", down: "st.down", off: "st.off" } as const;
 
 /** A dialog that runs one operation (start, stop, delete, a new token) and shows it. With
- * `confirm`, the operation waits until that word is typed. */
+ * `confirm`, the operation waits until that word is typed. With `autoClose`, it closes by
+ * itself a moment after the operation is done, unless there is something to read (a server
+ * that was offline). */
 function RunDialog({
   title,
   text,
   danger,
   label,
   confirm,
+  autoClose,
   start,
   onClose,
   names,
@@ -33,6 +36,7 @@ function RunDialog({
   danger?: boolean;
   label: string;
   confirm?: string;
+  autoClose?: boolean;
   start: () => Promise<{ op: string }>;
   onClose: (done: boolean) => void;
 }) {
@@ -51,6 +55,14 @@ function RunDialog({
     }
   };
   const ready = !confirm || typed.trim() === confirm;
+  const closeNow = useRef(onClose);
+  closeNow.current = onClose;
+  const finished = op?.state === "done" && !op.offline?.length;
+  useEffect(() => {
+    if (!autoClose || !finished) return;
+    const timer = setTimeout(() => closeNow.current(true), 1200);
+    return () => clearTimeout(timer);
+  }, [autoClose, finished]);
   return (
     <Dialog
       title={title}
@@ -406,6 +418,7 @@ export function TunnelsPage({
           text={act.action === "delete" ? t("tun.deleteText") : act.action === "rotate" ? t("tun.rotateText") : t(`tun.${act.action}Text`, { name: act.name })}
           danger={act.action === "delete"}
           confirm={act.action === "delete" ? act.name : undefined}
+          autoClose={act.action === "delete"}
           label={t(act.action === "delete" ? "tun.delete" : act.action === "rotate" ? "tun.rotate" : `tun.${act.action}`)}
           start={async () => {
             if (act.action === "delete") return api.deleteTunnel(act.name);

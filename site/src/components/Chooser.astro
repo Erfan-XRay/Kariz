@@ -20,8 +20,8 @@ const T = {
     v: {
       cdn: ["wss", "A CDN only carries HTTP, so the tunnel rides a WebSocket. Use `ws` if the CDN talks plain HTTP to your server.", "Through a CDN or reverse proxy"],
       "udp-games": ["kcp", "Games and voice want low, steady latency on a path where UDP works. FEC rebuilds lost packets without a resend.", "UDP works, for games or voice"],
-      "udp-lossy": ["kcp", "TCP halves its rate on every loss; KCP keeps its speed. `quic` with BBR is the other choice.", "UDP works, the path is lossy"],
-      "udp-clean": ["tcpmux", "The fastest choice on a clean path: a few long-lived connections carry every user. `quic` also fits.", "UDP works, the path is clean"],
+      "udp-lossy": ["kcp", "TCP halves its rate on every loss; KCP keeps its speed. `quic` with BBR is the other choice; if the network recognises QUIC, set `obfs = true` under `[tunnel.quic]` on both sides.", "UDP works, the path is lossy"],
+      "udp-clean": ["tcpmux", "The fastest choice on a clean path: a few long-lived connections carry every user. `quic` also fits (add `obfs = true` where QUIC is filtered).", "UDP works, the path is clean"],
       "noudp-https": ["wss", "The tunnel looks like a browser talking to an HTTPS site; anything else gets a stock 404.", "No UDP, and it should look like HTTPS"],
       "noudp-games": ["tcpmux", "UDP is not an option, so tcpmux with the gaming profile is the next best for latency.", "No UDP, for games or voice"],
       noudp: ["tcpmux", "Fewer connections between the servers, all user connections over a few long-lived ones.", "No UDP, a plain path"],
@@ -32,7 +32,7 @@ const T = {
     q: {
       cdn: "بین دو سرور CDN یا reverse proxy هست؟",
       udp: "UDP به‌طور قابل‌اعتماد به سرور دیگر می‌رسد؟",
-      lossy: "مسیر طولانی یا پرتلفات است (بین‌المللی، محدودشده)؟",
+      lossy: "مسیر طولانی یا پراتلاف است (بین‌المللی، محدودشده)؟",
       games: "برای بازی یا صدا است؟",
       https: "باید شبیه یک سایت HTTPS باشد؟",
     },
@@ -44,8 +44,8 @@ const T = {
     v: {
       cdn: ["wss", "CDN فقط HTTP می‌برد، پس تانل روی WebSocket سوار می‌شود. اگر CDN با سرور شما ساده HTTP حرف می‌زند، `ws` را بگذارید.", "از پشت CDN یا reverse proxy"],
       "udp-games": ["kcp", "بازی و صدا تأخیر کم و پایدار می‌خواهند و UDP کار می‌کند. FEC بسته‌های گم‌شده را بدون ارسال دوباره می‌سازد.", "UDP کار می‌کند، برای بازی یا صدا"],
-      "udp-lossy": ["kcp", "TCP با هر اتلاف سرعتش را نصف می‌کند؛ KCP سرعتش را نگه می‌دارد. گزینهٔ دیگر `quic` با BBR است.", "UDP کار می‌کند، مسیر پرتلفات است"],
-      "udp-clean": ["tcpmux", "سریع‌ترین انتخاب روی مسیر تمیز: چند اتصال بلندمدت همهٔ کاربرها را می‌برند. `quic` هم می‌خورد.", "UDP کار می‌کند، مسیر تمیز است"],
+      "udp-lossy": ["kcp", "TCP با هر اتلاف سرعتش را نصف می‌کند، ولی KCP سرعتش را نگه می‌دارد. گزینهٔ دیگر `quic` با BBR است؛ اگر شبکه QUIC را می‌شناسد و فیلتر می‌کند، `obfs = true` را زیر `[tunnel.quic]` روی هر دو سمت بگذارید.", "UDP کار می‌کند، مسیر پراتلاف است"],
+      "udp-clean": ["tcpmux", "سریع‌ترین انتخاب روی مسیر تمیز: چند اتصال بلندمدت همهٔ کاربرها را می‌برند. `quic` هم مناسب است (جایی که QUIC فیلتر می‌شود `obfs = true` اضافه کنید).", "UDP کار می‌کند، مسیر تمیز است"],
       "noudp-https": ["wss", "تانل مثل مرورگری به نظر می‌رسد که با یک سایت HTTPS حرف می‌زند؛ هر چیز دیگر یک ۴۰۴ معمولی می‌گیرد.", "بدون UDP، و باید شبیه HTTPS باشد"],
       "noudp-games": ["tcpmux", "UDP گزینه نیست، پس tcpmux با پروفایل gaming بهترین گزینهٔ بعدی برای تأخیر است.", "بدون UDP، برای بازی یا صدا"],
       noudp: ["tcpmux", "اتصال کمتر بین دو سرور؛ همهٔ اتصال‌های کاربرها روی چند اتصال بلندمدت.", "بدون UDP، مسیر ساده"],

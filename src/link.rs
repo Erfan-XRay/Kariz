@@ -3,15 +3,21 @@
 //! the mux), so it resists DPI like a tunnel does. The web panel uses it to talk to its
 //! agents; nothing in the tunnel core uses it.
 //!
-//! The transport is `tcpmux`, `kcp` or `wss` ([`LINK_TRANSPORTS`]): a panel listens on all
-//! three (TCP and UDP of its agents port, and TLS on the next port, [`wss_addr`]), and an
-//! agent uses the one that gets through. Which side dials and which opens streams are
-//! independent: an agent dials the panel, but the panel is the one that opens streams
-//! (requests).
+//! The transport is `tcpmux`, `kcp`, `wss` or `quic` ([`LINK_TRANSPORTS`]): a panel listens
+//! on all of them (TCP and UDP of its agents port, and TLS and QUIC on the next port,
+//! [`wss_addr`]), and an agent uses the one that gets through. Which side dials and which
+//! opens streams are independent: an agent dials the panel, but the panel is the one that
+//! opens streams (requests).
 //!
 //! Over `wss` the dialing side does not check the certificate: TLS is only there to look
 //! like a web site. Who is on the other end is proven by the token handshake inside, as on
 //! the other transports.
+//!
+//! `quic` is always obfuscated (`[tunnel.quic] obfs`, see `transport/quic_obfs.rs`): every
+//! UDP packet is sealed with a key from the token, so the link does not look like QUIC to a
+//! network that filters it, and the port answers nothing that was not made with the token.
+//! There is no setting for it: a link that is meant to get through is never plain QUIC.
+//! Its TLS 1.3 handshake proves the token, so it has no handshake of its own.
 
 use std::io;
 use std::net::SocketAddr;
@@ -25,21 +31,46 @@ use crate::channel;
 use crate::config::{Config, TransportKind, Tuning};
 use crate::crypto::{Crypto, ReplayFilter};
 use crate::mux::{MuxSession, SessionConfig, Side};
+#[cfg(feature = "quic")]
+use crate::session::quic::QuicSession;
+use crate::session::Session;
+#[cfg(feature = "quic")]
+use crate::transport::quic::{Accepting, QuicDialer, QuicListener, QuicSettings};
 use crate::transport::{Dialer as TransportDialer, Incoming, Listener, Settings};
 
 /// The transports a management link can use, in the order an agent tries them. Some
 /// networks let a TCP connection open and then stall it; KCP (over UDP) often gets
-/// through those, and WebSocket over TLS looks like an ordinary web site.
+/// through those, WebSocket over TLS looks like an ordinary web site, and QUIC (sealed, so
+/// it is not recognised as QUIC) is another way over UDP. QUIC is last: an agent before it
+/// existed does not try it, and one that does tries it after the others.
+#[cfg(feature = "quic")]
+pub const LINK_TRANSPORTS: [TransportKind; 4] = [
+    TransportKind::Tcpmux,
+    TransportKind::Kcp,
+    TransportKind::Wss,
+    TransportKind::Quic,
+];
+#[cfg(not(feature = "quic"))]
 pub const LINK_TRANSPORTS: [TransportKind; 3] = [
     TransportKind::Tcpmux,
     TransportKind::Kcp,
     TransportKind::Wss,
 ];
 
-/// The `wss` address of a panel whose agents port is in `addr`: the next port, as the
-/// other transports use the agents port itself (TCP and UDP).
+/// The address of a panel's `wss` and `quic` links, whose agents port is in `addr`: the
+/// next port (`wss` on TCP, `quic` on UDP), as the other transports use the agents port
+/// itself (TCP and UDP).
 pub fn wss_addr(addr: &str) -> io::Result<String> {
     next_port(addr)
+}
+
+/// The address a link over `kind` uses, given the panel's agents port address `addr`: the
+/// next port for `wss` and `quic`, the agents port itself for the others.
+pub fn address_for(addr: &str, kind: TransportKind) -> io::Result<String> {
+    match kind {
+        TransportKind::Wss | TransportKind::Quic => next_port(addr),
+        _ => Ok(addr.to_owned()),
+    }
 }
 
 /// `addr` with its port one higher.
@@ -88,6 +119,9 @@ token = {token:?}
 ",
         kind.name()
     );
+    if kind == TransportKind::Quic {
+        toml.push_str("[tunnel.quic]\nobfs = true\n");
+    }
     if kind == TransportKind::Wss {
         toml.push_str(&format!(
             "[tunnel.ws]
@@ -138,24 +172,45 @@ struct Common {
     tuning: Tuning,
     settings: Settings,
     sessions: SessionConfig,
+    /// A `quic` link's endpoint settings (the token's identity, and the seal on every packet).
+    #[cfg(feature = "quic")]
+    quic: Option<QuicSettings>,
 }
 
 fn common(toml: String) -> io::Result<Common> {
     let config = Config::parse(&toml)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("{e:#}")))?;
     let mux = config.mux();
+    let crypto = Crypto::new(&config.tunnel.token, config.tunnel.encryption).with_mux(true);
+    let tuning = config.tuning();
+    #[cfg(feature = "quic")]
+    let quic = if config.tunnel.transport == TransportKind::Quic {
+        let quic = config.tunnel.quic.clone().unwrap_or_default();
+        Some(QuicSettings::new(crypto.psk(), &quic, &mux, &tuning)?)
+    } else {
+        None
+    };
     Ok(Common {
-        crypto: Crypto::new(&config.tunnel.token, config.tunnel.encryption).with_mux(true),
-        tuning: config.tuning(),
+        crypto,
+        tuning,
         settings: Settings::new(&config.tunnel, config.kcp()),
         sessions: SessionConfig::new(&mux),
+        #[cfg(feature = "quic")]
+        quic,
     })
+}
+
+/// What an [`Acceptor`] listens with: a stream transport's listener, or a QUIC endpoint.
+enum Listening {
+    Stream(Listener),
+    #[cfg(feature = "quic")]
+    Quic(QuicListener),
 }
 
 /// The listening end.
 pub struct Acceptor {
     kind: TransportKind,
-    listener: Listener,
+    listening: Listening,
     replay: Arc<ReplayFilter>,
     common: Arc<Common>,
 }
@@ -166,7 +221,7 @@ impl Acceptor {
         Self::bind_via(addr, token, TransportKind::Tcpmux).await
     }
 
-    /// Like [`Acceptor::bind`], over `tcpmux` or `kcp`.
+    /// Like [`Acceptor::bind`], over `tcpmux`, `kcp` or `quic` (always sealed).
     pub async fn bind_via(addr: &str, token: &str, kind: TransportKind) -> io::Result<Self> {
         Self::bind_with(addr, token, kind, None).await
     }
@@ -185,10 +240,19 @@ impl Acceptor {
     ) -> io::Result<Self> {
         let toml = toml(kind, true, addr, token, tls)?;
         let common = common(toml)?;
-        let listener = Listener::bind(&common.settings, addr, &common.tuning).await?;
+        #[cfg(feature = "quic")]
+        let listening = match &common.quic {
+            Some(settings) => Listening::Quic(QuicListener::bind(addr, settings).await?),
+            None => {
+                Listening::Stream(Listener::bind(&common.settings, addr, &common.tuning).await?)
+            }
+        };
+        #[cfg(not(feature = "quic"))]
+        let listening =
+            Listening::Stream(Listener::bind(&common.settings, addr, &common.tuning).await?);
         Ok(Self {
             kind,
-            listener,
+            listening,
             replay: Arc::new(ReplayFilter::default()),
             common: Arc::new(common),
         })
@@ -200,15 +264,32 @@ impl Acceptor {
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.listener.local_addr()
+        match &self.listening {
+            Listening::Stream(l) => l.local_addr(),
+            #[cfg(feature = "quic")]
+            Listening::Quic(l) => l.local_addr(),
+        }
     }
 
     /// The next connection. It is not authenticated yet: hand it to a task and call
     /// [`Pending::establish`], so a slow or hostile peer never holds up this loop.
     pub async fn accept(&self) -> io::Result<Pending> {
-        let (incoming, peer) = self.listener.accept().await?;
+        let (waiting, peer) = match &self.listening {
+            Listening::Stream(l) => {
+                let (incoming, peer) = l.accept().await?;
+                (Waiting::Stream(incoming), peer)
+            }
+            #[cfg(feature = "quic")]
+            Listening::Quic(l) => {
+                let accepting = l.accept().await.ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "the QUIC endpoint is closed")
+                })?;
+                let peer = accepting.remote_address();
+                (Waiting::Quic(Box::new(accepting)), peer)
+            }
+        };
         Ok(Pending {
-            incoming,
+            waiting,
             peer,
             replay: self.replay.clone(),
             common: self.common.clone(),
@@ -216,9 +297,16 @@ impl Acceptor {
     }
 }
 
+/// A connection whose handshake is still to be run.
+enum Waiting {
+    Stream(Incoming),
+    #[cfg(feature = "quic")]
+    Quic(Box<Accepting>),
+}
+
 /// A connection that has not finished its handshake.
 pub struct Pending {
-    incoming: Incoming,
+    waiting: Waiting,
     peer: SocketAddr,
     replay: Arc<ReplayFilter>,
     common: Arc<Common>,
@@ -229,25 +317,50 @@ impl Pending {
         self.peer
     }
 
-    /// Runs the handshake and starts the session, with `side` as this end's mux role.
-    /// A peer with a wrong token is kept waiting for a random 5-30 s before it is let go,
-    /// like a tunnel does.
-    pub async fn establish(self, side: Side) -> io::Result<MuxSession> {
+    /// Runs the handshake and starts the session, with `side` as this end's mux role (a
+    /// QUIC link has no such roles: either end can open streams). A peer with a wrong
+    /// token is kept waiting for a random 5-30 s before it is let go, like a tunnel does;
+    /// over QUIC (sealed) it gets no answer at all.
+    pub async fn establish(self, side: Side) -> io::Result<Session> {
         let c = &self.common;
-        let link = channel::accept(
-            self.incoming,
-            &c.crypto,
-            &self.replay,
-            c.tuning.handshake_timeout,
-        )
-        .await?;
-        Ok(MuxSession::over(link, side, c.sessions.clone()))
+        match self.waiting {
+            Waiting::Stream(incoming) => {
+                let link = channel::accept(
+                    incoming,
+                    &c.crypto,
+                    &self.replay,
+                    c.tuning.handshake_timeout,
+                )
+                .await?;
+                Ok(Session::Kmux(MuxSession::over(
+                    link,
+                    side,
+                    c.sessions.clone(),
+                )))
+            }
+            #[cfg(feature = "quic")]
+            Waiting::Quic(accepting) => {
+                let conn = accepting.establish().await?;
+                Ok(Session::Quic(QuicSession::new(
+                    conn,
+                    &c.sessions,
+                    c.tuning.handshake_timeout,
+                )))
+            }
+        }
     }
+}
+
+/// How a [`Dialer`] connects.
+enum Dialing {
+    Stream(TransportDialer),
+    #[cfg(feature = "quic")]
+    Quic(Box<QuicDialer>),
 }
 
 /// The dialing end.
 pub struct Dialer {
-    dialer: TransportDialer,
+    dialing: Dialing,
     common: Common,
 }
 
@@ -257,23 +370,59 @@ impl Dialer {
         Self::via(addr, token, TransportKind::Tcpmux)
     }
 
-    /// Like [`Dialer::new`], over `kind` (one of [`LINK_TRANSPORTS`]; for `wss`, `addr` is
-    /// the panel's [`wss_addr`]).
+    /// Like [`Dialer::new`], over `kind` (one of [`LINK_TRANSPORTS`]; for `wss` and `quic`,
+    /// `addr` is the panel's [`wss_addr`], see [`address_for`]).
     pub fn via(addr: &str, token: &str, kind: TransportKind) -> io::Result<Self> {
         let toml = toml(kind, false, addr, token, None)?;
         let common = common(toml)?;
-        let dialer = TransportDialer::new(&common.settings, addr, &common.tuning)?;
-        Ok(Self { dialer, common })
+        #[cfg(feature = "quic")]
+        let dialing = match &common.quic {
+            Some(settings) => Dialing::Quic(Box::new(QuicDialer::new(addr, None, settings)?)),
+            None => Dialing::Stream(TransportDialer::new(
+                &common.settings,
+                addr,
+                &common.tuning,
+            )?),
+        };
+        #[cfg(not(feature = "quic"))]
+        let dialing = Dialing::Stream(TransportDialer::new(
+            &common.settings,
+            addr,
+            &common.tuning,
+        )?);
+        Ok(Self { dialing, common })
     }
 
-    /// Connects, authenticates and starts a session, with `side` as this end's mux role.
-    pub async fn connect(&self, side: Side) -> io::Result<MuxSession> {
+    /// Connects, authenticates and starts a session, with `side` as this end's mux role
+    /// (not used by QUIC).
+    pub async fn connect(&self, side: Side) -> io::Result<Session> {
         let c = &self.common;
         let wait: Duration = c.tuning.dial_timeout + c.tuning.handshake_timeout;
-        let link = timeout(wait, channel::connect(&self.dialer, &c.crypto, &[]))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))??;
-        Ok(MuxSession::over(link, side, c.sessions.clone()))
+        match &self.dialing {
+            Dialing::Stream(dialer) => {
+                let link = timeout(wait, channel::connect(dialer, &c.crypto, &[]))
+                    .await
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::TimedOut, "handshake timed out")
+                    })??;
+                Ok(Session::Kmux(MuxSession::over(
+                    link,
+                    side,
+                    c.sessions.clone(),
+                )))
+            }
+            #[cfg(feature = "quic")]
+            Dialing::Quic(dialer) => {
+                let conn = timeout(wait, dialer.connect()).await.map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "handshake timed out")
+                })??;
+                Ok(Session::Quic(QuicSession::new(
+                    conn,
+                    &c.sessions,
+                    c.tuning.handshake_timeout,
+                )))
+            }
+        }
     }
 }
 
@@ -338,6 +487,61 @@ mod tests {
         let dialer = Dialer::via(&addr, TOKEN, TransportKind::Kcp).unwrap();
         round_trips(acceptor, dialer).await;
         assert!(Dialer::via(&addr, TOKEN, TransportKind::Ws).is_err());
+    }
+
+    #[cfg(feature = "quic")]
+    #[tokio::test]
+    async fn a_link_works_over_quic_and_is_always_sealed() {
+        let acceptor = Acceptor::bind_via("127.0.0.1:0", TOKEN, TransportKind::Quic)
+            .await
+            .unwrap();
+        let addr = acceptor.local_addr().unwrap().to_string();
+
+        // Plain QUIC (no seal) with the very same token gets no answer: the port takes only
+        // what was sealed with the token, so a link is never plain QUIC.
+        let plain =
+            crate::transport::quic::tests::settings(TOKEN, &crate::config::QuicConfig::default());
+        let plain = crate::transport::quic::QuicDialer::new(&addr, None, &plain).unwrap();
+        assert!(plain.connect().await.is_err(), "plain QUIC got a link");
+
+        let dialer = Dialer::via(&addr, TOKEN, TransportKind::Quic).unwrap();
+        round_trips(acceptor, dialer).await;
+        assert!(Dialer::via(&addr, TOKEN, TransportKind::Ws).is_err());
+    }
+
+    #[cfg(feature = "quic")]
+    #[tokio::test]
+    async fn a_quic_link_with_another_token_never_connects() {
+        let acceptor = Acceptor::bind_via("127.0.0.1:0", TOKEN, TransportKind::Quic)
+            .await
+            .unwrap();
+        let addr = acceptor.local_addr().unwrap().to_string();
+        let dialer =
+            Dialer::via(&addr, "another-token-0123456789abcdef", TransportKind::Quic).unwrap();
+        let result =
+            tokio::time::timeout(Duration::from_secs(15), dialer.connect(Side::Server)).await;
+        assert!(
+            !matches!(result, Ok(Ok(_))),
+            "a wrong token must not connect"
+        );
+    }
+
+    #[test]
+    fn quic_and_wss_links_use_the_next_port() {
+        assert_eq!(
+            address_for("203.0.113.5:29001", TransportKind::Quic).unwrap(),
+            "203.0.113.5:29002"
+        );
+        assert_eq!(
+            address_for("203.0.113.5:29001", TransportKind::Wss).unwrap(),
+            "203.0.113.5:29002"
+        );
+        for kind in [TransportKind::Tcpmux, TransportKind::Kcp] {
+            assert_eq!(
+                address_for("203.0.113.5:29001", kind).unwrap(),
+                "203.0.113.5:29001"
+            );
+        }
     }
 
     #[tokio::test]

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
-use kariz::config::TransportKind;
-use kariz::mux::{MuxSession, Side};
+use kariz::mux::Side;
+use kariz::session::Session;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -45,7 +45,7 @@ pub struct AgentConfig {
     /// A release public key (hex) of your own, instead of the one built in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_key: Option<String>,
-    /// The one link transport to use (`tcpmux`, `kcp`, `wss`); none: try them in turn.
+    /// The one link transport to use (`tcpmux`, `kcp`, `wss`, `quic`); none: try them in turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
 }
@@ -474,14 +474,14 @@ impl Agent {
     /// Answers the requests on one session until it closes.
     /// Returns how many requests the panel made; `working` is called once it has made
     /// [`GOOD_LINK`] of them.
-    pub async fn serve(self: &Arc<Self>, session: MuxSession, working: impl FnOnce()) -> u32 {
+    pub async fn serve(self: &Arc<Self>, session: Session, working: impl FnOnce()) -> u32 {
         self.serve_with(session, working).await.0
     }
 
     /// Like [`Agent::serve`], and why the session ended.
     pub async fn serve_with(
         self: &Arc<Self>,
-        session: MuxSession,
+        session: Session,
         working: impl FnOnce(),
     ) -> (u32, String) {
         let mut asked = 0u32;
@@ -596,7 +596,6 @@ impl Agent {
                 c.transport.unwrap_or_default()
             );
         }
-        let wss = kariz::link::wss_addr(&c.panel)?;
         let chosen = self.path.with_file_name(TRANSPORT_FILE);
         let mut at = std::fs::read_to_string(&chosen)
             .ok()
@@ -606,11 +605,8 @@ impl Agent {
         let mut backoff = Duration::from_secs(1);
         loop {
             let kind = kinds[at];
-            let addr = if kind == TransportKind::Wss {
-                &wss
-            } else {
-                &c.panel
-            };
+            // wss and quic are on the port after the agents port, the others on it.
+            let addr = &kariz::link::address_for(&c.panel, kind)?;
             let dialer = kariz::link::Dialer::via(addr, &c.link_token, kind)?;
             match dialer.connect(Side::Server).await {
                 Ok(session) => {

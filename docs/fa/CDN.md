@@ -10,12 +10,12 @@ CDN جلوی سمتِ **شنونده** می‌نشیند و سمت وصل‌شو
 
 | حالت | وصل می‌شود | پشت CDN | CDN معمول |
 |---|---|---|---|
-| `direct` | entry (ایران) | exit (خارج) | Cloudflare |
-| `reverse` | exit (خارج) | entry (ایران) | CDN با edge داخل ایران، مثل ArvanCloud |
+| `direct` | ورودی (ایران) | خروجی (خارج) | Cloudflare |
+| `reverse` | خروجی (خارج) | ورودی (ایران) | CDN با edge داخل ایران، مثل ArvanCloud |
 
 ## پیکربندی
 
-حالت direct از راه Cloudflare، با exit که `wss` را به Cloudflare سرو می‌کند (حالت SSL/TLS برابر **Full (strict)**):
+حالت direct از راه Cloudflare، با خروجی که `wss` را به Cloudflare سرو می‌کند (حالت SSL/TLS برابر **Full (strict)**):
 
 ```toml
 # entry (Iran): dials a Cloudflare edge
@@ -56,11 +56,11 @@ cert = "/etc/kariz/origin.pem"     # Cloudflare Origin CA or Let's Encrypt certi
 key = "/etc/kariz/origin.key"
 ```
 
-جایگزین: exit به‌جای آن `ws` ساده سرو کند (مثلاً روی پورت ۸۰ یا ۸۰۸۰) و Cloudflare حالت SSL/TLS برابر **Flexible** را بگیرد. entry باز هم به edge با `wss` وصل می‌شود. پای Cloudflare تا origin آن‌وقت TLS نیست، ولی رمزنگاری خودِ تانل باز هم ترافیک را می‌پوشاند.
+جایگزین: خروجی به‌جای آن `ws` ساده سرو کند (مثلاً روی پورت ۸۰ یا ۸۰۸۰) و Cloudflare حالت SSL/TLS برابر **Flexible** را بگیرد. ورودی باز هم به edge با `wss` وصل می‌شود. پای Cloudflare تا origin آن‌وقت TLS نیست، ولی رمزنگاری خودِ تانل باز هم ترافیک را می‌پوشاند.
 
 نکته‌ها:
 
-- **به‌سمت CDN از `tls.pin_sha256` استفاده نکنید.** entry گواهی edge از CDN را می‌بیند که عمومی معتبر است و زود‌به‌زود عوض می‌شود. راستی‌آزمایی پیش‌فرض (ریشه‌های Mozilla) آنجا درست است. pin برای وصل شدن مستقیم به سرور خودتان با گواهی خودامضاست.
+- **به‌سمت CDN از `tls.pin_sha256` استفاده نکنید.** ورودی گواهی edge از CDN را می‌بیند که عمومی معتبر است و زود‌به‌زود عوض می‌شود. راستی‌آزمایی پیش‌فرض (ریشه‌های Mozilla) آنجا درست است. pin برای وصل شدن مستقیم به سرور خودتان با گواهی خودامضاست.
 - **mux روشن می‌ماند** (پیش‌فرض `ws` / `wss`). هر `keepalive` (پیش‌فرض ۳۰ ثانیه) ping می‌زند، که WebSocket را از بریده شدن به‌عنوان بی‌کار نجات می‌دهد: Cloudflare بی‌کارها را حدود ۱۰۰ ثانیه بعد می‌برد. اگر `tuning.keepalive_secs` بالای ۹۰ باشد `kariz check` هشدار می‌دهد. بدون mux، یک اتصال کاربرِ ساکت را CDN می‌برد.
 - **پورت‌هایی که Cloudflare پروکسی می‌کند:** HTTPS ‏443، 2053، 2083، 2087، 2096، 8443؛ HTTP ‏80، 8080، 8880، 2052، 2082، 2086، 2095.
 - probeهایی که از راه CDN به origin می‌رسند برای هر مسیری جز `ws.path` صفحهٔ `404` nginx را می‌گیرند، و برای upgradeِ روی `ws.path` که early dataاش hello معتبر ندارد هم.
@@ -80,19 +80,19 @@ key = "/etc/kariz/origin.key"
 
 - [ ] `curl -sI https://tunnel.example.com/` ← `404`، `server: cloudflare`.
 - [ ] `curl -s https://tunnel.example.com/api/v1/stream` (بدون upgrade) ← `404`.
-- [ ] اول exit را راه بیندازید، بعد entry را. exit به تعداد `mux.connections` یک‌بار `mux session from the entry side established` لاگ می‌کند و entry هیچ reconnectی لاگ نمی‌کند.
-- [ ] با `RUST_LOG=kariz=debug` روی exit: `websocket upgrade request accepted` مقدار `client=<entry IP>` (از `CF-Connecting-IP`) و `early=` بالای ۰ را نشان می‌دهد.
-- [ ] ترافیک از پورت forward کار می‌کند: یک دانلود بزرگ، به‌علاوهٔ اتصال‌های کوتاهِ موازی زیاد (مثلاً یک مرورگر از راه پروکسی‌ای که روی exit سرو می‌شود).
+- [ ] اول خروجی را راه بیندازید، بعد ورودی را. خروجی به تعداد `mux.connections` یک‌بار `mux session from the entry side established` لاگ می‌کند و ورودی هیچ reconnectی لاگ نمی‌کند.
+- [ ] با `RUST_LOG=kariz=debug` روی خروجی: `websocket upgrade request accepted` مقدار `client=<entry IP>` (از `CF-Connecting-IP`) و `early=` بالای ۰ را نشان می‌دهد.
+- [ ] ترافیک از پورت forward کار می‌کند: یک دانلود بزرگ، به‌علاوهٔ اتصال‌های کوتاهِ موازی زیاد (مثلاً یک مرورگر از راه پروکسی‌ای که روی خروجی سرو می‌شود).
 - [ ] بی‌کاری: یک اتصال کاربر باز کنید، تانل را ۵ دقیقه بی‌کار بگذارید، بعد دوباره از همان اتصال استفاده کنید. باز هم کار می‌کند و reconnectی لاگ نمی‌شود.
-- [ ] exit را دوباره راه بیندازید: entry ظرف چند ثانیه دوباره وصل می‌شود و اتصال‌های تازه کار می‌کنند.
+- [ ] خروجی را دوباره راه بیندازید: ورودی ظرف چند ثانیه دوباره وصل می‌شود و اتصال‌های تازه کار می‌کنند.
 - [ ] با `mux.max_lifetime_secs = 600`: sessionها هر ~۱۰ دقیقه جایگزین می‌شوند و اتصال‌های باز نمی‌شکنند.
-- [ ] `ws.path` غلط روی entry: `websocket upgrade refused with HTTP 404` لاگ می‌کند.
+- [ ] `ws.path` غلط روی ورودی: `websocket upgrade refused with HTTP 404` لاگ می‌کند.
 
 عیب‌یابی:
 
 | نشانه | علت محتمل |
 |---|---|
-| Entry: `upgrade refused with HTTP 404` | `ws.path` / `ws.host` فرق دارند، یا (با early data) hello رد شده: ناهمخوانی token، ساعت‌های ناهماهنگ؛ لاگ exit را ببینید. |
+| Entry: `upgrade refused with HTTP 404` | `ws.path` / `ws.host` فرق دارند، یا (با early data) hello رد شده: ناهمخوانی توکن، ساعت‌های ناهماهنگ؛ لاگ خروجی را ببینید. |
 | Entry: HTTP ‏`521` / `522` | origin خاموش است، یا پورت از Cloudflare در دسترس نیست. |
 | Entry: HTTP ‏`525` / `526` | Full / Full (strict): origin TLS سرو نمی‌کند، یا گواهی‌اش برای آن نام معتبر نیست. |
 | Entry: خطای گواهی | pin به‌سمت CDN (`pin_sha256` را بردارید)، یا `tls.sni` / `ws.host` نام پروکسی‌شده نیست. |
@@ -100,7 +100,7 @@ key = "/etc/kariz/origin.key"
 
 ## ArvanCloud (حالت reverse)
 
-برای CDNهایی با edge داخل ایران همان تنظیم‌ها به‌کار می‌رود، با نقش‌های جابه‌جا: entry (ایران) origin پشت CDN است و exit به edge از CDN وصل می‌شود. پشتیبانی WebSocket و timeout بی‌کاری CDN را بررسی کنید. فهرست بالا با جابه‌جا شدن «entry» و «exit» صدق می‌کند. *هنوز راستی‌آزمایی نشده؛ نتیجه‌ها اینجا اضافه می‌شوند.*
+برای CDNهایی با edge داخل ایران همان تنظیم‌ها به‌کار می‌رود، با نقش‌های جابه‌جا: ورودی (ایران) origin پشت CDN است و خروجی به edge از CDN وصل می‌شود. پشتیبانی WebSocket و timeout بی‌کاری CDN را بررسی کنید. فهرست بالا با جابه‌جا شدن «ورودی» و «خروجی» صدق می‌کند. *هنوز راستی‌آزمایی نشده؛ نتیجه‌ها اینجا اضافه می‌شوند.*
 
 ## نتیجه‌ها
 

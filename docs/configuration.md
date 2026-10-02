@@ -74,6 +74,7 @@ root certificates.
 | `congestion` | `cubic` | `cubic`, `bbr` or `newreno`. BBR keeps its speed under random loss but is experimental in quinn and fills queues (warned). |
 | `sni` | the host in `remote` (none for an IP) | Dialer only. |
 | `alpn` | `h3` | Must match on both sides. |
+| `obfs` | `false` | Seal every UDP packet with a key derived from the token, so the traffic does not look like QUIC (see [Transports](transports.md#obfs)). Must be the same on both sides. Costs 28 bytes a packet, and some CPU. |
 
 ## `[tunnel.kcp]` (`kcp`)
 
@@ -150,6 +151,6 @@ errors itself and `journalctl -u kariz -p warning` shows only those.
 
 ## Settings that must match on both sides
 
-`transport`, `token`, mux on or off, `ws.path`, `quic.alpn`, and `encryption = "none"`
+`transport`, `token`, mux on or off, `ws.path`, `quic.alpn`, `quic.obfs`, and `encryption = "none"`
 (both or neither). A mismatch fails the handshake with an error saying which setting
 differs, where the protocol can tell.

@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::{Connection, Endpoint, EndpointConfig, IdleTimeout, TransportConfig, VarInt};
+use quinn::{
+    Connection, Endpoint, EndpointConfig, IdleTimeout, MtuDiscoveryConfig, TransportConfig, VarInt,
+};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
@@ -27,10 +29,14 @@ use tracing::debug;
 
 use crate::config::{Congestion, MuxSettings, QuicConfig, Tuning};
 use crate::crypto::Psk;
+use crate::transport::quic_obfs::{ObfsSocket, OVERHEAD as OBFS_OVERHEAD};
 
 const IDENTITY_CONTEXT: &str = "kariz 2026-10 quic identity v1";
 const RESET_KEY_CONTEXT: &str = "kariz 2026-10 quic stateless reset v1";
 const CID_KEY_CONTEXT: &str = "kariz 2026-10 quic connection id v1";
+const OBFS_KEY_CONTEXT: &str = "kariz 2026-10 quic obfs v1";
+/// Largest UDP payload quinn probes for by default (Ethernet's MTU under IPv6).
+const MAX_UDP_PAYLOAD: u16 = 1452;
 /// PKCS#8 v1 wrapping of an Ed25519 seed (RFC 8410): this prefix, then the 32 bytes.
 const ED25519_PKCS8_PREFIX: [u8; 16] = [
     0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
@@ -192,6 +198,8 @@ pub struct QuicSettings {
     reset_key: [u8; 32],
     cid_key: u64,
     alpn: Vec<u8>,
+    /// Key that seals every UDP packet (`obfs`).
+    obfs_key: Option<[u8; 32]>,
     transport: Arc<TransportConfig>,
     handshake_timeout: Duration,
     socket_buffer: usize,
@@ -217,6 +225,13 @@ impl QuicSettings {
             ))
             .datagram_receive_buffer_size(Some(mux.datagram_buffer))
             .datagram_send_buffer_size(mux.datagram_buffer);
+        if quic.obfs {
+            // The seal makes every packet longer: what quinn may send is smaller by that
+            // much (the first packets, 1200 bytes, stay within any path that carries IPv6).
+            let mut mtu = MtuDiscoveryConfig::default();
+            mtu.upper_bound(MAX_UDP_PAYLOAD - OBFS_OVERHEAD as u16);
+            transport.mtu_discovery_config(Some(mtu));
+        }
         match quic.congestion {
             Congestion::Cubic => transport
                 .congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default())),
@@ -239,6 +254,7 @@ impl QuicSettings {
                 u64::from_le_bytes(key[..8].try_into().expect("8 bytes"))
             },
             alpn: quic.alpn.as_bytes().to_vec(),
+            obfs_key: quic.obfs.then(|| psk.subkey(OBFS_KEY_CONTEXT)),
             transport: Arc::new(transport),
             handshake_timeout: tuning.handshake_timeout,
             socket_buffer: tuning.udp.socket_buffer,
@@ -310,7 +326,11 @@ impl QuicSettings {
         }
         let runtime = quinn::default_runtime()
             .ok_or_else(|| io::Error::other("QUIC needs a tokio runtime"))?;
-        Endpoint::new(self.endpoint_config(), server, socket, runtime)
+        let Some(key) = &self.obfs_key else {
+            return Endpoint::new(self.endpoint_config(), server, socket, runtime);
+        };
+        let socket = ObfsSocket::new(runtime.wrap_udp_socket(socket)?, key)?;
+        Endpoint::new_with_abstract_socket(self.endpoint_config(), server, socket, runtime)
     }
 }
 
@@ -537,6 +557,79 @@ pub(crate) mod tests {
             let err = conn.closed().await;
             assert!(err.to_string().contains("certificate"), "{err}");
         }
+    }
+
+    fn obfs() -> QuicConfig {
+        QuicConfig {
+            obfs: true,
+            ..QuicConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn obfs_connects_and_carries_data() {
+        let (client, server) = pair(&obfs()).await;
+        let (mut send, _) = client.open_bi().await.unwrap();
+        // Many packets, so batches and the smaller MTU are exercised (within the stream window,
+        // as nothing reads before the write is done).
+        let data = vec![0x5a; 200_000];
+        send.write_all(&data).await.unwrap();
+        send.finish().unwrap();
+        let (_, mut recv) = server.accept_bi().await.unwrap();
+        assert_eq!(recv.read_to_end(1 << 20).await.unwrap(), data);
+        // The seal fits in the largest packet quinn may use.
+        assert!(client.max_datagram_size().unwrap() < 1452 - OBFS_OVERHEAD);
+    }
+
+    #[tokio::test]
+    async fn obfs_must_be_on_at_both_ends() {
+        async fn dial_fails(client: &QuicSettings, server: &QuicSettings) {
+            let listener = QuicListener::bind("127.0.0.1:0", server).await.unwrap();
+            let addr = listener.local_addr().unwrap().to_string();
+            let dialer = QuicDialer::new(&addr, None, client).unwrap();
+            let (dialed, accepted) = tokio::join!(
+                dialer.connect(),
+                timeout(Duration::from_millis(1500), listener.accept())
+            );
+            assert_eq!(dialed.unwrap_err().kind(), io::ErrorKind::TimedOut);
+            assert!(accepted.is_err(), "the listener took a connection");
+        }
+        let plain = settings(TOKEN, &QuicConfig::default());
+        let sealed = settings(TOKEN, &obfs());
+        tokio::join!(dial_fails(&plain, &sealed), dial_fails(&sealed, &plain));
+    }
+
+    #[tokio::test]
+    async fn obfs_hides_quic_on_the_wire() {
+        // A plain socket stands in for the peer and sees what the dialer sends.
+        let wire = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = wire.local_addr().unwrap().to_string();
+        let dialer = QuicDialer::new(&addr, None, &settings(TOKEN, &obfs())).unwrap();
+        let dialing = tokio::spawn(async move { dialer.connect().await });
+        let mut packet = [0u8; 2048];
+        let (len, _) = timeout(Duration::from_secs(2), wire.recv_from(&mut packet))
+            .await
+            .expect("nothing sent")
+            .unwrap();
+        // A QUIC Initial is at least 1200 bytes; sealed, it carries the seal on top.
+        assert!(len >= 1200 + OBFS_OVERHEAD, "{len}");
+        // Not QUIC to look at: no version 1 in the header.
+        assert_ne!(packet[1..5], [0, 0, 0, 1]);
+        // With the token's key it opens, and is one.
+        let key = ring::aead::UnboundKey::new(
+            &ring::aead::CHACHA20_POLY1305,
+            &Psk::new(TOKEN).subkey(OBFS_KEY_CONTEXT),
+        )
+        .unwrap();
+        let key = ring::aead::LessSafeKey::new(key);
+        let (nonce, sealed) = packet[..len].split_at_mut(ring::aead::NONCE_LEN);
+        let nonce = ring::aead::Nonce::try_assume_unique_for_key(nonce).unwrap();
+        let plain = key
+            .open_in_place(nonce, ring::aead::Aad::empty(), sealed)
+            .unwrap();
+        assert!(plain[0] & 0x80 != 0, "not a long header");
+        assert_eq!(plain[1..5], [0, 0, 0, 1], "not QUIC version 1");
+        dialing.abort();
     }
 
     #[tokio::test]

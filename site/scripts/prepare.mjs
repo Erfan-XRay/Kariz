@@ -53,4 +53,6 @@ fs.writeFileSync(
   ),
 );
 cp(path.join(repo, "assets/logo.svg"), path.join(site, "public/logo.svg"));
+// The card that link previews show (the repository's social image).
+cp(path.join(repo, "assets/social-preview.png"), path.join(site, "public/social-preview.png"));
 console.log("site assets ready");
