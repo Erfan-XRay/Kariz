@@ -27,7 +27,7 @@ kariz-manager panel install
 - **لینک ورود** یک‌بار کار می‌کند، برای ۶۰ دقیقه. در مرورگر بازش کنید: واردتان می‌کند و از نوار آدرس محو می‌شود. هر وقت یکی دیگر لازم بود با `kariz-manager panel link` بسازید.
 - **پورت‌ها** تصادفی‌اند (بالای ۲۰۰۰۰). `--port N` پورت پنل را انتخاب می‌کند. هم پورت پنل (برای خودتان) و هم پورت agentها (برای سرورهای دیگرتان) را در فایروال باز کنید؛ پورت agentها را هم برای TCP و هم برای UDP، و پورت بعدی‌اش را برای TCP (برای `wss`).
 
-اگر می‌خواهید بدون لینک وارد شوید در *تنظیمات* رمز بگذارید (۱۰ نویسه یا بیشتر). یا از روی سرور: `kariz-manager panel password` (یکی تصادفی می‌سازد و نشان می‌دهد؛ `--stdin` رمز شما را می‌خواند).
+نصب‌کننده رمزی از خودتان برای مدیر می‌پرسد (دست‌کم ۱۲ نویسه، سه نوع از: حروف کوچک، حروف بزرگ، رقم، نماد)؛ یا فقط لینک ورود یک‌بارمصرف را انتخاب کنید. بعداً در *تنظیمات* عوضش کنید (۱۰ نویسه یا بیشتر)، یا از روی سرور: `kariz-manager panel password` (همین‌طور می‌پرسد؛ `--random` یکی می‌سازد و نشان می‌دهد، `--stdin` رمز شما را می‌خواند).
 
 ## گواهی
 
@@ -109,7 +109,7 @@ kariz-manager --agent kz1_...
 ```bash
 kariz-manager panel install [--port N] [--host H]   # settings, service, address and a link
 kariz-manager panel link [--host H]                 # a new one-time login link
-kariz-manager panel password [--stdin]              # a new admin password
+kariz-manager panel password [--stdin | --random]  # a new admin password (asked twice, hidden)
 kariz-manager panel status | logs                   # the service, its address / follow the log
 kariz-manager panel uninstall [--yes]
 kariz-manager --agent CODE                          # connect this server to a panel
