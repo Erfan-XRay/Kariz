@@ -571,6 +571,22 @@ install_manager() {
     fi
 }
 
+# A copy of this script run from a file of its own (a new one copied to the server) takes
+# the place of the installed kariz-manager at once. Without this it did so only while Kariz
+# itself was installed or updated, so with the core up to date the old menu came back from
+# the kariz-manager command.
+sync_manager() {
+    local self=${BASH_SOURCE[0]:-}
+    [[ -f "$self" && -f "$MANAGER" && "$EUID" -eq 0 ]] || return 0
+    [[ "$(realpath "$self")" != "$(realpath "$MANAGER")" ]] || return 0
+    cmp -s "$self" "$MANAGER" && return 0
+    if install -m 0755 "$self" "$MANAGER"; then
+        ok "This script is now the installed kariz-manager."
+    else
+        warn "Could not replace $MANAGER with this script."
+    fi
+}
+
 cmd_install() {
     need_root
     need_systemd
@@ -666,14 +682,42 @@ offer_update() {
     fi
 }
 
-# Puts the newest kariz-manager script in place (a best-effort; the running copy goes on).
+# Puts the newest kariz-manager script in place (a best-effort; the running copy goes on,
+# and the menu reopens as the new one: reload_if_replaced).
 refresh_manager() {
     local tmp
     tmp=$(mktemp)
     if FETCH_MAX=20 fetch "$RAW_URL" "$tmp" 2>/dev/null && bash -n "$tmp" 2>/dev/null; then
-        install -m 0755 "$tmp" "$MANAGER"
+        if cmp -s "$tmp" "$MANAGER"; then
+            :
+        elif install -m 0755 "$tmp" "$MANAGER"; then
+            ok "The kariz-manager script is updated."
+        else
+            warn "Could not replace $MANAGER with the newest script."
+        fi
+    else
+        warn "Could not download the newest kariz-manager script: the old one stays (run the update again later)."
     fi
     rm -f "$tmp"
+}
+
+# The checksum of the installed script: to see that an update replaced it under this menu.
+manager_sum() { cksum <"$MANAGER" 2>/dev/null || true; }
+
+# The menu that is open is the old script even after an update has written the new one to
+# disk (bash has read the old file already). When the installed script is not what runs
+# any more, the menu opens again as the new one.
+reload_if_replaced() {
+    [[ -n "$MANAGER_SUM" && "$(manager_sum)" != "$MANAGER_SUM" ]] || return 0
+    local self=${BASH_SOURCE[0]:-}
+    # A copy run from a file of its own that was installed as it is has nothing new to show.
+    if [[ -f "$self" && "$(realpath "$self")" != "$(realpath "$MANAGER")" ]] && cmp -s "$self" "$MANAGER"; then
+        return 0
+    fi
+    ui_restore_terminal
+    info "The kariz-manager script was updated: opening the new menu."
+    [[ -n "$IN_FD" ]] && exec {IN_FD}<&-
+    exec "$MANAGER"
 }
 
 cmd_update() {
@@ -1949,7 +1993,7 @@ menu_goodbye() {
 
 # Ctrl+C at the menu itself leaves the manager. During a screen (which runs in a subshell,
 # and so ends on it) it comes back to the menu at once.
-MENU_BUSY=0 INTERRUPTED=0 IN_SCREEN="" OFFERED=0
+MENU_BUSY=0 INTERRUPTED=0 IN_SCREEN="" OFFERED=0 MANAGER_SUM=""
 on_interrupt() {
     if ((MENU_BUSY)); then
         INTERRUPTED=1
@@ -2018,6 +2062,7 @@ menu() {
     trap on_interrupt INT
     trap 'MENU_RESIZED=1' WINCH
     trap ui_restore_terminal EXIT
+    MANAGER_SUM=$(manager_sum)
     if [[ ! -x "$BIN" ]]; then
         # An action that fails ends it, as in the menu; the menu opens after it.
         (first_run) || true
@@ -2035,6 +2080,7 @@ menu() {
     MENU_SERVER_LINE=$(server_line)
     MENU_SEL=1
     while true; do
+        reload_if_replaced
         MENU_STATUS=$(menu_status_lines)
         menu_select
         case $MENU_CHOICE in
@@ -2085,6 +2131,10 @@ EOF
 }
 
 main() {
+    case ${1:-} in
+        help | -h | --help | tunnel-cert) ;;
+        *) sync_manager ;;
+    esac
     case ${1:-} in
         "") menu ;;
         install) shift && cmd_install "$@" ;;
