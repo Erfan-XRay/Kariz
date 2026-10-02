@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The manager script now updates itself.** Updating the core, the panel and the agent left the
+  `kariz-manager` command on its old version in two cases: a new script copied to the server and run
+  from a file was installed only while something else was being installed, and an update from the open
+  menu wrote the new script to disk but went on showing the old menu. A script run from a file now
+  replaces the installed `kariz-manager` at once, the menu reopens as the new script after an update
+  replaced it, and a failed download of the script is said out loud.
+
+### Added
+
+- **A tab icon** for the website and the web panel (a simpler drawing of the logo that stays readable
+  at 16 pixels), and a **Support** page with the ways to donate, linked from the footer and the READMEs.
+
 ## 1.8.0 - 2026-10-02
 
 ### Fixed

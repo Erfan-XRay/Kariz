@@ -27,7 +27,7 @@ animated diagrams and a live demo of the panel, in English and Persian:
 | [Security](security.md) | What the token protects, encryption, what is visible on the wire |
 | [Troubleshooting](troubleshooting.md) | `kariz check` warnings, common errors, logs |
 
-How it is built: [design and protocol](ROADMAP.md).
+How it is built: [design and protocol](ROADMAP.md). To help the project go on: [Support Kariz](support.md).
 
 Kariz is source-available under its own [license](../LICENSE): you may read it and run the
 official releases on your own servers; using the core anywhere else is not allowed.

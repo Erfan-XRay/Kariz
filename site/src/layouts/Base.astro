@@ -38,7 +38,10 @@ const card = new URL(`${BASE}/social-preview.png`, Astro.site);
     <link rel="canonical" href={url} />
     <link rel="alternate" hreflang="en" href={en} />
     <link rel="alternate" hreflang="fa" href={fa} />
-    <link rel="icon" type="image/svg+xml" href={`${BASE}/logo.svg`} />
+    <link rel="icon" type="image/svg+xml" href={`${BASE}/favicon.svg`} />
+    <link rel="icon" type="image/png" sizes="32x32" href={`${BASE}/favicon-32.png`} />
+    <link rel="icon" sizes="any" href={`${BASE}/favicon.ico`} />
+    <link rel="apple-touch-icon" href={`${BASE}/apple-touch-icon.png`} />
     <meta property="og:title" content={full} />
     <meta property="og:description" content={description ?? t.tagline} />
     <meta property="og:type" content="website" />

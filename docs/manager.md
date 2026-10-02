@@ -96,8 +96,16 @@ SHA-256. `update` restarts what runs: every tunnel, the panel and the agent, so 
 new binary. Once a server is connected to a panel, the panel can update it (and itself) with a
 button: [Updating from the panel](panel.md#updating).
 
-`update` does not replace the manager script itself. For a new version of the manager, fetch it
-again:
+The manager script updates itself too, in two ways:
+
+- `update` (and the *Install or update* item) fetches the newest `kariz-manager` and, when it
+  replaces the one that is open in the menu, the menu opens again as the new one. If the download
+  fails it says so and the old script stays.
+- A copy of the script you run from a file (a new one you copied to the server) is installed as
+  `kariz-manager` at once, even when the core is up to date. Run the file once and the
+  `kariz-manager` command is the new script from then on.
+
+To fetch it by hand:
 
 ```bash
 curl -fsSL -o /usr/local/bin/kariz-manager \
