@@ -107,7 +107,7 @@ export function Shell({
         <div className="rail-group">{PAGES.filter((p) => p !== "settings").map((p) => item(p))}</div>
         <div className="rail-spacer" />
         {item("settings")}
-        <div className="rail-extra rail-channel-slot">
+        <div className="rail-channel-slot">
           <ChannelLink variant="rail" />
         </div>
         <button className="rail-item rail-extra" type="button" onClick={onLogout}>
