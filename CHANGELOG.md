@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.9.1 - 2026-10-03
+
+### Added
+
+- **A link to the Telegram channel in the panel.** The channel (@Erfan_Xray) is on a card in the
+  side bar, above Sign out, and on a line above the credit line at the foot of every page and under
+  the sign-in form (which is where a phone, with no side bar, sees it). The command palette has
+  "Open the Telegram channel". It opens in a new tab.
+- **QR codes for the donation addresses.** The [Support](docs/support.md) page shows a QR code
+  under each address (USDT on TRON, Gram on TON, Bitcoin), to scan with a wallet app. The pictures
+  are in `docs/images/` and the website serves its own copy.
+
 ## 1.9.0 - 2026-10-03
 
 ### Added

@@ -57,6 +57,10 @@ cp(path.join(repo, "assets/logo.svg"), path.join(site, "public/logo.svg"));
 for (const icon of ["favicon.svg", "favicon.ico", "favicon-32.png", "apple-touch-icon.png"]) {
   cp(path.join(repo, "assets", icon), path.join(site, "public", icon));
 }
+// The pictures the docs show (the donation QR codes): the docs link to docs/images/, the site serves a copy.
+const images = path.join(site, "public/docs-images");
+rm(images);
+cp(path.join(repo, "docs/images"), images);
 // The card that link previews show (the repository's social image).
 cp(path.join(repo, "assets/social-preview.png"), path.join(site, "public/social-preview.png"));
 console.log("site assets ready");

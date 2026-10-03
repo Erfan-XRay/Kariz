@@ -110,7 +110,9 @@ img, svg, canvas { max-width: 100%; }
 .prose blockquote { margin: 0 0 var(--sp-4); padding: var(--sp-2) var(--sp-4); border-inline-start: 3px solid var(--accent); background: var(--accent-soft); border-radius: var(--r-1); color: var(--text-2); }
 .prose blockquote > :last-child { margin-bottom: 0; }
 .prose hr { border: 0; border-top: 1px solid var(--line); margin: var(--sp-6) 0; }
-.prose img { border-radius: var(--r-2); }
+.prose img { border-radius: var(--r-2); max-width: 100%; height: auto; }
+/* A QR code keeps its own white page (a code needs the light margin to be read) at a size a phone can scan. */
+.prose img[src*="docs-images/qr-"] { display: block; width: 176px; margin: var(--sp-3) 0; border: 1px solid var(--line-strong); border-radius: var(--r-2); }
 .tablewrap { overflow-x: auto; margin: 0 0 var(--sp-4); border: 1px solid var(--line); border-radius: var(--r-2); }
 .prose table { border-collapse: collapse; width: 100%; font-size: var(--fs-sm); }
 .prose th, .prose td { text-align: start; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }

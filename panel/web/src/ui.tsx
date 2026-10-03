@@ -156,6 +156,12 @@ const ICONS: Record<string, ReactNode> = {
       <path d="M12 3.5a8.5 8.5 0 0 0 0 17" fill="currentColor" stroke="none" opacity=".35" />
     </>
   ),
+  telegram: (
+    <>
+      <path d="M21 4 3 10.8l6 2.2 2.2 6.2 2.9-4 4.4 3.2L21 4Z" />
+      <path d="m9 13 12-9" />
+    </>
+  ),
   bell: (
     <>
       <path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15L6 16.5Z" />
@@ -318,6 +324,28 @@ export function Copyright() {
         Kariz
       </a>
     </p>
+  );
+}
+
+export const CHANNEL_URL = "https://t.me/Erfan_Xray";
+export const CHANNEL_HANDLE = "@Erfan_Xray";
+
+/**
+ * The link to the author's Telegram channel. "rail" is the card in the side bar; "pill" is the
+ * one above the credit line (the sign-in page and every page's foot, where the phone's bottom
+ * bar has no room for it).
+ */
+export function ChannelLink({ variant }: { variant: "rail" | "pill" }) {
+  const { t } = useApp();
+  return (
+    <a className={`channel channel-${variant}`} href={CHANNEL_URL} target="_blank" rel="noopener noreferrer" aria-label={t("chan.label")}>
+      <Icon name="telegram" size={variant === "rail" ? 22 : 18} />
+      <span className="channel-text">
+        <span className="channel-name">{t("chan.name")}</span>
+        <small dir="ltr">{CHANNEL_HANDLE}</small>
+      </span>
+      <span className="channel-join">{t("chan.join")}</span>
+    </a>
   );
 }
 
