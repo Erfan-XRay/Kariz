@@ -7,9 +7,11 @@ required, and nothing in Kariz depends on it.
 ## Donate
 
 Send each coin **only on the network shown next to it**. A coin sent on another network
-cannot be recovered.
+cannot be recovered. Scan the code with your wallet app, or copy the address under it.
 
 **USDT** on the **TRON network (TRC20)**
+
+![QR code of the USDT (TRC20) address](images/qr-usdt-trc20.svg)
 
 ```text
 TKM87mEXhUpEBzqvNxs1qjM4EddX6VMXmw
@@ -17,11 +19,15 @@ TKM87mEXhUpEBzqvNxs1qjM4EddX6VMXmw
 
 **Gram (TON)** on the **TON network**
 
+![QR code of the Gram (TON) address](images/qr-ton.svg)
+
 ```text
 UQDfjT-h4ENIrt_Sq5-zBy9TvhckniwSLCkS7zIVX4fVSaFw
 ```
 
 **Bitcoin (BTC)** on the **Bitcoin network**
+
+![QR code of the Bitcoin (BTC) address](images/qr-btc.svg)
 
 ```text
 bc1qc4cgy5etuwj2375c5zqma7xmjtk59s5s49rfp5
@@ -38,5 +44,6 @@ Money is not the only thing that keeps a project alive:
 - **Report a problem** with what you did, what you expected and the log
   ([Troubleshooting](troubleshooting.md) says what to collect). A report that can be repeated
   gets fixed fastest.
+- **Join the Telegram channel**, [@Erfan_Xray](https://t.me/Erfan_Xray): news, releases and answers. The panel links to it too.
 - **Tell other server operators** about it.
 - **Support what Kariz stands on**: the projects whose work it uses deserve the same thanks.

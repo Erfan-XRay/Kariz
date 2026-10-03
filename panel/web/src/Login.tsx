@@ -5,7 +5,7 @@ import { paletteNow } from "./draw";
 import { startLoginScene } from "./scene-login";
 import type { LoginScene } from "./scene-login";
 import { useApp } from "./store";
-import { Copyright, Icon } from "./ui";
+import { ChannelLink, Copyright, Icon } from "./ui";
 import logo from "./logo.svg";
 
 /** The token in what the user pasted: a whole link, or just its 64 characters. */
@@ -237,6 +237,7 @@ export function Login({
           <span>{t("login.foot")}</span>
           <code dir="ltr">kariz-manager panel link</code>
         </p>
+        <ChannelLink variant="pill" />
         <Copyright />
       </form>
     </section>
