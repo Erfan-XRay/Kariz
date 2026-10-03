@@ -278,6 +278,31 @@ export interface UpdateStatus {
   outdated: { id: string; name: string; version: string; online: boolean }[];
 }
 
+/** The Telegram bot's settings as the panel shows them: the token itself is never sent. */
+export interface TelegramView {
+  enabled: boolean;
+  token_set: boolean;
+  token_tail: string;
+  chats: { id: number; name: string }[];
+  lang: "fa" | "en";
+  servers: boolean;
+  tunnels: boolean;
+  server_grace: number;
+  tunnel_grace: number;
+  digest_hours: number;
+  api_base: string;
+  proxy: string;
+  connect_via: string;
+  muted_until: number | null;
+  pair: { code: string; expires_in: number } | null;
+  last_ok: number | null;
+  last_error: string | null;
+}
+
+export type TelegramChange = Partial<
+  Pick<TelegramView, "enabled" | "lang" | "servers" | "tunnels" | "server_grace" | "tunnel_grace" | "digest_hours" | "api_base" | "proxy" | "connect_via">
+> & { token?: string; remove_token?: boolean };
+
 export class ApiError extends Error {
   status: number;
   code: string;
@@ -361,6 +386,11 @@ export const api = {
   update: () => call<UpdateStatus>("GET", "update"),
   checkUpdate: () => call<UpdateStatus>("POST", "update/check", {}),
   updateSettings: (body: { channel?: "stable" | "beta"; auto?: boolean }) => call<UpdateStatus>("POST", "update/settings", body),
+  telegram: () => call<TelegramView>("GET", "telegram"),
+  telegramSet: (body: TelegramChange) => call<TelegramView>("POST", "telegram", body),
+  telegramPair: () => call<TelegramView>("POST", "telegram/pair", {}),
+  telegramRemoveChat: (id: number) => call<TelegramView>("POST", "telegram/chats/remove", { id }),
+  telegramTest: () => call<{ ok: boolean; bot?: string; error?: string }>("POST", "telegram/test", {}),
   applyUpdate: (confirm_major: boolean) => call<{ op: string }>("POST", "update/apply", { confirm_major }),
   updateServers: (restart_tunnels: boolean) => call<{ op: string }>("POST", "update/servers", { restart_tunnels }),
   newLink: () => call<{ token: string; valid_for: number }>("POST", "links"),
