@@ -84,6 +84,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/sessions/revoke", post(revoke))
         .route("/api/password", post(password))
         .route("/api/links", post(new_link))
+        .route("/api/telegram", get(telegram_get).post(telegram_set))
+        .route("/api/telegram/pair", post(telegram_pair))
+        .route("/api/telegram/chats/remove", post(telegram_remove_chat))
+        .route("/api/telegram/test", post(telegram_test))
         .layer(DefaultBodyLimit::max(16 * 1024))
 }
 
@@ -1401,5 +1405,174 @@ async fn update_servers(
             reply(StatusCode::ACCEPTED, json!({ "op": op }))
         }
         Err(e) => update_error(e),
+    }
+}
+
+// ---- Telegram ----
+
+#[derive(Deserialize)]
+struct TelegramBody {
+    enabled: Option<bool>,
+    /// A new bot token. A different one is another bot: the chats of the old one go.
+    token: Option<String>,
+    #[serde(default)]
+    remove_token: bool,
+    lang: Option<String>,
+    servers: Option<bool>,
+    tunnels: Option<bool>,
+    server_grace: Option<u32>,
+    tunnel_grace: Option<u32>,
+    digest_hours: Option<u32>,
+    api_base: Option<String>,
+    proxy: Option<String>,
+    connect_via: Option<String>,
+}
+
+async fn telegram_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    let s = crate::telegram::Settings::load(&state.db);
+    reply(StatusCode::OK, state.hub.telegram.view(&s, &state.db))
+}
+
+async fn telegram_set(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<TelegramBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let old = crate::telegram::Settings::load(&state.db);
+    let mut s = old.clone();
+    if body.remove_token {
+        s.token.clear();
+        s.chats.clear();
+        s.enabled = false;
+    }
+    if let Some(token) = body
+        .token
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+    {
+        if token != s.token {
+            // Another bot: the chats connected to the old one are not its chats. A bot
+            // that was just given is turned on (nothing is sent before a chat is connected).
+            s.chats.clear();
+            s.enabled = true;
+        }
+        s.token = token;
+    }
+    if let Some(v) = body.enabled {
+        s.enabled = v;
+    }
+    if let Some(v) = body.lang {
+        s.lang = v;
+    }
+    if let Some(v) = body.servers {
+        s.servers = v;
+    }
+    if let Some(v) = body.tunnels {
+        s.tunnels = v;
+    }
+    if let Some(v) = body.server_grace {
+        s.server_grace = v;
+    }
+    if let Some(v) = body.tunnel_grace {
+        s.tunnel_grace = v;
+    }
+    if let Some(v) = body.digest_hours {
+        s.digest_hours = v;
+    }
+    if let Some(v) = body.api_base {
+        s.api_base = v.trim().to_owned();
+    }
+    if let Some(v) = body.proxy {
+        // The page shows the proxy without its password: sending that back keeps it.
+        if v != crate::telegram::mask_proxy(&old.proxy) || old.proxy.is_empty() {
+            s.proxy = v.trim().to_owned();
+        }
+    }
+    if let Some(v) = body.connect_via {
+        s.connect_via = v.trim().to_owned();
+    }
+    if let Err(code) = crate::telegram::check_new(&s) {
+        return error(StatusCode::BAD_REQUEST, code);
+    }
+    if s.digest_hours != old.digest_hours {
+        crate::telegram::reset_digest(&state.db);
+    }
+    if let Err(e) = s.save(&state.db) {
+        return internal(e);
+    }
+    audit(
+        &state,
+        &format!("session {}", me.id),
+        &ip_of(&peer),
+        if s.enabled {
+            "changed the Telegram settings (on)"
+        } else {
+            "changed the Telegram settings (off)"
+        },
+    );
+    reply(StatusCode::OK, state.hub.telegram.view(&s, &state.db))
+}
+
+/// A new code for connecting a chat: the chat sends `/start CODE` to the bot.
+async fn telegram_pair(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = authenticate(&state, &headers, true) {
+        return r;
+    }
+    let s = crate::telegram::Settings::load(&state.db);
+    if s.token.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "no_token");
+    }
+    match state.hub.telegram.new_pair() {
+        Ok(_) => reply(StatusCode::OK, state.hub.telegram.view(&s, &state.db)),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ChatBody {
+    id: i64,
+}
+
+async fn telegram_remove_chat(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<ChatBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let mut s = crate::telegram::Settings::load(&state.db);
+    s.chats.retain(|c| c.id != body.id);
+    if let Err(e) = s.save(&state.db) {
+        return internal(e);
+    }
+    audit(
+        &state,
+        &format!("session {}", me.id),
+        &ip_of(&peer),
+        "disconnected a Telegram chat",
+    );
+    reply(StatusCode::OK, state.hub.telegram.view(&s, &state.db))
+}
+
+/// Is the token good and Telegram reachable; a message goes to every connected chat.
+async fn telegram_test(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = authenticate(&state, &headers, true) {
+        return r;
+    }
+    match crate::telegram::check(&state.hub).await {
+        Ok(bot) => reply(StatusCode::OK, json!({ "ok": true, "bot": bot })),
+        // A refusal by Telegram or the network is the answer, not a server error.
+        Err(why) => reply(StatusCode::OK, json!({ "ok": false, "error": why })),
     }
 }

@@ -107,7 +107,7 @@ export interface Section {
 export const SECTIONS: Section[] = [
   { id: "start", title: { en: "Get started", fa: "شروع کار" }, pages: ["getting-started", "using-the-panel", "tour", "manager", "panel"] },
   { id: "concepts", title: { en: "Concepts", fa: "مفاهیم" }, pages: ["how-it-works", "transports", "profiles", "udp-and-games", "cdn"] },
-  { id: "guides", title: { en: "Guides", fa: "راهنماها" }, pages: ["networks", "troubleshooting", "speedtest", "performance"] },
+  { id: "guides", title: { en: "Guides", fa: "راهنماها" }, pages: ["networks", "troubleshooting", "speedtest", "telegram", "performance"] },
   { id: "reference", title: { en: "Reference", fa: "مرجع" }, pages: ["configuration", "status", "accessibility"] },
   { id: "security", title: { en: "Security", fa: "امنیت" }, pages: ["security", "security-review"] },
   { id: "project", title: { en: "Project", fa: "پروژه" }, pages: ["changelog", "roadmap", "support"] },
@@ -128,6 +128,7 @@ export const LABELS: Record<string, Record<Lang, string>> = {
   networks: { en: "Private networks (GRE)", fa: "شبکه‌های خصوصی (GRE)" },
   troubleshooting: { en: "Troubleshooting", fa: "عیب‌یابی" },
   speedtest: { en: "Speed test", fa: "تست سرعت" },
+  telegram: { en: "Telegram alerts", fa: "اعلان تلگرام" },
   performance: { en: "Performance", fa: "کارایی" },
   configuration: { en: "Configuration", fa: "پیکربندی" },
   status: { en: "Status", fa: "وضعیت" },

@@ -9,6 +9,7 @@ import { startMap } from "./scene-map";
 import type { MapData, MapHit } from "./scene-map";
 import { useApp } from "./store";
 import { BackupDialog, RestoreDialog } from "./Extras";
+import { TelegramSection } from "./Telegram";
 import { transportLabel } from "./transport";
 import { Card, CodeBlock, CopyValue, Dialog, Empty, Icon, Odo, Seg, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
 
@@ -944,6 +945,7 @@ export function SettingsPage({ hasPassword, onPasswordSet, updates }: { hasPassw
   const sections: [string, string, string][] = [
     ["sec", t("set.sec"), "shield"],
     ["upd", t("set.updates"), "update"],
+    ["tg", t("set.telegram"), "bell"],
     ["bak", t("set.backup"), "download"],
     ["look", t("set.look"), "palette"],
   ];
@@ -996,6 +998,9 @@ export function SettingsPage({ hasPassword, onPasswordSet, updates }: { hasPassw
         </Card>
         <div id="set-upd" className="set-section">
           {updates}
+        </div>
+        <div id="set-tg" className="set-section">
+          <TelegramSection />
         </div>
         <Card title={t("set.backup")} id="set-bak" className="set-section">
           {row(

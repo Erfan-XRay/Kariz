@@ -73,6 +73,9 @@ Want to look first? The [live demo](https://erfan-xray.github.io/Kariz/try/) run
 - **A panel that undoes its mistakes.** The tunnel wizard checks both servers first, and if anything fails
   it puts both back as they were. Live map, charts, logs, speed test, backups, private networks and
   updates are in the same place.
+- **Alerts in Telegram.** Your own bot tells you when a server goes offline or a tunnel goes down (and
+  when it is back), and answers `/status` with every server and tunnel. It can go through a proxy or a
+  tunnel where Telegram is blocked. [Set it up](https://erfan-xray.github.io/Kariz/docs/telegram/).
 - **Signed releases.** The install script, the panel and its agents verify a release's signature before
   they run anything from it.
 

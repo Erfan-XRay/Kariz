@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.9.0 - 2026-10-03
+
+### Added
+
+- **Alerts and status in Telegram.** In **Settings > Telegram** the panel takes your own bot's token
+  and tells a connected chat when a server goes offline or a tunnel goes down, and when it is back
+  (with how long it was down). A thing has to stay down for a wait (60 s for a server, 30 s for a
+  tunnel, both settable) before it is told, nothing is said in the first minute after the panel
+  starts, a server's tunnels are named in its one message, and a tunnel that keeps going down is
+  called unstable and then left alone. The bot answers `/status`, `/servers`, `/server NAME`,
+  `/tunnels`, `/tunnel NAME`, `/mute 2h` and `/unmute` (read-only: nothing changes a tunnel), and
+  can send the status by itself every 6, 12 or 24 hours. A chat is connected with a one-time code
+  (`/start CODE`); no one else is answered. Where Telegram is blocked the panel can go through an
+  HTTP or SOCKS5 proxy, through a local port that a tunnel forwards to `api.telegram.org:443`, or
+  through a relay of your own. The token is never shown again, is kept out of backups, and is
+  removed from errors. Messages are in Persian or English. See [Telegram alerts](docs/telegram.md).
+
 ## 1.8.1 - 2026-10-02
 
 ### Fixed
