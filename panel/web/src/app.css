@@ -839,35 +839,6 @@ kbd {
 .rail-spacer { flex: 1; min-height: var(--sp-4); }
 .rail-extra { color: var(--text-3); }
 
-/* The author's Telegram channel: a card in the side bar, a pill above the credit line. */
-.channel {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  color: var(--text-2);
-  text-decoration: none;
-  border: var(--hairline) solid var(--line-strong);
-  background: var(--accent-soft);
-  transition: border-color 0.15s ease, color 0.15s ease;
-}
-.channel:hover { color: var(--text); border-color: var(--accent); }
-.channel svg { flex: none; color: var(--accent); }
-.channel-text { display: grid; min-width: 0; line-height: 1.25; }
-.channel-name { font-size: var(--fs-sm); font-weight: 600; color: var(--text); }
-.channel small { font-size: var(--fs-xs); color: var(--text-3); text-align: start; }
-.channel-join {
-  margin-inline-start: auto;
-  padding: 2px 10px;
-  border-radius: 999px;
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  color: var(--bg);
-  background: var(--accent);
-}
-.channel-rail { margin: var(--sp-2) 0; padding: var(--sp-2) var(--sp-3); border-radius: 12px; }
-.channel-pill { width: fit-content; margin: 0 auto var(--sp-3); padding: 6px 8px 6px 14px; border-radius: 999px; }
-[dir="rtl"] .channel-pill { padding: 6px 14px 6px 8px; }
-
 .sky {
   grid-area: sky;
   position: relative;
@@ -981,6 +952,7 @@ kbd {
 .square-btn:hover { color: var(--text); border-color: var(--accent); }
 .square-btn[aria-pressed="true"] { color: var(--accent); border-color: var(--line-strong); background: var(--accent-soft); }
 .square-btn svg { width: 20px; height: 20px; }
+a.square-btn, a.chip { text-decoration: none; }
 
 .main {
   grid-area: main;
@@ -1153,8 +1125,7 @@ kbd {
   }
   .rail .brand,
   .rail-spacer,
-  .rail .rail-extra,
-  .rail-channel-slot { display: none; }
+  .rail .rail-extra { display: none; }
   .rail-group { display: contents; }
   .rail-item { width: auto; flex: 1; min-width: 0; min-height: 54px; font-size: 10px; border-radius: 8px; }
   .rail-item span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

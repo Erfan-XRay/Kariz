@@ -318,7 +318,10 @@ export function Dialog({
 export function Copyright() {
   return (
     <p className="copyright" dir="ltr">
-      <span>© ErfanXRay</span>
+      <span>©</span>
+      <a href={CHANNEL_URL} target="_blank" rel="noopener noreferrer">
+        Erfan_Xray
+      </a>
       <span aria-hidden="true">·</span>
       <a href="https://github.com/Erfan-XRay/Kariz" target="_blank" rel="noopener noreferrer">
         Kariz
@@ -330,21 +333,12 @@ export function Copyright() {
 export const CHANNEL_URL = "https://t.me/Erfan_Xray";
 export const CHANNEL_HANDLE = "@Erfan_Xray";
 
-/**
- * The link to the author's Telegram channel. "rail" is the card in the side bar; "pill" is the
- * one above the credit line (the sign-in page and every page's foot, where the phone's bottom
- * bar has no room for it).
- */
-export function ChannelLink({ variant }: { variant: "rail" | "pill" }) {
+/** The link to the author's Telegram channel: a small icon, beside the other top-bar controls. */
+export function ChannelLink({ variant }: { variant: "square" | "chip" }) {
   const { t } = useApp();
   return (
-    <a className={`channel channel-${variant}`} href={CHANNEL_URL} target="_blank" rel="noopener noreferrer" aria-label={t("chan.label")}>
-      <Icon name="telegram" size={variant === "rail" ? 22 : 18} />
-      <span className="channel-text">
-        <span className="channel-name">{t("chan.name")}</span>
-        <small dir="ltr">{CHANNEL_HANDLE}</small>
-      </span>
-      <span className="channel-join">{t("chan.join")}</span>
+    <a className={variant === "square" ? "square-btn" : "chip"} href={CHANNEL_URL} target="_blank" rel="noopener noreferrer" title={`${t("chan.name")} ${CHANNEL_HANDLE}`} aria-label={t("chan.label")}>
+      <Icon name="telegram" size={variant === "square" ? 20 : 16} />
     </a>
   );
 }
