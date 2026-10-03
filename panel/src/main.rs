@@ -475,6 +475,7 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
             kariz_bin: std::env::current_exe()?.with_file_name("kariz"),
         });
         tokio::spawn(hub.clone().run_local());
+        tokio::spawn(kariz_panel::telegram::run(hub.clone()));
         let mut state = AppState::new(db);
         state.hub = hub.clone();
         if let Some(listen) = &config.agent_listen {

@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod agent_update;
+pub mod alerts;
 pub mod api;
 pub mod auth;
 pub mod backup;
@@ -19,6 +20,7 @@ pub mod netops;
 pub mod networks;
 pub mod pair;
 pub mod sign;
+pub mod telegram;
 pub mod update;
 pub mod updater;
 pub mod wire;
