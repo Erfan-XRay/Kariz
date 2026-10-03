@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.9.2 - 2026-10-03
+
+### Changed
+
+- **The Telegram channel link is small now.** The card in the side bar and the line above the
+  credit line are gone. The top bar has one small Telegram icon beside the language and theme
+  buttons (the sign-in page has it in the same place), and the name in the credit line, now
+  `Erfan_Xray`, opens the channel. The command palette still has "Open the Telegram channel".
+
 ## 1.9.1 - 2026-10-03
 
 ### Added
