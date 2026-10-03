@@ -1,6 +1,6 @@
 # Kariz documentation
 
-For Kariz **v1.8.1**; what changed in each version is in the [changelog](../CHANGELOG.md). Start with
+For Kariz **v1.9.0**; what changed in each version is in the [changelog](../CHANGELOG.md). Start with
 [Getting started](getting-started.md) and come back to the reference pages when you need a specific
 setting. The same pages are a website, with search,
 animated diagrams and a live demo of the panel, in English and Persian:
@@ -13,6 +13,7 @@ animated diagrams and a live demo of the panel, in English and Persian:
 | [The manager script](manager.md) | One-line install of Kariz and the panel on a server, and connecting a server to a panel |
 | [Configuration reference](configuration.md) | Every setting, its default and its limits |
 | [Speed test](speedtest.md) | The panel's button and `kariz speedtest`: speed, latency and UDP through the live tunnel |
+| [Telegram alerts](telegram.md) | A bot that tells you when a server or tunnel goes down, and answers `/status`; if Telegram is blocked |
 | [The web panel](panel.md) | Install the panel, sign in, connect servers with agents, what it shows |
 | [Status](status.md) | `kariz status`: connection, round trip, last error and traffic per port, on either side; the JSON document |
 | [Accessibility](accessibility.md) | what is checked on every change (axe, keyboard, motion) and what is checked by hand |

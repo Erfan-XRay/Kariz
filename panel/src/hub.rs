@@ -149,6 +149,8 @@ pub struct Hub {
     pub update_settings: std::sync::OnceLock<crate::updater::UpdateSettings>,
     /// What the last check for a newer release found.
     pub checked: Mutex<crate::updater::Checked>,
+    /// The Telegram bot's connect code and how it is going.
+    pub telegram: crate::telegram::State,
 }
 
 pub const LOCAL: &str = "local";
@@ -223,6 +225,7 @@ impl Hub {
             connect_wait,
             update_settings: std::sync::OnceLock::new(),
             checked: Mutex::new(crate::updater::Checked::default()),
+            telegram: crate::telegram::State::default(),
             kariz_dir,
             live: Mutex::new(HashMap::new()),
         })
