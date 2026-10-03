@@ -39,6 +39,9 @@ export function remarkDocLinks({ base, repo }) {
       const abs = path.resolve(from, target);
       const file = rel(abs);
       if (file.startsWith("..")) return url;
+      // The pictures of the docs (docs/images/) are copied into the site, so a page shows them
+      // from the site and not from GitHub.
+      if (image && file.startsWith("docs/images/")) return `${base}/docs-images/${file.slice("docs/images/".length)}`;
       const route = routeFor(file, base);
       if (route) return route + hash;
       const kind = image ? "raw" : /\.[a-z0-9]+$/i.test(file) ? "blob" : "tree";
