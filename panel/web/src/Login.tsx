@@ -145,6 +145,7 @@ export function Login({
             <Icon name={theme === "night" ? "sun" : "moon"} size={16} />
             {theme === "night" ? t("theme.dawn") : t("theme.night")}
           </button>
+          <ChannelLink variant="chip" />
         </div>
       </div>
 
@@ -237,7 +238,6 @@ export function Login({
           <span>{t("login.foot")}</span>
           <code dir="ltr">kariz-manager panel link</code>
         </p>
-        <ChannelLink variant="pill" />
         <Copyright />
       </form>
     </section>

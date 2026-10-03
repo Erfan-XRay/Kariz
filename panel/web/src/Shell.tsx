@@ -107,9 +107,6 @@ export function Shell({
         <div className="rail-group">{PAGES.filter((p) => p !== "settings").map((p) => item(p))}</div>
         <div className="rail-spacer" />
         {item("settings")}
-        <div className="rail-channel-slot">
-          <ChannelLink variant="rail" />
-        </div>
         <button className="rail-item rail-extra" type="button" onClick={onLogout}>
           <Icon name="exit" size={22} />
           <span>{t("nav.logout")}</span>
@@ -152,6 +149,7 @@ export function Shell({
           <button className="square-btn" type="button" onClick={() => setLow(!low, true)} aria-label="Low power" aria-pressed={low} title={t("pal.low")}>
             <Icon name="leaf" />
           </button>
+          <ChannelLink variant="square" />
         </div>
       </header>
 
@@ -164,7 +162,6 @@ export function Shell({
         )}
         <div className="content">{children}</div>
         <footer className="app-foot">
-          <ChannelLink variant="pill" />
           <Copyright />
         </footer>
       </main>
