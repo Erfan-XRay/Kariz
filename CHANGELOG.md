@@ -1,8 +1,12 @@
 # Changelog
 
-## Unreleased
+## 1.9.5 - 2026-10-05
 
 ### Added
+
+- **A video tutorial on the website.** A page of about two minutes (*Video tutorial*, under *Get
+  started*) shows the panel from a bare server to a running tunnel, with chapters that jump to
+  their place in it. The captions on the screen are in Persian.
 
 - **A server that goes offline can be brought back from the panel.** Its card says since when and
   why (the link ended, or an agent came with a key the panel does not accept) and has a
@@ -18,6 +22,12 @@
   back; each restart is an event. New API: `GET/POST /api/schedules`, `/api/schedules/delete`,
   `/api/schedules/run`, `/api/servers/reconnect`, `/api/servers/rename`. A server's `last_seen` and
   `last_error` are in `GET /api/servers`.
+
+### Fixed
+
+- **The low-power button on the website works when the system asks for less motion.** It could not
+  bring the animation back on a computer with "reduce motion" set; now it can, and the choice is
+  kept.
 
 ## 1.9.2 - 2026-10-03
 
