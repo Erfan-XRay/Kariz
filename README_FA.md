@@ -83,7 +83,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/script
 | | |
 |---|---|
 | [شروع کار](https://erfan-xray.github.io/Kariz/fa/docs/getting-started/) | نصب، اولین تانل، systemd |
-| [کار با پنل](https://erfan-xray.github.io/Kariz/fa/docs/using-the-panel/) · [تور راهنما](https://erfan-xray.github.io/Kariz/fa/docs/tour/) | پنل، صفحه به صفحه |
+| [کار با پنل](https://erfan-xray.github.io/Kariz/fa/docs/using-the-panel/) · [تور راهنما](https://erfan-xray.github.io/Kariz/fa/docs/tour/) · [ویدیوی آموزشی](https://erfan-xray.github.io/Kariz/fa/docs/video/) | پنل، صفحه به صفحه، و در دو دقیقه ویدیو |
 | [اسکریپت مدیر](https://erfan-xray.github.io/Kariz/fa/docs/manager/) | نصب، به‌روزرسانی، منو |
 | [ترنسپورت‌ها](https://erfan-xray.github.io/Kariz/fa/docs/transports/) · [کدام یکی؟](https://erfan-xray.github.io/Kariz/fa/docs/how-it-works/) | انتخاب و تنظیم |
 | [مرجع پیکربندی](https://erfan-xray.github.io/Kariz/fa/docs/configuration/) | همهٔ تنظیم‌ها با مقدار پیش‌فرض و محدوده |

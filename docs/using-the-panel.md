@@ -3,8 +3,9 @@
 This page walks through the panel in the order you need it, from a new server to a tunnel you
 can trust. You do not need any other tutorial: everything about servers and tunnels is done here,
 in the browser. Try the same screens first, with sample data and nothing to install, in the
-[live demo](https://erfan-xray.github.io/Kariz/try/), or take the
-[guided tour](https://erfan-xray.github.io/Kariz/docs/tour/), which opens each screen as it explains it.
+[live demo](https://erfan-xray.github.io/Kariz/try/), take the
+[guided tour](https://erfan-xray.github.io/Kariz/docs/tour/), which opens each screen as it explains it, or
+watch the [video tutorial](https://erfan-xray.github.io/Kariz/docs/video/) (about two minutes, from a bare server to a running tunnel).
 
 ## 1. Sign in
 

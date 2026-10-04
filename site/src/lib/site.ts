@@ -105,7 +105,7 @@ export interface Section {
 
 /** The map of the docs. A slug is the file name of a page in `docs/`, lower case. */
 export const SECTIONS: Section[] = [
-  { id: "start", title: { en: "Get started", fa: "شروع کار" }, pages: ["getting-started", "using-the-panel", "tour", "manager", "panel"] },
+  { id: "start", title: { en: "Get started", fa: "شروع کار" }, pages: ["getting-started", "using-the-panel", "video", "tour", "manager", "panel"] },
   { id: "concepts", title: { en: "Concepts", fa: "مفاهیم" }, pages: ["how-it-works", "transports", "profiles", "udp-and-games", "cdn"] },
   { id: "guides", title: { en: "Guides", fa: "راهنماها" }, pages: ["networks", "troubleshooting", "speedtest", "telegram", "performance"] },
   { id: "reference", title: { en: "Reference", fa: "مرجع" }, pages: ["configuration", "status", "accessibility"] },
@@ -120,6 +120,7 @@ export const LABELS: Record<string, Record<Lang, string>> = {
   panel: { en: "The web panel", fa: "پنل وب" },
   "using-the-panel": { en: "Using the panel", fa: "کار با پنل" },
   tour: { en: "Guided tour", fa: "تور راهنما" },
+  video: { en: "Video tutorial", fa: "ویدیوی آموزشی" },
   "how-it-works": { en: "How it works", fa: "چطور کار می‌کند" },
   transports: { en: "Transports", fa: "ترنسپورت‌ها" },
   profiles: { en: "Profiles", fa: "پروفایل‌ها" },
@@ -141,7 +142,7 @@ export const LABELS: Record<string, Record<Lang, string>> = {
 };
 
 /** Pages made by the site itself (not a file of docs/): they exist in both languages. */
-export const OWN_PAGES = new Set(["how-it-works", "tour"]);
+export const OWN_PAGES = new Set(["how-it-works", "tour", "video"]);
 
 export const sectionOf = (slug: string) => SECTIONS.find((s) => s.pages.includes(slug));
 

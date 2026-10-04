@@ -1,0 +1,126 @@
+---
+// The video tutorial: the panel from a bare server to a running tunnel, in about two minutes,
+// with a list of chapters that jump to their place in it. The captions in the video are in
+// Persian; the chapters are the words for it in both languages.
+import DocsShell from "./DocsShell.astro";
+import { href } from "../lib/site";
+import type { Lang } from "../lib/site";
+
+const { lang } = Astro.props as { lang: Lang };
+const base = import.meta.env.BASE_URL;
+const T = {
+  en: {
+    title: "Video tutorial",
+    desc: "A two-minute video: install the panel, sign in, add a second server, make your first tunnel with the wizard and test its speed.",
+    lead: "About two minutes from a bare server to a running tunnel: install the panel, sign in, add a second server, make a tunnel with the wizard, then watch it and test its speed. The panel in the video is the real one, filled with sample data. The captions on the screen are in Persian; the chapters below say what each part shows.",
+    player: "Kariz panel video tutorial",
+    chapters: "Chapters",
+    chaptersHint: "Choose a chapter to jump to it.",
+    fallback: "Your browser cannot play this video.",
+    download: "Download the video (MP4)",
+    more: "The same in words, with every detail:",
+    moreLinks: [
+      ["/docs/using-the-panel/", "Using the panel"],
+      ["/docs/manager/", "The manager script"],
+      ["/docs/tour/", "Guided tour"],
+    ],
+    items: [
+      { t: 0, title: "Introduction", text: "What Kariz is: a fast, encrypted tunnel between two servers, and the web panel that makes it." },
+      { t: 5, title: "Install the panel", text: "On the server that keeps the panel, run the one-line install as root. In the manager's menu, choose Install the web panel here: it prints the panel's address and a one-time login link." },
+      { t: 17, title: "Sign in, and the map", text: "Open the link, or paste it into the sign-in box; no password is needed the first time. The map shows every server as a well and every tunnel as a channel." },
+      { t: 31, title: "Add a second server", text: "Servers, then Add server: give it a name and make a join code, which works once and for ten minutes. Run the command on the other server; it appears in the panel within seconds and opens no port." },
+      { t: 51, title: "Make a tunnel", text: "Tunnels, then New tunnel. The wizard asks for the name and the two servers, how they connect, the transport, profile and encryption, the connection port and address, and the ports the entry opens. Then it builds both sides and shows every step; if anything fails, both servers are put back." },
+      { t: 99, title: "Watch it and test its speed", text: "The tunnel is on the map, with water flowing. Open it for charts of throughput and round trip, its ports and its traffic, and run a speed test from inside the tunnel." },
+      { t: 122, title: "Handy things", text: "Ctrl+K searches pages, tunnels and commands. The top bar switches Night and Dawn, Persian and English, and low power." },
+    ],
+  },
+  fa: {
+    title: "ویدیوی آموزشی",
+    desc: "ویدیویی دو دقیقه‌ای: نصب پنل، ورود، افزودن سرور دوم، ساخت اولین تانل با ویزارد و تست سرعت.",
+    lead: "حدود دو دقیقه از یک سرور خالی تا یک تانل جاری: نصب پنل، ورود، افزودن سرور دوم، ساخت تانل با ویزارد، و بعد دیدن آن و تست سرعتش. پنلِ داخل ویدیو همان پنل واقعی است، با داده‌های نمونه. زیرنویس روی تصویر فارسی است و فهرست زیر می‌گوید هر بخش چه چیزی را نشان می‌دهد.",
+    player: "ویدیوی آموزشی پنل کاریز",
+    chapters: "بخش‌ها",
+    chaptersHint: "یک بخش را بزنید تا ویدیو به همان‌جا برود.",
+    fallback: "مرورگر شما این ویدیو را پخش نمی‌کند.",
+    download: "دانلود ویدیو (MP4)",
+    more: "همین‌ها به‌صورت نوشته، با همهٔ جزئیات:",
+    moreLinks: [
+      ["/docs/using-the-panel/", "کار با پنل"],
+      ["/docs/manager/", "اسکریپت مدیر"],
+      ["/docs/tour/", "تور راهنما"],
+    ],
+    items: [
+      { t: 0, title: "آغاز", text: "کاریز چیست: یک تانل سریع و رمزنگاری‌شده بین دو سرور، و پنل وبی که آن را می‌سازد." },
+      { t: 5, title: "نصب پنل", text: "روی سروری که پنل می‌ماند، دستور یک‌خطی نصب را با root اجرا کنید. در منوی manager گزینهٔ ۳ (نصب پنل وب) را بزنید: آدرس پنل و یک لینک ورود یک‌بارمصرف چاپ می‌شود." },
+      { t: 17, title: "ورود و نقشه", text: "لینک را باز کنید یا در کادر ورود بچسبانید؛ بار اول رمز لازم نیست. نقشه هر سرور را چاه و هر تانل را مجرا نشان می‌دهد." },
+      { t: 31, title: "افزودن سرور دوم", text: "«سرورها» و بعد «افزودن سرور»: یک اسم بدهید و کد عضویت بسازید؛ کد یک‌بار و ده دقیقه کار می‌کند. دستور را روی سرور دیگر اجرا کنید؛ در چند ثانیه در پنل ظاهر می‌شود و هیچ پورتی باز نمی‌کند." },
+      { t: 51, title: "ساخت تانل", text: "«تانل‌ها» و بعد «تانل تازه». ویزارد اسم و دو سرور، نحوهٔ اتصال، ترنسپورت، پروفایل و رمزنگاری، پورت و نشانی اتصال، و پورت‌هایی را که ورودی باز می‌کند می‌پرسد. بعد هر دو سمت را می‌سازد و هر گام را نشان می‌دهد؛ اگر چیزی خراب شود، هر دو سرور به حالت قبل برمی‌گردند." },
+      { t: 99, title: "دیدن تانل و تست سرعت", text: "تانل روی نقشه است و آب در آن جاری است. بازش کنید تا نمودار توان عبوری و تأخیر، پورت‌ها و ترافیکش را ببینید، و از درون خود تانل تست سرعت بگیرید." },
+      { t: 122, title: "چیزهای کاربردی", text: "Ctrl+K صفحه‌ها، تانل‌ها و دستورها را جستجو می‌کند. نوار بالا شب و سپیده‌دم، فارسی و انگلیسی، و کم‌مصرف را عوض می‌کند." },
+    ],
+  },
+}[lang];
+const clock = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+const digits = "۰۱۲۳۴۵۶۷۸۹";
+const shown = (s: number) => (lang === "fa" ? clock(s).replace(/\d/g, (d) => digits[+d]) : clock(s));
+const headings = [{ depth: 2, slug: "chapters", text: T.chapters }];
+const src = `${base}video/kariz-panel-tutorial.mp4`;
+---
+
+<DocsShell lang={lang} title={T.title} description={T.desc} path="/docs/video/" slug="video" headings={headings}>
+  <article class="prose video-page" data-pagefind-body>
+    <h1>{T.title}</h1>
+    <p>{T.lead}</p>
+    <div class="video-frame">
+      <video controls preload="metadata" playsinline poster={`${base}video/poster.jpg`} aria-label={T.player} data-video>
+        <source src={src} type="video/mp4" />
+        {T.fallback} <a href={src}>{T.download}</a>
+      </video>
+    </div>
+    <p class="video-dl"><a href={src} download>{T.download}</a></p>
+    <h2 id="chapters">{T.chapters}</h2>
+    <p>{T.chaptersHint}</p>
+    <ol class="chapters">
+      {T.items.map((c) => (
+        <li>
+          <button type="button" class="chapter" data-seek={c.t}>
+            <time class="at" datetime={`PT${c.t}S`} dir="ltr">{shown(c.t)}</time>
+            <span class="what"><b>{c.title}</b><span>{c.text}</span></span>
+          </button>
+        </li>
+      ))}
+    </ol>
+    <p class="video-more">
+      {T.more}
+      {T.moreLinks.map(([p, label], i) => (
+        <>{i > 0 ? " · " : " "}<a href={href(lang, p)}>{label}</a></>
+      ))}
+    </p>
+  </article>
+</DocsShell>
+
+<script>
+  const video = document.querySelector<HTMLVideoElement>("[data-video]");
+  for (const b of document.querySelectorAll<HTMLButtonElement>("[data-seek]")) {
+    b.addEventListener("click", () => {
+      if (!video) return;
+      video.currentTime = Number(b.dataset.seek);
+      void video.play().catch(() => {});
+      video.scrollIntoView({ block: "nearest" });
+    });
+  }
+</script>
+
+<style>
+  .video-frame { margin: var(--sp-4) 0 var(--sp-2); border: 1px solid var(--line-strong); border-radius: var(--r-3); overflow: hidden; background: #050b16; box-shadow: var(--shadow-deep); }
+  .video-frame video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #050b16; }
+  .video-dl { margin: 0 0 var(--sp-5); font-size: var(--fs-sm); }
+  .chapters { list-style: none; margin: var(--sp-3) 0 0; padding: 0; display: grid; gap: var(--sp-2); }
+  .chapter { display: grid; grid-template-columns: 3.4rem 1fr; gap: var(--sp-3); align-items: start; width: 100%; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--stratum-1); color: var(--text); font: inherit; text-align: start; cursor: pointer; }
+  .chapter:hover { border-color: var(--accent); background: var(--accent-soft); }
+  .chapter .at { font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--accent-strong); padding-top: 2px; }
+  .chapter .what { display: grid; gap: 2px; }
+  .chapter .what b { font-weight: 600; }
+  .chapter .what span { color: var(--text-2); font-size: var(--fs-sm); }
+  .video-more { margin-top: var(--sp-6); color: var(--text-2); }
+</style>

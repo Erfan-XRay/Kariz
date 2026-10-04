@@ -86,7 +86,7 @@ Everything else is on the website, in English and Persian:
 | | |
 |---|---|
 | [Getting started](https://erfan-xray.github.io/Kariz/docs/getting-started/) | install, the first tunnel, systemd |
-| [Using the panel](https://erfan-xray.github.io/Kariz/docs/using-the-panel/) · [Guided tour](https://erfan-xray.github.io/Kariz/docs/tour/) | the panel, page by page |
+| [Using the panel](https://erfan-xray.github.io/Kariz/docs/using-the-panel/) · [Guided tour](https://erfan-xray.github.io/Kariz/docs/tour/) · [Video tutorial](https://erfan-xray.github.io/Kariz/docs/video/) | the panel, page by page, and in two minutes of video |
 | [The manager script](https://erfan-xray.github.io/Kariz/docs/manager/) | installing, updating, the menu |
 | [Transports](https://erfan-xray.github.io/Kariz/docs/transports/) · [Which one?](https://erfan-xray.github.io/Kariz/docs/how-it-works/) | choosing and tuning |
 | [Configuration reference](https://erfan-xray.github.io/Kariz/docs/configuration/) | every setting, default and limit |

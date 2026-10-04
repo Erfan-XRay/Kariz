@@ -19,7 +19,8 @@ import type { Palette } from "./panel/draw";
 const TAU = Math.PI * 2;
 const root = document.documentElement;
 const reduced = matchMedia("(prefers-reduced-motion: reduce)");
-const isStill = () => root.dataset.low === "1" || reduced.matches;
+// "1" is low power on, "0" is motion on even when the system asks for less; no value follows the system.
+const isStill = () => root.dataset.low === "1" || (root.dataset.low !== "0" && reduced.matches);
 /** The most pixels the canvas holds, whatever the screen's density. */
 const PIXELS = 2e6;
 

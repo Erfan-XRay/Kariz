@@ -29,11 +29,13 @@ $("[data-theme-toggle]")?.addEventListener("click", () => {
   store.set("kariz-site-theme", next);
 });
 const lowBtn = $<HTMLButtonElement>("[data-low-toggle]");
-const syncLow = () => lowBtn?.setAttribute("aria-pressed", String(root.dataset.low === "1" || reduced.matches));
+// "1" is low power on, "0" is motion on even when the system asks for less; no value follows the system.
+const isLow = () => root.dataset.low === "1" || (root.dataset.low !== "0" && reduced.matches);
+const syncLow = () => lowBtn?.setAttribute("aria-pressed", String(isLow()));
 syncLow();
 lowBtn?.addEventListener("click", () => {
-  if (root.dataset.low === "1") {
-    delete root.dataset.low;
+  if (isLow()) {
+    root.dataset.low = "0";
     store.set("kariz-site-low", "0");
   } else {
     root.dataset.low = "1";
@@ -192,7 +194,7 @@ if (prose) {
       }
       b.textContent = label.done;
       b.classList.add("done");
-      if (root.dataset.low !== "1" && !reduced.matches) {
+      if (!isLow()) {
         const rect = b.getBoundingClientRect();
         const host = box.getBoundingClientRect();
         for (let i = 0; i < 7; i++) {

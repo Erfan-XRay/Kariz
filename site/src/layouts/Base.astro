@@ -58,7 +58,8 @@ const card = new URL(`${BASE}/social-preview.png`, Astro.site);
         try {
           var th = localStorage.getItem("kariz-site-theme");
           if (th === "dawn" || th === "night") h.dataset.theme = th;
-          if (localStorage.getItem("kariz-site-low") === "1") h.dataset.low = "1";
+          var lw = localStorage.getItem("kariz-site-low");
+          if (lw === "1" || lw === "0") h.dataset.low = lw;
         } catch (e) {}
       })();
     </script>
