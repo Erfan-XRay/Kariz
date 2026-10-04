@@ -39,6 +39,11 @@ pub fn routes() -> Router<AppState> {
         .route("/api/servers/join-code", post(join_code))
         .route("/api/servers/panel-addresses", get(panel_addresses))
         .route("/api/servers/remove", post(remove_server))
+        .route("/api/servers/reconnect", post(reconnect_server))
+        .route("/api/servers/rename", post(rename_server))
+        .route("/api/schedules", get(schedules_list).post(schedule_set))
+        .route("/api/schedules/delete", post(schedule_delete))
+        .route("/api/schedules/run", post(schedule_run))
         // A tunnel with many ports is a bigger body than the other calls take.
         .route(
             "/api/tunnels/check",
@@ -519,6 +524,205 @@ async fn join_code(
             )
         }
         Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ReconnectBody {
+    id: String,
+    /// The address the browser reached the panel by: what the server should dial.
+    host: String,
+    /// The one link transport the agent is to use; none or `auto`: all of them in turn.
+    transport: Option<String>,
+}
+
+/// A join code for a server that is already known: its agent is replaced by one that joins
+/// with it, and the server keeps its name, its tunnels and its private network links.
+async fn reconnect_server(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<ReconnectBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let Some(port) = state.agent_port else {
+        return error(StatusCode::CONFLICT, "agents_off");
+    };
+    let host = body.host.trim();
+    let transport = body
+        .transport
+        .as_deref()
+        .map(str::trim)
+        .filter(|x| !x.is_empty() && *x != "auto");
+    if body.id == crate::hub::LOCAL
+        || !crate::join::valid_host(host)
+        || transport.is_some_and(|x| !crate::join::valid_transport(x))
+    {
+        return error(StatusCode::BAD_REQUEST, "bad_input");
+    }
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    match state
+        .hub
+        .create_rejoin(&body.id, &format!("{host}:{port}"), transport)
+    {
+        Ok(code) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("made a code to reconnect server {}", body.id),
+            );
+            reply(
+                StatusCode::OK,
+                json!({ "code": code, "valid_for": crate::join::JOIN_TTL }),
+            )
+        }
+        Err(e) if format!("{e:#}") == "no_such_server" => {
+            error(StatusCode::NOT_FOUND, "no_such_server")
+        }
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RenameBody {
+    id: String,
+    name: String,
+}
+
+async fn rename_server(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<RenameBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let name = body.name.trim();
+    match state.hub.rename(&body.id, name) {
+        Ok(()) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("renamed server {} to {name}", body.id),
+            );
+            reply(StatusCode::OK, json!({}))
+        }
+        Err(e) => match format!("{e:#}").as_str() {
+            "bad_name" | "local" => error(StatusCode::BAD_REQUEST, "bad_name"),
+            "name_taken" => error(StatusCode::CONFLICT, "name_taken"),
+            "no_such_server" => error(StatusCode::NOT_FOUND, "no_such_server"),
+            _ => internal(e),
+        },
+    }
+}
+
+// ---- automatic restarts ----
+
+async fn schedules_list(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match crate::schedule::list(&state.hub.db) {
+        Ok(list) => reply(StatusCode::OK, json!({ "schedules": list })),
+        Err(e) => internal(e),
+    }
+}
+
+async fn schedule_set(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<crate::schedule::NewSchedule>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match crate::schedule::set(&state.hub, &body) {
+        Ok(()) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("set an automatic restart of {} {}", body.kind, body.subject),
+            );
+            reply(StatusCode::OK, json!({}))
+        }
+        Err(e) => match format!("{e:#}").as_str() {
+            "bad_name" | "bad_input" => error(StatusCode::BAD_REQUEST, "bad_input"),
+            "no_such_tunnel" => error(StatusCode::NOT_FOUND, "no_such_tunnel"),
+            "no_such_server" => error(StatusCode::NOT_FOUND, "no_such_server"),
+            _ => internal(e),
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct ScheduleKey {
+    kind: String,
+    subject: String,
+}
+
+async fn schedule_delete(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<ScheduleKey>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match crate::schedule::delete(&state.hub.db, &body.kind, &body.subject) {
+        Ok(_) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!(
+                    "removed the automatic restart of {} {}",
+                    body.kind, body.subject
+                ),
+            );
+            reply(StatusCode::OK, json!({}))
+        }
+        Err(e) => internal(e),
+    }
+}
+
+/// Runs a timer's restart now. It goes on in the background; the list shows how it went.
+async fn schedule_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ScheduleKey>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, true) {
+        return r;
+    }
+    let known = crate::schedule::list(&state.hub.db)
+        .map(|l| {
+            l.iter()
+                .any(|s| s.kind == body.kind && s.subject == body.subject)
+        })
+        .unwrap_or(false);
+    if !known {
+        return error(StatusCode::NOT_FOUND, "no_such_schedule");
+    }
+    if crate::schedule::run_now(&state.hub, &body.kind, &body.subject) {
+        reply(StatusCode::OK, json!({}))
+    } else {
+        error(StatusCode::CONFLICT, "busy")
     }
 }
 

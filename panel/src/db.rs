@@ -112,6 +112,22 @@ const MIGRATIONS: &[&str] = &[
     // connected yet, and a private network link whose other end has no address would be
     // left out of the list an agent is sent (and the agent removes what is not in it).
     "CREATE TABLE server_seen (server TEXT PRIMARY KEY, addr TEXT NOT NULL);",
+    // 10: a join code made for a server the panel already knows: the agent that spends it
+    // becomes that server again (same id, a new key), so its tunnels and networks stay.
+    "ALTER TABLE joins ADD COLUMN rejoin TEXT;",
+    // 11: automatic restarts of a tunnel, or of every running tunnel of a server.
+    "CREATE TABLE schedules (
+         kind TEXT NOT NULL,                      -- 'tunnel' or 'server'
+         subject TEXT NOT NULL,                   -- the tunnel's name, or the server's id
+         mode TEXT NOT NULL,                      -- 'every' or 'daily'
+         every_secs INTEGER NOT NULL DEFAULT 0,
+         daily_min INTEGER NOT NULL DEFAULT 0,    -- minutes after midnight, UTC
+         enabled INTEGER NOT NULL DEFAULT 1,
+         since INTEGER NOT NULL,                  -- when it was set
+         last_run INTEGER NOT NULL DEFAULT 0,
+         last_result TEXT NOT NULL DEFAULT '',
+         PRIMARY KEY (kind, subject)
+     );",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

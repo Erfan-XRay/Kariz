@@ -486,6 +486,23 @@ pre.notes { max-height: 240px; overflow: auto; white-space: pre-wrap; }
 .diagnosis.calm h3 { color: var(--text); }
 .diagnosis.calm .diag-icon { background: var(--card-2); color: var(--text-2); }
 .td-sides { display: grid; gap: var(--sp-3); }
+
+/* a server that is offline: what is wrong, and the way back */
+.srv-alert { display: grid; gap: var(--sp-3); justify-items: start; margin: 0 0 var(--sp-3); padding: var(--sp-3) var(--sp-4); border: var(--hairline) solid color-mix(in srgb, var(--warn) 50%, transparent); border-radius: var(--r-3); background: var(--warn-soft); }
+.srv-alert p { margin: 0; font-size: var(--fs-sm); color: var(--text-2); }
+.fix-state { display: grid; gap: var(--sp-2); margin-bottom: var(--sp-4); padding: var(--sp-3) var(--sp-4); border: var(--hairline) solid var(--line); border-radius: var(--r-2); background: var(--stratum-1); }
+.fix-state p { margin: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: var(--fs-sm); }
+.fix-state code { overflow-wrap: anywhere; }
+
+/* automatic restart */
+.ar { display: grid; gap: var(--sp-3); max-width: 560px; }
+.ar-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }
+.fix-name-row .text { flex: 1 1 200px; min-width: 0; }
+.ar-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.ar-state { display: grid; gap: var(--sp-2); margin: var(--sp-2) 0 0; padding: var(--sp-3) var(--sp-4); border: var(--hairline) solid var(--line); border-radius: var(--r-2); background: var(--stratum-1); font-size: var(--fs-sm); }
+.ar-state div { display: flex; justify-content: space-between; gap: var(--sp-3); }
+.ar-state dt { color: var(--text-3); }
+.ar-state dd { margin: 0; text-align: end; }
 .td-speed { scroll-margin-top: var(--sp-4); }
 .review-card { padding: var(--sp-4); border: var(--hairline) solid var(--line); border-radius: 12px; background: var(--card-2); }
 .review-card h4 { margin: 0 0 var(--sp-3); font-size: var(--fs-sm); color: var(--text-3); font-weight: 500; }

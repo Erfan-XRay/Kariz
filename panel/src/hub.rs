@@ -47,6 +47,17 @@ pub struct TunnelView {
     pub rate_mbps: Option<f64>,
 }
 
+/// Why a server's link last ended or was refused, for the Servers page to explain.
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkError {
+    /// Unix seconds.
+    pub at: i64,
+    /// `link_ended` (the link dropped or went quiet) or `wrong_key` (an agent came with this
+    /// server's id and a key that does not match: it needs a new code).
+    pub kind: &'static str,
+    pub detail: String,
+}
+
 /// A server as the API shows it.
 #[derive(Debug, Clone, Serialize)]
 pub struct ServerView {
@@ -66,6 +77,11 @@ pub struct ServerView {
     /// The transport its agent's link uses now (`tcpmux`, `kcp`, `wss` or `quic`); none for the panel's
     /// own server and for one that is offline.
     pub link: Option<String>,
+    /// When the panel last heard from this server (unix seconds), also from before the panel
+    /// started; none for the panel's own server and for one that never connected.
+    pub last_seen: Option<i64>,
+    /// Why its link last ended or was refused, until it connects again.
+    pub last_error: Option<LinkError>,
     pub health: Option<Health>,
     /// The server's public IPv4 and IPv6 addresses, when they are known: what its agent
     /// reports, or the address its link comes from.
@@ -109,6 +125,8 @@ enum Spent {
     New(String),
     /// The server it registered before, whose agent has not confirmed yet.
     Unconfirmed { id: String, key: String },
+    /// A server the panel already knows, taken over by a new agent (a new key).
+    Rejoin { id: String },
 }
 
 #[derive(Default)]
@@ -128,6 +146,8 @@ struct Live {
     session: Option<Arc<Session>>,
     /// Whether each tunnel was connected at the last reading, to notice it changing.
     connected: HashMap<String, bool>,
+    /// Why the last link ended, until the server connects again.
+    last_error: Option<LinkError>,
 }
 
 pub struct Hub {
@@ -497,6 +517,85 @@ impl Hub {
         }))
     }
 
+    /// A join code for a server the panel already knows. The agent that spends it becomes
+    /// that server again (same id, a new key), so the server keeps its name, its tunnels and
+    /// its private network links. It is for an agent that is lost, broken or reinstalled,
+    /// and for one that is to use another link transport.
+    pub fn create_rejoin(&self, id: &str, panel: &str, transport: Option<&str>) -> Result<String> {
+        if transport.is_some_and(|x| !join::valid_transport(x)) {
+            bail!("unknown transport");
+        }
+        let name: Option<String> = self
+            .db
+            .conn()
+            .query_row("SELECT name FROM servers WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?;
+        let Some(name) = name else {
+            bail!("no_such_server");
+        };
+        let secret = random_hex(16)?;
+        let t = now();
+        {
+            let conn = self.db.conn();
+            // An earlier code for this server that nobody used is no longer wanted.
+            conn.execute("DELETE FROM joins WHERE rejoin = ?1 AND used = 0", [id])?;
+            conn.execute(
+                "INSERT INTO joins (hash, name, created, expires, used, rejoin) VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+                params![hash_token(&secret), name, t, t + JOIN_TTL, id],
+            )?;
+        }
+        Ok(join::encode(&JoinCode {
+            p: panel.to_owned(),
+            t: self.link_token()?,
+            j: secret,
+            n: Some(name),
+            x: transport.map(str::to_owned),
+        }))
+    }
+
+    /// The automatic restarts that are set.
+    pub fn schedules(&self) -> Result<Vec<crate::schedule::Schedule>> {
+        crate::schedule::list(&self.db)
+    }
+
+    /// Renames a server (not the panel's own, whose name is set on that server).
+    pub fn rename(&self, id: &str, wanted: &str) -> Result<()> {
+        if id == LOCAL {
+            bail!("local");
+        }
+        if !join::valid_name(wanted) {
+            bail!("bad_name");
+        }
+        // Read before the database is locked below (the lock is not re-entrant).
+        let local = self.local_name();
+        let conn = self.db.conn();
+        let taken: i64 = conn.query_row(
+            "SELECT count(*) FROM servers WHERE name = ?1 AND id != ?2",
+            params![wanted, id],
+            |r| r.get(0),
+        )?;
+        if taken > 0 || wanted == local {
+            bail!("name_taken");
+        }
+        if conn.execute(
+            "UPDATE servers SET name = ?2 WHERE id = ?1",
+            params![id, wanted],
+        )? == 0
+        {
+            bail!("no_such_server");
+        }
+        Ok(())
+    }
+
+    /// Remembers why a server's link failed, for the Servers page.
+    fn note_error(&self, id: &str, kind: &'static str, detail: String) {
+        self.live().entry(id.to_owned()).or_default().last_error = Some(LinkError {
+            at: now(),
+            kind,
+            detail,
+        });
+    }
+
     /// Spends a join secret, if it is valid: a new server to register (with the name the
     /// code carried), or the server it already registered whose agent never confirmed.
     fn spend_join(&self, secret: &str) -> Result<Option<Spent>> {
@@ -504,29 +603,36 @@ impl Hub {
         let t = now();
         conn.execute("DELETE FROM joins WHERE expires < ?1 - 86400", [t])?;
         let hash = hash_token(secret);
-        let row: Option<(String, bool, Option<String>)> = conn
+        let row: Option<(String, bool, Option<String>, Option<String>)> = conn
             .query_row(
-                "SELECT name, used, server FROM joins WHERE hash = ?1 AND expires > ?2",
+                "SELECT name, used, server, rejoin FROM joins WHERE hash = ?1 AND expires > ?2",
                 params![hash, t],
-                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
         match row {
             None => Ok(None),
-            Some((name, false, _)) => {
+            Some((_, false, _, Some(id))) => {
+                let changed = conn.execute(
+                    "UPDATE joins SET used = 1 WHERE hash = ?1 AND used = 0",
+                    [&hash],
+                )?;
+                Ok((changed == 1).then_some(Spent::Rejoin { id }))
+            }
+            Some((name, false, _, None)) => {
                 let changed = conn.execute(
                     "UPDATE joins SET used = 1 WHERE hash = ?1 AND used = 0",
                     [&hash],
                 )?;
                 Ok((changed == 1).then_some(Spent::New(name)))
             }
-            Some((_, true, Some(id))) => {
+            Some((_, true, Some(id), _)) => {
                 let key: Option<String> = conn
                     .query_row("SELECT key FROM servers WHERE id = ?1", [&id], |r| r.get(0))
                     .optional()?;
                 Ok(key.map(|key| Spent::Unconfirmed { id, key }))
             }
-            Some((_, true, None)) => Ok(None),
+            Some((_, true, None, _)) => Ok(None),
         }
     }
 
@@ -595,6 +701,10 @@ impl Hub {
             conn.execute("DELETE FROM server_addrs WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM server_seen WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM pending_deletes WHERE server = ?1", [id])?;
+            conn.execute(
+                "DELETE FROM schedules WHERE kind = 'server' AND subject = ?1",
+                [id],
+            )?;
         }
         let removed = self
             .db
@@ -673,6 +783,7 @@ impl Hub {
                 old.close();
             }
             entry.online = true;
+            entry.last_error = None;
             entry.link = Some(link);
             entry.peer_ip = Some(peer_ip);
             entry.hostname = hello.hostname.clone();
@@ -708,6 +819,11 @@ impl Hub {
                 entry.online = false;
                 entry.link = None;
                 entry.session = None;
+                entry.last_error = result.as_ref().err().map(|e| LinkError {
+                    at: now(),
+                    kind: "link_ended",
+                    detail: format!("{e:#}"),
+                });
                 self.history.event("server_down", &id, "");
             }
         }
@@ -737,6 +853,7 @@ impl Hub {
             let ok = blake3::Hash::from_hex(&expected)?
                 == blake3::Hash::from_hex(proof).map_err(|_| anyhow!("a malformed proof"))?;
             if !ok {
+                self.note_error(id, "wrong_key", String::new());
                 bail!("an agent with a wrong proof for {id}");
             }
             self.db.conn().execute(
@@ -752,6 +869,7 @@ impl Hub {
             bail!("an agent with a join secret that is wrong, used or expired");
         };
         let hash = hash_token(secret);
+        let mut rejoined = false;
         let (id, key, name) = match spent {
             Spent::New(wanted) => {
                 let wanted = if wanted.is_empty() {
@@ -764,6 +882,35 @@ impl Hub {
                     "UPDATE joins SET server = ?2 WHERE hash = ?1",
                     params![hash, id],
                 )?;
+                (id, key, name)
+            }
+            // A server the panel knows, taken over by a new agent: the same id and name, a
+            // new key (the old agent's key no longer opens it). Written before the agent is
+            // told, so a link that drops now is finished later with the same key, as below.
+            Spent::Rejoin { id } => {
+                let name: Option<String> = self
+                    .db
+                    .conn()
+                    .query_row("SELECT name FROM servers WHERE id = ?1", [&id], |r| {
+                        r.get(0)
+                    })
+                    .optional()?;
+                let Some(name) = name else {
+                    bail!("the server of this code was removed");
+                };
+                let key = random_hex(32)?;
+                {
+                    let conn = self.db.conn();
+                    conn.execute(
+                        "UPDATE servers SET key = ?2 WHERE id = ?1",
+                        params![id, key],
+                    )?;
+                    conn.execute(
+                        "UPDATE joins SET server = ?2 WHERE hash = ?1",
+                        params![hash, id],
+                    )?;
+                }
+                rejoined = true;
                 (id, key, name)
             }
             // Registered on an earlier link that dropped before the agent answered: the
@@ -797,9 +944,10 @@ impl Hub {
         self.db
             .conn()
             .execute("UPDATE joins SET server = NULL WHERE hash = ?1", [&hash])?;
+        let what = if rejoined { "re-paired" } else { "registered" };
         let _ = self
             .db
-            .audit("hub", None, &format!("registered server {name} ({id})"));
+            .audit("hub", None, &format!("{what} server {name} ({id})"));
         Ok((id, hello))
     }
 
@@ -964,58 +1112,72 @@ impl Hub {
 
     /// Every server, the panel's own first, for the API.
     pub fn snapshot(&self) -> Result<Vec<ServerView>> {
-        let rows: Vec<(String, String, String, String, String)> = {
+        let rows: Vec<(String, String, String, String, String, i64)> = {
             let conn = self.db.conn();
             let mut stmt = conn.prepare(
-                "SELECT id, name, version, arch, host FROM servers ORDER BY created, id",
+                "SELECT id, name, version, arch, host, last_seen FROM servers ORDER BY created, id",
             )?;
             let rows = stmt.query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
             })?;
             rows.collect::<rusqlite::Result<_>>()?
         };
         let live = self.live();
-        let view =
-            |id: &str, name: String, local: bool, version: String, arch: String, host: String| {
-                let l = live.get(id);
-                let hidden = self.pending_deletes(id);
-                let (ip4, ip6) =
-                    addresses(l.and_then(|l| l.health.as_ref()), l.and_then(|l| l.peer_ip));
-                ServerView {
-                    id: id.to_owned(),
-                    name,
-                    local,
-                    online: l.is_some_and(|l| l.online),
-                    version: l
-                        .filter(|l| !l.version.is_empty())
-                        .map_or(version, |l| l.version.clone()),
-                    arch: l
-                        .filter(|l| !l.arch.is_empty())
-                        .map_or(arch, |l| l.arch.clone()),
-                    hostname: l
-                        .filter(|l| !l.hostname.is_empty())
-                        .map_or(host, |l| l.hostname.clone()),
-                    addr: None,
-                    addr_default: ip4.clone().or_else(|| ip6.clone()),
-                    seen_secs: l.and_then(|l| l.seen).map(|s| s.elapsed().as_secs()),
-                    link: l
-                        .filter(|l| l.online)
-                        .and_then(|l| l.link)
-                        .map(str::to_owned),
-                    health: l.and_then(|l| l.health.clone()),
-                    ip4,
-                    ip6,
-                    tunnels: l
-                        .map(|l| {
-                            l.tunnels
-                                .iter()
-                                .filter(|t| !hidden.contains(&t.info.name))
-                                .cloned()
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                }
-            };
+        let view = |id: &str,
+                    name: String,
+                    local: bool,
+                    version: String,
+                    arch: String,
+                    host: String,
+                    last_seen: i64| {
+            let l = live.get(id);
+            let hidden = self.pending_deletes(id);
+            let (ip4, ip6) =
+                addresses(l.and_then(|l| l.health.as_ref()), l.and_then(|l| l.peer_ip));
+            ServerView {
+                id: id.to_owned(),
+                name,
+                local,
+                online: l.is_some_and(|l| l.online),
+                version: l
+                    .filter(|l| !l.version.is_empty())
+                    .map_or(version, |l| l.version.clone()),
+                arch: l
+                    .filter(|l| !l.arch.is_empty())
+                    .map_or(arch, |l| l.arch.clone()),
+                hostname: l
+                    .filter(|l| !l.hostname.is_empty())
+                    .map_or(host, |l| l.hostname.clone()),
+                addr: None,
+                addr_default: ip4.clone().or_else(|| ip6.clone()),
+                seen_secs: l.and_then(|l| l.seen).map(|s| s.elapsed().as_secs()),
+                link: l
+                    .filter(|l| l.online)
+                    .and_then(|l| l.link)
+                    .map(str::to_owned),
+                last_seen: (last_seen > 0).then_some(last_seen),
+                last_error: l.and_then(|l| l.last_error.clone()),
+                health: l.and_then(|l| l.health.clone()),
+                ip4,
+                ip6,
+                tunnels: l
+                    .map(|l| {
+                        l.tunnels
+                            .iter()
+                            .filter(|t| !hidden.contains(&t.info.name))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }
+        };
         let local_name = self.local_name();
         let mut out = vec![view(
             LOCAL,
@@ -1024,9 +1186,10 @@ impl Hub {
             crate::version().to_owned(),
             std::env::consts::ARCH.to_owned(),
             String::new(),
+            0,
         )];
-        for (id, name, version, arch, host) in rows {
-            out.push(view(&id, name, false, version, arch, host));
+        for (id, name, version, arch, host, last_seen) in rows {
+            out.push(view(&id, name, false, version, arch, host, last_seen));
         }
         let addrs: HashMap<String, String> = {
             let conn = self.db.conn();

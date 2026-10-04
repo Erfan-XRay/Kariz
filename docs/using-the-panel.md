@@ -62,7 +62,10 @@ step failed and why. You cannot end with half a tunnel.
   version, each with a button to go there) and every server's load.
 - **The top bar** says *Live* while the panel answers. If it stops answering, a notice says
   so and the page keeps the last numbers until it is back.
-- **Servers:** a card per server with its load, version and link. Click or tap its **IPv4** or
+- **Servers:** a card per server with its load, version and link. A server that is **offline**
+  says since when and why, and has a **Reconnect** button: a new join code that makes the agent
+  on it *that same server* again (same tunnels, nothing lost), with a choice of how it reaches
+  the panel, if one protocol is filtered ([details](panel.md#a-server-that-goes-offline)). Click or tap its **IPv4** or
   **IPv6** address (or the address set for it) to copy it: the chip shows a check and a note says
   what was copied. On a phone each address is a full-width row, easy to hit.
 - **Tunnels:** click a row. You see both sides, live charts of throughput and round trip (1 hour to
@@ -80,6 +83,9 @@ Open the tunnel, then:
 - **Speed test:** measures download, upload, latency under load and UDP through the tunnel, for
   the seconds you choose.
 - **New token:** replaces the secret on both sides.
+- **Auto restart:** restarts the tunnel by itself, every so many minutes, hours or days or every
+  day at a time. The same on a server's card restarts all its running tunnels
+  ([details](panel.md#restart-on-a-timer)).
 - **Delete:** removes it from both servers.
 
 ## 6. Private networks

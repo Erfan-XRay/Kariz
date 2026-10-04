@@ -9,6 +9,7 @@ import { Card, Dialog, Empty, Icon, Seg, Skeleton, Stat } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { RouteScene } from "./RouteScene";
 import { SpeedTest } from "./SpeedTest";
+import { AutoRestartBlock } from "./AutoRestart";
 import { Wizard } from "./Wizard";
 import { TunnelEdit } from "./TunnelEdit";
 import { transportLabel } from "./transport";
@@ -310,6 +311,10 @@ function TunnelPage({ tunnel, onBack, onAct, onEdit }: { tunnel: Tunnel; onBack:
           <Stat label={t("td.moved")} icon="download" value={status ? num(moved.value, moved.decimals) : "—"} unit={status ? moved.unit : undefined} />
         </div>
       </div>
+
+      <Card title={t("ar.title")} sub={t("ar.subTunnel")}>
+        <AutoRestartBlock tunnel={tunnel.name} />
+      </Card>
 
       <div className="td-speed" ref={speed}>
         <Card title={t("sp.title")} sub={t("sp.sub")}>

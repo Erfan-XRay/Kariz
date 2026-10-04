@@ -10,6 +10,8 @@ import type { MapData, MapHit } from "./scene-map";
 import { useApp } from "./store";
 import { BackupDialog, RestoreDialog } from "./Extras";
 import { TelegramSection } from "./Telegram";
+import { AutoRestartDialog } from "./AutoRestart";
+import { ServerFixDialog } from "./ServerFix";
 import { transportLabel } from "./transport";
 import { Card, CodeBlock, CopyValue, Dialog, Empty, Icon, Odo, Seg, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
 
@@ -596,6 +598,8 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
   const ago = useAgo();
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<ServerInfo | null>(null);
+  const [fixing, setFixing] = useState<string | null>(null);
+  const [auto, setAuto] = useState<string | null>(null);
   const online = servers.filter((s) => s.online).length;
   const uptime = (secs: number) => {
     const d = Math.floor(secs / 86400);
@@ -655,6 +659,15 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                     label={s.online ? t("srv.online") : `${t("srv.offline")}${s.seen_secs != null ? ` · ${ago(s.seen_secs)}` : ""}`}
                   />
                 </header>
+                {!s.online && !s.local && (
+                  <div className="srv-alert" role="status">
+                    <p>{s.last_error?.kind === "wrong_key" ? t("srv.alertKey") : t("srv.alertOff")}</p>
+                    <button className="btn btn-primary btn-sm" type="button" onClick={() => setFixing(s.id)}>
+                      <Icon name="restart" size={16} />
+                      {t("srv.reconnect")}
+                    </button>
+                  </div>
+                )}
                 <div className="srv-meters">
                   <Meter label={t("srv.cpu")} pct={s.online ? (h?.cpu_pct ?? null) : null} />
                   <Meter label={t("srv.ram")} pct={s.online ? mem : null} />
@@ -694,6 +707,16 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                   <span className={`badge ${s.tunnels.length ? "" : "muted"}`}>{t(s.tunnels.length === 1 ? "srv.tn1" : "srv.tn", { n: num(s.tunnels.length) })}</span>
                   {s.addr && s.addr !== s.ip4 && s.addr !== s.ip6 && <CopyValue what={t("srv.address")} value={s.addr} />}
                   <span className="grow" />
+                  <button className="btn btn-quiet btn-sm" type="button" onClick={() => setAuto(s.id)}>
+                    <Icon name="clock" size={16} />
+                    {t("srv.auto")}
+                  </button>
+                  {!s.local && s.online && (
+                    <button className="btn btn-quiet btn-sm" type="button" onClick={() => setFixing(s.id)}>
+                      <Icon name="edit" size={16} />
+                      {t("srv.edit")}
+                    </button>
+                  )}
                   {!s.local && (
                     <button className="btn btn-quiet btn-sm" type="button" onClick={() => setRemoving(s)}>
                       <Icon name="trash" size={16} />
@@ -716,6 +739,12 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
         </ul>
       )}
       {adding && <AddServer servers={servers} agentsOn={agentsOn} onClose={() => setAdding(false)} />}
+      {fixing && servers.find((s) => s.id === fixing) && (
+        <ServerFixDialog server={servers.find((s) => s.id === fixing)!} servers={servers} agentsOn={agentsOn} onChanged={onChanged} onClose={() => setFixing(null)} />
+      )}
+      {auto && servers.find((s) => s.id === auto) && (
+        <AutoRestartDialog server={auto} name={servers.find((s) => s.id === auto)!.name} offline={!servers.find((s) => s.id === auto)!.online} onClose={() => setAuto(null)} />
+      )}
       {removing && (
         <Dialog
           title={t("srv.removeTitle", { name: removing.name })}

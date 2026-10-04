@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use kariz_panel::agent::{self, Agent, AgentConfig};
 use kariz_panel::db::Db;
-use kariz_panel::hub::{Hub, ServerView};
+use kariz_panel::hub::{Hub, ServerView, LOCAL};
 
 /// A hub taking agents on a free loopback port; returns it with that address.
 async fn start_hub(kariz_dir: &Path) -> (Arc<Hub>, String) {
@@ -371,4 +371,254 @@ async fn a_tunnel_deleted_while_its_server_is_away_goes_when_the_server_is_back(
     })
     .await;
     back.abort();
+}
+
+#[tokio::test]
+async fn a_lost_server_is_taken_over_by_a_new_agent_and_keeps_its_name_and_tunnels() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("kariz_panel=debug,kariz=warn")
+        .with_test_writer()
+        .try_init();
+    let panel_dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let kariz_dir = dir.path().join("kariz");
+    std::fs::create_dir_all(&kariz_dir).unwrap();
+    std::fs::write(kariz_dir.join("main.toml"), TUNNEL).unwrap();
+    let (hub, addr) = start_hub(panel_dir.path()).await;
+
+    let code = hub.create_join(Some("istanbul-1"), &addr).unwrap();
+    let (first, old_path) = agent_for(&code, dir.path(), &kariz_dir);
+    let running = tokio::spawn(first.run());
+    wait_for("the server to join", || {
+        remote(&hub).iter().any(|s| s.online)
+    })
+    .await;
+    wait_for("its tunnel", || remote(&hub)[0].tunnels.len() == 1).await;
+    let id = remote(&hub)[0].id.clone();
+
+    // It goes away. The panel still knows it, when it was last heard, and why the link ended.
+    running.abort();
+    wait_for("the server to show offline", || !remote(&hub)[0].online).await;
+    assert!(remote(&hub)[0].last_seen.is_some());
+
+    // A code for this server, with another link transport; there is none for the panel's own
+    // server or for one that is not known.
+    assert!(hub.create_rejoin("nobody", &addr, None).is_err());
+    assert!(hub.create_rejoin(LOCAL, &addr, None).is_err());
+    assert!(hub.create_rejoin(&id, &addr, Some("nonsense")).is_err());
+    let fresh = hub.create_rejoin(&id, &addr, Some("tcpmux")).unwrap();
+    assert_eq!(
+        kariz_panel::join::decode(&fresh).unwrap().x.as_deref(),
+        Some("tcpmux")
+    );
+
+    // A new agent (a reinstalled server, with the same tunnel files) joins with it: the same
+    // server, not a second one, with its name and its tunnel.
+    let other = tempfile::tempdir().unwrap();
+    let (second, new_path) = agent_for(&fresh, other.path(), &kariz_dir);
+    let running = tokio::spawn(second.run());
+    wait_for("the server to come back", || {
+        remote(&hub).iter().any(|s| s.online)
+    })
+    .await;
+    let servers = remote(&hub);
+    assert_eq!(
+        servers.len(),
+        1,
+        "a re-joined server is not a second server"
+    );
+    assert_eq!(
+        (servers[0].id.as_str(), servers[0].name.as_str()),
+        (id.as_str(), "istanbul-1")
+    );
+    wait_for("its tunnel", || remote(&hub)[0].tunnels.len() == 1).await;
+    assert!(servers[0].last_error.is_none());
+    let saved = AgentConfig::load(&new_path).unwrap();
+    assert_eq!(saved.id.as_deref(), Some(id.as_str()));
+    assert!(saved.join.is_none());
+
+    // The code worked once.
+    let third = tempfile::tempdir().unwrap();
+    let (late, _) = agent_for(&fresh, third.path(), &kariz_dir);
+    let intruder = tokio::spawn(late.run());
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(remote(&hub).len(), 1);
+    intruder.abort();
+
+    // The old agent's key no longer opens the server, and the panel says so.
+    running.abort();
+    wait_for("offline again", || !remote(&hub)[0].online).await;
+    let old = Agent::new(&old_path, AgentConfig::load(&old_path).unwrap());
+    let stale = tokio::spawn(old.run());
+    wait_for("the refusal to be noted", || {
+        remote(&hub)[0]
+            .last_error
+            .as_ref()
+            .is_some_and(|e| e.kind == "wrong_key")
+    })
+    .await;
+    assert!(!remote(&hub)[0].online);
+    stale.abort();
+
+    // The new agent's saved identity brings it back.
+    let back = Agent::new(&new_path, AgentConfig::load(&new_path).unwrap());
+    let back = tokio::spawn(back.run());
+    wait_for("the new agent to connect", || remote(&hub)[0].online).await;
+    back.abort();
+}
+
+#[tokio::test]
+async fn a_server_can_be_renamed_but_not_to_a_name_that_is_taken() {
+    let panel_dir = tempfile::tempdir().unwrap();
+    let (hub, addr) = start_hub(panel_dir.path()).await;
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let (a, _) = agent_for(
+        &hub.create_join(Some("one"), &addr).unwrap(),
+        dir_a.path(),
+        dir_a.path(),
+    );
+    let a = tokio::spawn(a.run());
+    wait_for("the first server", || {
+        remote(&hub).len() == 1 && remote(&hub)[0].online
+    })
+    .await;
+    let (b, _) = agent_for(
+        &hub.create_join(Some("two"), &addr).unwrap(),
+        dir_b.path(),
+        dir_b.path(),
+    );
+    let b = tokio::spawn(b.run());
+    wait_for("the second server", || remote(&hub).len() == 2).await;
+    let ids: Vec<String> = remote(&hub).iter().map(|s| s.id.clone()).collect();
+
+    hub.rename(&ids[0], "frankfurt").unwrap();
+    assert_eq!(remote(&hub)[0].name, "frankfurt");
+    assert_eq!(
+        hub.rename(&ids[1], "frankfurt").unwrap_err().to_string(),
+        "name_taken"
+    );
+    assert_eq!(
+        hub.rename(&ids[0], "Bad Name!").unwrap_err().to_string(),
+        "bad_name"
+    );
+    assert!(hub.rename(LOCAL, "mine").is_err());
+    // Its own name again is fine.
+    hub.rename(&ids[0], "frankfurt").unwrap();
+    a.abort();
+    b.abort();
+}
+
+/// Services that only write down what they were asked, and say which tunnels are stopped.
+struct Recorder {
+    calls: std::sync::Mutex<Vec<(String, String)>>,
+    stopped: Vec<&'static str>,
+}
+
+impl kariz_panel::manage::Services for Recorder {
+    fn ctl(&self, name: String, action: String) -> kariz_panel::manage::Fut<anyhow::Result<()>> {
+        self.calls.lock().unwrap().push((name, action));
+        Box::pin(async { Ok(()) })
+    }
+    fn active(&self, name: String) -> kariz_panel::manage::Fut<Option<bool>> {
+        let stopped = self.stopped.contains(&name.as_str());
+        Box::pin(async move { Some(!stopped) })
+    }
+}
+
+fn result_of(hub: &Hub, id: &str) -> (i64, String) {
+    let s = hub
+        .schedules()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.subject == id)
+        .unwrap();
+    (s.last_run, s.last_result)
+}
+
+#[tokio::test]
+async fn a_server_restart_timer_restarts_what_runs_and_waits_for_a_server_that_is_away() {
+    let panel_dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let kariz_dir = dir.path().join("kariz");
+    std::fs::create_dir_all(&kariz_dir).unwrap();
+    std::fs::write(kariz_dir.join("main.toml"), TUNNEL).unwrap();
+    std::fs::write(kariz_dir.join("quiet.toml"), TUNNEL).unwrap();
+    let (hub, addr) = start_hub(panel_dir.path()).await;
+
+    let code = hub.create_join(Some("far"), &addr).unwrap();
+    let path = dir.path().join("agent.toml");
+    let mut config = agent::enroll_from_code(&code, &path).unwrap();
+    config.kariz_dir = kariz_dir.clone();
+    config.save(&path).unwrap();
+    let recorder = Arc::new(Recorder {
+        calls: Default::default(),
+        stopped: vec!["quiet"],
+    });
+    let running = tokio::spawn(Agent::with_services(&path, config, recorder.clone()).run());
+    wait_for("the server and its tunnels", || {
+        remote(&hub)
+            .iter()
+            .any(|s| s.online && s.tunnels.len() == 2)
+    })
+    .await;
+    let id = remote(&hub)[0].id.clone();
+
+    // What is not allowed.
+    use kariz_panel::schedule::{self, NewSchedule};
+    let timer = |subject: &str, mode: &str, every: i64, daily: i64| NewSchedule {
+        kind: "server".into(),
+        subject: subject.into(),
+        mode: mode.into(),
+        every_secs: every,
+        daily_min: daily,
+        enabled: true,
+    };
+    assert!(
+        schedule::set(&hub, &timer(&id, "every", 5, 0)).is_err(),
+        "under ten minutes"
+    );
+    assert!(schedule::set(&hub, &timer(&id, "daily", 0, 1440)).is_err());
+    assert!(schedule::set(&hub, &timer("nobody", "every", 3600, 0)).is_err());
+    let bad_tunnel = NewSchedule {
+        kind: "tunnel".into(),
+        subject: "nothing".into(),
+        ..timer(&id, "every", 3600, 0)
+    };
+    assert!(schedule::set(&hub, &bad_tunnel).is_err());
+
+    // A timer every hour: counted from now, so not due yet.
+    schedule::set(&hub, &timer(&id, "every", 3600, 0)).unwrap();
+    let s = hub.schedules().unwrap().remove(0);
+    assert_eq!((s.last_run, s.last_result.as_str()), (0, ""));
+    assert!(s.next_run.unwrap() > kariz_panel::auth::now() + 3000);
+
+    // Run now: the tunnel that runs is restarted, the stopped one is left alone.
+    assert!(schedule::run_now(&hub, "server", &id));
+    wait_for("the restart", || !result_of(&hub, &id).1.is_empty()).await;
+    assert_eq!(result_of(&hub, &id).1, "ok:1");
+    assert!(result_of(&hub, &id).0 > 0);
+    assert_eq!(
+        *recorder.calls.lock().unwrap(),
+        vec![("main".to_owned(), "restart".to_owned())]
+    );
+    assert!(hub
+        .history
+        .events(10)
+        .unwrap()
+        .iter()
+        .any(|e| e.kind == "auto_restart_server" && e.subject == id));
+
+    // The server goes away: nothing is restarted, the turn is kept for when it is back.
+    running.abort();
+    wait_for("offline", || !remote(&hub)[0].online).await;
+    let before = result_of(&hub, &id).0;
+    assert!(schedule::run_now(&hub, "server", &id));
+    wait_for("the skip", || result_of(&hub, &id).1 == "skipped_offline").await;
+    assert_eq!(result_of(&hub, &id).0, before);
+    assert_eq!(recorder.calls.lock().unwrap().len(), 1);
+
+    // Removing the server removes its timer.
+    hub.remove(&id).unwrap();
+    assert!(hub.schedules().unwrap().is_empty());
 }

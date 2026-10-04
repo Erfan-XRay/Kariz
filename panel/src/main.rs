@@ -476,6 +476,7 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
         });
         tokio::spawn(hub.clone().run_local());
         tokio::spawn(kariz_panel::telegram::run(hub.clone()));
+        tokio::spawn(kariz_panel::schedule::run(hub.clone()));
         let mut state = AppState::new(db);
         state.hub = hub.clone();
         if let Some(listen) = &config.agent_listen {
