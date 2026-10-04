@@ -94,6 +94,38 @@ export interface SpeedPoll {
 /** How an agent reaches the panel: `auto` tries every transport in turn. */
 export type LinkTransport = "auto" | "tcpmux" | "kcp" | "wss" | "quic";
 
+export interface LinkError {
+  at: number;
+  /** `link_ended`: the link dropped or went quiet. `wrong_key`: an agent came with this server's id and a key that does not match. */
+  kind: "link_ended" | "wrong_key";
+  detail: string;
+}
+
+/** An automatic restart of a tunnel (by name) or of the running tunnels of a server (by id). */
+export interface ScheduleRow {
+  kind: "tunnel" | "server";
+  subject: string;
+  mode: "every" | "daily";
+  every_secs: number;
+  /** For `daily`: minutes after midnight, UTC. */
+  daily_min: number;
+  enabled: boolean;
+  since: number;
+  last_run: number;
+  /** `ok`, `ok:N`, `skipped_offline`, `skipped_stopped`, `skipped_none`, `busy`, `missed`, or `failed:` and why. */
+  last_result: string;
+  next_run: number | null;
+}
+
+export interface ScheduleBody {
+  kind: "tunnel" | "server";
+  subject: string;
+  mode: "every" | "daily";
+  every_secs?: number;
+  daily_min?: number;
+  enabled: boolean;
+}
+
 export interface ServerInfo {
   id: string;
   name: string;
@@ -107,6 +139,10 @@ export interface ServerInfo {
   /** The address it is known by (public IPv4, else IPv6): what private networks use until one is set. */
   addr_default?: string | null;
   seen_secs: number | null;
+  /** When the panel last heard from it (unix seconds), also from before the panel started. */
+  last_seen?: number | null;
+  /** Why its link last ended or was refused, until it connects again. */
+  last_error?: LinkError | null;
   /** The transport its agent's link uses now (tcpmux or kcp). */
   link?: string | null;
   health: Health | null;
@@ -351,6 +387,13 @@ export const api = {
     call<{ code: string; valid_for: number }>("POST", "servers/join-code", { name, host, transport }),
   panelAddresses: () => call<{ v4: string | null; v6: string | null; agent_port: number | null }>("GET", "servers/panel-addresses"),
   removeServer: (id: string) => call<object>("POST", "servers/remove", { id }),
+  reconnectServer: (id: string, host: string, transport: LinkTransport) =>
+    call<{ code: string; valid_for: number }>("POST", "servers/reconnect", { id, host, transport }),
+  renameServer: (id: string, name: string) => call<object>("POST", "servers/rename", { id, name }),
+  schedules: () => call<{ schedules: ScheduleRow[] }>("GET", "schedules"),
+  setSchedule: (body: ScheduleBody) => call<object>("POST", "schedules", body),
+  deleteSchedule: (kind: string, subject: string) => call<object>("POST", "schedules/delete", { kind, subject }),
+  runSchedule: (kind: string, subject: string) => call<object>("POST", "schedules/run", { kind, subject }),
   sessions: () => call<{ sessions: SessionRow[] }>("GET", "sessions"),
   revoke: (id: number) => call<object>("POST", "sessions/revoke", { id }),
   changePassword: (current: string | undefined, next: string) =>

@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A server that goes offline can be brought back from the panel.** Its card says since when and
+  why (the link ended, or an agent came with a key the panel does not accept) and has a
+  **Reconnect** button. The dialog says what to look at on that server, lets you choose how the
+  agent reaches the panel (*Auto*, *TCP*, *KCP*, *WSS* or *QUIC*), and makes a join code **for that
+  same server**: the new agent becomes the server again, with its name, its tunnels and its
+  private network links; nothing is deleted or made twice. The old agent's key stops working.
+  Online servers have the same dialog as **Edit**, and the server can be renamed there.
+- **Automatic restarts.** A tunnel (its page) or all the running tunnels of a server (its card)
+  can restart on a timer: every 10 minutes to 30 days, or every day at a time. The panel keeps the
+  timers and uses the same requests as the *Restart* button, so no cron is set up on the servers.
+  A tunnel that was stopped stays stopped; a server that is offline is restarted as soon as it is
+  back; each restart is an event. New API: `GET/POST /api/schedules`, `/api/schedules/delete`,
+  `/api/schedules/run`, `/api/servers/reconnect`, `/api/servers/rename`. A server's `last_seen` and
+  `last_error` are in `GET /api/servers`.
+
 ## 1.9.2 - 2026-10-03
 
 ### Changed

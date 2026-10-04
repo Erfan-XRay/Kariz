@@ -392,6 +392,8 @@ mod tests {
             addr_default: None,
             seen_secs: None,
             link: None,
+            last_seen: None,
+            last_error: None,
             health: None,
             ip4: None,
             ip6: None,

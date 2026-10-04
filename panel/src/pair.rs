@@ -390,7 +390,7 @@ async fn wait_connected(hub: &Hub, req: &PairRequest, limit: Duration) -> Result
     }
 }
 
-async fn ctl(hub: &Hub, server: &str, name: &str, action: &str) -> Result<(), String> {
+pub async fn ctl(hub: &Hub, server: &str, name: &str, action: &str) -> Result<(), String> {
     let r: Ack = hub
         .ask_as(
             server,
@@ -907,6 +907,13 @@ async fn run_delete(hub: &Hub, op: &str, name: &str) -> Result<(), String> {
                 failed = Some(e);
             }
         }
+    }
+    // A tunnel that is gone needs no automatic restart.
+    if failed.is_none() {
+        let _ = hub.db.conn().execute(
+            "DELETE FROM schedules WHERE kind = 'tunnel' AND subject = ?1",
+            [name],
+        );
     }
     failed.map_or(Ok(()), Err)
 }

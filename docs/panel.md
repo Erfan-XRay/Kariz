@@ -106,6 +106,45 @@ panel within seconds.
 - **Remove a server** in the panel (*Servers*, *Remove*): it leaves the panel and its link
   closes. Nothing is deleted on it; its tunnels keep running.
 
+### A server that goes offline
+
+The agent's link to the panel and the tunnels are separate things: when a server shows
+*offline*, its tunnels may well be running; the panel just cannot reach it. The server's card
+says so, with when the panel last heard from it and, if it knows, why the link ended, and has a
+**Reconnect** button (an online server has **Edit** instead). It opens a dialog that:
+
+- tells you what to look at on that server first: `kariz-manager agent status`, and
+  `systemctl restart kariz-agent` if the agent is stopped;
+- lets you **choose how the agent reaches the panel** (*Auto*, *TCP*, *KCP*, *WSS* or *QUIC*),
+  for a network that filters one of them;
+- makes a **join code for that same server**: run `kariz-manager --agent kz1_...` on it and the
+  new agent *is* that server again, with the same name, the same tunnels and the same private
+  network links (nothing is deleted or made twice). The old agent's key stops working, so it
+  is also the way out when an agent was reinstalled, lost its settings, or the panel says an
+  agent came with a key it does not accept. The code works once, for 10 minutes;
+- renames the server.
+
+While a server is offline, a tunnel with its other side online can still be started, stopped
+and restarted from that side; editing a tunnel needs both sides connected.
+
+## Restart on a timer
+
+A tunnel, or all the running tunnels of a server, can be restarted by themselves: on the
+tunnel's page (*Auto restart*) or on the server's card (*Auto restart*). Pick **every** so many
+minutes, hours or days (10 minutes to 30 days, counted from when you save and then from each
+restart), or **every day at** a time (the browser's time). The panel keeps the timers and does
+the restarts itself, with the same requests as the *Restart* button, so no cron is set up on the
+servers. Good to know:
+
+- A **tunnel** is restarted on both sides, the accepting side first. A **server** restarts each
+  running tunnel on it, one after the other; the agent itself is not restarted.
+- What you **stopped** stays stopped.
+- A server that is **offline** is not restarted: the panel tries again as soon as it is back (a
+  daily time that the panel itself slept through is skipped, unless it is back within the hour).
+- *Restart now* tries it at once; the card shows when the next restart is and how the last one
+  went. Each restart is in *Events* and the audit log. The timers need the panel to be running,
+  and are not part of the backup.
+
 ## Make a tunnel
 
 *Tunnels*, *New tunnel* opens the wizard (it needs two connected servers):
