@@ -7,8 +7,9 @@ import type { Lang } from "../lib/site";
 const { lang } = Astro.props as { lang: Lang };
 const t = ui[lang];
 const nav = await sidebar(lang);
-const skipDesc = new Set(["how-it-works", "tour"]);
+const skipDesc = new Set(["how-it-works", "tour", "video"]);
 const desc: Record<string, string> = {
+  video: lang === "fa" ? "ویدیویی دو دقیقه‌ای: از نصب پنل تا اولین تانل و تست سرعت." : "A two-minute video: from installing the panel to your first tunnel and its speed test.",
   tour: lang === "fa" ? "صفحه‌های پنل یکی‌یکی، در دموی زنده: هرکدام برای چیست و کجا را بزنید." : "The panel's screens one by one, in the live demo: what each is for and where to click.",
   "how-it-works": lang === "fa" ? "لایه‌ها، حالت direct و reverse، mux و انتخاب ترنسپورت، با انیمیشن." : "Layers, direct and reverse, the mux, and a chooser for the transport, animated.",
 };

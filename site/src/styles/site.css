@@ -280,15 +280,17 @@ html:not(.js) .hero { height: 100vh; }
 }
 
 /* ---- Low power and reduced motion: nothing moves ---- */
-[data-low] *, [data-low] *::before, [data-low] *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+/* data-low="1": the reader asked for low power. data-low="0": the reader asked for motion, which beats the
+   system's request for less. No value: the system decides. */
+[data-low="1"] *, [data-low="1"] *::before, [data-low="1"] *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  :root:not([data-low="0"]) *, :root:not([data-low="0"]) *::before, :root:not([data-low="0"]) *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
 
 /* Held still, the hero is one screen: there is no descent to scroll through. */
-[data-low] .hero, [data-low] .hero-cue { height: 100vh; }
-[data-low] .hero-cue { display: none; }
+[data-low="1"] .hero, [data-low="1"] .hero-cue { height: 100vh; }
+[data-low="1"] .hero-cue { display: none; }
 @media (prefers-reduced-motion: reduce) {
-  .hero { height: 100vh; }
-  .hero-cue { display: none; }
+  :root:not([data-low="0"]) .hero { height: 100vh; }
+  :root:not([data-low="0"]) .hero-cue { display: none; }
 }
