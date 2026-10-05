@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 2.0.0 - 2026-10-05
+
+A new major version: servers can now join three ways (over the internet, over a GRE link alone,
+or with the panel connecting to them), and join codes and agent settings gain fields that older
+agents do not know. Panels update to it only when you confirm (*Settings, Updates*); update the
+agents from the panel after it.
 
 ### Added
 
