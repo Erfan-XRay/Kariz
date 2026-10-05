@@ -281,6 +281,11 @@ pub async fn delete_link(hub: &Hub, id: &str) -> Result<()> {
                 bail!("in_use:{}", t.info.name);
             }
         }
+        // A server whose agent reaches the panel through this link would lose it, and with
+        // it the only way the panel has to ask that server anything.
+        if server.gre.as_ref().is_some_and(|g| g.link == link.id) {
+            bail!("agent_uses:{}", server.id);
+        }
     }
     tear_down(hub, &link).await;
     Ok(())

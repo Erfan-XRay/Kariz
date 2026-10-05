@@ -47,6 +47,27 @@ pub struct TunnelView {
     pub rate_mbps: Option<f64>,
 }
 
+/// The private (GRE) network link that a server's agent reaches the panel through.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GreRef {
+    /// The link's id.
+    pub link: String,
+    /// The name of its network.
+    pub network: String,
+}
+
+/// A GRE link between the panel's own server and another one, as an address to dial the
+/// panel at: `addr` is the panel's end, `peer_addr` the other server's.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GreAddr {
+    pub link: String,
+    pub network: String,
+    /// The other server (id).
+    pub server: String,
+    pub addr: String,
+    pub peer_addr: String,
+}
+
 /// Why a server's link last ended or was refused, for the Servers page to explain.
 #[derive(Debug, Clone, Serialize)]
 pub struct LinkError {
@@ -82,6 +103,9 @@ pub struct ServerView {
     pub last_seen: Option<i64>,
     /// Why its link last ended or was refused, until it connects again.
     pub last_error: Option<LinkError>,
+    /// The private network link its agent connects through (its link to the panel comes from
+    /// that link's address), when it does.
+    pub gre: Option<GreRef>,
     pub health: Option<Health>,
     /// The server's public IPv4 and IPv6 addresses, when they are known: what its agent
     /// reports, or the address its link comes from.
@@ -117,6 +141,26 @@ fn addresses(
         }
     }
     (v4, v6)
+}
+
+/// The link between the panel's own server and `server` whose end on `server` is `ip`: the
+/// agent's link comes from there when the agent was given the panel's address on that link.
+fn gre_via(
+    links: &[crate::networks::Link],
+    names: &HashMap<String, String>,
+    server: &str,
+    ip: &str,
+) -> Option<GreRef> {
+    links
+        .iter()
+        .find(|l| {
+            (l.a == server && l.b == LOCAL && l.addr_a == ip)
+                || (l.b == server && l.a == LOCAL && l.addr_b == ip)
+        })
+        .map(|l| GreRef {
+            link: l.id.clone(),
+            network: names.get(&l.network).cloned().unwrap_or_default(),
+        })
 }
 
 /// What a join secret is good for.
@@ -551,6 +595,35 @@ impl Hub {
             n: Some(name),
             x: transport.map(str::to_owned),
         }))
+    }
+
+    /// The panel's own address on each GRE link to another server, to offer as the address
+    /// that server's agent dials (the agent then goes through the private network).
+    pub fn gre_addresses(&self) -> Result<Vec<GreAddr>> {
+        let names: HashMap<String, String> = self
+            .networks
+            .networks()?
+            .into_iter()
+            .map(|n| (n.id, n.name))
+            .collect();
+        let mut out = Vec::new();
+        for l in self.networks.links(None)? {
+            let (server, addr, peer_addr) = if l.a == LOCAL {
+                (l.b.clone(), l.addr_a.clone(), l.addr_b.clone())
+            } else if l.b == LOCAL {
+                (l.a.clone(), l.addr_b.clone(), l.addr_a.clone())
+            } else {
+                continue;
+            };
+            out.push(GreAddr {
+                link: l.id,
+                network: names.get(&l.network).cloned().unwrap_or_default(),
+                server,
+                addr,
+                peer_addr,
+            });
+        }
+        Ok(out)
     }
 
     /// The automatic restarts that are set.
@@ -1129,6 +1202,14 @@ impl Hub {
             })?;
             rows.collect::<rusqlite::Result<_>>()?
         };
+        let links = self.networks.links(None).unwrap_or_default();
+        let names: HashMap<String, String> = self
+            .networks
+            .networks()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| (n.id, n.name))
+            .collect();
         let live = self.live();
         let view = |id: &str,
                     name: String,
@@ -1164,6 +1245,9 @@ impl Hub {
                     .map(str::to_owned),
                 last_seen: (last_seen > 0).then_some(last_seen),
                 last_error: l.and_then(|l| l.last_error.clone()),
+                gre: l
+                    .and_then(|l| l.peer_ip)
+                    .and_then(|ip| gre_via(&links, &names, id, &ip.to_string())),
                 health: l.and_then(|l| l.health.clone()),
                 ip4,
                 ip6,
@@ -1317,6 +1401,90 @@ mod tests {
         assert!(hub.net_specs("far").is_err());
         // A server with no link is not held back by it.
         assert!(hub.net_specs("other").unwrap().is_empty());
+    }
+
+    /// A server that joined through the panel's address on a private network link: the panel
+    /// offers that address for the server, knows the agent comes through the link, and does
+    /// not let the link be deleted under it.
+    #[tokio::test]
+    async fn a_server_that_joined_through_a_gre_link_is_known_by_it_and_its_link_is_kept() {
+        let hub = Hub::new(
+            Db::in_memory().unwrap(),
+            std::env::temp_dir().join("kariz-none"),
+        );
+        let net = hub
+            .networks
+            .create_network("main", "10.77.0.0/24", &[])
+            .unwrap();
+        let link = hub
+            .networks
+            .create_links(
+                &net.id,
+                &[(LOCAL.to_owned(), "far".to_owned())],
+                &Default::default(),
+            )
+            .unwrap()
+            .remove(0);
+        // "far" sorts before "local": it holds the first address, the panel the second.
+        assert_eq!(
+            (link.a.as_str(), link.addr_a.as_str(), link.addr_b.as_str()),
+            ("far", "10.77.0.1", "10.77.0.2")
+        );
+        hub.db
+            .conn()
+            .execute(
+                "INSERT INTO servers (id, name, key, created) VALUES ('far', 'far', 'k', 1)",
+                [],
+            )
+            .unwrap();
+
+        // The panel's address on the link is what the server's agent is to dial.
+        let offered = hub.gre_addresses().unwrap();
+        assert_eq!(
+            offered,
+            vec![GreAddr {
+                link: link.id.clone(),
+                network: "main".into(),
+                server: "far".into(),
+                addr: "10.77.0.2".into(),
+                peer_addr: "10.77.0.1".into(),
+            }]
+        );
+
+        let far = |hub: &Hub| {
+            hub.snapshot()
+                .unwrap()
+                .into_iter()
+                .find(|s| s.id == "far")
+                .unwrap()
+        };
+        // Its agent came in from the public address: not through the link.
+        {
+            let mut live = hub.live();
+            let l = live.entry("far".into()).or_default();
+            l.online = true;
+            l.peer_ip = Some("203.0.113.9".parse().unwrap());
+        }
+        assert_eq!(far(&hub).gre, None);
+        // Or from its end of the link: through it. A private address is never taken for the
+        // server's public one.
+        hub.live().get_mut("far").unwrap().peer_ip = Some("10.77.0.1".parse().unwrap());
+        let s = far(&hub);
+        assert_eq!(
+            s.gre,
+            Some(GreRef {
+                link: link.id.clone(),
+                network: "main".into()
+            })
+        );
+        assert_eq!(s.ip4, None, "a GRE address is not a public address");
+
+        // The link stays while that agent runs through it.
+        let refused = crate::netops::delete_link(&hub, &link.id)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.to_string(), "agent_uses:far");
+        assert_eq!(hub.networks.links(None).unwrap().len(), 1);
     }
 
     #[test]

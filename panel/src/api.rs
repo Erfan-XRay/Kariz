@@ -466,9 +466,10 @@ async fn panel_addresses(State(state): State<AppState>, headers: HeaderMap) -> R
     let (v4, v6) = tokio::task::spawn_blocking(crate::join::own_addresses)
         .await
         .unwrap_or((None, None));
+    let gre = state.hub.gre_addresses().unwrap_or_default();
     reply(
         StatusCode::OK,
-        json!({ "v4": v4, "v6": v6, "agent_port": state.agent_port }),
+        json!({ "v4": v4, "v6": v6, "agent_port": state.agent_port, "gre": gre }),
     )
 }
 
@@ -1288,7 +1289,9 @@ fn net_error(e: anyhow::Error) -> Response {
     match code {
         "bad_name" | "bad_cidr" | "not_private" | "too_small" | "overlaps_route"
         | "overlaps_network" | "bad_input" | "same_server" => error(StatusCode::BAD_REQUEST, &text),
-        "name_taken" | "in_use" | "pool_full" | "busy" => error(StatusCode::CONFLICT, &text),
+        "name_taken" | "in_use" | "agent_uses" | "pool_full" | "busy" => {
+            error(StatusCode::CONFLICT, &text)
+        }
         "no_such_network" | "no_such_link" | "no_such_server" => {
             error(StatusCode::NOT_FOUND, &text)
         }

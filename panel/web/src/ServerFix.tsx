@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "./api";
-import type { LinkTransport, ServerInfo } from "./api";
+import type { LinkTransport, PanelAddresses, ServerInfo } from "./api";
 import { useApp } from "./store";
 import { CodeBlock, Dialog, Icon, Seg, useAgo } from "./ui";
 
@@ -18,9 +18,11 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
   const live = servers.find((s) => s.id === server.id) ?? server;
   const wasOffline = useRef(!server.online);
   const [name, setName] = useState(server.name);
+  // A server that came in through a private network link goes on dialling the panel's end of it.
   const [host, setHost] = useState(location.hostname.replace(/^\[|\]$/g, ""));
+  const picked = useRef(false);
   const [transport, setTransport] = useState<LinkTransport>("auto");
-  const [own, setOwn] = useState<{ v4: string | null; v6: string | null; agent_port: number | null } | null>(null);
+  const [own, setOwn] = useState<PanelAddresses | null>(null);
   const [code, setCode] = useState("");
   const [left, setLeft] = useState(0);
   const [error, setError] = useState("");
@@ -31,7 +33,12 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
     let alive = true;
     api
       .panelAddresses()
-      .then((a) => alive && setOwn(a))
+      .then((a) => {
+        if (!alive) return;
+        setOwn(a);
+        const mine = (a.gre ?? []).find((g) => g.server === server.id);
+        if (mine && server.gre && !picked.current) setHost(mine.addr);
+      })
       .catch(() => {});
     return () => {
       alive = false;
@@ -72,7 +79,9 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
     ...(own?.v4 ? [[t("add.addr.v4"), own.v4] as [string, string]] : []),
     ...(own?.v6 ? [[t("add.addr.v6"), own.v6] as [string, string]] : []),
     ...(here && here !== own?.v4 && here !== own?.v6 ? [[t("add.addr.here"), here] as [string, string]] : []),
+    ...(own?.gre ?? []).filter((g) => g.server === server.id).map((g) => [t("fix.addr.gre", { network: g.network }), g.addr] as [string, string]),
   ];
+  const greNow = (own?.gre ?? []).find((g) => g.server === server.id && g.addr === host.trim());
   const portText = (x: LinkTransport) => (port == null ? "?" : String(x === "wss" ? port + 1 : port));
   const seenAgo = live.last_seen ? ago(Math.max(0, Date.now() / 1000 - live.last_seen)) : null;
   const err = live.last_error;
@@ -163,7 +172,16 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
             {choices.length > 1 && (
               <div className="addr-picks" role="group" aria-label={t("add.host")}>
                 {choices.map(([label, value]) => (
-                  <button key={value} type="button" className="addr-pick" aria-pressed={host === value} onClick={() => setHost(value)}>
+                  <button
+                    key={value}
+                    type="button"
+                    className="addr-pick"
+                    aria-pressed={host === value}
+                    onClick={() => {
+                      picked.current = true;
+                      setHost(value);
+                    }}
+                  >
                     <span>{label}</span>
                     <code dir="ltr">{value}</code>
                   </button>
@@ -172,6 +190,8 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
             )}
             <input className="text mono" id="fix-host" dir="ltr" value={host} onChange={(e) => setHost(e.target.value)} />
             <span className="help">{t("add.addrHelp")}</span>
+            {greNow && <span className="help">{t("fix.greHelp", { network: greNow.network })}</span>}
+            {!greNow && (own?.gre ?? []).some((g) => g.server === server.id) && <span className="help">{t("fix.greAvailable")}</span>}
             <span className="err">{error}</span>
           </div>
           <div className="field">

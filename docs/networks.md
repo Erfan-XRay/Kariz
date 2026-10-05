@@ -42,6 +42,27 @@ if they do not.
    connect. Unticked, the tunnel goes back to the public addresses (you give the address to dial);
    the link stays for other tunnels.
 
+## The agent's link over a network
+
+A server that already has a GRE link to the panel's own server can send its **agent** through it:
+the agent dials the panel at the panel's address on the link (such as `10.77.0.1`) instead of a
+public one. Nothing is different for the agent otherwise: all four transports work over it.
+
+- In *Servers*, *Edit* (or *Reconnect*, for a server that is offline) offers that address, labelled
+  *GRE · network*, beside the public ones, and picks it by itself for a server whose agent already
+  connects that way. Make the code and run it on the server as usual; the server keeps its name,
+  tunnels and links. A server whose agent comes in through a link shows *via GRE* on its card.
+- *Add server* lists the panel's GRE addresses too. A **new** server has no link yet (the panel
+  makes links through the agents it has), so it can only use one that was made by hand; otherwise
+  join with a public address first, make the link, and then switch the agent over with *Edit*.
+- The link comes back by itself after a reboot: the agent makes the links it had before it dials
+  the panel, from the settings it saved. The panel's own server does the same, and the agents port
+  listens on every address, so open it in the firewall for the link's interface too.
+- A link that an agent reaches the panel through **cannot be deleted** (like a link a tunnel uses):
+  the panel would lose the only way it has to ask that server anything. Switch the agent back to a
+  public address first (*Servers*, *Edit*). If it happens anyway (the server's public address
+  changed, GRE blocked on the path), the server shows offline: *Reconnect* it with a public address.
+
 ## The rules the panel keeps
 
 - No address is given twice, ever, until its link is deleted. The database refuses a repeated
@@ -53,8 +74,8 @@ if they do not.
   GRE tunnels between the same two addresses apart), the smallest one not yet used.
 - A server that changes its public address keeps its private ones: set the new address on the
   page and the panel sends every link of that server again.
-- A link a tunnel still uses (its listen or dial address is one of the link's) cannot be
-  deleted. Deleting a tunnel keeps its link (the panel does not guess you are done with it).
+- A link a tunnel still uses (its listen or dial address is one of the link's), or that a
+  server's agent reaches the panel through, cannot be deleted. Deleting a tunnel keeps its link (the panel does not guess you are done with it).
 - Removing a server removes its links, and the servers on their other ends are told.
 - An update does not break a network. The panel remembers the address each server was last known
   by, so after it restarts it still sends every server its whole list of links, and it never sends

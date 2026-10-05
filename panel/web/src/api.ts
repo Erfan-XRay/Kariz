@@ -94,6 +94,23 @@ export interface SpeedPoll {
 /** How an agent reaches the panel: `auto` tries every transport in turn. */
 export type LinkTransport = "auto" | "tcpmux" | "kcp" | "wss" | "quic";
 
+/** The panel's address on a private (GRE) network link to another server: what that server's agent can dial. */
+export interface GreAddr {
+  link: string;
+  network: string;
+  /** The other server (id). */
+  server: string;
+  addr: string;
+  peer_addr: string;
+}
+
+export interface PanelAddresses {
+  v4: string | null;
+  v6: string | null;
+  agent_port: number | null;
+  gre?: GreAddr[];
+}
+
 export interface LinkError {
   at: number;
   /** `link_ended`: the link dropped or went quiet. `wrong_key`: an agent came with this server's id and a key that does not match. */
@@ -143,6 +160,8 @@ export interface ServerInfo {
   last_seen?: number | null;
   /** Why its link last ended or was refused, until it connects again. */
   last_error?: LinkError | null;
+  /** The private network link its agent connects through, when it does. */
+  gre?: { link: string; network: string } | null;
   /** The transport its agent's link uses now (tcpmux or kcp). */
   link?: string | null;
   health: Health | null;
@@ -385,7 +404,7 @@ export const api = {
   servers: () => call<{ servers: ServerInfo[]; agents: boolean }>("GET", "servers"),
   joinCode: (name: string | undefined, host: string, transport: LinkTransport) =>
     call<{ code: string; valid_for: number }>("POST", "servers/join-code", { name, host, transport }),
-  panelAddresses: () => call<{ v4: string | null; v6: string | null; agent_port: number | null }>("GET", "servers/panel-addresses"),
+  panelAddresses: () => call<PanelAddresses>("GET", "servers/panel-addresses"),
   removeServer: (id: string) => call<object>("POST", "servers/remove", { id }),
   reconnectServer: (id: string, host: string, transport: LinkTransport) =>
     call<{ code: string; valid_for: number }>("POST", "servers/reconnect", { id, host, transport }),
