@@ -149,12 +149,15 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     pool,
     ws_path: isWs ? wsPath : undefined,
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
-    tls_sni: transport === "wss" && sni.trim() ? sni.trim() : undefined,
+    // A server name typed for a self-signed certificate is not sent with a real one: the
+    // other side checks a real one against the name it was issued for (tls_host).
+    tls_sni: transport === "wss" && tls.mode === "self" && sni.trim() ? sni.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
     encryption: cipherOf(enc, transport),
     quic_obfs: obfsOf(obfs, transport),
     tls_cert: transport === "wss" && tls.mode === "real" && tls.cert ? tls.cert : undefined,
     tls_key: transport === "wss" && tls.mode === "real" && tls.key ? tls.key : undefined,
+    tls_host: transport === "wss" && tls.mode === "real" && tls.cert && tls.host ? tls.host : undefined,
     forwards: parsed.forwards,
   });
 

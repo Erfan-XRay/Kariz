@@ -91,6 +91,11 @@ panel within seconds.
   the agents port listens on both. A server that has a private (GRE) link to the panel's server
   can go through it: its *Edit* offers the panel's address on the link
   ([details](networks.md#the-agents-link-over-a-network)).
+- **Only GRE gets through?** Choose **Over a GRE link** and type the new server's public IPv4
+  address: the panel makes its end of a GRE link at once, and the command makes the other end
+  before the agent connects across it ([details](networks.md#add-a-server-over-gre)).
+- **The new server cannot reach the panel at all?** Choose **The panel connects to it**: its
+  agent listens on a port of its own and the panel dials it ([below](#the-panel-connects-to-the-server-reverse)).
 - **The link's transport is automatic by default.** The panel takes agents over `tcpmux`
   (TCP on the agents port), `kcp` (UDP on the same port) and `wss` (WebSocket over TLS with
   the panel's certificate, on the next port; it looks like an ordinary HTTPS site) and
@@ -107,6 +112,30 @@ panel within seconds.
 - The agent runs as the service `kariz-agent`: `kariz-manager agent status | logs | remove`.
 - **Remove a server** in the panel (*Servers*, *Remove*): it leaves the panel and its link
   closes. Nothing is deleted on it; its tunnels keep running.
+
+### The panel connects to the server (reverse)
+
+Usually the agent dials the panel. When the new server cannot reach the panel (the panel's
+server takes no connections from outside, or the way in is filtered) but the panel can reach
+the new server, turn it round: *Add server*, **The panel connects to it**, and type the new
+server's address (an IP or a domain) and the port its agent is to listen on (`29001` unless you
+change it).
+
+1. The panel lists the server (*waiting for its agent*) and starts trying to connect to it.
+2. You run the command it shows on the new server, as root. Its agent starts listening on the
+   port and the next one, over the same transports as a panel's agents port (`tcpmux` and `kcp`
+   on the port, TCP and UDP; `wss` and `quic` on the next), and the panel connects within
+   seconds. Open those ports for the panel's address (the dialog lists them).
+3. From then on the panel keeps the link up: when it drops, the panel connects again by itself
+   (every few seconds at first, then up to every 30 s; with *Auto* it moves on to the next
+   transport when one keeps failing). The card says *panel connects · address*.
+
+The link is made the same way as the other way round: the token handshake, the encryption, and
+the agent still proves who it is with its key. A server that answers at that address as another
+server is let go. The panel does not need an agents port of its own for this, so it works on a
+panel that takes no agents. *Reconnect* and *Edit* have the same choice (*Who makes the
+connection*), so a server can be switched either way; the address and port can be changed there.
+A backup keeps where the panel dials each such server.
 
 ### A server that goes offline
 
@@ -172,7 +201,8 @@ servers. Good to know:
 **If any step fails, everything made so far is removed from both servers**, and the wizard says
 which step and why (a refused connection, a wrong token, a port in use...). A `wss` accepting
 side gets a self-signed certificate made by its own server, and the other side is given its pin
-automatically.
+automatically; or a real one from Let's Encrypt
+([details](transports.md#wss-with-a-real-certificate)).
 
 Open a tunnel (click its row) to see both sides, its charts, and to **edit** it (the same
 wizard, filled in; both sides change together and are restarted, and if they do not connect

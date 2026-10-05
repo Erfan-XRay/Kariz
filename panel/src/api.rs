@@ -37,6 +37,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/logout", post(logout))
         .route("/api/servers", get(servers))
         .route("/api/servers/join-code", post(join_code))
+        .route("/api/servers/join-gre", post(join_gre))
+        .route("/api/servers/join-reverse", post(join_reverse))
         .route("/api/servers/panel-addresses", get(panel_addresses))
         .route("/api/servers/remove", post(remove_server))
         .route("/api/servers/reconnect", post(reconnect_server))
@@ -467,10 +469,95 @@ async fn panel_addresses(State(state): State<AppState>, headers: HeaderMap) -> R
         .await
         .unwrap_or((None, None));
     let gre = state.hub.gre_addresses().unwrap_or_default();
+    // The panel server's public address as private network links use it (one that was set
+    // for it, else its own).
+    let gre_local = state.hub.addr_of(crate::hub::LOCAL);
     reply(
         StatusCode::OK,
-        json!({ "v4": v4, "v6": v6, "agent_port": state.agent_port, "gre": gre }),
+        json!({ "v4": v4, "v6": v6, "agent_port": state.agent_port, "gre": gre, "gre_local": gre_local }),
     )
+}
+
+#[derive(Deserialize)]
+struct JoinGreBody {
+    name: Option<String>,
+    /// The new server's public IPv4 address: the other end of the GRE link.
+    ip: String,
+    /// The private network to take the link's addresses from; none: the first, or a new one.
+    network: Option<String>,
+    transport: Option<String>,
+}
+
+/// *Add server* over a private network: the server is listed, the panel's end of a GRE link
+/// to it is made, and the code makes the other end before the agent dials across it.
+async fn join_gre(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<JoinGreBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let Some(port) = state.agent_port else {
+        return error(StatusCode::CONFLICT, "agents_off");
+    };
+    let name = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    let transport = body
+        .transport
+        .as_deref()
+        .map(str::trim)
+        .filter(|x| !x.is_empty() && *x != "auto");
+    let network = body
+        .network
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    match state
+        .hub
+        .create_gre_join(name, body.ip.trim(), network, transport, port)
+        .await
+    {
+        Ok(made) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!(
+                    "added server {} ({}) to join over a private network from {}",
+                    made.name,
+                    made.id,
+                    body.ip.trim()
+                ),
+            );
+            reply(
+                StatusCode::OK,
+                json!({
+                    "code": made.code,
+                    "valid_for": crate::join::JOIN_TTL,
+                    "id": made.id,
+                    "name": made.name,
+                    "network": made.network,
+                    "panel_addr": made.panel_addr,
+                    "server_addr": made.server_addr,
+                }),
+            )
+        }
+        Err(e) => {
+            let why = format!("{e:#}");
+            if why == "bad_input" {
+                error(StatusCode::BAD_REQUEST, "bad_input")
+            } else {
+                // A code the page explains, or what the panel's own server said.
+                error(StatusCode::CONFLICT, &why)
+            }
+        }
+    }
 }
 
 async fn join_code(
@@ -529,12 +616,89 @@ async fn join_code(
 }
 
 #[derive(Deserialize)]
+struct JoinReverseBody {
+    name: Option<String>,
+    /// Where the panel reaches the new server: an IP address or a host name, and the port
+    /// its agent is to listen on (and the next one).
+    host: String,
+    port: u16,
+    transport: Option<String>,
+}
+
+/// *Add server* the other way round: the panel connects to the new server. The server is
+/// listed, the panel starts dialing it, and the code makes its agent listen there. It works
+/// on a panel that takes no agents too.
+async fn join_reverse(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<JoinReverseBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let Ok(target) = crate::reverse::Reverse::new(&body.host, body.port, body.transport.as_deref())
+    else {
+        return error(StatusCode::BAD_REQUEST, "bad_input");
+    };
+    let at = target.addr();
+    let name = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    match state.hub.create_reverse_join(name, target).await {
+        Ok(made) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!(
+                    "added server {} ({}) for the panel to connect to at {at}",
+                    made.name, made.id
+                ),
+            );
+            reply(
+                StatusCode::OK,
+                json!({
+                    "code": made.code,
+                    "valid_for": crate::join::JOIN_TTL,
+                    "id": made.id,
+                    "name": made.name,
+                }),
+            )
+        }
+        Err(e) => {
+            let why = format!("{e:#}");
+            if why == "bad_input" {
+                error(StatusCode::BAD_REQUEST, "bad_input")
+            } else if why.starts_with("address_taken:") {
+                error(StatusCode::CONFLICT, &why)
+            } else {
+                internal(e)
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
 struct ReconnectBody {
     id: String,
     /// The address the browser reached the panel by: what the server should dial.
+    #[serde(default)]
     host: String,
     /// The one link transport the agent is to use; none or `auto`: all of them in turn.
     transport: Option<String>,
+    /// The panel connects to the server instead (reverse), there; left out, the server's
+    /// agent dials the panel (and a server the panel connected to stops being one).
+    reverse: Option<ReverseBody>,
+}
+
+#[derive(Deserialize)]
+struct ReverseBody {
+    host: String,
+    port: u16,
 }
 
 /// A join code for a server that is already known: its agent is replaced by one that joins
@@ -549,6 +713,38 @@ async fn reconnect_server(
         Ok(s) => s,
         Err(r) => return r,
     };
+    if let Some(r) = &body.reverse {
+        let target = match crate::reverse::Reverse::new(&r.host, r.port, body.transport.as_deref())
+        {
+            Ok(t) => t,
+            Err(_) => return error(StatusCode::BAD_REQUEST, "bad_input"),
+        };
+        if body.id == crate::hub::LOCAL {
+            return error(StatusCode::BAD_REQUEST, "bad_input");
+        }
+        let at = target.addr();
+        return match state.hub.create_reverse_rejoin(&body.id, target) {
+            Ok(code) => {
+                audit(
+                    &state,
+                    &format!("session {}", me.id),
+                    &ip_of(&peer),
+                    &format!(
+                        "made a code to reconnect server {} (the panel connects to it at {at})",
+                        body.id
+                    ),
+                );
+                reply(
+                    StatusCode::OK,
+                    json!({ "code": code, "valid_for": crate::join::JOIN_TTL }),
+                )
+            }
+            Err(e) if format!("{e:#}") == "no_such_server" => {
+                error(StatusCode::NOT_FOUND, "no_such_server")
+            }
+            Err(e) => internal(e),
+        };
+    }
     let Some(port) = state.agent_port else {
         return error(StatusCode::CONFLICT, "agents_off");
     };
@@ -574,6 +770,10 @@ async fn reconnect_server(
         .create_rejoin(&body.id, &format!("{host}:{port}"), transport)
     {
         Ok(code) => {
+            // Its agent dials the panel again: the panel stops dialing it.
+            if let Err(e) = state.hub.set_reverse(&body.id, None) {
+                return internal(e);
+            }
             audit(
                 &state,
                 &format!("session {}", me.id),
@@ -1261,6 +1461,8 @@ async fn restore(
     };
     match crate::backup::import(&state.db, &body.passphrase, &file, body.replace) {
         Ok(n) => {
+            // The servers it connects to, from the backup, are dialed from now on.
+            state.hub.start_reverse_links();
             audit(
                 &state,
                 &format!("session {}", me.id),

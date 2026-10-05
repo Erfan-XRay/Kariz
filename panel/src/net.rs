@@ -243,6 +243,21 @@ impl Net {
         self.save(&state)
     }
 
+    /// Adds a link to the saved list without making it (a join code's link: the agent makes
+    /// it when it starts, before it dials). True when the list changed: the link is new, or
+    /// it was saved with other settings.
+    pub fn keep(&self, spec: NetSpec) -> Result<bool> {
+        validate(&spec)?;
+        let mut state = self.load();
+        if state.link.contains(&spec) {
+            return Ok(false);
+        }
+        state.link.retain(|l| l.name != spec.name);
+        state.link.push(spec);
+        self.save(&state)?;
+        Ok(true)
+    }
+
     pub async fn down(&self, name: &str) -> Result<()> {
         if !valid_ifname(name) {
             bail!("the interface name must be kz- and up to eight small letters or digits");
@@ -494,6 +509,29 @@ mod tests {
         let mut p2p = spec();
         (p2p.prefix, p2p.address, p2p.peer) = (31, "10.77.0.0".into(), "10.77.0.1".into());
         assert!(validate(&p2p).is_ok());
+    }
+
+    #[test]
+    fn a_join_codes_link_is_kept_once_and_replaced_when_it_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(Fake::default());
+        let net = Net::with_exec(Some(dir.path().join("net.toml")), fake.clone());
+        assert!(net.keep(spec()).unwrap(), "a new link");
+        assert!(!net.keep(spec()).unwrap(), "the same one again");
+        let moved = NetSpec {
+            remote: "198.51.100.8".into(),
+            ..spec()
+        };
+        assert!(net.keep(moved.clone()).unwrap(), "new settings");
+        assert_eq!(net.load().link, vec![moved]);
+        // Nothing ran: the agent makes it when it starts.
+        assert!(calls(&fake).is_empty());
+        assert!(net
+            .keep(NetSpec {
+                name: "eth0".into(),
+                ..spec()
+            })
+            .is_err());
     }
 
     #[test]

@@ -52,9 +52,7 @@ public one. Nothing is different for the agent otherwise: all four transports wo
   *GRE · network*, beside the public ones, and picks it by itself for a server whose agent already
   connects that way. Make the code and run it on the server as usual; the server keeps its name,
   tunnels and links. A server whose agent comes in through a link shows *via GRE* on its card.
-- *Add server* lists the panel's GRE addresses too. A **new** server has no link yet (the panel
-  makes links through the agents it has), so it can only use one that was made by hand; otherwise
-  join with a public address first, make the link, and then switch the agent over with *Edit*.
+- **A new server can join over GRE alone** ([below](#add-a-server-over-gre)).
 - The link comes back by itself after a reboot: the agent makes the links it had before it dials
   the panel, from the settings it saved. The panel's own server does the same, and the agents port
   listens on every address, so open it in the firewall for the link's interface too.
@@ -62,6 +60,28 @@ public one. Nothing is different for the agent otherwise: all four transports wo
   the panel would lose the only way it has to ask that server anything. Switch the agent back to a
   public address first (*Servers*, *Edit*). If it happens anyway (the server's public address
   changed, GRE blocked on the path), the server shows offline: *Reconnect* it with a public address.
+
+## Add a server over GRE
+
+For a server that can reach the panel's server **only over GRE** (the agents port is filtered
+between them, GRE is not): *Servers*, *Add server*, **Over a GRE link**, and type the new
+server's public IPv4 address. That is all there is to fill in.
+
+1. The panel lists the server (it shows *waiting for its agent*), gives the link between the two
+   a `/30` of a network (the first one there is; with none, it makes `kariz`, `10.77.0.0/16` or
+   the next free pool), and makes **its own end of the GRE link now**, from its public address
+   to the one you typed.
+2. You run the command it shows on the new server, as root (it installs Kariz first if needed).
+   The join code carries the server's end of the link: the agent makes it, then dials the panel's
+   private address across it (such as `10.77.0.2`). The server turns *online*, *via GRE*.
+3. Only GRE (IP protocol 47) has to pass between the two public addresses. The link is saved on
+   both servers and comes back after a reboot, before the agent dials.
+
+The panel must know its own server's public IPv4 address (*Networks*, *Server addresses*); it is
+shown in the dialog. A code works once, for 10 minutes: if it runs out, *New command* on the
+waiting server's card makes another (it carries the link too). *Remove* on that card takes the
+server, its link and the panel's end of it away again. An address another server has already is
+refused: bring that server back with *Reconnect* instead.
 
 ## The rules the panel keeps
 

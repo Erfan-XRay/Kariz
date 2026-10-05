@@ -997,6 +997,30 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
   .stats.five { grid-template-columns: 1fr 1fr; }
 }
 
+/* Add server: over the internet, or over a GRE link the panel makes */
+.join-ways { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--sp-2); }
+.join-way {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 2px var(--sp-2);
+  padding: var(--sp-3);
+  border: var(--hairline) solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--card-2);
+  color: var(--text-2);
+  text-align: start;
+  transition: border-color var(--dur-short), background var(--dur-short);
+}
+.join-way b { color: var(--text); font-size: var(--fs-sm); }
+.join-way span { grid-column: 1 / -1; font-size: var(--fs-xs); color: var(--text-2); line-height: 1.5; }
+.join-way:hover { border-color: var(--accent); }
+.join-way[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.join-way[aria-pressed="true"] svg { color: var(--accent); }
+.gre-panel-addr { font-family: var(--font-mono); color: var(--text); unicode-bidi: isolate; }
+.gre-steps { margin: 0 0 var(--sp-3); padding-inline-start: 1.4em; display: grid; gap: var(--sp-1); color: var(--text-2); font-size: var(--fs-xs); line-height: 1.6; }
+.gre-made { display: grid; gap: var(--sp-1); justify-items: start; margin-bottom: var(--sp-3); padding: var(--sp-3); border: var(--hairline) solid var(--water); border-radius: 12px; background: var(--water-soft); }
+
 /* Add server: the panel's own addresses to pick from */
 .addr-picks { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .addr-pick {

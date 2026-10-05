@@ -119,7 +119,13 @@ points at the listening server, and press the button: the server runs
 `kariz-manager tunnel-cert`, which stops whatever holds port 80 for a few seconds, gets the
 certificate, and sets up the renewal timer. The tunnel then names the files under
 `/etc/letsencrypt/live/` (`tunnel.tls.cert` / `key`), reloads them when they are renewed, and the
-dialing side checks the certificate against the web's roots (no pin; it dials the domain).
+dialing side checks the certificate against the web's roots (no pin).
+
+The dialing side checks it against **the name it was issued for**: the panel sets that as its
+`tls.sni`, so it does not matter which address the side dials (a private GRE address, another
+address of the server) or which WebSocket *Host* it sends. A certificate checked against another
+name is refused, and the listening side logs `received fatal alert: BadCertificate`; in a config
+written by hand, set `tls.sni` to the certificate's domain or address.
 
 ## `auto`
 

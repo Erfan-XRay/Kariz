@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Add a server over GRE alone.** *Add server* asks how the new server reaches the panel: *Over
+  the internet* (as before) or **Over a GRE link**, for a server that can reach the panel's server
+  only over GRE. Type its public IPv4 address and the panel lists the server (*waiting for its
+  agent*), gives the link a `/30` of a private network (it makes `kariz`, `10.77.0.0/16`, when
+  there is none) and makes its own end of the GRE link at once; the join code carries the other
+  end, which the agent makes before it dials the panel's private address across it. *New command*
+  on the waiting server's card makes another code, *Remove* undoes it all. A reconnect code through
+  the panel's GRE address carries the link too, so an agent that lost it can make it again. New
+  API: `POST /api/servers/join-gre`; `GET /api/servers/panel-addresses` has `gre_local`. A server
+  whose agent never connected raises no *server down* alert.
+- **The panel can connect to a server (reverse).** For a server that cannot reach the panel but that
+  the panel can reach, *Add server* has a third way, **The panel connects to it**: type its address
+  and a port, run the command on it, and its agent listens there (the same four transports as a
+  panel's agents port, on the port and the next) while the panel dials it and keeps the link up,
+  trying again by itself when it drops. The agent proves who it is as always; one that turns out
+  to be another server is let go. *Reconnect* and *Edit* can switch a server either way
+  (*Who makes the connection*). It works on a panel that takes no agents, and backups keep where
+  the panel dials each server. New API: `POST /api/servers/join-reverse`, `reverse` in
+  `POST /api/servers/reconnect` and in `GET /api/servers`; agents get `listen` in `agent.toml`.
+
+### Fixed
+
+- **A `wss` tunnel with a Let's Encrypt certificate failed with `BadCertificate`** when the dialing
+  side checked the certificate against another name than the one it was issued for: a server name
+  typed while *Self-signed* was chosen, a WebSocket *Host*, or a dial address that is not the
+  certificate's (a private GRE address, for one). The dialing side now always checks it against
+  the certificate's own domain or address, and a failed tunnel shows the dialing side's error with
+  a word on what to do.
+
 ## 1.9.6 - 2026-10-05
 
 ### Added

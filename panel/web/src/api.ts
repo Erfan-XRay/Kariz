@@ -109,6 +109,29 @@ export interface PanelAddresses {
   v6: string | null;
   agent_port: number | null;
   gre?: GreAddr[];
+  /** The panel server's public IPv4 address as private network links use it, if it is known. */
+  gre_local?: string | null;
+}
+
+/** Where the panel dials a server it connects to (reverse): its agent listens on `port` and the next one. */
+export interface ReverseTarget {
+  host: string;
+  port: number;
+  /** The one link transport; none: all of them in turn. */
+  transport?: string | null;
+}
+
+/** What *Add server* over a private network made: the server (waiting for its agent) and its code. */
+export interface GreJoin {
+  code: string;
+  valid_for: number;
+  id: string;
+  name: string;
+  /** The private network the link's addresses come from. */
+  network: string;
+  /** The panel's end of the GRE link (what the agent dials) and the new server's. */
+  panel_addr: string;
+  server_addr: string;
 }
 
 export interface LinkError {
@@ -162,6 +185,8 @@ export interface ServerInfo {
   last_error?: LinkError | null;
   /** The private network link its agent connects through, when it does. */
   gre?: { link: string; network: string } | null;
+  /** Where the panel dials it, for a server the panel connects to (reverse). */
+  reverse?: ReverseTarget | null;
   /** The transport its agent's link uses now (tcpmux or kcp). */
   link?: string | null;
   health: Health | null;
@@ -217,6 +242,8 @@ export interface PairRequest {
   /** wss: the files of a real certificate on the listening side. */
   tls_cert?: string;
   tls_key?: string;
+  /** wss with a real certificate: the name it was issued for, which the dialing side checks it against. */
+  tls_host?: string;
   /** `auto` (left out), `aes-256-gcm`, `chacha20-poly1305` or `none`. */
   encryption?: string;
   /** quic: seal every UDP packet with a key from the token (`[tunnel.quic] obfs`). */
@@ -405,9 +432,13 @@ export const api = {
   joinCode: (name: string | undefined, host: string, transport: LinkTransport) =>
     call<{ code: string; valid_for: number }>("POST", "servers/join-code", { name, host, transport }),
   panelAddresses: () => call<PanelAddresses>("GET", "servers/panel-addresses"),
+  joinGre: (name: string | undefined, ip: string, network: string | undefined, transport: LinkTransport) =>
+    call<GreJoin>("POST", "servers/join-gre", { name, ip, network, transport }),
   removeServer: (id: string) => call<object>("POST", "servers/remove", { id }),
-  reconnectServer: (id: string, host: string, transport: LinkTransport) =>
-    call<{ code: string; valid_for: number }>("POST", "servers/reconnect", { id, host, transport }),
+  reconnectServer: (id: string, host: string, transport: LinkTransport, reverse?: { host: string; port: number }) =>
+    call<{ code: string; valid_for: number }>("POST", "servers/reconnect", { id, host, transport, reverse }),
+  joinReverse: (name: string | undefined, host: string, port: number, transport: LinkTransport) =>
+    call<{ code: string; valid_for: number; id: string; name: string }>("POST", "servers/join-reverse", { name, host, port, transport }),
   renameServer: (id: string, name: string) => call<object>("POST", "servers/rename", { id, name }),
   schedules: () => call<{ schedules: ScheduleRow[] }>("GET", "schedules"),
   setSchedule: (body: ScheduleBody) => call<object>("POST", "schedules", body),

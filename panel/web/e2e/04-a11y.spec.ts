@@ -62,6 +62,12 @@ test("the dialogs pass axe and keep the keyboard inside", async ({ page }) => {
   await page.locator(".page-band .btn-primary").click();
   await expect(page.locator(".dialog")).toBeVisible();
   await scan(page, "the add-server dialog", ".dialog");
+  await page.locator(".join-way").nth(1).click();
+  await expect(page.locator("#add-ip")).toBeVisible();
+  await scan(page, "the add-server dialog, over GRE", ".dialog");
+  await page.locator(".join-way").nth(2).click();
+  await expect(page.locator("#add-rhost")).toBeVisible();
+  await scan(page, "the add-server dialog, the panel connects", ".dialog");
   await page.keyboard.press("Escape");
   await expect(page.locator(".dialog")).toHaveCount(0);
 

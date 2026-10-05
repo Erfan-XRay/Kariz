@@ -128,6 +128,14 @@ const MIGRATIONS: &[&str] = &[
          last_result TEXT NOT NULL DEFAULT '',
          PRIMARY KEY (kind, subject)
      );",
+    // 12: servers the panel connects to (reverse): their agent listens, and the panel dials
+    // it at this host and port, over one transport or (NULL) all of them in turn.
+    "CREATE TABLE reverse_links (
+         server TEXT PRIMARY KEY,
+         host TEXT NOT NULL,
+         port INTEGER NOT NULL,
+         transport TEXT
+     );",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

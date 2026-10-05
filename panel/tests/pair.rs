@@ -163,6 +163,7 @@ async fn a_pair_is_made_edited_stopped_deleted_and_a_failure_leaves_nothing() {
         mux: None,
         tls_cert: None,
         tls_key: None,
+        tls_host: None,
         encryption: None,
         quic_obfs: false,
         forwards: vec![ForwardInfo {

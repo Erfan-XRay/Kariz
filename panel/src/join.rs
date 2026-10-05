@@ -3,11 +3,21 @@
 //! `kz1_` and the URL-safe base64 of a small JSON document: where the panel listens for
 //! agents, the link token, and a join secret that works once (10 minutes). The token is in
 //! it, so a code is as secret as a password until it is used.
+//!
+//! A code for a server that reaches the panel only through a private (GRE) network also
+//! carries that server's end of the link: the agent makes it first, then dials the panel's
+//! private address across it.
+//!
+//! A code for a server the panel connects to (reverse) has no panel address: it says where
+//! the agent listens (`l`), and the panel dials it there. An agent from before reverse links
+//! finds the code incomplete instead of dialing nowhere.
 
 use anyhow::{anyhow, bail, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+
+use crate::wire::NetSpec;
 
 pub const PREFIX: &str = "kz1_";
 /// A join code works for this long, once.
@@ -15,7 +25,7 @@ pub const JOIN_TTL: i64 = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinCode {
-    /// Where the panel listens for agents: `host:port`.
+    /// Where the panel listens for agents: `host:port`. Empty in a reverse code.
     pub p: String,
     /// The panel's link token.
     pub t: String,
@@ -27,6 +37,26 @@ pub struct JoinCode {
     /// The one link transport to use (`tcpmux`, `kcp`, `wss`, `quic`); none: try them all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x: Option<String>,
+    /// The GRE link to make before dialing (this server's end of it): `p` is then the
+    /// panel's private address on that link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub g: Option<NetSpec>,
+    /// Reverse: where the agent listens for the panel (`0.0.0.0:PORT`, its link transports
+    /// on that port and the next, as a panel's agents port); the panel dials it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l: Option<String>,
+}
+
+/// Whether `addr` is an address the agent can listen on: an IP address (or `[v6]`) and a
+/// port below 65535 (the next port is used too).
+pub fn valid_listen(addr: &str) -> bool {
+    addr.rsplit_once(':').is_some_and(|(host, port)| {
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        host.parse::<std::net::IpAddr>().is_ok()
+            && port
+                .parse::<u16>()
+                .is_ok_and(|p| (1..u16::MAX).contains(&p))
+    })
 }
 
 /// This server's public addresses, as other servers would dial them: the source address
@@ -81,11 +111,19 @@ pub fn decode(text: &str) -> Result<JoinCode> {
         .map_err(|_| anyhow!("this join code is damaged (copy all of it)"))?;
     let code: JoinCode = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow!("this join code is damaged (copy all of it)"))?;
-    if code.p.is_empty() || code.t.len() < 16 || code.j.is_empty() {
+    if (code.p.is_empty() && code.l.is_none()) || code.t.len() < 16 || code.j.is_empty() {
         bail!("this join code is incomplete");
+    }
+    if code.l.as_deref().is_some_and(|l| !valid_listen(l)) {
+        bail!("this join code says to listen on an address that is not valid");
     }
     if code.x.as_deref().is_some_and(|x| !valid_transport(x)) {
         bail!("this join code names a transport this agent does not know: update it");
+    }
+    if let Some(link) = &code.g {
+        crate::net::validate(link).map_err(|e| {
+            anyhow!("this join code has a private network link that is not valid: {e}")
+        })?;
     }
     Ok(code)
 }
@@ -120,6 +158,21 @@ mod tests {
             j: "j".repeat(32),
             n: Some("istanbul-1".into()),
             x: None,
+            g: None,
+            l: None,
+        }
+    }
+
+    fn link() -> NetSpec {
+        NetSpec {
+            name: "kz-ab12c".into(),
+            local: "198.51.100.7".into(),
+            remote: "203.0.113.5".into(),
+            key: 1,
+            address: "10.77.0.1".into(),
+            peer: "10.77.0.2".into(),
+            prefix: 30,
+            mtu: 1476,
         }
     }
 
@@ -181,6 +234,67 @@ mod tests {
         // Without one (auto) the code is what agents before 1.4 read too.
         assert!(!encode(&code()).is_empty());
         assert!(!serde_json::to_string(&code()).unwrap().contains("\"x\""));
+    }
+
+    #[test]
+    fn a_code_can_carry_the_gre_link_to_make_first() {
+        let with = JoinCode {
+            p: "10.77.0.2:29001".into(),
+            g: Some(link()),
+            ..code()
+        };
+        assert_eq!(decode(&encode(&with)).unwrap().g, Some(link()));
+        // Without one, nothing about it is in the code (what older agents read too).
+        assert!(!serde_json::to_string(&code()).unwrap().contains("\"g\""));
+        // A link the agent could not make is refused before anything is written.
+        let bad = JoinCode {
+            g: Some(NetSpec {
+                name: "eth0".into(),
+                ..link()
+            }),
+            ..with
+        };
+        assert!(decode(&encode(&bad))
+            .unwrap_err()
+            .to_string()
+            .contains("private network link"));
+    }
+
+    #[test]
+    fn a_reverse_code_says_where_to_listen_and_has_no_panel_address() {
+        let reverse = JoinCode {
+            p: String::new(),
+            l: Some("0.0.0.0:29001".into()),
+            ..code()
+        };
+        let back = decode(&encode(&reverse)).unwrap();
+        assert_eq!(
+            (back.p.as_str(), back.l.as_deref()),
+            ("", Some("0.0.0.0:29001"))
+        );
+        // Without either, it is incomplete; so is a reverse code to an agent that reads no `l`.
+        let neither = JoinCode {
+            p: String::new(),
+            ..code()
+        };
+        assert!(decode(&encode(&neither))
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete"));
+        for bad in [
+            "0.0.0.0",
+            "0.0.0.0:0",
+            "0.0.0.0:65535",
+            "example.com:29001",
+            "0.0.0.0:x",
+        ] {
+            let code = JoinCode {
+                l: Some(bad.into()),
+                ..reverse.clone()
+            };
+            assert!(decode(&encode(&code)).is_err(), "{bad}");
+        }
+        assert!(valid_listen("[::]:29001") && valid_listen("192.0.2.4:443"));
     }
 
     #[test]

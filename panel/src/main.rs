@@ -475,6 +475,9 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
             kariz_bin: std::env::current_exe()?.with_file_name("kariz"),
         });
         tokio::spawn(hub.clone().run_local());
+        // The servers the panel connects to (reverse) are dialed whether or not it takes
+        // agents itself.
+        hub.start_reverse_links();
         tokio::spawn(kariz_panel::telegram::run(hub.clone()));
         tokio::spawn(kariz_panel::schedule::run(hub.clone()));
         let mut state = AppState::new(db);
@@ -490,7 +493,7 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
                 let addr = &kariz::link::address_for(listen, kind)?;
                 let mut bound = 0;
                 let mut last = None;
-                for one in dual_stack(addr) {
+                for one in kariz_panel::agent::listen_addresses(addr) {
                     let made = if wss_kind {
                         kariz::link::Acceptor::bind_wss(&one, &token, &cert, &key).await
                     } else {
@@ -527,16 +530,6 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
     })
 }
 
-/// The addresses to listen on for `addr`: an address for every IPv4 one (`0.0.0.0:P`) is
-/// also taken on IPv6 (`[::]:P`), so servers can join over either. Where the IPv6 socket
-/// takes IPv4 too (Linux), the IPv4 one is refused as in use, which is fine.
-fn dual_stack(addr: &str) -> Vec<String> {
-    match addr.strip_prefix("0.0.0.0:") {
-        Some(port) => vec![format!("[::]:{port}"), addr.to_owned()],
-        None => vec![addr.to_owned()],
-    }
-}
-
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -570,6 +563,13 @@ fn run_agent(path: &std::path::Path, join: Option<&str>, no_run: bool) -> Result
             }
             let config = agent::enroll_from_code(code, path)?;
             eprintln!("settings written to {}", path.display());
+            if let Some(listen) = &config.listen {
+                let port = listen.rsplit(':').next().unwrap_or_default();
+                let next = port.parse::<u16>().map_or(0, |p| p.saturating_add(1));
+                eprintln!(
+                    "the panel connects to this server: the agent waits for it on port {port} (TCP and UDP) and {next} (TCP and UDP); let the panel's address through"
+                );
+            }
             config
         }
         None => AgentConfig::load(path)?,
