@@ -88,7 +88,9 @@ panel within seconds.
   panel's *agents* port.
 - **Choose the address.** *Add server* offers the panel's own public IPv4 and IPv6
   addresses. A server with only IPv6, or whose IPv4 route is filtered, can join over IPv6:
-  the agents port listens on both.
+  the agents port listens on both. A server that has a private (GRE) link to the panel's server
+  can go through it: its *Edit* offers the panel's address on the link
+  ([details](networks.md#the-agents-link-over-a-network)).
 - **The link's transport is automatic by default.** The panel takes agents over `tcpmux`
   (TCP on the agents port), `kcp` (UDP on the same port) and `wss` (WebSocket over TLS with
   the panel's certificate, on the next port; it looks like an ordinary HTTPS site) and

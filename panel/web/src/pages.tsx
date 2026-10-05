@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api } from "./api";
-import type { LinkTransport, ServerInfo, SessionRow } from "./api";
+import type { LinkTransport, PanelAddresses, ServerInfo, SessionRow } from "./api";
 import { bytesPerSec, pairTunnels, rateParts } from "./derive";
 import type { TunnelState } from "./derive";
 import type { Route } from "./App";
@@ -432,7 +432,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   const [name, setName] = useState("");
   const [host, setHost] = useState(location.hostname.replace(/^\[|\]$/g, ""));
   const [transport, setTransport] = useState<LinkTransport>("auto");
-  const [own, setOwn] = useState<{ v4: string | null; v6: string | null; agent_port: number | null } | null>(null);
+  const [own, setOwn] = useState<PanelAddresses | null>(null);
   const [code, setCode] = useState("");
   const [left, setLeft] = useState(0);
   const [error, setError] = useState("");
@@ -476,7 +476,9 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
     ...(own?.v4 ? [[t("add.addr.v4"), own.v4] as [string, string]] : []),
     ...(own?.v6 ? [[t("add.addr.v6"), own.v6] as [string, string]] : []),
     ...(here && here !== own?.v4 && here !== own?.v6 ? [[t("add.addr.here"), here] as [string, string]] : []),
+    ...(own?.gre ?? []).map((g) => [t("add.addr.gre", { network: g.network, server: servers.find((s) => s.id === g.server)?.name ?? g.server }), g.addr] as [string, string]),
   ];
+  const greHost = (own?.gre ?? []).some((g) => g.addr === host.trim());
   const portText = (x: LinkTransport) => (port == null ? "?" : String(x === "wss" || x === "quic" ? port + 1 : port));
   const openList =
     port == null
@@ -540,6 +542,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
             )}
             <input className="text mono" id="add-host" dir="ltr" value={host} onChange={(e) => setHost(e.target.value)} />
             <span className="help">{t("add.addrHelp")}</span>
+            {greHost && <span className="help">{t("add.greHelp")}</span>}
             <span className="err">{error}</span>
           </div>
           <div className="field">
@@ -697,6 +700,13 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                     <dd className="mono">{s.local ? t("srv.localLink") : s.link ?? "—"}</dd>
                   </div>
                 </dl>
+                {s.gre && (
+                  <div className="srv-ips">
+                    <span className="badge" title={t("srv.viaGre", { network: s.gre.network })}>
+                      {t("srv.greChip", { network: s.gre.network })}
+                    </span>
+                  </div>
+                )}
                 {(s.ip4 || s.ip6) && (
                   <div className="srv-ips" dir="ltr">
                     {s.ip4 && <CopyValue what={t("srv.ip4")} label={t("srv.ip4")} value={s.ip4} />}

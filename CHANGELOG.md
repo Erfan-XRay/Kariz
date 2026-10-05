@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.9.6 - 2026-10-05
+
+### Added
+
+- **A server's agent can reach the panel through a private (GRE) network.** *Edit* and *Reconnect* on
+  a server that has a GRE link to the panel's own server offer the panel's address on the link
+  (*GRE · network*) beside the public ones, and choose it for a server whose agent already comes in
+  that way; *Add server* lists the panel's GRE addresses too. A server whose agent comes through a
+  link shows *via GRE*, and that link cannot be deleted while the agent depends on it (the panel
+  would lose the only way it has to ask that server anything). `GET /api/servers/panel-addresses`
+  has the new `gre` list and `GET /api/servers` a `gre` field.
+
 ## 1.9.5 - 2026-10-05
 
 ### Added
