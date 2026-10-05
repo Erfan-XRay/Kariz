@@ -97,7 +97,9 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
         setDialHost(hostOf(dia.remote));
         setWsPath(a.ws_path ?? "/");
         setWsHost(a.ws_host ?? b.ws_host ?? "");
-        setSni(dia.tls_sni ?? "");
+        const real = acc.tls_cert && acc.tls_key ? { cert: acc.tls_cert, key: acc.tls_key } : null;
+        // With a real certificate the server name is the certificate's own (not one to edit).
+        setSni(real ? "" : (dia.tls_sni ?? ""));
         setPool(a.pool);
         const list = a.forwards;
         setPorts(list.map((f) => (portOf(f.listen) === portOf(f.target) ? portOf(f.listen) : `${portOf(f.listen)}=${portOf(f.target)}`)).join(", "));
@@ -108,8 +110,7 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
         setObfs(!!(a.quic_obfs ?? b.quic_obfs));
         // A tunnel that has no encryption already was confirmed when it was made.
         setEncAck((a.encryption ?? "auto") === "none");
-        const real = acc.tls_cert && acc.tls_key ? { cert: acc.tls_cert, key: acc.tls_key } : null;
-        setTls(real ? { mode: "real", host: hostOf(dia.remote), email: "", ...real } : emptyTls());
+        setTls(real ? { mode: "real", host: dia.tls_sni || hostOf(dia.remote), email: "", ...real } : emptyTls());
         setInitial("");
       })
       .catch(() => {
@@ -154,12 +155,13 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
     pool,
     ws_path: isWs ? wsPath : undefined,
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
-    tls_sni: transport === "wss" && sni.trim() ? sni.trim() : undefined,
+    tls_sni: transport === "wss" && tls.mode === "self" && sni.trim() ? sni.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
     encryption: cipherOf(enc, transport),
     quic_obfs: obfsOf(obfs, transport),
     tls_cert: transport === "wss" && tls.mode === "real" && tls.cert ? tls.cert : undefined,
     tls_key: transport === "wss" && tls.mode === "real" && tls.key ? tls.key : undefined,
+    tls_host: transport === "wss" && tls.mode === "real" && tls.cert && tls.host ? tls.host : undefined,
     rotate: rotate ? true : undefined,
     forwards: parsed.forwards,
   });

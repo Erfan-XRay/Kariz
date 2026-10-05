@@ -26,7 +26,7 @@ pub fn valid_addr(text: &str) -> bool {
 
 /// One end of a link, as the server that owns it is told: `mine` is the address of this
 /// end, `theirs` the other's.
-fn spec_for(link: &Link, server: &str, local: &str, remote: &str) -> NetSpec {
+pub(crate) fn spec_for(link: &Link, server: &str, local: &str, remote: &str) -> NetSpec {
     let first = link.a == server;
     NetSpec {
         name: link.ifname.clone(),
@@ -339,6 +339,7 @@ mod tests {
             quic_obfs: false,
             tls_cert: None,
             tls_key: None,
+            tls_host: None,
             forwards: Vec::new(),
             rotate: false,
             network: Some("n".into()),

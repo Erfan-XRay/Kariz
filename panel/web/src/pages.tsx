@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api } from "./api";
-import type { LinkTransport, PanelAddresses, ServerInfo, SessionRow } from "./api";
+import type { GreJoin, LinkTransport, PanelAddresses, ServerInfo, SessionRow } from "./api";
 import { bytesPerSec, pairTunnels, rateParts } from "./derive";
 import type { TunnelState } from "./derive";
 import type { Route } from "./App";
@@ -12,7 +12,9 @@ import { BackupDialog, RestoreDialog } from "./Extras";
 import { TelegramSection } from "./Telegram";
 import { AutoRestartDialog } from "./AutoRestart";
 import { ServerFixDialog } from "./ServerFix";
-import { transportLabel } from "./transport";
+import { useNetworks } from "./Networks";
+import { describeError } from "./ops";
+import { hostPort, linkPorts, reverseOk, transportLabel } from "./transport";
 import { Card, CodeBlock, CopyValue, Dialog, Empty, Icon, Odo, Seg, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
 
 // ---------------------------------------------------------------- the map
@@ -427,17 +429,49 @@ function Meter({ label, pct }: { label: string; pct: number | null }) {
   );
 }
 
+/**
+ * How a new server joins: its agent dials the panel over the internet (the panel's public address) or over a
+ * private GRE link the panel sets up for it, or the panel dials the agent (reverse).
+ */
+type JoinWay = "internet" | "gre" | "reverse";
+
+/** The port a reverse agent listens on, until another is typed. */
+const REVERSE_PORT = "29001";
+
+/** The text of an error from *Add server* over GRE. */
+function greJoinError(t: (k: string, v?: Record<string, string | number>) => string, code: string, names: Map<string, string>): string {
+  const [what, who = ""] = code.split(":");
+  if (what === "no_address") return t("add.gre.err.noPanelAddr");
+  if (what === "same_address") return t("add.gre.err.same");
+  if (what === "address_taken") return t("add.gre.err.taken", { name: names.get(who) ?? who });
+  if (what === "bad_input") return t("add.gre.err.ip");
+  if (what === "agents_off") return t("add.off");
+  return describeError(t, code, names);
+}
+
 function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agentsOn: boolean; onClose: () => void }) {
   const { t, digitsOf, toast } = useApp();
+  const [way, setWay] = useState<JoinWay>("internet");
   const [name, setName] = useState("");
   const [host, setHost] = useState(location.hostname.replace(/^\[|\]$/g, ""));
   const [transport, setTransport] = useState<LinkTransport>("auto");
+  // Over GRE: the new server's public IPv4 address, and the network its link takes its addresses from.
+  const [ip, setIp] = useState("");
+  const { networks } = useNetworks();
+  const [netId, setNetId] = useState("");
+  const [gre, setGre] = useState<GreJoin | null>(null);
+  // Reverse: where the panel reaches the new server, and the port its agent listens on.
+  const [rhost, setRhost] = useState("");
+  const [rport, setRport] = useState(REVERSE_PORT);
+  const [rev, setRev] = useState<{ addr: string; port: number } | null>(null);
+  const [busy, setBusy] = useState(false);
   const [own, setOwn] = useState<PanelAddresses | null>(null);
   const [code, setCode] = useState("");
   const [left, setLeft] = useState(0);
   const [error, setError] = useState("");
   const known = useRef<Set<string>>(new Set());
   const joined = servers.find((s) => code && !known.current.has(s.id) && s.online);
+  const names = new Map(servers.map((s) => [s.id, s.name]));
 
   // The panel's own public addresses (IPv4 and IPv6), to pick from.
   useEffect(() => {
@@ -459,13 +493,30 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
 
   const make = async () => {
     setError("");
+    setBusy(true);
     try {
       known.current = new Set(servers.map((s) => s.id));
-      const made = await api.joinCode(name.trim() || undefined, host.trim(), transport);
-      setCode(made.code);
-      setLeft(made.valid_for);
+      if (way === "gre") {
+        const made = await api.joinGre(name.trim() || undefined, ip.trim(), netId || undefined, "auto");
+        setGre(made);
+        setCode(made.code);
+        setLeft(made.valid_for);
+      } else if (way === "reverse") {
+        const made = await api.joinReverse(name.trim() || undefined, rhost.trim(), +rport, transport);
+        setRev({ addr: hostPort(rhost.trim().replace(/^\[|\]$/g, ""), rport.trim()), port: +rport });
+        setCode(made.code);
+        setLeft(made.valid_for);
+      } else {
+        const made = await api.joinCode(name.trim() || undefined, host.trim(), transport);
+        setCode(made.code);
+        setLeft(made.valid_for);
+      }
     } catch (e) {
-      setError(e instanceof ApiError && e.code === "agents_off" ? t("add.off") : t("add.bad"));
+      if (way === "gre") setError(e instanceof ApiError ? greJoinError(t, e.code, names) : String(e));
+      else if (way === "reverse") setError(e instanceof ApiError && e.code !== "bad_input" ? greJoinError(t, e.code, names) : t("add.rev.err.input"));
+      else setError(e instanceof ApiError && e.code === "agents_off" ? t("add.off") : t("add.bad"));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -480,16 +531,26 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   ];
   const greHost = (own?.gre ?? []).some((g) => g.addr === host.trim());
   const portText = (x: LinkTransport) => (port == null ? "?" : String(x === "wss" || x === "quic" ? port + 1 : port));
-  const openList =
-    port == null
-      ? ""
-      : transport === "auto"
-        ? `TCP ${port}, UDP ${port}, TCP ${port + 1}, UDP ${port + 1}`
-        : transport === "kcp"
-          ? `UDP ${port}`
-          : transport === "quic"
-            ? `UDP ${port + 1}`
-            : `TCP ${portText(transport)}`;
+  const openList = port == null ? "" : linkPorts(port, transport);
+  // The panel server's public address, the panel's end of the GRE link (unknown: it has to be set first).
+  const panelPublic = own ? (own.gre_local ?? null) : undefined;
+  const ipOk = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(ip.trim()) && ip.trim().split(".").every((p) => +p <= 255);
+  const network = networks.find((n) => n.id === netId) ?? networks[0];
+  const ready = way === "gre" ? ipOk && panelPublic !== null : way === "reverse" ? reverseOk(rhost, rport) : !!host.trim();
+  // The panel needs no agents port of its own when it is the one that connects.
+  const blocked = !agentsOn && way !== "reverse";
+  const transportField = (help: string) => (
+    <div className="field">
+      <span className="label">{t("add.transport")}</span>
+      <Seg
+        value={transport}
+        options={(["auto", "tcpmux", "kcp", "wss", "quic"] as LinkTransport[]).map((x) => [x, t(`add.x.${x}`)] as [LinkTransport, string])}
+        onChange={setTransport}
+      />
+      <span className="help">{help}</span>
+      {transport !== "auto" && <span className="help">{t(transport === "quic" ? "add.newAgentQuic" : "add.newAgent")}</span>}
+    </div>
+  );
   return (
     <Dialog
       title={t("add.title")}
@@ -509,71 +570,195 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
         ) : (
           <>
             <button className="btn btn-ghost btn-sm" type="button" onClick={onClose}>
-              {t("cancel")}
+              {code ? t("close") : t("cancel")}
             </button>
             {!code && (
-              <button className="btn btn-primary btn-sm" type="button" disabled={!host.trim() || !agentsOn} onClick={() => void make()}>
-                {t("add.make")}
+              <button className="btn btn-primary btn-sm" type="button" disabled={!ready || blocked || busy} onClick={() => void make()}>
+                {busy ? t("add.making") : t("add.make")}
               </button>
             )}
           </>
         )
       }
     >
-      {!agentsOn && <p className="err small">{t("add.off")}</p>}
+      {blocked && <p className="err small">{t("add.off")}</p>}
       {!code && (
         <>
           <div className="field">
+            <span className="label">{t("add.way")}</span>
+            <div className="join-ways" role="group" aria-label={t("add.way")}>
+              {(["internet", "gre", "reverse"] as JoinWay[]).map((w) => (
+                <button
+                  key={w}
+                  type="button"
+                  className="join-way"
+                  aria-pressed={way === w}
+                  onClick={() => {
+                    setWay(w);
+                    setError("");
+                  }}
+                >
+                  <Icon name={w === "gre" ? "networks" : w === "reverse" ? "back" : "map"} size={18} />
+                  <b>{t(`add.way.${w}`)}</b>
+                  <span>{t(`add.way.${w}.d`)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="field">
             <label htmlFor="add-name">{t("add.name")}</label>
             <input className="text mono" id="add-name" dir="ltr" placeholder="istanbul-1" value={name} onChange={(e) => setName(e.target.value)} />
-            <span className="help">{t("add.nameHelp")}</span>
+            <span className="help">{t(way === "gre" ? "add.gre.nameHelp" : "add.nameHelp")}</span>
           </div>
-          <div className="field">
-            <label htmlFor="add-host">{t("add.host")}</label>
-            {choices.length > 1 && (
-              <div className="addr-picks" role="group" aria-label={t("add.host")}>
-                {choices.map(([label, value]) => (
-                  <button key={value} type="button" className="addr-pick" aria-pressed={host === value} onClick={() => setHost(value)}>
-                    <span>{label}</span>
-                    <code dir="ltr">{value}</code>
-                  </button>
-                ))}
+          {way === "internet" && (
+            <>
+              <div className="field">
+                <label htmlFor="add-host">{t("add.host")}</label>
+                {choices.length > 1 && (
+                  <div className="addr-picks" role="group" aria-label={t("add.host")}>
+                    {choices.map(([label, value]) => (
+                      <button key={value} type="button" className="addr-pick" aria-pressed={host === value} onClick={() => setHost(value)}>
+                        <span>{label}</span>
+                        <code dir="ltr">{value}</code>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <input className="text mono" id="add-host" dir="ltr" value={host} onChange={(e) => setHost(e.target.value)} />
+                <span className="help">{t("add.addrHelp")}</span>
+                {greHost && <span className="help">{t("add.greHelp")}</span>}
+                <span className="err">{error}</span>
               </div>
-            )}
-            <input className="text mono" id="add-host" dir="ltr" value={host} onChange={(e) => setHost(e.target.value)} />
-            <span className="help">{t("add.addrHelp")}</span>
-            {greHost && <span className="help">{t("add.greHelp")}</span>}
-            <span className="err">{error}</span>
-          </div>
-          <div className="field">
-            <span className="label">{t("add.transport")}</span>
-            <Seg
-              value={transport}
-              options={(["auto", "tcpmux", "kcp", "wss", "quic"] as LinkTransport[]).map((x) => [x, t(`add.x.${x}`)] as [LinkTransport, string])}
-              onChange={setTransport}
-            />
-            <span className="help">{t(`add.x.${transport}.d`, { p: portText(transport) })}</span>
-            {openList && (
-              <span className="help">
-                {t("add.ports", { list: "" })}
-                <code dir="ltr">{openList}</code>
+              <div className="field">
+                <span className="label">{t("add.transport")}</span>
+                <Seg
+                  value={transport}
+                  options={(["auto", "tcpmux", "kcp", "wss", "quic"] as LinkTransport[]).map((x) => [x, t(`add.x.${x}`)] as [LinkTransport, string])}
+                  onChange={setTransport}
+                />
+                <span className="help">{t(`add.x.${transport}.d`, { p: portText(transport) })}</span>
+                {openList && (
+                  <span className="help">
+                    {t("add.ports", { list: "" })}
+                    <code dir="ltr">{openList}</code>
+                  </span>
+                )}
+                {transport !== "auto" && <span className="help">{t(transport === "quic" ? "add.newAgentQuic" : "add.newAgent")}</span>}
+              </div>
+            </>
+          )}
+          {way === "reverse" && (
+            <>
+              <div className="grid-2">
+                <div className="field">
+                  <label htmlFor="add-rhost">{t("add.rev.host")}</label>
+                  <input className="text mono" id="add-rhost" dir="ltr" placeholder="198.51.100.7" value={rhost} onChange={(e) => setRhost(e.target.value.trim())} />
+                  <span className="help">{t("add.rev.hostHelp")}</span>
+                </div>
+                <div className="field">
+                  <label htmlFor="add-rport">{t("add.rev.port")}</label>
+                  <input className="text mono" id="add-rport" dir="ltr" inputMode="numeric" value={rport} onChange={(e) => setRport(e.target.value.trim())} />
+                  <span className="help">{t("add.rev.portHelp")}</span>
+                </div>
+              </div>
+              <span className="err" role="alert">
+                {error}
               </span>
-            )}
-            {transport !== "auto" && <span className="help">{t(transport === "quic" ? "add.newAgentQuic" : "add.newAgent")}</span>}
-          </div>
+              {transportField(
+                transport === "auto"
+                  ? t("add.rev.auto")
+                  : t(`add.x.${transport}.d`, { p: String(/^\d+$/.test(rport) ? (transport === "wss" || transport === "quic" ? +rport + 1 : +rport) : "?") }),
+              )}
+              {/^\d+$/.test(rport) && +rport > 0 && +rport < 65535 && (
+                <p className="help">
+                  {t("add.rev.ports")} <code dir="ltr">{linkPorts(+rport, transport)}</code>
+                </p>
+              )}
+              <ol className="gre-steps">
+                <li>{t("add.rev.step1")}</li>
+                <li>{t("add.rev.step2")}</li>
+                <li>{t("add.rev.step3")}</li>
+              </ol>
+            </>
+          )}
+          {way === "gre" && (
+            <>
+              <div className="field">
+                <label htmlFor="add-ip">{t("add.gre.ip")}</label>
+                <input className="text mono" id="add-ip" dir="ltr" inputMode="decimal" placeholder="198.51.100.7" value={ip} onChange={(e) => setIp(e.target.value.trim())} />
+                <span className="help">{t("add.gre.ipHelp")}</span>
+                <span className="err" role="alert">
+                  {error}
+                </span>
+              </div>
+              <div className="field">
+                <span className="label">{t("add.gre.panel")}</span>
+                {panelPublic ? (
+                  <code dir="ltr" className="gre-panel-addr">
+                    {panelPublic}
+                  </code>
+                ) : panelPublic === null ? (
+                  <span className="err small">{t("add.gre.err.noPanelAddr")}</span>
+                ) : (
+                  <span className="muted small">…</span>
+                )}
+                <span className="help">{t("add.gre.panelHelp")}</span>
+              </div>
+              <div className="field">
+                <span className="label">{t("add.gre.net")}</span>
+                {networks.length > 1 ? (
+                  <select className="select" aria-label={t("add.gre.net")} value={network?.id ?? ""} onChange={(e) => setNetId(e.target.value)} style={{ maxWidth: 360 }}>
+                    {networks.map((n) => (
+                      <option key={n.id} value={n.id}>
+                        {n.name} ({n.cidr})
+                      </option>
+                    ))}
+                  </select>
+                ) : network ? (
+                  <span className="help">
+                    {t("add.gre.netOne", { name: network.name })} <code dir="ltr">{network.cidr}</code>
+                  </span>
+                ) : (
+                  <span className="help">{t("add.gre.netNew")}</span>
+                )}
+              </div>
+              <ol className="gre-steps">
+                <li>{t("add.gre.step1")}</li>
+                <li>{t("add.gre.step2")}</li>
+                <li>{t("add.gre.step3")}</li>
+              </ol>
+            </>
+          )}
         </>
       )}
       {code && (
         <>
+          {rev && (
+            <div className="gre-made">
+              <span className="badge">{t("srv.revChip", { addr: `\u2066${rev.addr}\u2069` })}</span>
+              <span className="help">{t("add.rev.made", { addr: `\u2066${rev.addr}\u2069` })}</span>
+              <span className="help">
+                {t("add.rev.ports")} <code dir="ltr">{linkPorts(rev.port, transport)}</code>
+              </span>
+            </div>
+          )}
+          {gre && (
+            <div className="gre-made">
+              <span className="badge">{t("srv.greChip", { network: gre.network })}</span>
+              {/* The addresses are isolated left to right, so a Persian sentence around them keeps its order. */}
+              <span className="small">{t("add.gre.link", { panel: `⁦${gre.panel_addr}⁩`, server: `⁦${gre.server_addr}⁩`, name: `⁨${gre.name}⁩` })}</span>
+              <span className="help">{t("add.gre.made")}</span>
+            </div>
+          )}
           <div className="field">
             <span className="label">{t("add.run")}</span>
             <CodeBlock text={`bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh) --agent ${code}`} />
-            <span className="help">{t("add.runHelp")}</span>
+            <span className="help">{t(gre ? "add.gre.runHelp" : rev ? "add.rev.runHelp" : "add.runHelp")}</span>
             <span className="label" style={{ marginTop: "var(--sp-3)" }}>
               {t("add.runInstalled")}
             </span>
             <CodeBlock text={`kariz-manager --agent ${code}`} />
-            {transport !== "auto" && <span className="help">{t("add.via", { t: t(`add.x.${transport}`) })}</span>}
+            {!gre && transport !== "auto" && <span className="help">{t("add.via", { t: t(`add.x.${transport}`) })}</span>}
             <span className="countdown">{joined ? "" : t("add.valid", { m: digitsOf(mmss) })}</span>
           </div>
           <div className={`waiting ${joined ? "done" : ""}`}>
@@ -590,6 +775,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
             )}
             <span>{joined ? t("add.connected", { name: joined.name }) : t("add.waiting")}</span>
           </div>
+          {(gre || rev) && !joined && <p className="muted small">{t("add.gre.later")}</p>}
         </>
       )}
     </Dialog>
@@ -604,6 +790,8 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
   const [fixing, setFixing] = useState<string | null>(null);
   const [auto, setAuto] = useState<string | null>(null);
   const online = servers.filter((s) => s.online).length;
+  // Added, and its agent has never connected (one added over GRE waits here until its command is run).
+  const waiting = (s: ServerInfo) => !s.local && !s.online && !s.last_seen;
   const uptime = (secs: number) => {
     const d = Math.floor(secs / 86400);
     const h = Math.floor((secs % 86400) / 3600);
@@ -653,21 +841,27 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                       {s.name}
                       {s.local && <span className="badge">{t("srv.panelBadge")}</span>}
                     </div>
-                    <div className="srv-sub">
-                      {t("srv.version", { v: s.version })} · {s.arch}
-                    </div>
+                    <div className="srv-sub">{s.version ? `${t("srv.version", { v: s.version })} · ${s.arch}` : t("srv.notYet")}</div>
                   </div>
                   <StatePill
                     state={s.online ? "up" : "down"}
-                    label={s.online ? t("srv.online") : `${t("srv.offline")}${s.seen_secs != null ? ` · ${ago(s.seen_secs)}` : ""}`}
+                    label={s.online ? t("srv.online") : waiting(s) ? t("srv.waiting") : `${t("srv.offline")}${s.seen_secs != null ? ` · ${ago(s.seen_secs)}` : ""}`}
                   />
                 </header>
                 {!s.online && !s.local && (
                   <div className="srv-alert" role="status">
-                    <p>{s.last_error?.kind === "wrong_key" ? t("srv.alertKey") : t("srv.alertOff")}</p>
+                    <p>
+                      {waiting(s)
+                        ? s.reverse
+                          ? t("srv.alertWaitRev", { addr: `\u2066${hostPort(s.reverse.host, s.reverse.port)}\u2069` })
+                          : t(s.gre ? "srv.alertWaitGre" : "srv.alertWait")
+                        : s.last_error?.kind === "wrong_key"
+                          ? t("srv.alertKey")
+                          : t("srv.alertOff")}
+                    </p>
                     <button className="btn btn-primary btn-sm" type="button" onClick={() => setFixing(s.id)}>
                       <Icon name="restart" size={16} />
-                      {t("srv.reconnect")}
+                      {t(waiting(s) ? "srv.newCode" : "srv.reconnect")}
                     </button>
                   </div>
                 )}
@@ -700,6 +894,13 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                     <dd className="mono">{s.local ? t("srv.localLink") : s.link ?? "—"}</dd>
                   </div>
                 </dl>
+                {s.reverse && (
+                  <div className="srv-ips">
+                    <span className="badge" title={t("srv.viaRev", { addr: hostPort(s.reverse.host, s.reverse.port) })}>
+                      {t("srv.revChip", { addr: `\u2066${hostPort(s.reverse.host, s.reverse.port)}\u2069` })}
+                    </span>
+                  </div>
+                )}
                 {s.gre && (
                   <div className="srv-ips">
                     <span className="badge" title={t("srv.viaGre", { network: s.gre.network })}>

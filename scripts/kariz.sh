@@ -1566,7 +1566,16 @@ agent_join() {
     sleep 2
     systemctl is-active --quiet kariz-agent ||
         die "The agent did not start: journalctl -u kariz-agent -n 50"
-    ok "This server is connected: it shows up in the panel under Servers."
+    # A server the panel connects to (reverse): its agent listens instead of dialing.
+    local listen
+    listen=$(sed -n 's/^listen = "\(.*\)"$/\1/p' "$AGENT_CONF" | head -n 1)
+    if [[ -n "$listen" ]]; then
+        local lport=${listen##*:}
+        ok "This server is ready: its agent waits for the panel on port $lport."
+        info "Open TCP and UDP $lport and $((lport + 1)) to the panel's address; the panel connects within seconds."
+    else
+        ok "This server is connected: it shows up in the panel under Servers."
+    fi
     info "Follow it with: kariz-manager agent logs"
 }
 

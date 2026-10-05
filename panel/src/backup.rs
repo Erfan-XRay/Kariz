@@ -1,5 +1,6 @@
-//! A backup of the panel: the servers it knows (with the keys they prove themselves with)
-//! and the link token they dial with, in one file locked with a passphrase.
+//! A backup of the panel: the servers it knows (with the keys they prove themselves with),
+//! the link token they dial with, and where the panel dials the ones it connects to
+//! (reverse), in one file locked with a passphrase.
 //!
 //! Tunnels are not in it: they live on the servers, in their own files, and the panel
 //! reads them from there. Sessions and login links are not in it either.
@@ -30,6 +31,15 @@ struct Server {
     host: String,
 }
 
+/// A server the panel connects to (reverse): where it dials it.
+#[derive(Debug, Serialize, Deserialize)]
+struct ReverseRow {
+    server: String,
+    host: String,
+    port: u16,
+    transport: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Payload {
     format: u32,
@@ -37,6 +47,9 @@ struct Payload {
     panel: String,
     link_token: Option<String>,
     servers: Vec<Server>,
+    /// Not in backups from before reverse links: then there are none.
+    #[serde(default)]
+    reverse: Vec<ReverseRow>,
 }
 
 fn derive(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
@@ -85,12 +98,27 @@ pub fn export(db: &Db, passphrase: &str) -> Result<Vec<u8>> {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
+    let reverse = {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT server, host, port, transport FROM reverse_links ORDER BY server")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ReverseRow {
+                server: r.get(0)?,
+                host: r.get(1)?,
+                port: r.get(2)?,
+                transport: r.get(3)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
     let payload = Payload {
         format: 1,
         created: now(),
         panel: crate::version().to_owned(),
         link_token: db.meta("link_token")?,
         servers,
+        reverse,
     };
     let salt = random::<16>()?;
     let nonce = random::<12>()?;
@@ -147,6 +175,13 @@ pub fn import(db: &Db, passphrase: &str, file: &[u8], replace: bool) -> Result<u
             params![s.id, s.name, s.key, s.created, s.last_seen, s.version, s.arch, s.host],
         )?;
     }
+    tx.execute("DELETE FROM reverse_links", [])?;
+    for r in &payload.reverse {
+        tx.execute(
+            "INSERT INTO reverse_links (server, host, port, transport) VALUES (?1, ?2, ?3, ?4)",
+            params![r.server, r.host, r.port, r.transport],
+        )?;
+    }
     if let Some(token) = &payload.link_token {
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('link_token', ?1) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -167,6 +202,13 @@ mod tests {
         db.conn()
             .execute(
                 "INSERT INTO servers (id, name, key, created) VALUES ('a1', 'frankfurt', 'k1', 100), ('b2', 'istanbul', 'k2', 200)",
+                [],
+            )
+            .unwrap();
+        // The panel connects to istanbul (reverse).
+        db.conn()
+            .execute(
+                "INSERT INTO reverse_links (server, host, port, transport) VALUES ('b2', 'ist.example.com', 29001, NULL)",
                 [],
             )
             .unwrap();
@@ -197,6 +239,16 @@ mod tests {
             .query_row("SELECT name FROM servers WHERE id = 'b2'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(name, "istanbul");
+        // And where the panel dials the one it connects to.
+        let at: (String, u16) = fresh
+            .conn()
+            .query_row(
+                "SELECT host, port FROM reverse_links WHERE server = 'b2'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(at, ("ist.example.com".to_owned(), 29001));
     }
 
     #[test]

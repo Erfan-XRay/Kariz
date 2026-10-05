@@ -29,7 +29,7 @@ use crate::config::random_hex;
 use crate::db::Db;
 use crate::join::{self, JoinCode, JOIN_TTL};
 use crate::manage::{Services, Systemd};
-use crate::wire::{Ack, Health, HelloReply, Request, TunnelInfo, MAX_REPLY};
+use crate::wire::{Ack, Health, HelloReply, NetSpec, Request, TunnelInfo, MAX_REPLY};
 
 /// How often the panel asks an agent for its state.
 pub const POLL: Duration = Duration::from_secs(2);
@@ -67,6 +67,31 @@ pub struct GreAddr {
     pub addr: String,
     pub peer_addr: String,
 }
+
+/// A server added to come in through a private (GRE) network: the code its agent joins
+/// with, and what the panel set up for it.
+#[derive(Debug, Clone, Serialize)]
+pub struct GreJoin {
+    pub code: String,
+    /// The server (listed now, waiting for its agent).
+    pub id: String,
+    pub name: String,
+    /// The private network the link's addresses come from (its name).
+    pub network: String,
+    /// The panel's end of the link (what the agent dials) and the new server's.
+    pub panel_addr: String,
+    pub server_addr: String,
+}
+
+/// The pools a private network made for *Add server* over GRE is tried on, in order (the
+/// same the Networks page suggests).
+const JOIN_POOLS: [&str; 5] = [
+    "10.77.0.0/16",
+    "10.88.0.0/16",
+    "10.200.0.0/16",
+    "172.30.0.0/16",
+    "192.168.222.0/24",
+];
 
 /// Why a server's link last ended or was refused, for the Servers page to explain.
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +131,8 @@ pub struct ServerView {
     /// The private network link its agent connects through (its link to the panel comes from
     /// that link's address), when it does.
     pub gre: Option<GreRef>,
+    /// Where the panel dials this server, for one it connects to (reverse).
+    pub reverse: Option<crate::reverse::Reverse>,
     pub health: Option<Health>,
     /// The server's public IPv4 and IPv6 addresses, when they are known: what its agent
     /// reports, or the address its link comes from.
@@ -163,6 +190,22 @@ fn gre_via(
         })
 }
 
+/// The link between the panel's own server and `server`, for a server whose agent has not
+/// come in yet.
+fn gre_waiting(
+    links: &[crate::networks::Link],
+    names: &HashMap<String, String>,
+    server: &str,
+) -> Option<GreRef> {
+    links
+        .iter()
+        .find(|l| (l.a == server && l.b == LOCAL) || (l.b == server && l.a == LOCAL))
+        .map(|l| GreRef {
+            link: l.id.clone(),
+            network: names.get(&l.network).cloned().unwrap_or_default(),
+        })
+}
+
 /// What a join secret is good for.
 enum Spent {
     /// A new server, with the name the code carried (empty: the agent's host name).
@@ -198,6 +241,9 @@ pub struct Hub {
     pub(crate) db: Db,
     kariz_dir: PathBuf,
     live: Mutex<HashMap<String, Live>>,
+    /// Servers the panel dials (reverse): the generation of each one's dialing loop. A loop
+    /// whose number is no longer the server's stops (`crate::reverse`).
+    pub(crate) reverse_gen: Mutex<HashMap<String, u64>>,
     /// The panel's own server, which answers the same requests as an agent, in-process.
     local: Arc<Agent>,
     services: Arc<dyn Services>,
@@ -273,6 +319,7 @@ impl Hub {
             services: Default::default(),
             release_key: None,
             transport: None,
+            listen: None,
         };
         Arc::new(Self {
             history: crate::history::History::new(db.clone()),
@@ -292,6 +339,7 @@ impl Hub {
             telegram: crate::telegram::State::default(),
             kariz_dir,
             live: Mutex::new(HashMap::new()),
+            reverse_gen: Mutex::new(HashMap::new()),
         })
     }
 
@@ -558,6 +606,8 @@ impl Hub {
             j: secret,
             n: name.map(str::to_owned),
             x: transport.map(str::to_owned),
+            g: None,
+            l: None,
         }))
     }
 
@@ -565,7 +615,42 @@ impl Hub {
     /// that server again (same id, a new key), so the server keeps its name, its tunnels and
     /// its private network links. It is for an agent that is lost, broken or reinstalled,
     /// and for one that is to use another link transport.
+    ///
+    /// When `panel` is the panel's end of a GRE link to this server, the code carries the
+    /// server's end too, so the agent can make the link again before it dials across it.
     pub fn create_rejoin(&self, id: &str, panel: &str, transport: Option<&str>) -> Result<String> {
+        let host = panel
+            .rsplit_once(':')
+            .map_or(panel, |(h, _)| h)
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        let link = self.gre_join_spec(id, host);
+        self.rejoin_code(id, panel, transport, link, None)
+    }
+
+    /// The server's end of the GRE link whose other end, on the panel's server, has the
+    /// address `panel_addr`: what a join code carries for an agent that comes in through it.
+    /// `None` when there is no such link, or an end's public address is not known.
+    fn gre_join_spec(&self, server: &str, panel_addr: &str) -> Option<NetSpec> {
+        let link = self.networks.links(None).ok()?.into_iter().find(|l| {
+            (l.a == LOCAL && l.b == server && l.addr_a == panel_addr)
+                || (l.b == LOCAL && l.a == server && l.addr_b == panel_addr)
+        })?;
+        let (mine, panels) = (self.addr_of(server)?, self.addr_of(LOCAL)?);
+        Some(crate::netops::spec_for(&link, server, &mine, &panels))
+    }
+
+    /// A code that makes the agent that spends it server `id` again: it dials `panel` (with
+    /// the GRE `link` made first, if there is one), or, with `listen`, waits there for the
+    /// panel to dial it (reverse; `panel` is then empty).
+    pub(crate) fn rejoin_code(
+        &self,
+        id: &str,
+        panel: &str,
+        transport: Option<&str>,
+        link: Option<NetSpec>,
+        listen: Option<String>,
+    ) -> Result<String> {
         if transport.is_some_and(|x| !join::valid_transport(x)) {
             bail!("unknown transport");
         }
@@ -594,7 +679,158 @@ impl Hub {
             j: secret,
             n: Some(name),
             x: transport.map(str::to_owned),
+            g: link,
+            l: listen,
         }))
+    }
+
+    /// Adds a server that reaches the panel only through a private (GRE) network: the panel
+    /// cannot ask it anything until its agent is in, so it does its own half now. The server
+    /// is listed (waiting for its agent), the link between the two gets its private
+    /// addresses, and the panel's end of it is made on this server. The code carries the
+    /// other end: the agent on the new server makes it, then dials the panel across it.
+    ///
+    /// `public_ip` is the new server's public IPv4 address (GRE runs between the two public
+    /// addresses); `network` the private network to take the addresses from, else the first
+    /// one, else a new one is made. Errors are codes the page explains (`no_address:local`,
+    /// `no_gre:local`, `same_address`, `address_taken:ID`, `no_such_network`, `pool_full`).
+    pub async fn create_gre_join(
+        self: &Arc<Self>,
+        name: Option<&str>,
+        public_ip: &str,
+        network: Option<&str>,
+        transport: Option<&str>,
+        agent_port: u16,
+    ) -> Result<GreJoin> {
+        if transport.is_some_and(|x| !join::valid_transport(x))
+            || name.is_some_and(|n| !join::valid_name(n))
+            || !crate::netops::valid_addr(public_ip)
+        {
+            bail!("bad_input");
+        }
+        let panels = self
+            .addr_of(LOCAL)
+            .filter(|a| a.parse::<std::net::Ipv4Addr>().is_ok())
+            .ok_or_else(|| anyhow!("no_address:{LOCAL}"))?;
+        if panels == public_ip {
+            bail!("same_address");
+        }
+        // A server the panel knows already is reconnected, not added a second time.
+        let known: Vec<String> = self
+            .db
+            .conn()
+            .prepare("SELECT id FROM servers")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if let Some(other) = known
+            .iter()
+            .find(|s| self.addr_of(s).as_deref() == Some(public_ip))
+        {
+            bail!("address_taken:{other}");
+        }
+        let status: crate::wire::NetStatus = self
+            .ask_as(LOCAL, &Request::NetStatus)
+            .await
+            .map_err(|e| anyhow!("no_gre:{LOCAL}:{e:#}"))?;
+        if !status.gre {
+            bail!("no_gre:{LOCAL}");
+        }
+        let network = self.network_for_join(network)?;
+
+        let (id, name) = self.add_waiting(name, public_ip)?;
+        let made: Result<GreJoin> = async {
+            self.set_addr(&id, public_ip)?;
+            let link = self
+                .networks
+                .create_links(&network, &[(LOCAL.to_owned(), id.clone())], &self.routes())?
+                .remove(0);
+            let ours = crate::netops::spec_for(&link, LOCAL, &panels, public_ip);
+            let ack: Ack = self.ask_as(LOCAL, &Request::NetUp { net: ours }).await?;
+            if !ack.ok {
+                bail!("{}", ack.error.unwrap_or_else(|| "failed".into()));
+            }
+            let theirs = crate::netops::spec_for(&link, &id, public_ip, &panels);
+            let panel_addr = if link.a == LOCAL {
+                link.addr_a.clone()
+            } else {
+                link.addr_b.clone()
+            };
+            let code = self.rejoin_code(
+                &id,
+                &format!("{panel_addr}:{agent_port}"),
+                transport,
+                Some(theirs.clone()),
+                None,
+            )?;
+            Ok(GreJoin {
+                code,
+                id: id.clone(),
+                name: name.clone(),
+                panel_addr,
+                server_addr: theirs.address,
+                network: self
+                    .networks
+                    .networks()?
+                    .into_iter()
+                    .find(|n| n.id == network)
+                    .map(|n| n.name)
+                    .unwrap_or_default(),
+            })
+        }
+        .await;
+        if made.is_err() {
+            // Nothing half made stays: the server, its address and its link go again (and
+            // with the link, the panel's end of it).
+            let _ = self.remove(&id);
+        }
+        made
+    }
+
+    /// Lists a server that is waiting for its agent: a key nobody holds (the code it is
+    /// added with gives the agent a new one). Without a name, it is named after `addr`.
+    pub(crate) fn add_waiting(&self, name: Option<&str>, addr: &str) -> Result<(String, String)> {
+        let id = random_hex(8)?;
+        let wanted = name.map_or_else(
+            || {
+                let plain: String = addr
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                    .collect();
+                format!("server-{}", plain.trim_matches('-'))
+            },
+            str::to_owned,
+        );
+        let name = self.unique_name(&wanted)?;
+        self.db.conn().execute(
+            "INSERT INTO servers (id, name, key, created, last_seen) VALUES (?1, ?2, ?3, ?4, 0)",
+            params![id, name, random_hex(32)?, now()],
+        )?;
+        Ok((id, name))
+    }
+
+    /// The private network a server added over GRE takes its addresses from: the one asked
+    /// for, else the first there is, else a new one (`kariz`, on a pool no server routes).
+    fn network_for_join(&self, wanted: Option<&str>) -> Result<String> {
+        let all = self.networks.networks()?;
+        if let Some(id) = wanted {
+            return all
+                .into_iter()
+                .find(|n| n.id == id)
+                .map(|n| n.id)
+                .ok_or_else(|| anyhow!("no_such_network"));
+        }
+        if let Some(first) = all.into_iter().next() {
+            return Ok(first.id);
+        }
+        let routes: Vec<(String, Vec<String>)> = self.routes().into_iter().collect();
+        let mut last = anyhow!("pool_full");
+        for pool in JOIN_POOLS {
+            match self.networks.create_network("kariz", pool, &routes) {
+                Ok(made) => return Ok(made.id),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
     }
 
     /// The panel's own address on each GRE link to another server, to offer as the address
@@ -661,7 +897,7 @@ impl Hub {
     }
 
     /// Remembers why a server's link failed, for the Servers page.
-    fn note_error(&self, id: &str, kind: &'static str, detail: String) {
+    pub(crate) fn note_error(&self, id: &str, kind: &'static str, detail: String) {
         self.live().entry(id.to_owned()).or_default().last_error = Some(LinkError {
             at: now(),
             kind,
@@ -709,7 +945,7 @@ impl Hub {
         }
     }
 
-    fn unique_name(&self, wanted: &str) -> Result<String> {
+    pub(crate) fn unique_name(&self, wanted: &str) -> Result<String> {
         let base = if join::valid_name(wanted) {
             wanted.to_owned()
         } else {
@@ -771,6 +1007,7 @@ impl Hub {
         {
             let conn = self.db.conn();
             conn.execute("DELETE FROM net_links WHERE a = ?1 OR b = ?1", [id])?;
+            conn.execute("DELETE FROM reverse_links WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM server_addrs WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM server_seen WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM pending_deletes WHERE server = ?1", [id])?;
@@ -784,6 +1021,8 @@ impl Hub {
             .conn()
             .execute("DELETE FROM servers WHERE id = ?1", [id])?
             == 1;
+        // The panel stops dialing it, if it connected to it.
+        self.forget_reverse(id);
         for peer in peers {
             let hub = self.clone();
             tokio::spawn(async move {
@@ -813,7 +1052,9 @@ impl Hub {
                         match pending.establish(Side::Client).await {
                             Ok(session) => {
                                 let ip = peer.ip().to_canonical();
-                                if let Err(e) = hub.run_session(Arc::new(session), link, ip).await {
+                                if let Err(e) =
+                                    hub.run_session(Arc::new(session), link, ip, None).await
+                                {
                                     debug!(%peer, error = %e, "an agent session ended");
                                 }
                             }
@@ -829,16 +1070,20 @@ impl Hub {
         }
     }
 
-    async fn run_session(
+    /// Serves one agent's link until it ends. `expected`: the server the panel dialed (a
+    /// reverse link); an agent there that turns out to be another server is let go.
+    pub(crate) async fn run_session(
         self: &Arc<Self>,
         session: Arc<Session>,
         link: &'static str,
         peer_ip: std::net::IpAddr,
+        expected: Option<&str>,
     ) -> Result<()> {
-        let identified = tokio::time::timeout(Duration::from_secs(20), self.identify(&session))
-            .await
-            .map_err(|_| anyhow!("the agent did not identify itself in time"))
-            .and_then(|r| r);
+        let identified =
+            tokio::time::timeout(Duration::from_secs(20), self.identify(&session, expected))
+                .await
+                .map_err(|_| anyhow!("the agent did not identify itself in time"))
+                .and_then(|r| r);
         let (id, hello) = match identified {
             Ok(found) => found,
             Err(e) => {
@@ -904,8 +1149,21 @@ impl Hub {
     }
 
     /// Checks who is on the other end of a new link: a registered agent proves its key, a
-    /// new one is registered with its join secret.
-    async fn identify(&self, session: &Arc<Session>) -> Result<(String, HelloReply)> {
+    /// new one is registered with its join secret. On a link the panel dialed (`expected`,
+    /// reverse) it must be that server: another one is let go before anything is written.
+    async fn identify(
+        &self,
+        session: &Arc<Session>,
+        expected: Option<&str>,
+    ) -> Result<(String, HelloReply)> {
+        let other = |id: &str| -> Result<()> {
+            match expected {
+                Some(want) if want != id => {
+                    bail!("the agent there is another server ({id}), not {want}")
+                }
+                _ => Ok(()),
+            }
+        };
         let challenge = random_hex(16)?;
         let raw = request_on(
             session,
@@ -917,6 +1175,7 @@ impl Hub {
         let hello: HelloReply = serde_json::from_slice(&raw)?;
 
         if let (Some(id), Some(proof)) = (&hello.id, &hello.proof) {
+            other(id)?;
             let key = self
                 .server_key(id)?
                 .ok_or_else(|| anyhow!("an agent with an unknown id"))?;
@@ -941,6 +1200,13 @@ impl Hub {
         let Some(spent) = self.spend_join(secret)? else {
             bail!("an agent with a join secret that is wrong, used or expired");
         };
+        match &spent {
+            Spent::New(_) if expected.is_some() => {
+                bail!("the agent there has a code for a new server, not for this one")
+            }
+            Spent::Rejoin { id } | Spent::Unconfirmed { id, .. } => other(id)?,
+            Spent::New(_) => {}
+        }
         let hash = hash_token(secret);
         let mut rejoined = false;
         let (id, key, name) = match spent {
@@ -1245,9 +1511,15 @@ impl Hub {
                     .map(str::to_owned),
                 last_seen: (last_seen > 0).then_some(last_seen),
                 last_error: l.and_then(|l| l.last_error.clone()),
-                gre: l
-                    .and_then(|l| l.peer_ip)
-                    .and_then(|ip| gre_via(&links, &names, id, &ip.to_string())),
+                reverse: None,
+                gre: match l.and_then(|l| l.peer_ip) {
+                    Some(ip) => gre_via(&links, &names, id, &ip.to_string()),
+                    // Never connected, and linked to the panel's server: it was added to
+                    // come in through that link (links are otherwise made between servers
+                    // that are connected).
+                    None if !local && last_seen == 0 => gre_waiting(&links, &names, id),
+                    None => None,
+                },
                 health: l.and_then(|l| l.health.clone()),
                 ip4,
                 ip6,
@@ -1281,8 +1553,11 @@ impl Hub {
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
+        let mut reverse: HashMap<String, crate::reverse::Reverse> =
+            self.reverse_all()?.into_iter().collect();
         for s in &mut out {
             s.addr = addrs.get(&s.id).cloned();
+            s.reverse = reverse.remove(&s.id);
         }
         Ok(out)
     }

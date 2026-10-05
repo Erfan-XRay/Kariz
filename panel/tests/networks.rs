@@ -208,6 +208,7 @@ async fn links_are_made_on_both_servers_reused_undone_and_protected() {
         quic_obfs: false,
         tls_cert: None,
         tls_key: None,
+        tls_host: None,
         forwards: Vec::new(),
         rotate: false,
         network,
@@ -299,4 +300,173 @@ async fn links_are_made_on_both_servers_reused_undone_and_protected() {
     assert!(hub.remove(&remote).unwrap());
     assert!(hub.networks.links(None).unwrap().is_empty());
     assert_eq!(hub.addr_of(&remote), None);
+}
+
+/// *Add server* over a private network: the panel makes its own end of the GRE link at once
+/// and lists the server as waiting; the code carries the other end, which the agent makes
+/// before it dials the panel's private address. A reconnect code through that address
+/// carries the link again.
+#[tokio::test]
+async fn a_server_added_over_gre_makes_its_end_from_the_code_and_comes_in() {
+    let root = tempfile::tempdir().unwrap();
+    let (local_fake, agent_fake) = (Arc::new(Fake::default()), Arc::new(Fake::default()));
+    let hub = Hub::with_options(
+        Db::in_memory().unwrap(),
+        root.path().join("kariz"),
+        Arc::new(Systemd),
+        Duration::from_secs(5),
+        Some(root.path().join("panel")),
+        Some(local_fake.clone()),
+    );
+    std::fs::create_dir_all(root.path().join("panel")).unwrap();
+    let acceptor = kariz::link::Acceptor::bind("127.0.0.1:0", &hub.link_token().unwrap())
+        .await
+        .unwrap();
+    let addr = acceptor.local_addr().unwrap().to_string();
+    let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
+    tokio::spawn(hub.clone().serve_agents(acceptor));
+
+    // The panel must know its own public address: GRE runs between the two.
+    let why = |r: anyhow::Result<kariz_panel::hub::GreJoin>| format!("{:#}", r.unwrap_err());
+    assert_eq!(hub.addr_of(LOCAL), None);
+    assert_eq!(
+        why(hub
+            .create_gre_join(None, "192.0.2.2", None, None, port)
+            .await),
+        "no_address:local"
+    );
+    hub.set_addr(LOCAL, "192.0.2.1").unwrap();
+    for (bad, code) in [
+        ("not-an-ip", "bad_input"),
+        ("127.0.0.1", "bad_input"),
+        ("192.0.2.1", "same_address"),
+    ] {
+        assert_eq!(
+            why(hub.create_gre_join(None, bad, None, None, port).await),
+            code,
+            "{bad}"
+        );
+    }
+    assert!(hub.networks.networks().unwrap().is_empty());
+
+    let made = hub
+        .create_gre_join(Some("behind-gre"), "192.0.2.2", None, None, port)
+        .await
+        .unwrap();
+    assert_eq!(
+        (made.name.as_str(), made.network.as_str()),
+        ("behind-gre", "kariz")
+    );
+    // A network was made for it, and the link took a /30 of it.
+    let nets = hub.networks.networks().unwrap();
+    assert_eq!((nets.len(), nets[0].cidr.as_str()), (1, "10.77.0.0/16"));
+    let link = hub.networks.links(None).unwrap().remove(0);
+    assert!(
+        [&link.a, &link.b].contains(&&made.id) && [&link.a, &link.b].contains(&&LOCAL.to_owned())
+    );
+    // The panel's end is up already, from its public address to the new server's.
+    assert!(
+        local_fake.calls().iter().any(|c| c
+            == &format!(
+                "ip tunnel add {} mode gre local 192.0.2.1 remote 192.0.2.2 key 1 ttl 64",
+                link.ifname
+            )),
+        "{:?}",
+        local_fake.calls()
+    );
+    // Listed, waiting for its agent, as a server that comes in through the link.
+    let listed = |hub: &Hub| {
+        hub.snapshot()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == made.id)
+            .unwrap()
+    };
+    let waiting = listed(&hub);
+    assert!(!waiting.online && waiting.last_seen.is_none());
+    assert_eq!(waiting.gre.map(|g| g.network).as_deref(), Some("kariz"));
+    assert_eq!(waiting.addr.as_deref(), Some("192.0.2.2"));
+    // The same address cannot be added twice: that server is reconnected instead.
+    assert_eq!(
+        why(hub
+            .create_gre_join(None, "192.0.2.2", None, None, port)
+            .await),
+        format!("address_taken:{}", made.id)
+    );
+
+    // The code: the panel's private address, and the new server's end of the link.
+    let code = kariz_panel::join::decode(&made.code).unwrap();
+    assert_eq!(code.p, format!("{}:{port}", made.panel_addr));
+    let theirs = code.g.clone().expect("the code carries the link");
+    assert_eq!(
+        (theirs.local.as_str(), theirs.remote.as_str(), theirs.key),
+        ("192.0.2.2", "192.0.2.1", link.gre_key)
+    );
+    assert_eq!(
+        (theirs.address.as_str(), theirs.peer.as_str()),
+        (made.server_addr.as_str(), made.panel_addr.as_str())
+    );
+    assert_eq!(theirs.name, link.ifname);
+
+    // ---- the agent joins with it ----
+    let agent_dir = root.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let agent_file = agent_dir.join("agent.toml");
+    let mut config = agent::enroll_from_code(&made.code, &agent_file).unwrap();
+    // Its end of the link is saved, to be made when the agent starts.
+    let saved = std::fs::read_to_string(agent_dir.join("net.toml")).unwrap();
+    assert!(
+        saved.contains(&link.ifname) && saved.contains("192.0.2.1"),
+        "{saved}"
+    );
+    // (Here the private address is not routed: the agent is sent to the panel directly,
+    // as the link would carry it.)
+    config.panel = addr.clone();
+    config.save(&agent_file).unwrap();
+    let agent = Agent::with_exec(&agent_file, config, Arc::new(Systemd), agent_fake.clone());
+    tokio::spawn(agent.run());
+    for _ in 0..100 {
+        if listed(&hub).online {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let joined = listed(&hub);
+    assert!(joined.online, "the agent came in as the waiting server");
+    assert_eq!(joined.name, "behind-gre");
+    // The agent made its end before it dialed: from its address to the panel's.
+    let first = agent_fake.calls().into_iter().position(|c| {
+        c.starts_with(&format!(
+            "ip tunnel add {} mode gre local 192.0.2.2 remote 192.0.2.1",
+            link.ifname
+        ))
+    });
+    assert!(first.is_some(), "{:?}", agent_fake.calls());
+
+    // ---- a code to reconnect it through the panel's private address carries the link ----
+    let again = hub
+        .create_rejoin(&made.id, &format!("{}:{port}", made.panel_addr), None)
+        .unwrap();
+    assert_eq!(kariz_panel::join::decode(&again).unwrap().g, Some(theirs));
+    // One through a public address does not.
+    let public = hub
+        .create_rejoin(&made.id, "192.0.2.1:29001", None)
+        .unwrap();
+    assert_eq!(kariz_panel::join::decode(&public).unwrap().g, None);
+
+    // ---- removing the server takes the link, and the panel's end of it, with it ----
+    assert!(hub.remove(&made.id).unwrap());
+    assert!(hub.networks.links(None).unwrap().is_empty());
+    let mut gone = false;
+    for _ in 0..50 {
+        gone = local_fake
+            .calls()
+            .iter()
+            .any(|c| c == &format!("ip link del {}", link.ifname));
+        if gone {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(gone, "{:?}", local_fake.calls());
 }

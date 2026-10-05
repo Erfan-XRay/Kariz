@@ -209,7 +209,9 @@ impl Alerter {
                         ));
                     }
                 }
-            } else {
+            } else if s.local || s.last_seen.is_some() {
+                // (A server whose agent has never connected, one added and waiting for its
+                // agent, is not down: there is nothing to tell about it yet.)
                 self.servers.entry(key).or_insert_with(|| Track {
                     name: s.name.clone(),
                     since: now,
@@ -392,9 +394,10 @@ mod tests {
             addr_default: None,
             seen_secs: None,
             link: None,
-            last_seen: None,
+            last_seen: Some(1),
             last_error: None,
             gre: None,
+            reverse: None,
             health: None,
             ip4: None,
             ip6: None,
@@ -412,6 +415,23 @@ mod tests {
     /// An alerter whose startup quiet time is over.
     fn settled() -> Alerter {
         Alerter::new(-1000)
+    }
+
+    #[test]
+    fn a_server_waiting_for_its_first_agent_is_not_down() {
+        let mut a = settled();
+        let waiting = [ServerView {
+            last_seen: None,
+            ..server("w", false, vec![])
+        }];
+        assert!(a.step(&waiting, 0, R).is_empty());
+        assert!(a.step(&waiting, 600, R).is_empty());
+        // Once its agent has been in, it is a server like any other.
+        let came = [server("w", true, vec![])];
+        assert!(a.step(&came, 700, R).is_empty());
+        let gone = [server("w", false, vec![])];
+        a.step(&gone, 800, R);
+        assert_eq!(a.step(&gone, 900, R).len(), 1);
     }
 
     #[test]

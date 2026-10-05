@@ -1,5 +1,9 @@
 //! The agent: what runs on every other server (`kariz-panel agent`). It dials the panel,
 //! proves who it is, and answers the panel's requests: a fixed list, none of which runs anything the panel names.
+//!
+//! On a server the panel connects to (reverse, `listen` in its settings) it does not dial:
+//! it listens on its own port, over the same link transports as a panel's agents port, and
+//! the panel dials it. Everything after the link is made is the same.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -48,6 +52,9 @@ pub struct AgentConfig {
     /// The one link transport to use (`tcpmux`, `kcp`, `wss`, `quic`); none: try them in turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
+    /// Reverse: listen here for the panel (`0.0.0.0:PORT`) instead of dialing `panel`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
 }
 
 fn default_kariz_dir() -> PathBuf {
@@ -67,6 +74,7 @@ impl AgentConfig {
             services: Default::default(),
             release_key: None,
             transport: code.x.clone(),
+            listen: code.l.clone(),
         }
     }
 
@@ -585,6 +593,9 @@ impl Agent {
                 }
             }
         }
+        if let Some(listen) = c.listen.clone() {
+            return self.listen_for_panel(&listen).await;
+        }
         // One transport if the join code named it, else all of them in turn.
         let kinds: Vec<_> = kariz::link::LINK_TRANSPORTS
             .into_iter()
@@ -666,6 +677,104 @@ impl Agent {
     }
 }
 
+impl Agent {
+    /// Reverse: waits for the panel on `listen`, over every link transport (or the one the
+    /// code named), the way a panel's agents port does: `tcpmux` and `kcp` on the port (TCP
+    /// and UDP), `wss` and `quic` on the next. `wss` uses a self-signed certificate made
+    /// here (the panel does not check it: the token handshake inside proves who is who).
+    /// Each link the panel makes is served like one the agent dialed.
+    async fn listen_for_panel(self: Arc<Self>, listen: &str) -> Result<()> {
+        let c = self.config();
+        let kinds: Vec<_> = kariz::link::LINK_TRANSPORTS
+            .into_iter()
+            .filter(|k| !matches!(c.transport.as_deref(), Some(t) if t != k.name()))
+            .collect();
+        if kinds.is_empty() {
+            bail!(
+                "unknown transport {:?} in the agent's settings",
+                c.transport.unwrap_or_default()
+            );
+        }
+        let (cert, key) = (
+            self.path.with_file_name("link-cert.pem"),
+            self.path.with_file_name("link-key.pem"),
+        );
+        let mut accepting = tokio::task::JoinSet::new();
+        for kind in kinds {
+            let addr = kariz::link::address_for(listen, kind)?;
+            for one in listen_addresses(&addr) {
+                let bound = if kind == kariz::config::TransportKind::Wss {
+                    crate::cert::ensure(&cert, &key)?;
+                    kariz::link::Acceptor::bind_wss(&one, &c.link_token, &cert, &key).await
+                } else {
+                    kariz::link::Acceptor::bind_via(&one, &c.link_token, kind).await
+                };
+                match bound {
+                    Ok(acceptor) => {
+                        info!(address = %one, transport = kind.name(), "waiting for the panel");
+                        accepting.spawn(self.clone().serve_panel_links(acceptor));
+                    }
+                    Err(e) => {
+                        tracing::debug!(address = %one, transport = kind.name(), error = %e, "could not listen")
+                    }
+                }
+            }
+        }
+        if accepting.is_empty() {
+            bail!("could not listen for the panel on {listen} (is the port in use?)");
+        }
+        while accepting.join_next().await.is_some() {}
+        bail!("the agent stopped listening for the panel")
+    }
+
+    /// Takes the panel's links on one acceptor, for ever.
+    async fn serve_panel_links(self: Arc<Self>, acceptor: kariz::link::Acceptor) {
+        let kind = acceptor.kind().name();
+        loop {
+            let pending = match acceptor.accept().await {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(transport = kind, error = %e, "accepting the panel's link failed");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+            };
+            let agent = self.clone();
+            tokio::spawn(async move {
+                let peer = pending.peer();
+                match pending.establish(Side::Server).await {
+                    Ok(session) => {
+                        info!(panel = %peer, transport = kind, "the panel connected");
+                        crate::agent_update::touch(&agent.path.with_file_name("connected"));
+                        let started = std::time::Instant::now();
+                        let (asked, why) = agent.serve_with(session, || {}).await;
+                        warn!(
+                            transport = kind,
+                            requests = asked,
+                            secs = started.elapsed().as_secs(),
+                            reason = %why,
+                            "the panel's link ended; waiting for it again"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::debug!(%peer, transport = kind, error = %e, "a link did not authenticate")
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// The addresses to listen on for `addr`: one for every IPv4 address (`0.0.0.0:P`) is taken
+/// on IPv6 too (`[::]:P`), so either can reach it. Where the IPv6 socket takes IPv4 as well
+/// (Linux), the IPv4 one is refused as in use, which is fine.
+pub fn listen_addresses(addr: &str) -> Vec<String> {
+    match addr.strip_prefix("0.0.0.0:") {
+        Some(port) => vec![format!("[::]:{port}"), addr.to_owned()],
+        None => vec![addr.to_owned()],
+    }
+}
+
 /// Beside `agent.toml`: the link transport that last worked. A file of its own, so an
 /// older agent (a rolled back update) still reads its settings.
 const TRANSPORT_FILE: &str = "link-transport";
@@ -681,8 +790,25 @@ fn to_json<T: Serialize>(value: &T) -> Vec<u8> {
 }
 
 /// Reads a join code, writes the agent's settings from it, and returns them.
+///
+/// A code for a server that reaches the panel through a private network carries its end of
+/// the GRE link: it is saved with the links the agent makes when it starts, before it dials.
+/// An interface of that name that is there with other settings is taken down, so the agent
+/// makes it again with the code's.
 pub fn enroll_from_code(code_text: &str, path: &Path) -> Result<AgentConfig> {
     let code = join::decode(code_text)?;
+    if let Some(link) = code.g.clone() {
+        let name = link.name.clone();
+        let net = crate::net::Net::new(Some(path.with_file_name("net.toml")));
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        if net.keep(link)? && Path::new("/sys/class/net").join(&name).exists() {
+            let _ = std::process::Command::new("ip")
+                .args(["link", "del", name.as_str()])
+                .status();
+        }
+    }
     let config = AgentConfig::from_join(&code);
     config.save(path)?;
     Ok(config)
@@ -731,6 +857,8 @@ mod tests {
             j: "j".repeat(32),
             n: None,
             x: None,
+            g: None,
+            l: None,
         };
         let config = enroll_from_code(&join::encode(&code), &path).unwrap();
         assert_eq!(config.join.as_deref(), Some(code.j.as_str()));
@@ -818,6 +946,8 @@ target = \"127.0.0.1:443\"
             j: "j".into(),
             n: None,
             x: None,
+            g: None,
+            l: None,
         });
         config.kariz_dir = dir.path().to_path_buf();
         let agent = Agent::new(&dir.path().join("agent.toml"), config);
@@ -901,6 +1031,8 @@ target = \"127.0.0.1:443\"
             j: "j".into(),
             n: None,
             x: None,
+            g: None,
+            l: None,
         });
         config.kariz_dir = dir.path().to_path_buf();
         let agent = Agent::new(&dir.path().join("agent.toml"), config);

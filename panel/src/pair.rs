@@ -54,6 +54,11 @@ pub struct PairRequest {
     pub tls_cert: Option<String>,
     #[serde(default)]
     pub tls_key: Option<String>,
+    /// wss with a real certificate: the domain or address it was issued for. The dialing
+    /// side checks the certificate against this name (and sends it as SNI), whatever address
+    /// it dials and whatever WebSocket Host it sends.
+    #[serde(default)]
+    pub tls_host: Option<String>,
     #[serde(default)]
     pub forwards: Vec<ForwardInfo>,
     /// Edit only: make a new token for both sides.
@@ -86,7 +91,7 @@ impl PairRequest {
             mux: self.mux.clone().filter(|m| !m.is_empty()),
             encryption: self.chosen_encryption().map(str::to_owned),
             quic_obfs: self.sealed(),
-            tls_sni: (!accepts).then(|| self.tls_sni.clone()).flatten(),
+            tls_sni: (!accepts).then(|| self.dial_sni()).flatten(),
             tls_pin: (!accepts && self.transport == "wss" && self.tls_cert.is_none())
                 .then(|| pin.map(str::to_owned))
                 .flatten(),
@@ -103,6 +108,24 @@ impl PairRequest {
             },
         };
         (side("entry", reverse), side("exit", !reverse))
+    }
+
+    /// The TLS server name the dialing side uses. With a real certificate it is the name the
+    /// certificate was issued for: any other (a server name typed for a self-signed one, a
+    /// WebSocket Host, an address that is not the certificate's) makes the dialing side
+    /// refuse the certificate (`BadCertificate`).
+    fn dial_sni(&self) -> Option<String> {
+        if self.transport == "wss" && self.tls_cert.is_some() {
+            if let Some(host) = self
+                .tls_host
+                .as_deref()
+                .map(str::trim)
+                .filter(|h| !h.is_empty())
+            {
+                return Some(host.to_ascii_lowercase());
+            }
+        }
+        self.tls_sni.clone()
     }
 
     /// The server that accepts the tunnel's connections, and the one that dials.
@@ -178,6 +201,11 @@ impl PairRequest {
             // QUIC is always TLS 1.3: a cipher of its own does not exist there.
             if self.transport == "quic" && e != "auto" {
                 bail!("encryption_quic");
+            }
+        }
+        if let Some(host) = self.tls_host.as_deref().map(str::trim) {
+            if !host.is_empty() && !crate::manage::valid_cert_host(&host.to_ascii_lowercase()) {
+                bail!("bad_tls_host");
             }
         }
         Ok(())
@@ -352,7 +380,10 @@ async fn wait_connected(hub: &Hub, req: &PairRequest, limit: Duration) -> Result
     let mut last = String::new();
     loop {
         let mut connected = 0;
-        for server in [&req.entry, &req.exit] {
+        // The dialing side last, so its error is the one kept: it says why (a certificate
+        // it refused, an address it cannot reach), where the listening side only sees the
+        // connection end.
+        for server in req.acceptor_first() {
             let tunnels: Vec<TunnelInfo> = match hub.ask_as(server, &Request::Tunnels).await {
                 Ok(t) => t,
                 Err(e) => {
@@ -1128,6 +1159,7 @@ mod tests {
             mux: None,
             tls_cert: None,
             tls_key: None,
+            tls_host: None,
             encryption: enc.map(str::to_owned),
             quic_obfs: false,
             forwards: Vec::new(),
@@ -1189,6 +1221,7 @@ mod tests {
             quic_obfs: obfs,
             tls_cert: None,
             tls_key: None,
+            tls_host: None,
             forwards: Vec::new(),
             rotate: false,
             network: None,
@@ -1226,6 +1259,7 @@ mod tests {
             quic_obfs: false,
             tls_cert: None,
             tls_key: None,
+            tls_host: None,
             encryption: None,
             forwards: Vec::new(),
             rotate: false,
@@ -1239,5 +1273,67 @@ mod tests {
         assert!(req("tcpmux", Some(tuned)).needs_new_servers());
         assert!(!req("tcpmux", Some(Default::default())).needs_new_servers());
         assert!(!req("kcp", None).needs_new_servers());
+    }
+
+    /// The `BadCertificate` of a wss tunnel with a Let's Encrypt certificate: the dialing
+    /// side checked it against another name than the one it was issued for.
+    #[test]
+    fn a_real_certificate_is_checked_against_the_name_it_was_issued_for() {
+        let req = |sni: Option<&str>, ws_host: Option<&str>, real: bool| PairRequest {
+            name: "t".into(),
+            entry: "a".into(),
+            exit: "b".into(),
+            mode: "reverse".into(),
+            transport: "wss".into(),
+            profile: None,
+            listen: "0.0.0.0:3080".into(),
+            // A private (GRE) address, or another address of the server.
+            dial: "10.77.0.2:3080".into(),
+            pool: None,
+            ws_path: Some("/".into()),
+            ws_host: ws_host.map(str::to_owned),
+            tls_sni: sni.map(str::to_owned),
+            mux: None,
+            encryption: None,
+            quic_obfs: false,
+            tls_cert: real
+                .then(|| "/etc/letsencrypt/live/kariz-panel-t-example-com/fullchain.pem".into()),
+            tls_key: real
+                .then(|| "/etc/letsencrypt/live/kariz-panel-t-example-com/privkey.pem".into()),
+            tls_host: real.then(|| "T.example.com".into()),
+            forwards: Vec::new(),
+            rotate: false,
+            network: None,
+        };
+        // Reverse: the entry listens, the exit dials.
+        let dialer = |r: PairRequest| r.specs(None, None).1;
+        for (sni, host) in [
+            (None, None),
+            (Some("www.google.com"), None),
+            (None, Some("cdn.example.net")),
+        ] {
+            let d = dialer(req(sni, host, true));
+            assert_eq!(
+                d.tls_sni.as_deref(),
+                Some("t.example.com"),
+                "{sni:?} {host:?}"
+            );
+            assert_eq!(d.tls_pin, None, "a real certificate is not pinned");
+        }
+        // Self-signed: the name typed (if any) is what it sends, and the pin is what counts.
+        assert_eq!(
+            dialer(req(Some("www.google.com"), None, false))
+                .tls_sni
+                .as_deref(),
+            Some("www.google.com")
+        );
+        assert_eq!(dialer(req(None, None, false)).tls_sni, None);
+        // The listening side never gets a server name.
+        assert_eq!(req(None, None, true).specs(None, None).0.tls_sni, None);
+        // The name must be one a certificate can be for.
+        let mut bad = req(None, None, true);
+        bad.tls_host = Some("not a host".into());
+        assert_eq!(bad.validate().unwrap_err().to_string(), "bad_tls_host");
+        assert!(req(None, None, true).validate().is_ok());
     }
 }

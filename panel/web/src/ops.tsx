@@ -35,6 +35,9 @@ export function useOp(id: string | null): Op | null {
 
 type T = (k: string, v?: Record<string, string | number>) => string;
 
+/** A wss connection whose certificate one side refused (rustls' words, from either side). */
+const TLS_REFUSED = /BadCertificate|NotValidForName|not valid for name|UnknownIssuer|UnknownCA|invalid peer certificate|CertificateExpired/;
+
 /**
  * The text of an error: a known code (`gre_blocked`, or one with details after colons such as
  * `no_address:SERVER`, `overlaps_route:SERVER:10.0.0.0/8`), or what the server said.
@@ -44,7 +47,7 @@ export function describeError(t: T, error: string, names?: Map<string, string>):
   const [code, a, ...rest] = error.split(":");
   const key = `op.err.${code}`;
   const known = t(key);
-  if (known === key) return error;
+  if (known === key) return TLS_REFUSED.test(error) ? `${error} ${t("op.err.tls")}` : error;
   const who = a ? (names?.get(a) ?? a) : "";
   return t(key, { server: who, route: rest.join(":"), detail: [a, ...rest].filter(Boolean).join(":") });
 }
