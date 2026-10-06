@@ -337,7 +337,8 @@ impl Hub {
 
     /// A code that brings a known server back as one the panel connects to, at `target`
     /// (*Reconnect* or *Edit*): the server keeps its name, tunnels and links, and the panel
-    /// dials the new address from now on.
+    /// dials the new address from now on. When that is the server's end of a GRE link to
+    /// the panel's server, the code carries it, so the agent makes the link before it listens.
     pub fn create_reverse_rejoin(self: &Arc<Self>, id: &str, target: Reverse) -> Result<String> {
         if id == LOCAL {
             bail!("bad_input");
@@ -346,7 +347,7 @@ impl Hub {
             id,
             "",
             target.transport.as_deref(),
-            None,
+            self.gre_join_spec(id, &target.host, true),
             Some(target.listen()),
         )?;
         self.set_reverse(id, Some(&target))?;

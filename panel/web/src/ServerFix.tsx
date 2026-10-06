@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "./api";
-import type { LinkTransport, PanelAddresses, ServerInfo } from "./api";
+import type { GreJoin, LinkTransport, PanelAddresses, ServerInfo } from "./api";
+import { NewGreLinkFields, greJoinError, ipv4Ok } from "./GreLink";
+import { useNetworks } from "./Networks";
 import { useApp } from "./store";
 import { linkPorts, reverseOk } from "./transport";
 import { CodeBlock, Dialog, Icon, Seg, useAgo } from "./ui";
@@ -30,6 +32,13 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
   const [way, setWay] = useState<Way>(server.reverse ? "reverse" : "dial");
   const [rhost, setRhost] = useState(server.reverse?.host ?? server.ip4 ?? server.addr ?? "");
   const [rport, setRport] = useState(String(server.reverse?.port ?? 29001));
+  // Reverse across a GRE link to the panel's server: one it has (by link id), or a new one the panel makes.
+  const [greOn, setGreOn] = useState(!!(server.reverse && server.gre));
+  const [greLink, setGreLink] = useState(server.reverse && server.gre ? server.gre.link : "");
+  const [ip, setIp] = useState(server.addr ?? server.ip4 ?? "");
+  const { networks } = useNetworks();
+  const [netId, setNetId] = useState("");
+  const [madeGre, setMadeGre] = useState<GreJoin | null>(null);
   const [own, setOwn] = useState<PanelAddresses | null>(null);
   const [code, setCode] = useState("");
   const [left, setLeft] = useState(0);
@@ -69,17 +78,30 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
     }
   };
 
+  // The private network links between this server and the panel's, and the one picked (none: a new one).
+  const mine = (own?.gre ?? []).filter((g) => g.server === server.id);
+  const viaLink = greOn ? (mine.find((g) => g.link === greLink) ?? (greLink === "new" ? undefined : mine[0])) : undefined;
+  const newLink = way === "reverse" && greOn && !viaLink;
+
   const make = async () => {
     setError("");
     try {
+      if (newLink) {
+        const made = await api.reconnectServer(server.id, "", transport, { host: "", port: +rport }, { ip: ip.trim(), network: netId || undefined });
+        setMadeGre(made as GreJoin);
+        setCode(made.code);
+        setLeft(made.valid_for);
+        return;
+      }
       const made =
         way === "reverse"
-          ? await api.reconnectServer(server.id, "", transport, { host: rhost.trim().replace(/^\[|\]$/g, ""), port: +rport })
+          ? await api.reconnectServer(server.id, "", transport, { host: viaLink ? viaLink.peer_addr : rhost.trim().replace(/^\[|\]$/g, ""), port: +rport })
           : await api.reconnectServer(server.id, host.trim(), transport);
       setCode(made.code);
       setLeft(made.valid_for);
     } catch (e) {
-      setError(e instanceof ApiError && e.code === "agents_off" ? t("add.off") : t(way === "reverse" ? "add.rev.err.input" : "add.bad"));
+      if (newLink) setError(e instanceof ApiError ? greJoinError(t, e.code, new Map(servers.map((s) => [s.id, s.name]))) : String(e));
+      else setError(e instanceof ApiError && e.code === "agents_off" ? t("add.off") : t(way === "reverse" ? "add.rev.err.input" : "add.bad"));
     }
   };
 
@@ -99,7 +121,9 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
   const title = live.online ? t("fix.titleOnline", { name: live.name }) : t("fix.title", { name: live.name });
   // The panel needs no agents port of its own when it is the one that connects.
   const blocked = !agentsOn && way === "dial";
-  const ready = way === "reverse" ? reverseOk(rhost, rport) : !!host.trim();
+  const portOk = /^\d+$/.test(rport) && +rport > 0 && +rport < 65535;
+  const panelPublic = own ? (own.gre_local ?? null) : undefined;
+  const ready = way === "reverse" ? (newLink ? ipv4Ok(ip) && panelPublic !== null && portOk : viaLink ? portOk : reverseOk(rhost, rport)) : !!host.trim();
 
   return (
     <Dialog
@@ -206,30 +230,69 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
 
       {!code && way === "reverse" && (
         <>
-          <div className="grid-2">
+          <div className="field">
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={greOn}
+                onChange={(e) => {
+                  setGreOn(e.target.checked);
+                  setError("");
+                }}
+              />{" "}
+              {t("fix.rev.gre")}
+            </label>
+            <span className="help">{t("fix.rev.gre.d")}</span>
+          </div>
+          {greOn && mine.length > 0 && (
             <div className="field">
-              <label htmlFor="fix-rhost">{t("fix.rev.host")}</label>
-              <input className="text mono" id="fix-rhost" dir="ltr" value={rhost} onChange={(e) => setRhost(e.target.value.trim())} />
-              <span className="help">{t("add.rev.hostHelp")}</span>
+              <span className="label">{t("fix.rev.gre.which")}</span>
+              <div className="addr-picks" role="group" aria-label={t("fix.rev.gre.which")}>
+                {mine.map((g) => (
+                  <button key={g.link} type="button" className="addr-pick" aria-pressed={viaLink?.link === g.link} onClick={() => setGreLink(g.link)}>
+                    <span>{t("fix.addr.gre", { network: g.network })}</span>
+                    <code dir="ltr">{g.peer_addr}</code>
+                  </button>
+                ))}
+                <button type="button" className="addr-pick" aria-pressed={!viaLink} onClick={() => setGreLink("new")}>
+                  <span>{t("fix.rev.gre.new")}</span>
+                  <code dir="ltr">GRE +</code>
+                </button>
+              </div>
+              {viaLink && <span className="help">{t("fix.rev.gre.via", { addr: `\u2066${viaLink.peer_addr}\u2069`, network: viaLink.network })}</span>}
             </div>
+          )}
+          {newLink && (
+            <NewGreLinkFields id="fix-rip" ip={ip} onIp={setIp} ipLabel={t("fix.rev.gre.ip")} error={error} networks={networks} netId={netId} onNet={setNetId} panelPublic={panelPublic} />
+          )}
+          <div className="grid-2">
+            {!greOn && (
+              <div className="field">
+                <label htmlFor="fix-rhost">{t("fix.rev.host")}</label>
+                <input className="text mono" id="fix-rhost" dir="ltr" value={rhost} onChange={(e) => setRhost(e.target.value.trim())} />
+                <span className="help">{t("add.rev.hostHelp")}</span>
+              </div>
+            )}
             <div className="field">
               <label htmlFor="fix-rport">{t("add.rev.port")}</label>
               <input className="text mono" id="fix-rport" dir="ltr" inputMode="numeric" value={rport} onChange={(e) => setRport(e.target.value.trim())} />
               <span className="help">{t("add.rev.portHelp")}</span>
             </div>
           </div>
-          <span className="err" role="alert">
-            {error}
-          </span>
+          {!newLink && (
+            <span className="err" role="alert">
+              {error}
+            </span>
+          )}
           <div className="field">
             <span className="label">{t("fix.rev.protocol")}</span>
             <Seg<LinkTransport> value={transport} options={TRANSPORTS.map((x) => [x, t(`add.x.${x}`)] as [LinkTransport, string])} onChange={setTransport} />
-            {/^\d+$/.test(rport) && +rport > 0 && +rport < 65535 && (
+            {portOk && (
               <span className="help">
-                {t("fix.rev.ports")} <code dir="ltr">{linkPorts(+rport, transport)}</code>
+                {t(greOn ? "fix.rev.gre.ports" : "fix.rev.ports")} <code dir="ltr">{linkPorts(+rport, transport)}</code>
               </span>
             )}
-            <span className="help">{t("fix.rev.help")}</span>
+            <span className="help">{t(greOn ? "fix.rev.gre.help" : "fix.rev.help")}</span>
           </div>
           <div className="field">
             <span className="help">{t("fix.codeHelp")}</span>
@@ -281,6 +344,14 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
 
       {code && (
         <>
+          {madeGre && (
+            <div className="gre-made">
+              <span className="badge">{t("srv.greChip", { network: madeGre.network })}</span>
+              {/* The addresses are isolated left to right, so a Persian sentence around them keeps its order. */}
+              <span className="small">{t("add.gre.link", { panel: `\u2066${madeGre.panel_addr}\u2069`, server: `\u2066${madeGre.server_addr}\u2069`, name: `\u2068${madeGre.name}\u2069` })}</span>
+              <span className="help">{t("fix.rev.gre.made", { addr: `\u2066${madeGre.server_addr}:${rport}\u2069` })}</span>
+            </div>
+          )}
           <div className="field">
             <span className="label">{t("fix.run")}</span>
             <CodeBlock text={`kariz-manager --agent ${code}`} />

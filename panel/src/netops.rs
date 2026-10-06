@@ -281,9 +281,15 @@ pub async fn delete_link(hub: &Hub, id: &str) -> Result<()> {
                 bail!("in_use:{}", t.info.name);
             }
         }
-        // A server whose agent reaches the panel through this link would lose it, and with
-        // it the only way the panel has to ask that server anything.
-        if server.gre.as_ref().is_some_and(|g| g.link == link.id) {
+        // A server whose agent reaches the panel through this link (or that the panel
+        // dials across it) would lose it, and with it the only way the panel has to ask that
+        // server anything.
+        if server.gre.as_ref().is_some_and(|g| g.link == link.id)
+            || server
+                .reverse
+                .as_ref()
+                .is_some_and(|r| r.host == link.addr_a || r.host == link.addr_b)
+        {
             bail!("agent_uses:{}", server.id);
         }
     }

@@ -520,7 +520,13 @@ async fn join_gre(
         .filter(|n| !n.is_empty());
     match state
         .hub
-        .create_gre_join(name, body.ip.trim(), network, transport, port)
+        .create_gre_join(
+            name,
+            body.ip.trim(),
+            network,
+            transport,
+            crate::hub::GreWay::Dial { agent_port: port },
+        )
         .await
     {
         Ok(made) => {
@@ -535,28 +541,54 @@ async fn join_gre(
                     body.ip.trim()
                 ),
             );
-            reply(
-                StatusCode::OK,
-                json!({
-                    "code": made.code,
-                    "valid_for": crate::join::JOIN_TTL,
-                    "id": made.id,
-                    "name": made.name,
-                    "network": made.network,
-                    "panel_addr": made.panel_addr,
-                    "server_addr": made.server_addr,
-                }),
-            )
+            gre_made(&made)
         }
-        Err(e) => {
-            let why = format!("{e:#}");
-            if why == "bad_input" {
-                error(StatusCode::BAD_REQUEST, "bad_input")
-            } else {
-                // A code the page explains, or what the panel's own server said.
-                error(StatusCode::CONFLICT, &why)
-            }
-        }
+        Err(e) => gre_failed(&e),
+    }
+}
+
+/// The answer to a join over a GRE link: the code, and what the panel set up for it.
+fn gre_made(made: &crate::hub::GreJoin) -> Response {
+    reply(
+        StatusCode::OK,
+        json!({
+            "code": made.code,
+            "valid_for": crate::join::JOIN_TTL,
+            "id": made.id,
+            "name": made.name,
+            "network": made.network,
+            "panel_addr": made.panel_addr,
+            "server_addr": made.server_addr,
+        }),
+    )
+}
+
+fn gre_failed(e: &anyhow::Error) -> Response {
+    let why = format!("{e:#}");
+    match why.as_str() {
+        "bad_input" => error(StatusCode::BAD_REQUEST, "bad_input"),
+        "no_such_server" => error(StatusCode::NOT_FOUND, "no_such_server"),
+        // A code the page explains, or what the panel's own server said.
+        _ => error(StatusCode::CONFLICT, &why),
+    }
+}
+
+/// A GRE link to make between the panel's server and another one, for that server's link to
+/// the panel to go across.
+#[derive(Deserialize)]
+struct GreBody {
+    /// The server's public IPv4 address: the other end of the GRE link.
+    ip: String,
+    /// The private network to take the link's addresses from; none: the first, or a new one.
+    network: Option<String>,
+}
+
+impl GreBody {
+    fn network(&self) -> Option<&str> {
+        self.network
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
     }
 }
 
@@ -620,9 +652,13 @@ struct JoinReverseBody {
     name: Option<String>,
     /// Where the panel reaches the new server: an IP address or a host name, and the port
     /// its agent is to listen on (and the next one).
+    #[serde(default)]
     host: String,
     port: u16,
     transport: Option<String>,
+    /// The panel reaches it across a GRE link made for it instead (`host` is then the
+    /// server's end of that link).
+    gre: Option<GreBody>,
 }
 
 /// *Add server* the other way round: the panel connects to the new server. The server is
@@ -638,16 +674,50 @@ async fn join_reverse(
         Ok(s) => s,
         Err(r) => return r,
     };
-    let Ok(target) = crate::reverse::Reverse::new(&body.host, body.port, body.transport.as_deref())
-    else {
-        return error(StatusCode::BAD_REQUEST, "bad_input");
-    };
-    let at = target.addr();
     let name = body
         .name
         .as_deref()
         .map(str::trim)
         .filter(|n| !n.is_empty());
+    if let Some(gre) = &body.gre {
+        let transport = body
+            .transport
+            .as_deref()
+            .map(str::trim)
+            .filter(|x| !x.is_empty() && *x != "auto");
+        return match state
+            .hub
+            .create_gre_join(
+                name,
+                gre.ip.trim(),
+                gre.network(),
+                transport,
+                crate::hub::GreWay::Reverse { port: body.port },
+            )
+            .await
+        {
+            Ok(made) => {
+                audit(
+                    &state,
+                    &format!("session {}", me.id),
+                    &ip_of(&peer),
+                    &format!(
+                        "added server {} ({}) for the panel to connect to across a private network link from {}",
+                        made.name,
+                        made.id,
+                        gre.ip.trim()
+                    ),
+                );
+                gre_made(&made)
+            }
+            Err(e) => gre_failed(&e),
+        };
+    }
+    let Ok(target) = crate::reverse::Reverse::new(&body.host, body.port, body.transport.as_deref())
+    else {
+        return error(StatusCode::BAD_REQUEST, "bad_input");
+    };
+    let at = target.addr();
     match state.hub.create_reverse_join(name, target).await {
         Ok(made) => {
             audit(
@@ -693,10 +763,14 @@ struct ReconnectBody {
     /// The panel connects to the server instead (reverse), there; left out, the server's
     /// agent dials the panel (and a server the panel connected to stops being one).
     reverse: Option<ReverseBody>,
+    /// A GRE link is made between the panel's server and this one, and the link to the
+    /// panel goes across it (with `reverse`, its port; `host` is then not used).
+    gre: Option<GreBody>,
 }
 
 #[derive(Deserialize)]
 struct ReverseBody {
+    #[serde(default)]
     host: String,
     port: u16,
 }
@@ -713,6 +787,37 @@ async fn reconnect_server(
         Ok(s) => s,
         Err(r) => return r,
     };
+    if let Some(gre) = &body.gre {
+        let way = match (&body.reverse, state.agent_port) {
+            (Some(r), _) => crate::hub::GreWay::Reverse { port: r.port },
+            (None, Some(agent_port)) => crate::hub::GreWay::Dial { agent_port },
+            (None, None) => return error(StatusCode::CONFLICT, "agents_off"),
+        };
+        let transport = body
+            .transport
+            .as_deref()
+            .map(str::trim)
+            .filter(|x| !x.is_empty() && *x != "auto");
+        return match state
+            .hub
+            .create_gre_rejoin(&body.id, gre.ip.trim(), gre.network(), transport, way)
+            .await
+        {
+            Ok(made) => {
+                audit(
+                    &state,
+                    &format!("session {}", me.id),
+                    &ip_of(&peer),
+                    &format!(
+                        "made a code to reconnect server {} across a new private network link ({} to {})",
+                        body.id, made.panel_addr, made.server_addr
+                    ),
+                );
+                gre_made(&made)
+            }
+            Err(e) => gre_failed(&e),
+        };
+    }
     if let Some(r) = &body.reverse {
         let target = match crate::reverse::Reverse::new(&r.host, r.port, body.transport.as_deref())
         {

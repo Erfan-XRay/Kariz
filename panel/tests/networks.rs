@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use kariz_panel::agent::{self, Agent};
 use kariz_panel::db::Db;
-use kariz_panel::hub::{Hub, LOCAL};
+use kariz_panel::hub::{GreWay, Hub, LOCAL};
 use kariz_panel::manage::{Fut, Systemd};
 use kariz_panel::net::Exec;
 use kariz_panel::netops;
@@ -331,7 +331,13 @@ async fn a_server_added_over_gre_makes_its_end_from_the_code_and_comes_in() {
     assert_eq!(hub.addr_of(LOCAL), None);
     assert_eq!(
         why(hub
-            .create_gre_join(None, "192.0.2.2", None, None, port)
+            .create_gre_join(
+                None,
+                "192.0.2.2",
+                None,
+                None,
+                GreWay::Dial { agent_port: port }
+            )
             .await),
         "no_address:local"
     );
@@ -342,7 +348,9 @@ async fn a_server_added_over_gre_makes_its_end_from_the_code_and_comes_in() {
         ("192.0.2.1", "same_address"),
     ] {
         assert_eq!(
-            why(hub.create_gre_join(None, bad, None, None, port).await),
+            why(hub
+                .create_gre_join(None, bad, None, None, GreWay::Dial { agent_port: port })
+                .await),
             code,
             "{bad}"
         );
@@ -350,7 +358,13 @@ async fn a_server_added_over_gre_makes_its_end_from_the_code_and_comes_in() {
     assert!(hub.networks.networks().unwrap().is_empty());
 
     let made = hub
-        .create_gre_join(Some("behind-gre"), "192.0.2.2", None, None, port)
+        .create_gre_join(
+            Some("behind-gre"),
+            "192.0.2.2",
+            None,
+            None,
+            GreWay::Dial { agent_port: port },
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -389,7 +403,13 @@ async fn a_server_added_over_gre_makes_its_end_from_the_code_and_comes_in() {
     // The same address cannot be added twice: that server is reconnected instead.
     assert_eq!(
         why(hub
-            .create_gre_join(None, "192.0.2.2", None, None, port)
+            .create_gre_join(
+                None,
+                "192.0.2.2",
+                None,
+                None,
+                GreWay::Dial { agent_port: port }
+            )
             .await),
         format!("address_taken:{}", made.id)
     );
@@ -469,4 +489,170 @@ async fn a_server_added_over_gre_makes_its_end_from_the_code_and_comes_in() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(gone, "{:?}", local_fake.calls());
+}
+
+/// *Add server* with the panel connecting over a private network: the panel makes its end
+/// of the GRE link and dials the new server at the server's end of it; the code carries
+/// that end and makes the agent listen. *Edit* can move a known server onto such a link,
+/// and a code for a server the panel dials across one carries the link again.
+#[tokio::test]
+async fn a_reverse_server_is_reached_across_a_gre_link() {
+    let root = tempfile::tempdir().unwrap();
+    let local_fake = Arc::new(Fake::default());
+    let hub = Hub::with_options(
+        Db::in_memory().unwrap(),
+        root.path().join("kariz"),
+        Arc::new(Systemd),
+        Duration::from_secs(5),
+        Some(root.path().join("panel")),
+        Some(local_fake.clone()),
+    );
+    std::fs::create_dir_all(root.path().join("panel")).unwrap();
+    hub.set_addr(LOCAL, "192.0.2.1").unwrap();
+    let why = |r: anyhow::Result<kariz_panel::hub::GreJoin>| format!("{:#}", r.unwrap_err());
+    for port in [0, u16::MAX] {
+        assert_eq!(
+            why(hub
+                .create_gre_join(None, "192.0.2.2", None, None, GreWay::Reverse { port })
+                .await),
+            "bad_input"
+        );
+    }
+
+    let made = hub
+        .create_gre_join(
+            Some("far"),
+            "192.0.2.2",
+            None,
+            Some("kcp"),
+            GreWay::Reverse { port: 29501 },
+        )
+        .await
+        .unwrap();
+    let link = hub.networks.links(None).unwrap().remove(0);
+    // The panel's end is up, and the panel dials the server's end of the link.
+    assert!(local_fake.calls().iter().any(|c| c.starts_with(&format!(
+        "ip tunnel add {} mode gre local 192.0.2.1 remote 192.0.2.2",
+        link.ifname
+    ))));
+    let target = hub.reverse_of(&made.id).expect("the panel dials it");
+    assert_eq!(
+        (
+            target.host.as_str(),
+            target.port,
+            target.transport.as_deref()
+        ),
+        (made.server_addr.as_str(), 29501, Some("kcp"))
+    );
+    // The code makes the agent make its end, then listen; it dials nothing.
+    let code = kariz_panel::join::decode(&made.code).unwrap();
+    assert_eq!(code.p, "");
+    assert_eq!(code.l.as_deref(), Some("0.0.0.0:29501"));
+    assert_eq!(code.x.as_deref(), Some("kcp"));
+    let theirs = code.g.clone().expect("the code carries the link");
+    assert_eq!(
+        (
+            theirs.local.as_str(),
+            theirs.remote.as_str(),
+            theirs.address.as_str()
+        ),
+        ("192.0.2.2", "192.0.2.1", made.server_addr.as_str())
+    );
+    // Listed as one that uses the link, and the link cannot go while the panel dials across it.
+    let listed = hub
+        .snapshot()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == made.id)
+        .unwrap();
+    assert_eq!(listed.gre.map(|g| g.link), Some(link.id.clone()));
+    assert_eq!(
+        format!(
+            "{:#}",
+            netops::delete_link(&hub, &link.id).await.unwrap_err()
+        ),
+        format!("agent_uses:{}", made.id)
+    );
+    // A code for it at that address carries the link again; at a public one it does not.
+    let again = hub
+        .create_reverse_rejoin(
+            &made.id,
+            kariz_panel::reverse::Reverse::new(&made.server_addr, 29501, None).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(kariz_panel::join::decode(&again).unwrap().g, Some(theirs));
+    let public = hub
+        .create_reverse_rejoin(
+            &made.id,
+            kariz_panel::reverse::Reverse::new("192.0.2.2", 29501, None).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(kariz_panel::join::decode(&public).unwrap().g, None);
+
+    // ---- Edit: a server the panel dials at its public address moves onto a new link ----
+    let plain = hub
+        .create_reverse_join(
+            Some("plain"),
+            kariz_panel::reverse::Reverse::new("192.0.2.3", 29001, None).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        why(hub
+            .create_gre_rejoin(
+                &plain.id,
+                "192.0.2.2",
+                None,
+                None,
+                GreWay::Reverse { port: 29001 }
+            )
+            .await),
+        format!("address_taken:{}", made.id)
+    );
+    assert_eq!(
+        why(hub
+            .create_gre_rejoin(
+                "nobody",
+                "192.0.2.9",
+                None,
+                None,
+                GreWay::Reverse { port: 29001 }
+            )
+            .await),
+        "no_such_server"
+    );
+    let moved = hub
+        .create_gre_rejoin(
+            &plain.id,
+            "192.0.2.3",
+            None,
+            None,
+            GreWay::Reverse { port: 29002 },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (moved.id.as_str(), moved.name.as_str()),
+        (plain.id.as_str(), "plain")
+    );
+    assert_eq!(hub.networks.links(None).unwrap().len(), 2);
+    let target = hub.reverse_of(&plain.id).unwrap();
+    assert_eq!(
+        (target.host.as_str(), target.port),
+        (moved.server_addr.as_str(), 29002)
+    );
+    let code = kariz_panel::join::decode(&moved.code).unwrap();
+    assert_eq!(code.l.as_deref(), Some("0.0.0.0:29002"));
+    assert_eq!(code.g.map(|g| g.address), Some(moved.server_addr.clone()));
+    // Asked again, the link it has is taken, not a second one.
+    hub.create_gre_rejoin(
+        &plain.id,
+        "192.0.2.3",
+        None,
+        None,
+        GreWay::Reverse { port: 29002 },
+    )
+    .await
+    .unwrap();
+    assert_eq!(hub.networks.links(None).unwrap().len(), 2);
 }
