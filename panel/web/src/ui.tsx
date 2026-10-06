@@ -344,21 +344,29 @@ export function ChannelLink({ variant }: { variant: "square" | "chip" }) {
 }
 
 /** A row of choices, one pressed. */
-export function Seg<T extends string>({ value, options, onChange }: { value: T; options: [T, string][]; onChange: (v: T) => void }) {
+/** Buttons of which one is on. An option can carry a count, shown as a badge beside its label. */
+export function Seg<T extends string>({ value, options, onChange }: { value: T; options: [T, string, string?][]; onChange: (v: T) => void }) {
   return (
     <div className="seg" role="group">
-      {options.map(([v, label]) => (
+      {options.map(([v, label, count]) => (
         <button key={v} type="button" aria-pressed={value === v} onClick={() => onChange(v)}>
           {label}
+          {count !== undefined && <span className="seg-count">{count}</span>}
         </button>
       ))}
     </div>
   );
 }
 
+/**
+ * A separator between two bits of a line. Not "·": next to Persian digits it reads as a zero
+ * ("·۱" looks like "۱۰"), so it is a short line drawn in CSS.
+ */
+export const Sep = () => <span className="sep" aria-hidden="true" />;
+
 /** A block of code with a copy button. */
 export function CodeBlock({ text }: { text: string }) {
-  const { t } = useApp();
+  const { t, toast } = useApp();
   const [done, setDone] = useState(false);
   return (
     <pre className="code">
@@ -366,10 +374,11 @@ export function CodeBlock({ text }: { text: string }) {
       <button
         className={`copy-btn ${done ? "done" : ""}`}
         type="button"
-        aria-label={t("copied")}
+        aria-label={done ? t("copied") : t("copy")}
+        title={done ? t("copied") : t("copy")}
         onClick={() => {
           void copyText(text).then((ok) => {
-            if (!ok) return;
+            if (!ok) return toast(t("copy.failed", { value: text }), "err");
             setDone(true);
             setTimeout(() => setDone(false), 1600);
           });

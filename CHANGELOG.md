@@ -21,6 +21,22 @@
   and the agent now carry the manager of their own release and put it in place (in
   `/usr/local/bin/kariz-manager`) before they ask it for a certificate.
 
+### Changed
+
+- **A clearer panel, after a UX review** (heuristics, error states, accessibility, wording):
+  - The tunnel filters show their counts as badges. In Persian, "· ۱" read as "۱۰" (the Persian
+    zero is a dot); the same separator next to Persian digits elsewhere is now a short line.
+  - Latin names in the Persian layout are cut at their end ("iran-…") instead of losing their
+    first letters, the table keeps room for a tunnel's name and its two servers, and on a narrow
+    window the switches are never cut off.
+  - The tunnel wizard names the tunnel after its two servers until you type a name, and says what
+    is missing (the servers, an empty name, a name in use) next to the field, which it focuses.
+  - Screen readers hear the top bar, the navigation and the command palette in the panel's
+    language; the copy button says *Copy* (and *Copied* after), and a copy that fails says so.
+  - Every page names itself in the browser tab ("iran-eu — Tunnels — Kariz").
+  - The log level filter says *All levels*, and *Follow* explains itself; the Persian settings
+    say *دستگاه‌های واردشده* instead of mixing in "session", and "@BotFather" keeps its direction.
+
 ## 2.0.0 - 2026-10-05
 
 A new major version: servers can now join three ways (over the internet, over a GRE link alone,

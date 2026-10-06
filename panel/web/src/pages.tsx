@@ -15,7 +15,7 @@ import { ServerFixDialog } from "./ServerFix";
 import { useNetworks } from "./Networks";
 import { NewGreLinkFields, greJoinError, ipv4Ok } from "./GreLink";
 import { hostPort, linkPorts, reverseOk, transportLabel } from "./transport";
-import { Card, CodeBlock, CopyValue, Dialog, Empty, Icon, Odo, Seg, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
+import { Card, CodeBlock, CopyValue, Dialog, Empty, Icon, Odo, Seg, Sep, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
 
 // ---------------------------------------------------------------- the map
 
@@ -1142,8 +1142,9 @@ function Sessions() {
           <span className="meta">
             <span className="mono" dir="ltr">
               {s.ip}
-            </span>{" "}
-            · {s.current ? t("now") : ago(now - s.last_seen)}
+            </span>
+            <Sep />
+            {s.current ? t("now") : ago(now - s.last_seen)}
           </span>
         </div>
       ))}
