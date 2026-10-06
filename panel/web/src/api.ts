@@ -121,6 +121,12 @@ export interface ReverseTarget {
   transport?: string | null;
 }
 
+/** A GRE link the panel is to make to a server: its public IPv4 address, and the network that gives the addresses (none: the first, or a new one). */
+export interface NewGreLink {
+  ip: string;
+  network?: string;
+}
+
 /** What *Add server* over a private network made: the server (waiting for its agent) and its code. */
 export interface GreJoin {
   code: string;
@@ -435,10 +441,12 @@ export const api = {
   joinGre: (name: string | undefined, ip: string, network: string | undefined, transport: LinkTransport) =>
     call<GreJoin>("POST", "servers/join-gre", { name, ip, network, transport }),
   removeServer: (id: string) => call<object>("POST", "servers/remove", { id }),
-  reconnectServer: (id: string, host: string, transport: LinkTransport, reverse?: { host: string; port: number }) =>
-    call<{ code: string; valid_for: number }>("POST", "servers/reconnect", { id, host, transport, reverse }),
-  joinReverse: (name: string | undefined, host: string, port: number, transport: LinkTransport) =>
-    call<{ code: string; valid_for: number; id: string; name: string }>("POST", "servers/join-reverse", { name, host, port, transport }),
+  /** With `gre`, a GRE link to the server is made first and the link to the panel goes across it (the answer then says what was made). */
+  reconnectServer: (id: string, host: string, transport: LinkTransport, reverse?: { host: string; port: number }, gre?: NewGreLink) =>
+    call<{ code: string; valid_for: number } & Partial<GreJoin>>("POST", "servers/reconnect", { id, host, transport, reverse, gre }),
+  /** With `gre`, the panel makes a GRE link to the new server and dials it across that link (`host` is not used). */
+  joinReverse: (name: string | undefined, host: string, port: number, transport: LinkTransport, gre?: NewGreLink) =>
+    call<{ code: string; valid_for: number; id: string; name: string } & Partial<GreJoin>>("POST", "servers/join-reverse", { name, host, port, transport, gre }),
   renameServer: (id: string, name: string) => call<object>("POST", "servers/rename", { id, name }),
   schedules: () => call<{ schedules: ScheduleRow[] }>("GET", "schedules"),
   setSchedule: (body: ScheduleBody) => call<object>("POST", "schedules", body),

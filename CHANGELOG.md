@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **The panel can connect to a server across a GRE link.** *Add server*, *The panel connects to
+  it* has **Across a GRE link**: type the new server's public IPv4 address, and the panel makes a
+  GRE link to it (its own end at once; the code carries the other) and dials the server's private
+  address on the link. *Edit* has the same choice for a server the panel connects to: one of the
+  links it has with the panel's server, or a new one. A code for a server the panel dials across
+  a link carries the link, so the agent makes it again before it listens; such a link cannot be
+  removed while the panel uses it. API: `gre: {ip, network}` in `POST /api/servers/join-reverse`
+  and `POST /api/servers/reconnect`.
+
 ### Fixed
 
 - **Getting a certificate for a wss tunnel on a server set up with an older Kariz.** An update

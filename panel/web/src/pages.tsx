@@ -13,7 +13,7 @@ import { TelegramSection } from "./Telegram";
 import { AutoRestartDialog } from "./AutoRestart";
 import { ServerFixDialog } from "./ServerFix";
 import { useNetworks } from "./Networks";
-import { describeError } from "./ops";
+import { NewGreLinkFields, greJoinError, ipv4Ok } from "./GreLink";
 import { hostPort, linkPorts, reverseOk, transportLabel } from "./transport";
 import { Card, CodeBlock, CopyValue, Dialog, Empty, Icon, Odo, Seg, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
 
@@ -438,17 +438,6 @@ type JoinWay = "internet" | "gre" | "reverse";
 /** The port a reverse agent listens on, until another is typed. */
 const REVERSE_PORT = "29001";
 
-/** The text of an error from *Add server* over GRE. */
-function greJoinError(t: (k: string, v?: Record<string, string | number>) => string, code: string, names: Map<string, string>): string {
-  const [what, who = ""] = code.split(":");
-  if (what === "no_address") return t("add.gre.err.noPanelAddr");
-  if (what === "same_address") return t("add.gre.err.same");
-  if (what === "address_taken") return t("add.gre.err.taken", { name: names.get(who) ?? who });
-  if (what === "bad_input") return t("add.gre.err.ip");
-  if (what === "agents_off") return t("add.off");
-  return describeError(t, code, names);
-}
-
 function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agentsOn: boolean; onClose: () => void }) {
   const { t, digitsOf, toast } = useApp();
   const [way, setWay] = useState<JoinWay>("internet");
@@ -464,6 +453,8 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   const [rhost, setRhost] = useState("");
   const [rport, setRport] = useState(REVERSE_PORT);
   const [rev, setRev] = useState<{ addr: string; port: number } | null>(null);
+  // Reverse across a GRE link the panel makes: the new server's public IPv4 and network are the ones above.
+  const [revGre, setRevGre] = useState(false);
   const [busy, setBusy] = useState(false);
   const [own, setOwn] = useState<PanelAddresses | null>(null);
   const [code, setCode] = useState("");
@@ -501,6 +492,12 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
         setGre(made);
         setCode(made.code);
         setLeft(made.valid_for);
+      } else if (way === "reverse" && revGre) {
+        const made = await api.joinReverse(name.trim() || undefined, "", +rport, transport, { ip: ip.trim(), network: netId || undefined });
+        setGre(made as GreJoin);
+        setRev({ addr: hostPort(made.server_addr ?? "", rport.trim()), port: +rport });
+        setCode(made.code);
+        setLeft(made.valid_for);
       } else if (way === "reverse") {
         const made = await api.joinReverse(name.trim() || undefined, rhost.trim(), +rport, transport);
         setRev({ addr: hostPort(rhost.trim().replace(/^\[|\]$/g, ""), rport.trim()), port: +rport });
@@ -513,6 +510,8 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
       }
     } catch (e) {
       if (way === "gre") setError(e instanceof ApiError ? greJoinError(t, e.code, names) : String(e));
+      else if (way === "reverse" && revGre && !portOk) setError(t("add.rev.err.input"));
+      else if (way === "reverse" && revGre) setError(e instanceof ApiError ? greJoinError(t, e.code, names) : String(e));
       else if (way === "reverse") setError(e instanceof ApiError && e.code !== "bad_input" ? greJoinError(t, e.code, names) : t("add.rev.err.input"));
       else setError(e instanceof ApiError && e.code === "agents_off" ? t("add.off") : t("add.bad"));
     } finally {
@@ -534,9 +533,10 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   const openList = port == null ? "" : linkPorts(port, transport);
   // The panel server's public address, the panel's end of the GRE link (unknown: it has to be set first).
   const panelPublic = own ? (own.gre_local ?? null) : undefined;
-  const ipOk = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(ip.trim()) && ip.trim().split(".").every((p) => +p <= 255);
-  const network = networks.find((n) => n.id === netId) ?? networks[0];
-  const ready = way === "gre" ? ipOk && panelPublic !== null : way === "reverse" ? reverseOk(rhost, rport) : !!host.trim();
+  const ipOk = ipv4Ok(ip);
+  const portOk = /^\d+$/.test(rport) && +rport > 0 && +rport < 65535;
+  const ready =
+    way === "gre" ? ipOk && panelPublic !== null : way === "reverse" ? (revGre ? ipOk && panelPublic !== null && portOk : reverseOk(rhost, rport)) : !!host.trim();
   // The panel needs no agents port of its own when it is the one that connects.
   const blocked = !agentsOn && way !== "reverse";
   const transportField = (help: string) => (
@@ -649,79 +649,62 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
           )}
           {way === "reverse" && (
             <>
+              <div className="field">
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={revGre}
+                    onChange={(e) => {
+                      setRevGre(e.target.checked);
+                      setError("");
+                    }}
+                  />{" "}
+                  {t("add.rev.gre")}
+                </label>
+                <span className="help">{t("add.rev.gre.d")}</span>
+              </div>
+              {revGre && (
+                <NewGreLinkFields id="add-rip" ip={ip} onIp={setIp} ipLabel={t("add.gre.ip")} error={error} networks={networks} netId={netId} onNet={setNetId} panelPublic={panelPublic} />
+              )}
               <div className="grid-2">
-                <div className="field">
-                  <label htmlFor="add-rhost">{t("add.rev.host")}</label>
-                  <input className="text mono" id="add-rhost" dir="ltr" placeholder="198.51.100.7" value={rhost} onChange={(e) => setRhost(e.target.value.trim())} />
-                  <span className="help">{t("add.rev.hostHelp")}</span>
-                </div>
+                {!revGre && (
+                  <div className="field">
+                    <label htmlFor="add-rhost">{t("add.rev.host")}</label>
+                    <input className="text mono" id="add-rhost" dir="ltr" placeholder="198.51.100.7" value={rhost} onChange={(e) => setRhost(e.target.value.trim())} />
+                    <span className="help">{t("add.rev.hostHelp")}</span>
+                  </div>
+                )}
                 <div className="field">
                   <label htmlFor="add-rport">{t("add.rev.port")}</label>
                   <input className="text mono" id="add-rport" dir="ltr" inputMode="numeric" value={rport} onChange={(e) => setRport(e.target.value.trim())} />
                   <span className="help">{t("add.rev.portHelp")}</span>
                 </div>
               </div>
-              <span className="err" role="alert">
-                {error}
-              </span>
+              {!revGre && (
+                <span className="err" role="alert">
+                  {error}
+                </span>
+              )}
               {transportField(
                 transport === "auto"
                   ? t("add.rev.auto")
                   : t(`add.x.${transport}.d`, { p: String(/^\d+$/.test(rport) ? (transport === "wss" || transport === "quic" ? +rport + 1 : +rport) : "?") }),
               )}
-              {/^\d+$/.test(rport) && +rport > 0 && +rport < 65535 && (
+              {portOk && (
                 <p className="help">
-                  {t("add.rev.ports")} <code dir="ltr">{linkPorts(+rport, transport)}</code>
+                  {t(revGre ? "add.rev.gre.ports" : "add.rev.ports")} <code dir="ltr">{linkPorts(+rport, transport)}</code>
                 </p>
               )}
               <ol className="gre-steps">
-                <li>{t("add.rev.step1")}</li>
-                <li>{t("add.rev.step2")}</li>
-                <li>{t("add.rev.step3")}</li>
+                <li>{t(revGre ? "add.rev.gre.step1" : "add.rev.step1")}</li>
+                <li>{t(revGre ? "add.rev.gre.step2" : "add.rev.step2")}</li>
+                <li>{t(revGre ? "add.rev.gre.step3" : "add.rev.step3")}</li>
               </ol>
             </>
           )}
           {way === "gre" && (
             <>
-              <div className="field">
-                <label htmlFor="add-ip">{t("add.gre.ip")}</label>
-                <input className="text mono" id="add-ip" dir="ltr" inputMode="decimal" placeholder="198.51.100.7" value={ip} onChange={(e) => setIp(e.target.value.trim())} />
-                <span className="help">{t("add.gre.ipHelp")}</span>
-                <span className="err" role="alert">
-                  {error}
-                </span>
-              </div>
-              <div className="field">
-                <span className="label">{t("add.gre.panel")}</span>
-                {panelPublic ? (
-                  <code dir="ltr" className="gre-panel-addr">
-                    {panelPublic}
-                  </code>
-                ) : panelPublic === null ? (
-                  <span className="err small">{t("add.gre.err.noPanelAddr")}</span>
-                ) : (
-                  <span className="muted small">…</span>
-                )}
-                <span className="help">{t("add.gre.panelHelp")}</span>
-              </div>
-              <div className="field">
-                <span className="label">{t("add.gre.net")}</span>
-                {networks.length > 1 ? (
-                  <select className="select" aria-label={t("add.gre.net")} value={network?.id ?? ""} onChange={(e) => setNetId(e.target.value)} style={{ maxWidth: 360 }}>
-                    {networks.map((n) => (
-                      <option key={n.id} value={n.id}>
-                        {n.name} ({n.cidr})
-                      </option>
-                    ))}
-                  </select>
-                ) : network ? (
-                  <span className="help">
-                    {t("add.gre.netOne", { name: network.name })} <code dir="ltr">{network.cidr}</code>
-                  </span>
-                ) : (
-                  <span className="help">{t("add.gre.netNew")}</span>
-                )}
-              </div>
+              <NewGreLinkFields id="add-ip" ip={ip} onIp={setIp} ipLabel={t("add.gre.ip")} error={error} networks={networks} netId={netId} onNet={setNetId} panelPublic={panelPublic} />
               <ol className="gre-steps">
                 <li>{t("add.gre.step1")}</li>
                 <li>{t("add.gre.step2")}</li>
@@ -747,18 +730,18 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
               <span className="badge">{t("srv.greChip", { network: gre.network })}</span>
               {/* The addresses are isolated left to right, so a Persian sentence around them keeps its order. */}
               <span className="small">{t("add.gre.link", { panel: `⁦${gre.panel_addr}⁩`, server: `⁦${gre.server_addr}⁩`, name: `⁨${gre.name}⁩` })}</span>
-              <span className="help">{t("add.gre.made")}</span>
+              <span className="help">{t(rev ? "add.rev.gre.made" : "add.gre.made")}</span>
             </div>
           )}
           <div className="field">
             <span className="label">{t("add.run")}</span>
             <CodeBlock text={`bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh) --agent ${code}`} />
-            <span className="help">{t(gre ? "add.gre.runHelp" : rev ? "add.rev.runHelp" : "add.runHelp")}</span>
+            <span className="help">{t(gre && rev ? "add.rev.gre.runHelp" : gre ? "add.gre.runHelp" : rev ? "add.rev.runHelp" : "add.runHelp")}</span>
             <span className="label" style={{ marginTop: "var(--sp-3)" }}>
               {t("add.runInstalled")}
             </span>
             <CodeBlock text={`kariz-manager --agent ${code}`} />
-            {!gre && transport !== "auto" && <span className="help">{t("add.via", { t: t(`add.x.${transport}`) })}</span>}
+            {(!gre || rev) && transport !== "auto" && <span className="help">{t("add.via", { t: t(`add.x.${transport}`) })}</span>}
             <span className="countdown">{joined ? "" : t("add.valid", { m: digitsOf(mmss) })}</span>
           </div>
           <div className={`waiting ${joined ? "done" : ""}`}>

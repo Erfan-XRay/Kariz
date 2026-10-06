@@ -137,6 +137,18 @@ panel that takes no agents. *Reconnect* and *Edit* have the same choice (*Who ma
 connection*), so a server can be switched either way; the address and port can be changed there.
 A backup keeps where the panel dials each such server.
 
+**Across a GRE link.** When only GRE gets through between the two servers, tick **Across a GRE
+link** and type the new server's public IPv4 address instead of an address to dial. As with
+*Over a GRE link*, the panel gives the link a `/30` of a private network (it makes `kariz`,
+`10.77.0.0/16`, when there is none) and makes its own end at once; the code carries the other
+end, which the command makes on the new server before its agent starts listening. The panel then
+dials the server's private address on the link, so only GRE (IP protocol 47) has to pass between
+the public addresses. In *Edit* (*The panel connects to the agent*), **Across a GRE link to the
+panel's server** offers the server's end of every link it has with the panel's server, or **A new
+link** (its public IPv4 address and a network), which the panel makes in the same way. A link the
+panel dials a server across cannot be removed until the server is moved off it. New API fields:
+`gre: {ip, network}` in `POST /api/servers/join-reverse` and in `POST /api/servers/reconnect`.
+
 ### A server that goes offline
 
 The agent's link to the panel and the tunnels are separate things: when a server shows
