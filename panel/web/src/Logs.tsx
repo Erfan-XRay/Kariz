@@ -114,7 +114,7 @@ export function LogsPage({ servers }: { servers: ServerInfo[] }) {
             <select className="select" aria-label={t("logs.level")} value={level} onChange={(e) => setLevel(e.target.value)}>
               {["ALL", "ERROR", "WARN", "INFO", "DEBUG"].map((l) => (
                 <option key={l} value={l}>
-                  {l}
+                  {l === "ALL" ? t("logs.allLevels") : l}
                 </option>
               ))}
             </select>
@@ -123,7 +123,7 @@ export function LogsPage({ servers }: { servers: ServerInfo[] }) {
               <input type="search" dir="ltr" placeholder={t("logs.search")} aria-label={t("logs.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
             </label>
             <span className="grow" />
-            <button className={`btn btn-sm ${follow ? "btn-primary" : "btn-ghost"}`} type="button" aria-pressed={follow} onClick={() => setFollow(!follow)}>
+            <button className={`btn btn-sm ${follow ? "btn-primary" : "btn-ghost"}`} type="button" aria-pressed={follow} title={t(follow ? "logs.followOn" : "logs.followOff")} onClick={() => setFollow(!follow)}>
               <Icon name={follow ? "pause" : "play"} size={16} />
               {t("logs.follow")}
             </button>

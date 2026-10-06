@@ -17,6 +17,12 @@ import { FIRST_TUNNEL_PORT, freeTunnelPort, hostOf, portOf, portsInUse } from ".
 export const PROFILES = ["balanced", "ultraspeed", "gaming"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
+/** A tunnel name made from the names of its two servers ("tehran-1" and "fra" give "tehran-1-fra"), or "" when nothing usable is left. */
+export function suggestName(entry: string, exit: string): string {
+  const part = (x: string) => x.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  return [part(entry), part(exit)].filter(Boolean).join("-").slice(0, 32).replace(/-+$/, "");
+}
+
 /** "443, 8080-8090, 2053=53" as forwards; the piece that is wrong if one is. */
 export function parsePorts(text: string, protocol: string, host: string): { forwards: ForwardSpec[]; bad?: string } {
   const forwards: ForwardSpec[] = [];
@@ -66,6 +72,10 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [step, setStep] = useState(0);
   const [back, setBack] = useState(false);
   const [name, setName] = useState("");
+  // The name follows the two servers picked (tehran-frankfurt) until one is typed.
+  const [nameTouched, setNameTouched] = useState(false);
+  // Which field the error of the first step is about, to show it there.
+  const [errAt, setErrAt] = useState<"name" | "servers" | null>(null);
   const [entry, setEntry] = useState("");
   const [exit, setExit] = useState("");
   const [mode, setMode] = useState("reverse");
@@ -108,6 +118,19 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   }, []);
 
   const serverName = (id: string) => servers.find((s) => s.id === id)?.name ?? id;
+  const takenNames = useMemo(() => new Set(servers.flatMap((s) => s.tunnels.map((x) => x.name))), [servers]);
+  useEffect(() => {
+    if (nameTouched || !entry || !exit) return;
+    const guess = suggestName(serverName(entry), serverName(exit));
+    if (NAME.test(guess)) setName(guess);
+  }, [entry, exit, nameTouched]); // eslint-disable-line react-hooks/exhaustive-deps
+  // An error about the servers goes once both are picked.
+  useEffect(() => {
+    if (errAt === "servers" && entry && exit && entry !== exit) {
+      setErrAt(null);
+      setError("");
+    }
+  }, [entry, exit]); // eslint-disable-line react-hooks/exhaustive-deps
   const acceptor = mode === "reverse" ? entry : exit;
   const dialer = mode === "reverse" ? exit : entry;
   const parsed = useMemo(() => parsePorts(ports, protocol, target.trim() || "127.0.0.1"), [ports, protocol, target]);
@@ -163,8 +186,11 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
 
   const problem = (s: number): string => {
     if (s === 0) {
-      if (!NAME.test(name)) return t("wz.nameHelp");
-      if (!entry || !exit || entry === exit) return t("wz.samePick");
+      if (!entry || !exit) return t("wz.pickBoth");
+      if (entry === exit) return t("wz.samePick");
+      if (!name) return t("wz.nameEmpty");
+      if (!NAME.test(name)) return t("wz.nameBad");
+      if (takenNames.has(name)) return t("wz.nameTaken");
     }
     if (s === 2) {
       if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
@@ -180,9 +206,17 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
 
   const go = async (to: number) => {
     setError("");
+    setErrAt(null);
     if (to > step) {
       const p = problem(step);
-      if (p) return setError(p);
+      if (p) {
+        if (step === 0) {
+          const at = !entry || !exit || entry === exit ? "servers" : "name";
+          setErrAt(at);
+          if (at === "name") document.getElementById("wz-name")?.focus();
+        }
+        return setError(p);
+      }
     }
     setBack(to < step);
     setStep(to);
@@ -253,8 +287,28 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                 <p className="wz-lead">{t("wz.lead1")}</p>
                 <div className="field" style={{ marginBottom: "var(--sp-5)", maxWidth: 360 }}>
                   <label htmlFor="wz-name">{t("wz.name")}</label>
-                  <input className="text mono" id="wz-name" dir="ltr" value={name} placeholder="tehran-frankfurt" onChange={(e) => setName(e.target.value.toLowerCase())} />
-                  <span className="help">{t("wz.nameHelp")}</span>
+                  <input
+                    className="text mono"
+                    id="wz-name"
+                    dir="ltr"
+                    value={name}
+                    placeholder="tehran-frankfurt"
+                    aria-invalid={errAt === "name"}
+                    aria-describedby={errAt === "name" ? "wz-err" : "wz-name-help"}
+                    onChange={(e) => {
+                      setNameTouched(e.target.value !== "");
+                      setName(e.target.value.toLowerCase());
+                      if (errAt === "name") setErrAt(null);
+                    }}
+                  />
+                  <span className="help" id="wz-name-help">
+                    {t(nameTouched || !name ? "wz.nameHelp" : "wz.nameAuto")}
+                  </span>
+                  {errAt === "name" && (
+                    <span className="err" id="wz-err" role="alert">
+                      {error}
+                    </span>
+                  )}
                 </div>
                 <div className="pair">
                   <Picker label={t("wz.entry")} servers={servers} value={entry} other={exit} locked={false} onPick={setEntry} />
@@ -267,6 +321,11 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                   <Picker label={t("wz.exit")} servers={servers} value={exit} other={entry} locked={false} onPick={setExit} />
                 </div>
                 {online.length < 2 && <p className="err small">{t("tun.needTwo")}</p>}
+                {errAt === "servers" && (
+                  <p className="err small" role="alert">
+                    {error}
+                  </p>
+                )}
               </>
             )}
 
@@ -530,7 +589,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                 )}
               </>
             )}
-            {error && <p className="err small" role="alert">{error}</p>}
+            {error && !errAt && <p className="err small" role="alert">{error}</p>}
           </div>
         </div>
       </div>

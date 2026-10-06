@@ -54,6 +54,14 @@ export function Shell({
     main.current?.scrollTo({ top: 0 });
   }, [page, route.tunnel]);
 
+  // The tab (and a screen reader) says which page this is: "iran-eu — Tunnels — Kariz".
+  useEffect(() => {
+    document.title = [route.tunnel, t(`page.${page}`), "Kariz"].filter(Boolean).join(" — ");
+    return () => {
+      document.title = "Kariz";
+    };
+  }, [page, route.tunnel, lang]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
@@ -96,8 +104,8 @@ export function Shell({
   );
 
   return (
-    <section id="app" className={`screen is-on ${rising ? "is-rising" : ""}`} aria-label="Kariz panel">
-      <nav className="rail" aria-label="Main">
+    <section id="app" className={`screen is-on ${rising ? "is-rising" : ""}`} aria-label={t("a11y.panel")}>
+      <nav className="rail" aria-label={t("a11y.nav")}>
         <div className="brand">
           <img src={logo} alt="Kariz" />
           <span className="brand-word">
@@ -140,13 +148,13 @@ export function Shell({
           <kbd>Ctrl K</kbd>
         </button>
         <div className="sky-actions">
-          <button className="square-btn" type="button" onClick={() => setLang(lang === "fa" ? "en" : "fa")} aria-label="Language" title={lang === "fa" ? "English" : "فارسی"}>
+          <button className="square-btn" type="button" onClick={() => setLang(lang === "fa" ? "en" : "fa")} aria-label={lang === "fa" ? "English (change the language)" : "فارسی (تغییر زبان)"} title={lang === "fa" ? "English" : "فارسی"}>
             {lang === "fa" ? "EN" : "فا"}
           </button>
-          <button className="square-btn" type="button" onClick={() => setTheme(theme === "night" ? "dawn" : "night")} aria-label="Theme" title={theme === "night" ? t("theme.dawn") : t("theme.night")}>
+          <button className="square-btn" type="button" onClick={() => setTheme(theme === "night" ? "dawn" : "night")} aria-label={t("a11y.theme", { theme: theme === "night" ? t("theme.dawn") : t("theme.night") })} title={t("a11y.theme", { theme: theme === "night" ? t("theme.dawn") : t("theme.night") })}>
             <Icon name={theme === "night" ? "sun" : "moon"} />
           </button>
-          <button className="square-btn" type="button" onClick={() => setLow(!low, true)} aria-label="Low power" aria-pressed={low} title={t("pal.low")}>
+          <button className="square-btn" type="button" onClick={() => setLow(!low, true)} aria-label={t("pal.low")} aria-pressed={low} title={t("pal.low")}>
             <Icon name="leaf" />
           </button>
           <ChannelLink variant="square" />
@@ -210,7 +218,7 @@ function Palette({ commands, onClose }: { commands: Command[]; onClose: () => vo
   };
 
   return (
-    <div ref={box} className={`palette-backdrop ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label="Commands" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div ref={box} className={`palette-backdrop ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label={t("pal.title")} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="palette">
         <div className="palette-input">
           <Icon name="search" size={18} />

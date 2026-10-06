@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "./api";
 import { useApp } from "./store";
-import { Seg } from "./ui";
+import { Seg, Sep } from "./ui";
 
 const RANGES = ["1h", "24h", "7d", "30d"] as const;
 type Range = (typeof RANGES)[number];
@@ -103,8 +103,9 @@ export function Chart({ series, unit, decimals = 1 }: { series: string; unit: st
           <div className="chart-tip is-on" style={{ left: `clamp(8px, calc(${((coords[hover!][0] / W) * 100).toFixed(1)}% - 60px), calc(100% - 150px))` }}>
             <b className="num" dir="ltr">
               {num(at[1], decimals)} {unit}
-            </b>{" "}
-            · {time(at[0])}
+            </b>
+            <Sep />
+            {time(at[0])}
           </div>
         )}
       </div>

@@ -36,6 +36,30 @@
   transition: background var(--dur-short), color var(--dur-short);
 }
 .seg button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.seg-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 18px;
+  margin-inline-start: 6px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.seg button[aria-pressed="true"] .seg-count { background: color-mix(in srgb, var(--on-accent) 16%, transparent); color: var(--on-accent); }
+.sep {
+  display: inline-block;
+  width: 1px;
+  height: 0.9em;
+  margin-inline: 0.5em;
+  background: currentColor;
+  opacity: 0.35;
+  vertical-align: -0.1em;
+}
 .seg button:not([aria-pressed="true"]):hover { color: var(--text); background: var(--accent-soft); }
 
 /* ------------------------------------------------------------------ fields */
@@ -235,6 +259,9 @@ pre.notes { max-height: 240px; overflow: auto; white-space: pre-wrap; }
 .t-main { display: grid; gap: 1px; min-width: 0; }
 .t-name { font-weight: 600; font-size: var(--fs-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .t-route { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; overflow: hidden; }
+.t-route > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Names are Latin: in a right-to-left page they are cut at their own end ("iran-…"), not at their start. */
+[dir="rtl"] .t-name, [dir="rtl"] .t-route > span { direction: ltr; text-align: right; }
 .t-route svg { color: var(--accent); flex: none; }
 [dir="rtl"] .t-route svg { transform: scaleX(-1); }
 .t-bar { display: block; height: 6px; border-radius: 3px; background: var(--card-2); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }
@@ -275,6 +302,14 @@ pre.notes { max-height: 240px; overflow: auto; white-space: pre-wrap; }
 /* ------------------------------------------------------------------ tables */
 
 .tunnels { width: 100%; border-collapse: collapse; }
+/* The name column keeps room for a name and its two servers when the window is narrow; the
+   transport tags wrap instead, and the table scrolls rather than hide its switches. */
+.tunnels td:first-child { min-width: 10rem; }
+.tunnels-wrap { overflow-x: auto; }
+@media (max-width: 1100px) {
+  .tunnels td.c-transport { white-space: normal; }
+  .tunnels .t-route { flex-wrap: wrap; row-gap: 0; }
+}
 .tunnels th {
   padding: var(--sp-3) var(--sp-4);
   text-align: start;

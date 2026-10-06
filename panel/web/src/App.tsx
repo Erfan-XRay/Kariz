@@ -35,7 +35,7 @@ function readRoute(): Route {
 function Boot({ note }: { note: string }) {
   const { t } = useApp();
   return (
-    <section id="boot" className="screen is-on" aria-label="Loading" aria-busy="true">
+    <section id="boot" className="screen is-on" aria-label={t("a11y.loading")} aria-busy="true">
       <div className="boot-inner">
         <svg className="boot-logo" viewBox="0 0 256 256" aria-hidden="true">
           <defs>

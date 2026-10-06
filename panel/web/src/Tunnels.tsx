@@ -504,7 +504,7 @@ export function TunnelsPage({
       <div className="page-band">
         <Seg
           value={filter}
-          options={(["all", "up", "down", "off"] as Filter[]).map((f) => [f, `${f === "all" ? t("tl.all") : t(stateKey[f])} · ${num(f === "all" ? tunnels.length : count(f))}`] as [Filter, string])}
+          options={(["all", "up", "down", "off"] as Filter[]).map((f) => [f, f === "all" ? t("tl.all") : t(stateKey[f]), num(f === "all" ? tunnels.length : count(f))] as [Filter, string, string])}
           onChange={setFilter}
         />
         <label className="search">
@@ -540,95 +540,97 @@ export function TunnelsPage({
         </div>
       ) : (
         <div className="card flush">
-          <table className="tunnels">
-            <thead>
-              <tr>
-                <th>{t("t.name")}</th>
-                <th>{t("t.transport")}</th>
-                <th className="hide-sm">{t("t.ports")}</th>
-                <th>{t("t.state")}</th>
-                <th>{t("t.rate")}</th>
-                <th>
-                  <span className="sr-only">{t("tun.start")}</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length === 0 && (
+          <div className="tunnels-wrap">
+            <table className="tunnels">
+              <thead>
                 <tr>
-                  <td colSpan={6} className="muted" style={{ textAlign: "center", padding: "var(--sp-7)" }}>
-                    {t("tl.none")}
-                  </td>
+                  <th>{t("t.name")}</th>
+                  <th>{t("t.transport")}</th>
+                  <th className="hide-sm">{t("t.ports")}</th>
+                  <th>{t("t.state")}</th>
+                  <th>{t("t.rate")}</th>
+                  <th>
+                    <span className="sr-only">{t("tun.start")}</span>
+                  </th>
                 </tr>
-              )}
-              {rows.map((x) => {
-                const r = rateParts(x.rate);
-                const mode = x.entry?.tunnel.mode ?? x.exit?.tunnel.mode ?? "";
-                return (
-                  <tr key={x.name} className={`clickable st-${x.state}`} onClick={() => setOpen(x.name)}>
-                    <td>
-                      <div className="t-cell">
-                        <span className={`t-mark ${x.state}`} aria-hidden="true" />
-                        <div>
-                          <button className="linklike t-name" type="button" onClick={() => setOpen(x.name)}>
-                            {x.name}
-                          </button>
-                          <span className="t-route">
-                            {x.paired ? (
-                              <>
-                                <span>{x.entry!.server.name}</span>
-                                <Icon name="arrow" size={14} />
-                                <span>{x.exit!.server.name}</span>
-                              </>
-                            ) : (
-                              <span>
-                                {(x.entry ?? x.exit)!.server.name} · {t("t.oneSide")}
-                              </span>
-                            )}
-                          </span>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="c-transport">
-                      <span className={`tag ${x.via ? "via" : ""}`} dir="ltr">{transportLabel(x.transport, x.via)}</span> <span className="tag">{x.profile}</span>
-                      {mode && <span className="tag soft hide-sm">{t(`td.mode.${mode}`)}</span>}
-                    </td>
-                    <td className="c-transport num hide-sm">{num((x.entry ?? x.exit)?.tunnel.forwards.length ?? 0)}</td>
-                    <td>
-                      <StateBadge state={x.state} />
-                    </td>
-                    <td className="rate num">
-                      {x.state === "up" ? (
-                        <div className="rate-cell">
-                          <span dir="ltr">
-                            {num(r.value, r.decimals)} <small>{r.unit}</small>
-                          </span>
-                          <span className="t-bar" aria-hidden="true">
-                            <i style={{ width: `${Math.max(2, (x.rate / maxRate) * 100)}%` }} />
-                          </span>
-                        </div>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-                    <td>
-                      <button
-                        className="switch"
-                        type="button"
-                        role="switch"
-                        aria-checked={x.state !== "off"}
-                        aria-label={t("tl.toggle", { name: x.name })}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setAct({ name: x.name, action: x.state === "off" ? "start" : "stop" });
-                        }}
-                      />
+              </thead>
+              <tbody>
+                {rows.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="muted" style={{ textAlign: "center", padding: "var(--sp-7)" }}>
+                      {t("tl.none")}
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                )}
+                {rows.map((x) => {
+                  const r = rateParts(x.rate);
+                  const mode = x.entry?.tunnel.mode ?? x.exit?.tunnel.mode ?? "";
+                  return (
+                    <tr key={x.name} className={`clickable st-${x.state}`} onClick={() => setOpen(x.name)}>
+                      <td>
+                        <div className="t-cell">
+                          <span className={`t-mark ${x.state}`} aria-hidden="true" />
+                          <div>
+                            <button className="linklike t-name" type="button" onClick={() => setOpen(x.name)}>
+                              {x.name}
+                            </button>
+                            <span className="t-route">
+                              {x.paired ? (
+                                <>
+                                  <span>{x.entry!.server.name}</span>
+                                  <Icon name="arrow" size={14} />
+                                  <span>{x.exit!.server.name}</span>
+                                </>
+                              ) : (
+                                <span>
+                                  {(x.entry ?? x.exit)!.server.name} · {t("t.oneSide")}
+                                </span>
+                              )}
+                            </span>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="c-transport">
+                        <span className={`tag ${x.via ? "via" : ""}`} dir="ltr">{transportLabel(x.transport, x.via)}</span> <span className="tag">{x.profile}</span>
+                        {mode && <span className="tag soft hide-sm">{t(`td.mode.${mode}`)}</span>}
+                      </td>
+                      <td className="c-transport num hide-sm">{num((x.entry ?? x.exit)?.tunnel.forwards.length ?? 0)}</td>
+                      <td>
+                        <StateBadge state={x.state} />
+                      </td>
+                      <td className="rate num">
+                        {x.state === "up" ? (
+                          <div className="rate-cell">
+                            <span dir="ltr">
+                              {num(r.value, r.decimals)} <small>{r.unit}</small>
+                            </span>
+                            <span className="t-bar" aria-hidden="true">
+                              <i style={{ width: `${Math.max(2, (x.rate / maxRate) * 100)}%` }} />
+                            </span>
+                          </div>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td>
+                        <button
+                          className="switch"
+                          type="button"
+                          role="switch"
+                          aria-checked={x.state !== "off"}
+                          aria-label={t("tl.toggle", { name: x.name })}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setAct({ name: x.name, action: x.state === "off" ? "start" : "stop" });
+                          }}
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
       {dialogs}
