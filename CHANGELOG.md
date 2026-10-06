@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Getting a certificate for a wss tunnel on a server set up with an older Kariz.** An update
+  swaps the programs but not the manager script, so a server installed before `tunnel-cert`
+  answered with its usage text ("certificate not obtained: ... Set GITHUB_TOKEN ..."). The panel
+  and the agent now carry the manager of their own release and put it in place (in
+  `/usr/local/bin/kariz-manager`) before they ask it for a certificate.
+
 ## 2.0.0 - 2026-10-05
 
 A new major version: servers can now join three ways (over the internet, over a GRE link alone,
