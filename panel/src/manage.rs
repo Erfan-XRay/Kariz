@@ -579,6 +579,29 @@ pub(crate) async fn run(program: &str, args: &[String], limit: Duration) -> Resu
 /// The program that gets certificates (the manager script, installed with Kariz).
 const MANAGER: &str = "/usr/local/bin/kariz-manager";
 
+/// The manager script of this release. An update swaps the programs but not the script, so
+/// the installed one can be older than the commands sent to it (one without `tunnel-cert`
+/// only prints its usage).
+const MANAGER_SCRIPT: &str = include_str!("../../scripts/kariz.sh");
+
+/// Makes the installed manager the one of this release, when it is missing or different.
+fn sync_manager(path: &Path) -> Result<()> {
+    if std::fs::read(path).is_ok_and(|have| have == MANAGER_SCRIPT.as_bytes()) {
+        return Ok(());
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".new");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, MANAGER_SCRIPT)
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to replace {}", path.display()))
+}
+
 /// Whether `host` is a domain name or an IPv4 address the manager may ask a certificate for.
 pub fn valid_cert_host(host: &str) -> bool {
     if host.parse::<std::net::Ipv4Addr>().is_ok() {
@@ -622,7 +645,15 @@ pub async fn issue_cert(host: &str, email: Option<&str>) -> crate::wire::CertRep
             return failed("bad_email".into());
         }
     }
-    let program = std::env::var("KARIZ_MANAGER").unwrap_or_else(|_| MANAGER.to_owned());
+    let program = match std::env::var("KARIZ_MANAGER") {
+        Ok(program) => program,
+        Err(_) => {
+            if let Err(e) = sync_manager(Path::new(MANAGER)) {
+                tracing::warn!("the manager script could not be updated: {e:#}");
+            }
+            MANAGER.to_owned()
+        }
+    };
     if !Path::new(&program).exists() {
         return failed("no_manager".into());
     }
@@ -1392,5 +1423,26 @@ mod tests {
         remove_files(&d.0, "main").unwrap();
         assert_eq!(std::fs::read_dir(&d.0).unwrap().count(), 0);
         assert!(remove_files(&d.0, "main").is_ok(), "twice is fine");
+    }
+
+    #[test]
+    fn an_old_or_missing_manager_is_replaced_by_this_release_s() {
+        let d = Dir::new();
+        let path = d.0.join("kariz-manager");
+        assert!(MANAGER_SCRIPT.contains("tunnel-cert) shift && cmd_tunnel_cert"));
+        sync_manager(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), MANAGER_SCRIPT);
+        // One from before `tunnel-cert` only printed its usage to the panel.
+        std::fs::write(
+            &path,
+            "#!/usr/bin/env bash
+echo Usage: kariz-manager
+",
+        )
+        .unwrap();
+        sync_manager(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), MANAGER_SCRIPT);
+        sync_manager(&path).unwrap();
+        assert!(!d.0.join("kariz-manager.new").exists());
     }
 }
