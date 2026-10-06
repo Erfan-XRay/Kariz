@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 2.1.0 - 2026-10-06
+
+Two new things, both working with the agents you have: the **benchmark** finds the transport
+that gets through best between two servers before a tunnel is built, and the panel can **connect
+to a server across a GRE link**. The panel had a UX review, and getting a certificate for a wss
+tunnel works on servers set up with an older Kariz. The benchmark and the GRE link need the agents
+on both servers to be 2.1.0: update them from the panel (*Settings, Updates*) after the panel.
 
 ### Added
 
@@ -23,14 +29,6 @@
   the speed test). Agents: `BenchListen` and `BenchDial`. API: `POST /api/bench`,
   `GET /api/bench?id=`, `POST /api/bench/stop`, `GET /api/bench/last`.
 
-### Fixed
-
-- **Getting a certificate for a wss tunnel on a server set up with an older Kariz.** An update
-  swaps the programs but not the manager script, so a server installed before `tunnel-cert`
-  answered with its usage text ("certificate not obtained: ... Set GITHUB_TOKEN ..."). The panel
-  and the agent now carry the manager of their own release and put it in place (in
-  `/usr/local/bin/kariz-manager`) before they ask it for a certificate.
-
 ### Changed
 
 - **A clearer panel, after a UX review** (heuristics, error states, accessibility, wording):
@@ -46,6 +44,14 @@
   - Every page names itself in the browser tab ("iran-eu — Tunnels — Kariz").
   - The log level filter says *All levels*, and *Follow* explains itself; the Persian settings
     say *دستگاه‌های واردشده* instead of mixing in "session", and "@BotFather" keeps its direction.
+
+### Fixed
+
+- **Getting a certificate for a wss tunnel on a server set up with an older Kariz.** An update
+  swaps the programs but not the manager script, so a server installed before `tunnel-cert`
+  answered with its usage text ("certificate not obtained: ... Set GITHUB_TOKEN ..."). The panel
+  and the agent now carry the manager of their own release and put it in place (in
+  `/usr/local/bin/kariz-manager`) before they ask it for a certificate.
 
 ## 2.0.0 - 2026-10-05
 
