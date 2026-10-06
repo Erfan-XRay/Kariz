@@ -136,6 +136,14 @@ const MIGRATIONS: &[&str] = &[
          port INTEGER NOT NULL,
          transport TEXT
      );",
+    // 13: the last benchmark between two servers (entry, exit), as JSON.
+    "CREATE TABLE benchmarks (
+         entry TEXT NOT NULL,
+         exit TEXT NOT NULL,
+         created INTEGER NOT NULL,
+         result TEXT NOT NULL,
+         PRIMARY KEY (entry, exit)
+     );",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

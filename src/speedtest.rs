@@ -350,6 +350,29 @@ where
     Ok(report)
 }
 
+/// Round trips on one test stream (`open("echo")`) for `over`: what a benchmark's quick
+/// probe measures of a link.
+pub async fn latency(pipe: Pipe, over: Duration) -> Latency {
+    ping_loop(pipe, Instant::now() + over).await
+}
+
+/// The download and upload phases of a test without its idle and UDP phases (a benchmark
+/// measured the idle latency already): each direction's rate and the latency under it.
+pub async fn rates<O, F>(
+    open: O,
+    options: Options,
+    mut progress: impl FnMut(String),
+) -> io::Result<((Rate, Latency), (Rate, Latency))>
+where
+    O: Fn(&'static str) -> F,
+    F: std::future::Future<Output = io::Result<Pipe>>,
+{
+    options.validate()?;
+    let down = measure_rate(&open, "down", options, &mut progress, "↓").await?;
+    let up = measure_rate(&open, "up", options, &mut progress, "↑").await?;
+    Ok((down, up))
+}
+
 /// Aborts its tasks when it is dropped: a test that is cut off (its client went away, or
 /// pressed stop) must not leave streams pumping data behind it.
 struct Reap(Vec<tokio::task::AbortHandle>);

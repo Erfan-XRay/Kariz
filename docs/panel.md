@@ -224,6 +224,30 @@ a **speed test**, or **delete** it (both sides).
 The panel never keeps a tunnel's token: it makes one, sends it to the two servers over the link
 and forgets it. So *a new token* cannot be undone if it fails half way; run it again.
 
+### Benchmark: which transport gets through best
+
+Not sure which transport (or which direction) to use between two servers? The **Kind** step of
+the wizard, and every tunnel's page, have a **Benchmark**. It takes about 20 seconds, makes no
+tunnel and changes nothing on the servers:
+
+1. **Quick check.** Every transport (`tcp` with mux, `kcp`, `ws`, `wss`, `quic`) in **both
+   directions** (which server takes the connection), and across the GRE link if the two servers
+   have one: one server listens for a short test session, the other dials it, and the panel
+   notes whether it got through, how long the handshake took and the round trips. It uses the
+   port the tunnel would get, since filters often go by port.
+2. **Speed.** The best three of those move data each way for two seconds.
+
+Each one gets a **score from 0 to 100**: speed, latency and stability (lost round trips, a slow
+handshake, latency that grows while data moves), weighted by the profile: *gaming* counts
+latency most, *ultra speed* speed. The panel shows the recommended one with why ("the fastest,
+1.4× the speed of WSS"), the others ranked, what did not get through and the likely reason, and
+says when nothing got through in one direction (that server takes no connections from the
+other: use the other mode). **Use this** fills the wizard in; on a tunnel's page **Edit with
+this** opens the edit page with it filled in, to look over and save. The last result of each pair
+of servers is kept. A benchmark is a snapshot: some filters start only after minutes or at busy
+hours. Both servers need this release (`POST /api/bench`, `GET /api/bench?id=`,
+`POST /api/bench/stop`, `GET /api/bench/last?entry=&exit=`).
+
 ## What you see
 
 - **Map:** each server is a well on the horizon; each tunnel whose entry and exit servers

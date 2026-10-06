@@ -133,6 +133,13 @@ const ICONS: Record<string, ReactNode> = {
     </>
   ),
   pulse: <path d="M3 12h4l2.5-6 5 12 2.5-6H21" />,
+  gauge: (
+    <>
+      <path d="M4.5 17a8 8 0 1 1 15 0" />
+      <path d="m12 16.5 3.6-4.6" />
+      <circle cx="12" cy="16.5" r="1.3" />
+    </>
+  ),
   down: <path d="M12 5v14M6 13l6 6 6-6" />,
   up: <path d="M12 19V5M6 11l6-6 6 6" />,
   clock: (
