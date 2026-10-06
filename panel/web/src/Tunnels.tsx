@@ -9,6 +9,10 @@ import { Card, Dialog, Empty, Icon, Seg, Skeleton, Stat } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { RouteScene } from "./RouteScene";
 import { SpeedTest } from "./SpeedTest";
+import { BenchPanel } from "./Benchmark";
+import type { BenchChoice } from "./Benchmark";
+import { useNetworks } from "./Networks";
+import { linkWithAddress } from "./GreChoice";
 import { AutoRestartBlock } from "./AutoRestart";
 import { Wizard } from "./Wizard";
 import { TunnelEdit } from "./TunnelEdit";
@@ -185,15 +189,36 @@ function bytes(n: number): { value: number; unit: string; decimals: number } {
 type Action = "start" | "stop" | "restart" | "delete" | "rotate";
 
 /** One tunnel, on a page of its own. */
-function TunnelPage({ tunnel, onBack, onAct, onEdit }: { tunnel: Tunnel; onBack: () => void; onAct: (a: Action) => void; onEdit: () => void }) {
+function TunnelPage({
+  tunnel,
+  servers,
+  onBack,
+  onAct,
+  onEdit,
+}: {
+  tunnel: Tunnel;
+  servers: ServerInfo[];
+  onBack: () => void;
+  onAct: (a: Action) => void;
+  /** With a benchmark's choice, the edit page opens with it filled in. */
+  onEdit: (preset?: BenchChoice) => void;
+}) {
   const { t, num } = useApp();
   const speed = useRef<HTMLDivElement>(null);
+  const benchCard = useRef<HTMLDivElement>(null);
+  const { links } = useNetworks();
   const forwards = tunnel.entry?.tunnel.forwards ?? tunnel.exit?.tunnel.forwards ?? [];
   const status = tunnel.entry?.tunnel.status ?? null;
   const up = tunnel.state === "up";
   const r = rateParts(tunnel.rate);
   const moved = bytes(status ? status.totals.bytes_up + status.totals.bytes_down : 0);
   const mode = tunnel.entry?.tunnel.mode ?? tunnel.exit?.tunnel.mode ?? "";
+  // What the tunnel runs over now, as the benchmark names it: its core transport (tcp is measured with mux), its
+  // direction, and whether it listens on a private network link.
+  const acceptorSide = mode === "reverse" ? tunnel.entry : tunnel.exit;
+  const listenHost = (acceptorSide?.tunnel.listen ?? "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
+  const overGre = !!linkWithAddress(links, listenHost);
+  const nowCore = tunnel.transport === "tcp" ? "tcpmux" : tunnel.transport;
 
   return (
     <div className="page is-on tunnel-page">
@@ -220,6 +245,10 @@ function TunnelPage({ tunnel, onBack, onAct, onEdit }: { tunnel: Tunnel; onBack:
               <Icon name="bolt" size={18} />
               {t("sp.title")}
             </button>
+            <button className="btn btn-ghost btn-sm" type="button" disabled={!tunnel.paired} onClick={() => benchCard.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+              <Icon name="gauge" size={18} />
+              {t("bench.title")}
+            </button>
             <button className="btn btn-ghost btn-sm" type="button" disabled={tunnel.state === "off"} onClick={() => onAct("restart")}>
               <Icon name="restart" size={18} />
               {t("tun.restart")}
@@ -228,7 +257,7 @@ function TunnelPage({ tunnel, onBack, onAct, onEdit }: { tunnel: Tunnel; onBack:
               <Icon name={tunnel.state === "off" ? "play" : "pause"} size={18} />
               {t(tunnel.state === "off" ? "tun.start" : "tun.stop")}
             </button>
-            <button className="btn btn-ghost btn-sm" type="button" disabled={!tunnel.paired} title={tunnel.paired ? undefined : t("wz.oneSide")} onClick={onEdit}>
+            <button className="btn btn-ghost btn-sm" type="button" disabled={!tunnel.paired} title={tunnel.paired ? undefined : t("wz.oneSide")} onClick={() => onEdit()}>
               <Icon name="edit" size={18} />
               {t("tun.edit")}
             </button>
@@ -322,6 +351,25 @@ function TunnelPage({ tunnel, onBack, onAct, onEdit }: { tunnel: Tunnel; onBack:
         </Card>
       </div>
 
+      {tunnel.paired && tunnel.entry && tunnel.exit && (
+        <div className="td-speed" ref={benchCard}>
+          <Card title={t("bench.title")} sub={t("bench.sub")}>
+            <BenchPanel
+              entry={tunnel.entry.server.id}
+              exit={tunnel.exit.server.id}
+              profile={tunnel.profile}
+              port={0}
+              servers={servers}
+              applyLabel={t("bench.useTunnel")}
+              currentLabel={t("bench.currentTunnel")}
+              context="tunnel"
+              isCurrent={(c) => c.transport === nowCore && c.mode === mode && (c.path === "gre") === overGre}
+              onApply={(choice) => onEdit(choice)}
+            />
+          </Card>
+        </div>
+      )}
+
       {tunnel.entry && (
         <Card title={t("td.traffic")} sub={t("td.trafficSub")}>
           <div className="grid-3">
@@ -390,6 +438,8 @@ export function TunnelsPage({
   const online = servers.filter((s) => s.online);
   const [wizard, setWizard] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
+  // A benchmark's choice the edit page opens with.
+  const [preset, setPreset] = useState<BenchChoice | null>(null);
   const [act, setAct] = useState<{ name: string; action: Action } | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
@@ -477,8 +527,10 @@ export function TunnelsPage({
         key={openTunnel.name}
         tunnel={openTunnel}
         servers={servers}
+        preset={preset}
         onBack={() => {
           setEditing(null);
+          setPreset(null);
           onChanged();
         }}
       />
@@ -491,8 +543,12 @@ export function TunnelsPage({
         <TunnelPage
           tunnel={openTunnel}
           onBack={() => setOpen(null)}
+          servers={servers}
           onAct={(a) => setAct({ name: openTunnel.name, action: a })}
-          onEdit={() => setEditing(openTunnel.name)}
+          onEdit={(choice) => {
+            setPreset(choice ?? null);
+            setEditing(openTunnel.name);
+          }}
         />
         {dialogs}
       </>

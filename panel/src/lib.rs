@@ -6,6 +6,7 @@ pub mod alerts;
 pub mod api;
 pub mod auth;
 pub mod backup;
+pub mod bench;
 pub mod cert;
 pub mod collect;
 pub mod config;

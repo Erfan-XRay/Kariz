@@ -77,6 +77,27 @@ pub enum Request {
     NetPing { name: String },
     /// Whether GRE can be made here, and the state of this server's links.
     NetStatus,
+    /// Listen for one benchmark test session ([`kariz::bench`]) over `transport` with the
+    /// tunnel `profile`, on `port` of every IPv4 address (another free port when that one is
+    /// taken; 0: any). The answer says the port. The listener goes away when its session
+    /// ends, or after `wait_ms` if nobody comes.
+    BenchListen {
+        token: String,
+        transport: String,
+        profile: String,
+        port: u16,
+        wait_ms: u32,
+    },
+    /// Dial a benchmark listener at `addr` and measure the link: its handshake, round trips
+    /// for `ping_ms`, and with `seconds` above 0 the rate each way for that long.
+    BenchDial {
+        addr: String,
+        token: String,
+        transport: String,
+        profile: String,
+        ping_ms: u32,
+        seconds: u32,
+    },
     /// A release is about to be sent (its three files and their sizes).
     UpdateBegin {
         version: String,
@@ -295,6 +316,29 @@ pub struct CertReply {
     pub cert: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+}
+
+/// The answer to [`Request::BenchListen`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BenchListening {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub port: u16,
+}
+
+/// The answer to [`Request::BenchDial`]: what one test link measured.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BenchMeasured {
+    pub ok: bool,
+    pub error: Option<String>,
+    /// The connection and its handshake, in milliseconds.
+    pub connect_ms: f64,
+    /// Round trips on an idle link.
+    pub latency: Option<kariz::speedtest::Latency>,
+    /// With `seconds`: the rate each way, and round trips while data moves.
+    pub download_mbps: Option<f64>,
+    pub upload_mbps: Option<f64>,
+    pub loaded: Option<kariz::speedtest::Latency>,
 }
 
 /// The answer to [`Request::SpeedtestStart`].

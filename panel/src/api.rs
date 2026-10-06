@@ -67,6 +67,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/history", get(history))
         .route("/api/events", get(events))
         .route("/api/logs", get(tunnel_logs))
+        .route("/api/bench", post(bench_start).get(bench_state))
+        .route("/api/bench/stop", post(bench_stop))
+        .route("/api/bench/last", get(bench_last))
         .route("/api/tunnels/speedtest", post(tunnel_speedtest))
         .route("/api/tunnels/cert", post(tunnel_cert))
         .route("/api/tunnels/speedtest/start", post(tunnel_speedtest_start))
@@ -1214,6 +1217,97 @@ async fn op_status(
     match state.hub.ops.get(&q.id) {
         Some(op) => reply(StatusCode::OK, json!(op)),
         None => error(StatusCode::NOT_FOUND, "no_such_operation"),
+    }
+}
+
+/// Starts a benchmark between two servers (about 20 seconds); follow it with
+/// `GET /api/bench?id=`.
+async fn bench_start(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<crate::bench::Ask>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let (entry, exit) = (body.entry.clone(), body.exit.clone());
+    match crate::bench::start(&state.hub, body) {
+        Ok(id) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("ran a benchmark between {entry} and {exit}"),
+            );
+            reply(StatusCode::OK, json!({ "id": id }))
+        }
+        Err(e) => {
+            let why = format!("{e:#}");
+            match why.split(':').next().unwrap_or_default() {
+                "bad_input" | "same_server" => error(StatusCode::BAD_REQUEST, &why),
+                "offline" | "busy" => error(StatusCode::CONFLICT, &why),
+                _ => internal(e),
+            }
+        }
+    }
+}
+
+/// A benchmark run: what has been measured so far, and the scores.
+async fn bench_state(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<IdQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match state.hub.bench.get(&q.id) {
+        Some(b) => reply(StatusCode::OK, json!(b)),
+        None => error(StatusCode::NOT_FOUND, "no_such_benchmark"),
+    }
+}
+
+#[derive(Deserialize)]
+struct BenchStopBody {
+    id: String,
+}
+
+/// Stops a benchmark at its next step; what it measured so far is scored and kept.
+async fn bench_stop(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<BenchStopBody>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, true) {
+        return r;
+    }
+    if state.hub.bench.stop(&body.id) {
+        reply(StatusCode::OK, json!({}))
+    } else {
+        error(StatusCode::NOT_FOUND, "no_such_benchmark")
+    }
+}
+
+#[derive(Deserialize)]
+struct PairQuery {
+    entry: String,
+    exit: String,
+}
+
+/// The last finished benchmark between two servers (in that order), if there is one.
+async fn bench_last(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<PairQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    match crate::bench::last(&state.hub, &q.entry, &q.exit) {
+        Ok(b) => reply(StatusCode::OK, json!({ "bench": b })),
+        Err(e) => internal(e),
     }
 }
 

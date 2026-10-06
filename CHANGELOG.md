@@ -12,6 +12,16 @@
   a link carries the link, so the agent makes it again before it listens; such a link cannot be
   removed while the panel uses it. API: `gre: {ip, network}` in `POST /api/servers/join-reverse`
   and `POST /api/servers/reconnect`.
+- **Benchmark: which transport gets through best between two servers.** In the wizard's *Kind*
+  step and on every tunnel's page. In about 20 seconds, without making a tunnel, it tries every
+  transport in both directions (and across a GRE link between the two, if there is one) on the
+  tunnel's port, measures the speed of the best three, and scores each from 0 to 100 (speed,
+  latency, stability; weighted by the profile). It recommends one with the reason, ranks the
+  others, explains what did not get through, and says when a direction is blocked. *Use this*
+  fills the wizard in; *Edit with this* opens a tunnel's edit page with it. The last result of
+  each pair is kept. Core: `kariz::bench` (test links over any tunnel transport, measured like
+  the speed test). Agents: `BenchListen` and `BenchDial`. API: `POST /api/bench`,
+  `GET /api/bench?id=`, `POST /api/bench/stop`, `GET /api/bench/last`.
 
 ### Fixed
 

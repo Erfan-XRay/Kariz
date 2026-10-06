@@ -153,6 +153,8 @@ struct SpeedJob {
 
 /// The agent's state while it runs.
 pub struct Agent {
+    /// Its benchmark test listeners.
+    bench: crate::bench::Listeners,
     speed_jobs: Arc<Mutex<std::collections::HashMap<String, SpeedJob>>>,
     path: PathBuf,
     config: Mutex<AgentConfig>,
@@ -204,6 +206,7 @@ impl Agent {
     ) -> Arc<Self> {
         let config_key = config.release_key.clone();
         Arc::new(Self {
+            bench: crate::bench::Listeners::default(),
             speed_jobs: Arc::default(),
             path: path.to_path_buf(),
             config: Mutex::new(config),
@@ -438,6 +441,40 @@ impl Agent {
             Request::NetSync { links } => ack(self.net.sync(links).await),
             Request::NetPing { name } => to_json(&self.net.ping(&name).await),
             Request::NetStatus => to_json(&self.net.status().await),
+            Request::BenchListen {
+                token,
+                transport,
+                profile,
+                port,
+                wait_ms,
+            } => {
+                let (cert, key) = (
+                    self.path.with_file_name("link-cert.pem"),
+                    self.path.with_file_name("link-key.pem"),
+                );
+                to_json(
+                    &crate::bench::listen(
+                        &self.bench,
+                        &token,
+                        &transport,
+                        &profile,
+                        port,
+                        wait_ms,
+                        (&cert, &key),
+                    )
+                    .await,
+                )
+            }
+            Request::BenchDial {
+                addr,
+                token,
+                transport,
+                profile,
+                ping_ms,
+                seconds,
+            } => to_json(
+                &crate::bench::dial(&addr, &token, &transport, &profile, ping_ms, seconds).await,
+            ),
             Request::UpdateBegin { version, files } => ack(self.update.begin(&version, &files)),
             Request::UpdateChunk {
                 version,

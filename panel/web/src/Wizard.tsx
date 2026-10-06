@@ -11,6 +11,8 @@ import { MuxFields, MuxToggle, emptyMux, muxSpecOf, muxToSpec } from "./MuxField
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
+import { BenchPanel, benchLabel } from "./Benchmark";
+import type { BenchChoice } from "./Benchmark";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, transportLabel } from "./transport";
 import { FIRST_TUNNEL_PORT, freeTunnelPort, hostOf, portOf, portsInUse } from "./ports";
 
@@ -64,7 +66,7 @@ export function addressesOf(s: ServerInfo): string[] {
 export { hostOf, portOf };
 
 export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: () => void }) {
-  const { t, num, lang } = useApp();
+  const { t, num, lang, toast } = useApp();
   const online = servers.filter((s) => s.online);
   const [on, setOn] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -131,6 +133,16 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
       setError("");
     }
   }, [entry, exit]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A benchmark result chosen: its direction, transport (with mux, as the benchmark measured it) and the
+  // private network of a GRE path.
+  const applyBench = (c: BenchChoice) => {
+    setMode(c.mode);
+    setTransport(c.transport === "tcpmux" ? "tcp" : c.transport);
+    setMuxOn(true);
+    setNetId(c.network ?? "");
+    toast(t("bench.applied", { t: benchLabel(c.transport), mode: t(`bench.mode.${c.mode}`) }), "ok");
+  };
   const acceptor = mode === "reverse" ? entry : exit;
   const dialer = mode === "reverse" ? exit : entry;
   const parsed = useMemo(() => parsePorts(ports, protocol, target.trim() || "127.0.0.1"), [ports, protocol, target]);
@@ -333,6 +345,20 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
               <>
                 <h3 className="wz-q">{t("wz.q2")}</h3>
                 <p className="wz-lead">{t("wz.lead2")}</p>
+                <div className="wz-bench">
+                  <BenchPanel
+                    entry={entry}
+                    exit={exit}
+                    profile={profile}
+                    port={+suggestedPort || 0}
+                    servers={servers}
+                    applyLabel={t("bench.useWizard")}
+                    currentLabel={t("bench.chosenWizard")}
+                    context="wizard"
+                    isCurrent={(c) => c.transport === joinTransport(transport, muxOn).core && c.mode === mode && (c.path === "gre") === !!netId}
+                    onApply={applyBench}
+                  />
+                </div>
                 <div className="tiles" role="radiogroup" aria-label={t("wz.q2")}>
                   {(["reverse", "direct"] as const).map((m) => (
                     <button key={m} type="button" role="radio" aria-checked={mode === m} className="tile" onClick={() => setMode(m)}>

@@ -258,6 +258,8 @@ pub struct Hub {
     services: Arc<dyn Services>,
     /// The running and recent tunnel operations (`crate::pair`).
     pub ops: crate::pair::Ops,
+    /// Benchmark runs: which transport gets through best between two servers.
+    pub bench: crate::bench::Runs,
     /// Charts and events.
     pub history: crate::history::History,
     /// Private networks and their links.
@@ -342,6 +344,7 @@ impl Hub {
             ),
             services,
             ops: crate::pair::Ops::default(),
+            bench: crate::bench::Runs::default(),
             connect_wait,
             update_settings: std::sync::OnceLock::new(),
             checked: Mutex::new(crate::updater::Checked::default()),
@@ -383,7 +386,17 @@ impl Hub {
         server: &str,
         request: &Request,
     ) -> Result<T> {
-        let raw = self.ask(server, request).await?;
+        self.ask_as_within(server, request, REQUEST_TIMEOUT).await
+    }
+
+    /// Like [`Hub::ask_as`], for a request that is allowed to take up to `limit`.
+    pub async fn ask_as_within<T: serde::de::DeserializeOwned>(
+        &self,
+        server: &str,
+        request: &Request,
+        limit: Duration,
+    ) -> Result<T> {
+        let raw = self.ask_within(server, request, limit).await?;
         serde_json::from_slice(&raw).map_err(|_| match serde_json::from_slice::<Ack>(&raw) {
             Ok(Ack { error: Some(e), .. }) => anyhow!(e),
             _ => anyhow!("the server's answer was not understood"),

@@ -14,9 +14,11 @@ import { GreChoice, linkWithAddress } from "./GreChoice";
 import { useNetworks } from "./Networks";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, splitTransport } from "./transport";
 import { PROFILES, addressesOf, hostOf, parsePorts, portOf } from "./Wizard";
+import { benchLabel } from "./Benchmark";
+import type { BenchChoice } from "./Benchmark";
 
 /** Editing a tunnel: everything about it on one page, no steps. */
-export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; servers: ServerInfo[]; onBack: () => void }) {
+export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel; servers: ServerInfo[]; preset?: BenchChoice | null; onBack: () => void }) {
   const { t } = useApp();
   const entry = tunnel.entry?.server.id ?? "";
   const exit = tunnel.exit?.server.id ?? "";
@@ -174,6 +176,18 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
   }, [ready, now]); // eslint-disable-line react-hooks/exhaustive-deps
   const dirty = !!initial && now !== initial;
 
+  // Opened from a benchmark result: once what the tunnel has is known, its direction, transport and network
+  // are put in, as changes to look over and save.
+  const [presetDone, setPresetDone] = useState(false);
+  useEffect(() => {
+    if (!preset || presetDone || !initial || blocked) return;
+    setMode(preset.mode);
+    setTransport(preset.transport === "tcpmux" ? "tcp" : preset.transport);
+    setMuxOn(true);
+    setNetId(preset.network ?? "");
+    setPresetDone(true);
+  }, [initial]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const problem = (): string => {
     if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
     if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
@@ -225,6 +239,12 @@ export function TunnelEdit({ tunnel, servers, onBack }: { tunnel: Tunnel; server
           <p className="muted small">{t("te.lead", { entry: serverName(entry), exit: serverName(exit) })}</p>
         </div>
       </section>
+      {preset && !blocked && !loading && (
+        <div className="banner info">
+          <Icon name="gauge" size={18} />
+          <span>{t("te.fromBench", { t: benchLabel(preset.transport), mode: t(`bench.mode.${preset.mode}`) })}</span>
+        </div>
+      )}
 
       {blocked ? (
         <section className="card edit-sec">

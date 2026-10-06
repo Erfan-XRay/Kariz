@@ -94,25 +94,60 @@ fn ws_path(token: &str) -> String {
     format!("/{}", &hash.to_hex()[..16])
 }
 
+/// What a link is made of beyond its transport: a management link is always the defaults;
+/// a benchmark's test link ([`crate::bench`]) can be any transport it measures, with the
+/// profile the tunnel will have.
+#[derive(Clone, Copy)]
+pub(crate) struct Shape<'a> {
+    pub kind: TransportKind,
+    pub profile: Option<&'a str>,
+    /// Allow the transports a management link does not use (`ws`).
+    pub any: bool,
+}
+
+impl Shape<'_> {
+    fn link(kind: TransportKind) -> Self {
+        Shape {
+            kind,
+            profile: None,
+            any: false,
+        }
+    }
+}
+
 /// The synthetic config of one end. `tls`: the listening side's certificate and key for
 /// `wss`.
 fn toml(
-    kind: TransportKind,
+    shape: Shape,
     listening: bool,
     addr: &str,
     token: &str,
     tls: Option<(&Path, &Path)>,
 ) -> io::Result<String> {
-    check(kind)?;
+    let kind = shape.kind;
+    if shape.any {
+        crate::bench::check(kind)?;
+    } else {
+        check(kind)?;
+    }
     let (mode, key) = if listening {
         ("direct", "listen")
     } else {
         ("reverse", "remote")
     };
+    let profile = shape
+        .profile
+        .map(|p| {
+            format!(
+                "profile = {p:?}
+"
+            )
+        })
+        .unwrap_or_default();
     let mut toml = format!(
         "role = \"exit\"
 mode = \"{mode}\"
-[tunnel]
+{profile}[tunnel]
 transport = \"{}\"
 {key} = {addr:?}
 token = {token:?}
@@ -121,6 +156,14 @@ token = {token:?}
     );
     if kind == TransportKind::Quic {
         toml.push_str("[tunnel.quic]\nobfs = true\n");
+    }
+    if kind == TransportKind::Ws {
+        toml.push_str(&format!(
+            "[tunnel.ws]
+path = {:?}
+",
+            ws_path(token)
+        ));
     }
     if kind == TransportKind::Wss {
         toml.push_str(&format!(
@@ -238,7 +281,17 @@ impl Acceptor {
         kind: TransportKind,
         tls: Option<(&Path, &Path)>,
     ) -> io::Result<Self> {
-        let toml = toml(kind, true, addr, token, tls)?;
+        Self::bind_shape(addr, token, Shape::link(kind), tls).await
+    }
+
+    pub(crate) async fn bind_shape(
+        addr: &str,
+        token: &str,
+        shape: Shape<'_>,
+        tls: Option<(&Path, &Path)>,
+    ) -> io::Result<Self> {
+        let kind = shape.kind;
+        let toml = toml(shape, true, addr, token, tls)?;
         let common = common(toml)?;
         #[cfg(feature = "quic")]
         let listening = match &common.quic {
@@ -373,7 +426,11 @@ impl Dialer {
     /// Like [`Dialer::new`], over `kind` (one of [`LINK_TRANSPORTS`]; for `wss` and `quic`,
     /// `addr` is the panel's [`wss_addr`], see [`address_for`]).
     pub fn via(addr: &str, token: &str, kind: TransportKind) -> io::Result<Self> {
-        let toml = toml(kind, false, addr, token, None)?;
+        Self::shaped(addr, token, Shape::link(kind))
+    }
+
+    pub(crate) fn shaped(addr: &str, token: &str, shape: Shape<'_>) -> io::Result<Self> {
+        let toml = toml(shape, false, addr, token, None)?;
         let common = common(toml)?;
         #[cfg(feature = "quic")]
         let dialing = match &common.quic {

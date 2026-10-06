@@ -55,6 +55,45 @@ export interface Rate {
 }
 
 /** What a speed test measured (`kariz::speedtest::Report`). */
+/** One thing a benchmark measures: a transport, over a path, in a direction. */
+export interface BenchCandidate {
+  key: string;
+  /** The core transport: tcpmux, kcp, ws, wss or quic. */
+  transport: string;
+  /** public, or gre (across the private network link between the two servers). */
+  path: "public" | "gre";
+  network: string | null;
+  /** reverse (the entry listens) or direct (the exit listens). */
+  mode: "reverse" | "direct";
+  listener: string;
+  host: string;
+  port: number | null;
+  state: "wait" | "probe" | "speed" | "ok" | "fail" | "skip";
+  connect_ms: number | null;
+  latency: Latency | null;
+  download_mbps: number | null;
+  upload_mbps: number | null;
+  loaded: Latency | null;
+  score: number | null;
+  parts: { speed: number; latency: number; stability: number } | null;
+  error: string | null;
+}
+
+/** A benchmark run between two servers. */
+export interface Bench {
+  id: string;
+  entry: string;
+  exit: string;
+  profile: string;
+  state: "probe" | "speed" | "done" | "stopped" | "failed";
+  /** Unix milliseconds. */
+  started: number;
+  finished: number | null;
+  candidates: BenchCandidate[];
+  best: string | null;
+  error: string | null;
+}
+
 export interface SpeedReport {
   seconds: number;
   streams: number;
@@ -470,6 +509,10 @@ export const api = {
   history: (key: string, range: string) => call<{ points: [number, number][] }>("GET", `history?key=${encodeURIComponent(key)}&range=${range}`),
   events: (limit = 100) => call<{ events: EventRow[] }>("GET", `events?limit=${limit}`),
   logs: (name: string, lines = 200) => call<{ lines: LogLine[] }>("GET", `logs?name=${encodeURIComponent(name)}&lines=${lines}`),
+  benchStart: (entry: string, exit: string, profile: string, port: number) => call<{ id: string }>("POST", "bench", { entry, exit, profile, port }),
+  benchState: (id: string) => call<Bench>("GET", `bench?id=${encodeURIComponent(id)}`),
+  benchStop: (id: string) => call<object>("POST", "bench/stop", { id }),
+  benchLast: (entry: string, exit: string) => call<{ bench: Bench | null }>("GET", `bench/last?entry=${encodeURIComponent(entry)}&exit=${encodeURIComponent(exit)}`),
   speedtestStart: (name: string, seconds: number, streams: number, udp: boolean) =>
     call<SpeedStart>("POST", "tunnels/speedtest/start", { name, seconds, streams, udp }),
   speedtestStop: (name: string, id: string) => call<{ ok: boolean }>("POST", "tunnels/speedtest/stop", { name, id }),
