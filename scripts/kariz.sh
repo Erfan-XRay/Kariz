@@ -559,6 +559,19 @@ EOF
     systemctl daemon-reload
 }
 
+# Downloads the manager script into $1: the one of the release installed here, so that it
+# matches the programs (the panel and the agent put that same one in place when they start),
+# else the newest one, from main (a release before the tag existed, or none installed yet).
+fetch_manager() {
+    local v
+    v=$(bin_version "$BIN" 2>/dev/null || true)
+    if [[ -n "$v" ]] && fetch "https://raw.githubusercontent.com/$REPO/v$v/scripts/kariz.sh" "$1" 2>/dev/null &&
+        bash -n "$1" 2>/dev/null; then
+        return 0
+    fi
+    fetch "$RAW_URL" "$1" && bash -n "$1" 2>/dev/null
+}
+
 # Puts this script in place as kariz-manager: from its own file when it is one, else
 # from the repository (when it was run through `bash <(curl ...)`).
 install_manager() {
@@ -568,7 +581,7 @@ install_manager() {
     elif [[ ! -f "$MANAGER" ]] || [[ "$(realpath "$self")" != "$MANAGER" ]]; then
         local tmp
         tmp=$(mktemp)
-        if fetch "$RAW_URL" "$tmp"; then
+        if fetch_manager "$tmp"; then
             install -m 0755 "$tmp" "$MANAGER"
         else
             warn "Could not install the kariz-manager command (download failed)."
@@ -688,12 +701,12 @@ offer_update() {
     fi
 }
 
-# Puts the newest kariz-manager script in place (a best-effort; the running copy goes on,
-# and the menu reopens as the new one: reload_if_replaced).
+# Puts the kariz-manager script of the release now installed in place (a best-effort; the
+# running copy goes on, and the menu reopens as the new one: reload_if_replaced).
 refresh_manager() {
     local tmp
     tmp=$(mktemp)
-    if FETCH_MAX=20 fetch "$RAW_URL" "$tmp" 2>/dev/null && bash -n "$tmp" 2>/dev/null; then
+    if FETCH_MAX=20 fetch_manager "$tmp" 2>/dev/null; then
         if cmp -s "$tmp" "$MANAGER"; then
             :
         elif install -m 0755 "$tmp" "$MANAGER"; then

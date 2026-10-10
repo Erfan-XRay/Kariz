@@ -90,7 +90,8 @@ Opening the menu (and `kariz-manager status`) looks for a newer release. If one 
 core, the panel or the agent here is older, it says which and asks whether to update all of them
 now. Joining a panel with `--agent CODE` updates an older program first, because an old agent
 can refuse what a newer panel sends. `KARIZ_NO_UPDATE_CHECK=1` turns the look off. `update` also
-fetches the newest `kariz-manager` script (unless you install from files of your own).
+fetches the `kariz-manager` script of the release it installed (unless you install from files of
+your own).
 
 `install` and `update` check the release's **signature** (from 0.11, a release without a valid
 one is not installed; older releases have none and are accepted with a warning) and its
@@ -98,11 +99,15 @@ SHA-256. `update` restarts what runs: every tunnel, the panel and the agent, so 
 new binary. Once a server is connected to a panel, the panel can update it (and itself) with a
 button: [Updating from the panel](panel.md#updating).
 
-The manager script updates itself too, in two ways:
+The manager script updates itself too, in three ways:
 
-- `update` (and the *Install or update* item) fetches the newest `kariz-manager` and, when it
-  replaces the one that is open in the menu, the menu opens again as the new one. If the download
-  fails it says so and the old script stays.
+- The panel and the agent put the `kariz-manager` of their own release in place each time they
+  start, when the one there is missing or different. An update from the panel restarts them, so
+  a server that is only ever updated from the panel gets the menu of its new release too.
+- `update` (and the *Install or update* item) fetches the `kariz-manager` of the release it
+  installed (from main, if that release has no tag yet) and, when it replaces the one that is open
+  in the menu, the menu opens again as the new one. If the download fails it says so and the old
+  script stays.
 - A copy of the script you run from a file (a new one you copied to the server) is installed as
   `kariz-manager` at once, even when the core is up to date. Run the file once and the
   `kariz-manager` command is the new script from then on.

@@ -602,6 +602,28 @@ fn sync_manager(path: &Path) -> Result<()> {
     std::fs::rename(&tmp, path).with_context(|| format!("failed to replace {}", path.display()))
 }
 
+/// Puts the manager of this release in place when the panel or the agent starts, if the one
+/// there is missing or different. An update from the panel swaps the programs and restarts
+/// them, but not the script: a server set up long ago and updated only from the panel went on
+/// showing the menu of the release it was installed with. Only on a systemd host (not where the
+/// tests run the programs, which name a manager of their own); a failure only goes to the log.
+pub fn manager_in_place(services: ServiceKind) {
+    if !cfg!(target_os = "linux")
+        || services != ServiceKind::Systemd
+        || std::env::var_os("KARIZ_MANAGER").is_some()
+    {
+        return;
+    }
+    let path = Path::new(MANAGER);
+    if std::fs::read(path).is_ok_and(|have| have == MANAGER_SCRIPT.as_bytes()) {
+        return;
+    }
+    match sync_manager(path) {
+        Ok(()) => tracing::info!("put the kariz-manager script of this release in place"),
+        Err(e) => tracing::warn!("the manager script could not be updated: {e:#}"),
+    }
+}
+
 /// The manager's timer for `panel heal`: when the server's IP address changes and the panel's
 /// certificate was for the old one, it gets one for the new address by itself.
 const HEAL_TIMER: &str = "/etc/systemd/system/kariz-panel-heal.timer";
@@ -614,18 +636,17 @@ fn heal_timer_missing(domain: &Path, timer: &Path) -> bool {
 }
 
 /// Sets up the `panel heal` timer on a panel that was set up before it existed, with the
-/// manager of this release: a panel updated from the panel gets it without the manager being
-/// run by hand. Nothing when the timer is there; a failure only goes to the log.
+/// manager of this release (put in place first: [`manager_in_place`]): a panel updated from the
+/// panel gets it without the manager being run by hand. Nothing when the timer is there; a
+/// failure only goes to the log.
 pub async fn ensure_heal_timer(config: &Path) {
     if !cfg!(target_os = "linux") || std::env::var_os("KARIZ_MANAGER").is_some() {
         return;
     }
     let domain = config.with_file_name("domain");
-    if !heal_timer_missing(&domain, Path::new(HEAL_TIMER)) || !Path::new(MANAGER).exists() {
-        return;
-    }
-    if let Err(e) = sync_manager(Path::new(MANAGER)) {
-        tracing::warn!("the manager script could not be updated: {e:#}");
+    if !heal_timer_missing(&domain, Path::new(HEAL_TIMER))
+        || !std::fs::read(MANAGER).is_ok_and(|have| have == MANAGER_SCRIPT.as_bytes())
+    {
         return;
     }
     let args = ["panel".to_owned(), "heal-setup".to_owned()];
