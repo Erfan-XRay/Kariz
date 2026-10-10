@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 2.2.0 - 2026-10-10
+
+The panel now **follows a new IP address of its server**: when the address it had is filtered
+and the provider gives a new one, the panel gets a certificate for the new address by itself and
+opens there with no browser warning. And a server that was only ever updated from the panel gets
+the manager menu of its release. Nothing changes for 2.1.0 agents. Update the panel first
+(*Settings, Updates*), then the agents from the panel: each program that starts as 2.2.0 puts
+the manager of 2.2.0 in place on its server.
 
 ### Added
 
