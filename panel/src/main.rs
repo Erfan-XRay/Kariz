@@ -453,8 +453,10 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
     runtime.block_on(async move {
         let db = Db::open(&config.database())?;
         config.ensure_cert()?;
-        // A panel set up before `panel heal` gets its timer (a new IP address of the server
+        // The manager script of this release (an update from the panel does not swap it), and
+        // for a panel set up before `panel heal`, its timer (a new IP address of the server
         // then gets the panel a certificate for it by itself).
+        kariz_panel::manage::manager_in_place(config.services);
         if config.services == kariz_panel::manage::ServiceKind::Systemd {
             let path = config_path.to_path_buf();
             tokio::spawn(async move { kariz_panel::manage::ensure_heal_timer(&path).await });
@@ -583,6 +585,8 @@ fn run_agent(path: &std::path::Path, join: Option<&str>, no_run: bool) -> Result
     if no_run {
         return Ok(());
     }
+    // The manager script of this release: an update from the panel does not swap it.
+    kariz_panel::manage::manager_in_place(config.services);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

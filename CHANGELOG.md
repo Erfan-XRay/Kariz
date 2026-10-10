@@ -20,6 +20,16 @@
   whether its domain still points at this server, and offers the IP address first when the
   certificate was for one.
 
+### Fixed
+
+- **The manager's menu of an old release on a server updated from the panel.** An update from
+  the panel swaps the programs but not `/usr/local/bin/kariz-manager`, so a server set up long
+  ago and only ever updated from the panel went on showing the menu of the release it was
+  installed with. The panel and the agent now put the manager of their own release in place each
+  time they start (an update restarts them), when the one there is missing or different. And
+  `kariz-manager update` fetches the script of the release it installed instead of the newest
+  one on main, so the two ways of updating agree.
+
 ## 2.1.0 - 2026-10-06
 
 Two new things, both working with the agents you have: the **benchmark** finds the transport
