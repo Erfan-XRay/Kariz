@@ -57,6 +57,8 @@ kariz-manager panel name [NAME]                    # rename this server in the p
 kariz-manager panel link [--host H]                 # another one-time login link
 kariz-manager panel password [--stdin | --random]  # a new admin password (asked twice, hidden)
 kariz-manager panel status | logs                   # the service, its address / follow the log
+kariz-manager panel cert [--domain D | --ip A]      # a new domain or IP address, with its certificate
+kariz-manager panel heal                            # a certificate for this server's new IP address (a timer runs it)
 kariz-manager panel uninstall [--yes]
 
 kariz-manager --agent kz1_... [--yes]               # connect this server to a panel (the code is from the panel)

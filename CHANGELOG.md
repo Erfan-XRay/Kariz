@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **The panel follows a new IP address of its server.** When the server's IP address changes
+  (the old one was filtered and the provider gave a new one) and the panel's certificate was for
+  the old address, the browser refused it and the panel looked down. Now a timer
+  (`kariz-panel-heal.timer`, a minute after boot and every 10 minutes) runs
+  `kariz-manager panel heal`: it sees that the certificate's address is no longer on the server,
+  gets a Let's Encrypt certificate for the new one, switches the panel to it and removes the old
+  one. It asks for nothing unless the address changed, and waits an hour after a failure (Let's
+  Encrypt limits failed attempts). Behind NAT, and for a domain, the change cannot be seen from
+  the server: run `panel cert`. A panel set up before this gets the timer when it starts after
+  the update.
+- **The manager says when the certificate no longer fits.** The menu shows a line when the
+  certificate is for an address the server does not have any more, the login link uses the new
+  address, and item 6 (now *New IP, domain or certificate*) says what the certificate is for,
+  whether its domain still points at this server, and offers the IP address first when the
+  certificate was for one.
+
 ## 2.1.0 - 2026-10-06
 
 Two new things, both working with the agents you have: the **benchmark** finds the transport

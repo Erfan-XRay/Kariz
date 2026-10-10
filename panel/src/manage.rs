@@ -602,6 +602,44 @@ fn sync_manager(path: &Path) -> Result<()> {
     std::fs::rename(&tmp, path).with_context(|| format!("failed to replace {}", path.display()))
 }
 
+/// The manager's timer for `panel heal`: when the server's IP address changes and the panel's
+/// certificate was for the old one, it gets one for the new address by itself.
+const HEAL_TIMER: &str = "/etc/systemd/system/kariz-panel-heal.timer";
+
+/// Whether the panel's Let's Encrypt certificate (the manager keeps what it is for in
+/// `domain`, next to the settings) has no `panel heal` timer yet: a panel set up before the
+/// manager had it.
+fn heal_timer_missing(domain: &Path, timer: &Path) -> bool {
+    std::fs::read_to_string(domain).is_ok_and(|d| !d.trim().is_empty()) && !timer.exists()
+}
+
+/// Sets up the `panel heal` timer on a panel that was set up before it existed, with the
+/// manager of this release: a panel updated from the panel gets it without the manager being
+/// run by hand. Nothing when the timer is there; a failure only goes to the log.
+pub async fn ensure_heal_timer(config: &Path) {
+    if !cfg!(target_os = "linux") || std::env::var_os("KARIZ_MANAGER").is_some() {
+        return;
+    }
+    let domain = config.with_file_name("domain");
+    if !heal_timer_missing(&domain, Path::new(HEAL_TIMER)) || !Path::new(MANAGER).exists() {
+        return;
+    }
+    if let Err(e) = sync_manager(Path::new(MANAGER)) {
+        tracing::warn!("the manager script could not be updated: {e:#}");
+        return;
+    }
+    let args = ["panel".to_owned(), "heal-setup".to_owned()];
+    match run(MANAGER, &args, Duration::from_secs(30)).await {
+        Ok((true, _)) => {
+            tracing::info!("set up the timer that follows a new IP address of this server")
+        }
+        Ok((false, out)) => {
+            tracing::warn!("kariz-manager panel heal-setup failed: {}", out.trim())
+        }
+        Err(e) => tracing::warn!("kariz-manager panel heal-setup failed: {e:#}"),
+    }
+}
+
 /// Whether `host` is a domain name or an IPv4 address the manager may ask a certificate for.
 pub fn valid_cert_host(host: &str) -> bool {
     if host.parse::<std::net::Ipv4Addr>().is_ok() {
@@ -1444,5 +1482,20 @@ echo Usage: kariz-manager
         assert_eq!(std::fs::read_to_string(&path).unwrap(), MANAGER_SCRIPT);
         sync_manager(&path).unwrap();
         assert!(!d.0.join("kariz-manager.new").exists());
+    }
+
+    #[test]
+    fn a_lets_encrypt_panel_without_the_heal_timer_gets_it() {
+        let d = Dir::new();
+        let (domain, timer) = (d.0.join("domain"), d.0.join("kariz-panel-heal.timer"));
+        assert!(MANAGER_SCRIPT.contains("heal-setup)"));
+        // A certificate of your own: the manager keeps no `domain`.
+        assert!(!heal_timer_missing(&domain, &timer));
+        std::fs::write(&domain, "\n").unwrap();
+        assert!(!heal_timer_missing(&domain, &timer));
+        std::fs::write(&domain, "203.0.113.5\n").unwrap();
+        assert!(heal_timer_missing(&domain, &timer));
+        std::fs::write(&timer, "[Timer]\n").unwrap();
+        assert!(!heal_timer_missing(&domain, &timer));
     }
 }

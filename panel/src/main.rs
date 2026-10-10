@@ -453,6 +453,12 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
     runtime.block_on(async move {
         let db = Db::open(&config.database())?;
         config.ensure_cert()?;
+        // A panel set up before `panel heal` gets its timer (a new IP address of the server
+        // then gets the panel a certificate for it by itself).
+        if config.services == kariz_panel::manage::ServiceKind::Systemd {
+            let path = config_path.to_path_buf();
+            tokio::spawn(async move { kariz_panel::manage::ensure_heal_timer(&path).await });
+        }
         let listener = tokio::net::TcpListener::bind(&config.listen)
             .await
             .with_context(|| format!("failed to listen on {}", config.listen))?;
