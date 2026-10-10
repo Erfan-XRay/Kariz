@@ -11,6 +11,7 @@
 #   kariz-manager update | uninstall [--yes]
 #   kariz-manager panel install [--domain D | --ip ADDRESS] | link | password | status | logs | uninstall
 #   kariz-manager panel cert [--domain D | --ip ADDRESS]   change the domain or address of the panel
+#                                        (a new IP address is followed by itself: panel heal)
 #   kariz-manager --agent CODE [--yes]   connect this server to a panel (its join code); a
 #                                        server that is connected already is switched to it
 #   kariz-manager agent status | logs | remove
@@ -36,6 +37,11 @@ PANEL_DOMAIN=$PANEL_DIR/domain
 ACME_STOPPED=/run/kariz-acme-stopped
 PANEL_UNIT=/etc/systemd/system/kariz-panel.service
 AGENT_UNIT=/etc/systemd/system/kariz-agent.service
+# What gives the panel a certificate for the server's new IP address by itself (`panel heal`),
+# and the address it last failed to get one for, with when.
+HEAL_SERVICE=/etc/systemd/system/kariz-panel-heal.service
+HEAL_TIMER=/etc/systemd/system/kariz-panel-heal.timer
+HEAL_FAILED=$PANEL_DATA/heal-failed
 RAW_URL="https://raw.githubusercontent.com/$REPO/main/scripts/kariz.sh"
 
 # ---- Looks ----
@@ -746,6 +752,7 @@ cmd_update() {
             info "Restarted $svc."
         fi
     done
+    ensure_heal_timer
 }
 
 # Removes the private network links (GRE interfaces named kz-...) the panel made here.
@@ -847,15 +854,46 @@ server_line() {
     echo
 }
 
+# Whether the IPv4 address $1 is on one of this server's network interfaces.
+ip_is_here() {
+    { ip -4 -o addr show 2>/dev/null || true; } | awk -v a="$1" '{ sub(/\/.*/, "", $4); if ($4 == a) f = 1 } END { exit !f }'
+}
+
 # ---- The web panel and its agent ----
 
 # The panel's address, certificate and ports, from its settings.
 panel_setting() { sed -n "s/^$1 = \"\(.*\)\"/\1/p" "$PANEL_CONF" | head -n 1; }
 
-# This server's address as another machine would use it: --host, else its IPv4, else IPv6.
+# What the panel's Let's Encrypt certificate is for (a domain or an IP address); nothing for a
+# certificate of your own.
+panel_identity() {
+    [[ -s "$PANEL_DOMAIN" ]] && head -n 1 "$PANEL_DOMAIN"
+    return 0
+}
+
+# The server's new IPv4 address, when the panel's certificate is for an IP address the server
+# does not have any more and the address it has now is public (one Let's Encrypt can certify).
+# Returns 1 when there is none: the certificate is for a domain or of your own, its address is
+# still here, or the server is behind NAT (its public address cannot be seen from here, and is
+# the one that was typed at install).
+panel_new_ip() {
+    local old new
+    [[ -f "$PANEL_CONF" ]] || return 1
+    old=$(panel_identity)
+    public_ip4 "$old" || return 1
+    ! ip_is_here "$old" || return 1
+    new=$(own_ip4)
+    [[ -n "$new" && "$new" != "$old" ]] || return 1
+    public_ip4 "$new" || return 1
+    printf '%s' "$new"
+}
+
+# This server's address as another machine would use it: --host, else what the certificate is
+# for (the new address when the server's IP address changed), else its IPv4, else IPv6.
 panel_host() {
     local host=${1:-}
-    [[ -n "$host" || ! -s "$PANEL_DOMAIN" ]] || host=$(head -n 1 "$PANEL_DOMAIN")
+    [[ -n "$host" ]] || host=$(panel_new_ip) || host=""
+    [[ -n "$host" ]] || host=$(panel_identity)
     [[ -n "$host" ]] || host=$(own_ip4)
     [[ -n "$host" ]] || host=$(own_ip6)
     [[ -n "$host" ]] || host="<this-server>"
@@ -1071,6 +1109,7 @@ panel_install() {
     systemctl is-active --quiet kariz-panel ||
         die "The panel did not start: journalctl -u kariz-panel -n 50"
     ok "The web panel is running."
+    ensure_heal_timer
     # An admin password of your own, so the panel can be opened without a link (a one-time
     # sign-in link works without it): asked, or read from the first line of --password-file.
     local pw="" how=link
@@ -1269,6 +1308,42 @@ EOF
     systemctl enable --now kariz-cert-renew.timer >/dev/null
 }
 
+# The timer that runs `panel heal`: a minute after boot, then every 10 minutes. It only looks
+# at the server's addresses, and asks Let's Encrypt for nothing unless the address changed.
+install_heal_timer() {
+    cat >"$HEAL_SERVICE" <<EOF
+[Unit]
+Description=Give the Kariz panel a certificate for this server's new IP address
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$MANAGER panel heal
+EOF
+    cat >"$HEAL_TIMER" <<'EOF'
+[Unit]
+Description=Give the Kariz panel a certificate for this server's new IP address
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now kariz-panel-heal.timer >/dev/null
+}
+
+# A panel with a Let's Encrypt certificate that was set up before `panel heal` existed gets
+# its timer. Quiet, and nothing when it is there already.
+ensure_heal_timer() {
+    [[ "$EUID" -eq 0 && -f "$PANEL_CONF" && -s "$PANEL_DOMAIN" && ! -f "$HEAL_TIMER" ]] || return 0
+    [[ -x "$MANAGER" ]] || return 0
+    install_heal_timer 2>/dev/null || true
+}
+
 # Stops and starts nothing; only says what holds port 80 and asks whether it may be stopped
 # for a moment. Returns 1 when it may not.
 port80_agreed() {
@@ -1314,8 +1389,9 @@ get_cert() {
 }
 
 # Asks which it is, a domain or this server's IP address; sets CERT_KIND and CERT_IDENTITY.
+# $4: the kind offered first (domain by default).
 choose_identity() {
-    local domain=$1 ip=$2 yes=$3
+    local domain=$1 ip=$2 yes=$3 first=${4:-domain}
     CERT_KIND="" CERT_IDENTITY=""
     if [[ -n "$domain" ]]; then
         CERT_KIND=domain CERT_IDENTITY=$domain
@@ -1323,7 +1399,7 @@ choose_identity() {
         CERT_KIND=ip CERT_IDENTITY=$ip
     else
         local pick
-        choose pick "How will you open the panel?" domain \
+        choose pick "How will you open the panel?" "$first" \
             "domain|I have a domain name that points at this server" \
             "ip|only this server's IP address (a 6-day certificate, renewed by itself)"
         CERT_KIND=$pick
@@ -1379,25 +1455,91 @@ panel_cert() {
         ok "The panel uses your certificate now. Kariz does not renew it: send the panel a SIGHUP after you do (systemctl kill -s HUP kariz-panel)."
         return 0
     fi
-    choose_identity "$domain" "$ip" "$yes" || return 0
+    local first=domain
+    [[ -n "$domain$ip" ]] || cert_situation first
+    choose_identity "$domain" "$ip" "$yes" "$first" || return 0
     if [[ -z "$email" ]] && ((!yes)); then
         ask email "Email for expiry notices (optional, Enter to skip)" ""
     fi
-    local old=""
-    get_cert "$CERT_IDENTITY" "$CERT_KIND" "$email" "$yes"
+    switch_cert "$CERT_IDENTITY" "$CERT_KIND" "$email" "$yes"
+    ok "The panel has a trusted certificate for $CERT_IDENTITY; it renews by itself."
+    panel_show "$CERT_IDENTITY"
+}
+
+# Says what the panel's certificate is for and whether that still fits this server: its IP
+# address changed, or the domain points somewhere else. Sets the variable named $1 to the kind
+# to offer first (ip when the certificate is for an IP address).
+cert_situation() {
+    local _first=domain old new resolved mine
+    old=$(panel_identity)
+    if [[ -z "$old" ]]; then
+        [[ -z "$(panel_setting cert_file)" ]] || info "The panel uses a certificate of your own ($(panel_setting cert_file))."
+    elif public_ip4 "$old"; then
+        _first=ip
+        if new=$(panel_new_ip); then
+            warn "The panel's certificate is for $old, but this server's IP address is $new now."
+            info "Choose ip and $new below (this is also done by itself within 10 minutes)."
+        else
+            info "The panel's certificate is for the IP address $old."
+        fi
+    else
+        info "The panel's certificate is for $old."
+        resolved=$({ getent ahostsv4 "$old" 2>/dev/null || true; } | awk 'NR==1{print $1}')
+        mine=$(own_ip4)
+        if [[ -n "$resolved" && -n "$mine" && "$resolved" != "$mine" ]] && ! ip_is_here "$resolved"; then
+            warn "$old points at $resolved, not at this server ($mine): change its DNS record, or choose another domain or the IP address."
+        fi
+    fi
+    printf -v "$1" '%s' "$_first"
+}
+
+# Gets the certificate for $1 (kind $2: domain or ip), makes the panel use it and removes the
+# one it had before. $3: email (may be empty), $4: 1 to ask nothing.
+switch_cert() {
+    local identity=$1 kind=$2 email=$3 yes=$4 old=""
+    get_cert "$identity" "$kind" "$email" "$yes"
     if [[ -s "$PANEL_DOMAIN" ]]; then old=$(cert_name "$(head -n 1 "$PANEL_DOMAIN")"); fi
     panel_set_cert "$CERT_LIVE/fullchain.pem" "$CERT_LIVE/privkey.pem"
-    printf '%s\n' "$CERT_IDENTITY" >"$PANEL_DOMAIN"
+    printf '%s\n' "$identity" >"$PANEL_DOMAIN"
     systemctl restart kariz-panel
     sleep 2
     systemctl is-active --quiet kariz-panel ||
         die "The panel did not start with the new certificate: journalctl -u kariz-panel -n 50"
     # The certificate of what it was before is not needed any more (and must not be renewed).
-    if [[ -n "$old" && "$old" != "$(cert_name "$CERT_IDENTITY")" ]]; then
+    if [[ -n "$old" && "$old" != "$(cert_name "$identity")" ]]; then
         "$CERTBOT" delete --cert-name "$old" --non-interactive >/dev/null 2>&1 || true
     fi
-    ok "The panel has a trusted certificate for $CERT_IDENTITY; it renews by itself."
-    panel_show "$CERT_IDENTITY"
+    install_heal_timer
+}
+
+# `panel heal`, run by its timer: when this server's IP address changed (a new one from the
+# provider, after the old one was filtered) and the panel's certificate was for the old one,
+# gets one for the new address and switches the panel to it, so the panel opens at the new
+# address with no browser warning and nothing to do by hand. A request that failed (port 80
+# closed, say) is tried again an hour later, not every 10 minutes: Let's Encrypt limits failed
+# attempts. Behind NAT the public address cannot be seen from the server: run `panel cert`.
+panel_heal() {
+    need_root
+    local new old now last=()
+    new=$(panel_new_ip) || return 0
+    old=$(panel_identity)
+    now=$(date +%s)
+    if [[ -s "$HEAL_FAILED" ]]; then
+        read -r -a last <"$HEAL_FAILED" || true
+        if [[ "${last[0]:-}" == "$new" && "${last[1]:-0}" =~ ^[0-9]+$ ]] && ((now - last[1] < 3600)); then
+            return 0
+        fi
+    fi
+    info "This server's IP address is $new now; the panel's certificate is for $old. Getting one for $new."
+    if (switch_cert "$new" ip "" 1); then
+        rm -f "$HEAL_FAILED"
+        ok "The panel has a certificate for $new: open https://$new:$(panel_setting listen | sed 's/.*://')/$(panel_setting path)/"
+    else
+        mkdir -p "$PANEL_DATA"
+        printf '%s %s\n' "$new" "$now" >"$HEAL_FAILED"
+        warn "No certificate for $new yet (see above); trying again in an hour. By hand: kariz-manager panel cert --ip $new"
+        return 1
+    fi
 }
 
 # `tunnel-cert`: a Let's Encrypt certificate for a wss tunnel, with the same machinery as the
@@ -1473,8 +1615,13 @@ cmd_panel() {
         logs) journalctl -u kariz-panel -n 100 -f ;;
         cert) panel_cert "$@" ;;
         cert-hook) cert_hook "$@" ;;
+        heal) panel_heal ;;
+        heal-setup)
+            need_root
+            ensure_heal_timer
+            ;;
         uninstall) panel_uninstall "$@" ;;
-        *) die "panel: install [--port N] [--domain D | --ip A] [--name NAME] | name [NAME] | link | password [--stdin | --random] | cert [--domain D | --ip A] | status | logs | uninstall [--yes]" ;;
+        *) die "panel: install [--port N] [--domain D | --ip A] [--name NAME] | name [NAME] | link | password [--stdin | --random] | cert [--domain D | --ip A] | heal | status | logs | uninstall [--yes]" ;;
     esac
 }
 
@@ -1491,6 +1638,8 @@ panel_uninstall() {
         confirm "Stop the web panel and remove it?" || return 0
     fi
     systemctl disable --now kariz-panel 2>/dev/null || true
+    systemctl disable --now kariz-panel-heal.timer 2>/dev/null || true
+    rm -f "$HEAL_SERVICE" "$HEAL_TIMER"
     if [[ -s "$PANEL_DOMAIN" ]]; then
         # Its Let's Encrypt certificate is not renewed any more.
         systemctl disable --now kariz-cert-renew.timer 2>/dev/null || true
@@ -1659,7 +1808,7 @@ MENU_ROWS=(
     "panel|3|Install the web panel here|The panel: servers, tunnels and charts in a browser, over HTTPS."
     "link|4|Login link|A one-time login link for the panel (works once, for 60 minutes)."
     "password|5|Admin password|Set a new admin password for the panel."
-    "cert|6|Domain or IP and certificate|Change the panel's domain or IP, with a Let's Encrypt certificate."
+    "cert|6|New IP, domain or certificate|The server's IP or domain changed, or a new certificate: get one from Let's Encrypt."
     "premove|7|Remove the web panel|Stop and remove the panel. Asks first."
     ""
     "#AGENT"
@@ -1760,6 +1909,14 @@ status_rows() {
     else
         [[ -n "$short" ]] || tip=" ${C_DIM}(kariz-manager panel install)${C_RESET}"
         state_row inactive "web panel" "${C_DIM}not installed${C_RESET}$tip"
+    fi
+    # The server's IP address changed and the panel's certificate is for the old one: `panel
+    # heal` fixes it by itself, and this says so until it has.
+    local new
+    if new=$(panel_new_ip); then
+        tip="choose 6"
+        [[ -n "$short" ]] || tip="kariz-manager panel cert --ip $new"
+        state_row inactive "certificate" "${C_YELLOW}for $(panel_identity), but this server is $new now${C_RESET}${C_DIM}: fixed by itself soon, or $tip${C_RESET}"
     fi
     tip=""
     state=$(systemctl is-active kariz-agent 2>/dev/null || true)
@@ -2072,6 +2229,7 @@ menu() {
     trap 'MENU_RESIZED=1' WINCH
     trap ui_restore_terminal EXIT
     MANAGER_SUM=$(manager_sum)
+    ensure_heal_timer
     if [[ ! -x "$BIN" ]]; then
         # An action that fails ends it, as in the menu; the menu opens after it.
         (first_run) || true
@@ -2126,6 +2284,8 @@ usage() {
                                                the web panel on this server, with a Let's
                                                Encrypt certificate for the domain or IP address
   panel cert [--domain D | --ip ADDRESS]       change its domain or address (renewal is automatic)
+  panel heal                                   a certificate for this server's new IP address,
+                                               if it changed (a timer runs this every 10 minutes)
   panel cert --cert-file F --key-file K        use a certificate of your own instead
   panel link | password [--stdin] | status | logs | uninstall [--yes]
   --agent CODE [--version V] [--yes]           connect this server to a panel (an agent that is

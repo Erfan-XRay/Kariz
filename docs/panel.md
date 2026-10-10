@@ -61,6 +61,20 @@ domain. Add `--email you@example.com` to be told before a certificate expires.
 
 - **Renewal is automatic:** a timer (`kariz-cert-renew.timer`) checks twice a day, and the panel
   loads the new certificate without a restart.
+- **A new IP address is followed by itself.** When the server's IP address changes (the old one
+  was filtered and the provider gave a new one) and the certificate was for the old address,
+  `kariz-manager panel heal` gets one for the new address and switches the panel to it, within
+  10 minutes of the change and with no browser warning. A timer runs it (`kariz-panel-heal.timer`:
+  a minute after boot, then every 10 minutes); it asks Let's Encrypt for nothing unless the
+  address changed, and after a failure (port 80 closed) it tries again an hour later. Open the
+  panel at `https://NEW-IP:PORT/PATH/`, as before; the menu and `kariz-manager panel link` show
+  the new address. It cannot see a change behind NAT (the server only has a private address, and
+  the public one was typed at install) or for a domain: there, run `panel cert` (for a domain,
+  change its A record first, and the certificate keeps working). A panel set up before this gets
+  the timer when it is updated (from the panel or with the manager).
+- **A filtered domain or a new certificate:** run `kariz-manager panel cert` (menu item 6, *New IP,
+  domain or certificate*). It says what the certificate is for now and whether that still fits
+  this server, and gets one for the new domain or for the IP address.
 - **Port 80.** Let's Encrypt has to reach port 80 for a few seconds, at the first request and at
   each renewal. If a service holds it (nginx, a tunnel...), the manager says which one, asks to
   stop it for a moment and starts it again right after; the same happens at each renewal by

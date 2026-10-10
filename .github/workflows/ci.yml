@@ -78,6 +78,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: shellcheck scripts/*.sh
+      - name: The panel follows a new IP address of its server
+        run: shellcheck -x tests/heal.sh && bash tests/heal.sh
       - run: cargo build --release --locked -p kariz -p kariz-panel
       - name: Install with the manager
         run: |
