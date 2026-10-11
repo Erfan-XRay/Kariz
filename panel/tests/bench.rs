@@ -61,16 +61,27 @@ async fn two_servers_are_benchmarked_scored_and_the_result_kept() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let remote = remote.expect("the agent joined");
+    // Over IPv6 too, where this machine has it.
+    let v6 = std::net::TcpListener::bind("[::1]:0").is_ok();
     let ask = |profile: &str| Ask {
         entry: LOCAL.into(),
         exit: remote.clone(),
         profile: profile.into(),
         port: 0,
         modes: Vec::new(),
+        sni: Some("front.example".into()),
         hosts: HashMap::from([
             (LOCAL.to_owned(), "127.0.0.1".to_owned()),
             (remote.clone(), "127.0.0.1".to_owned()),
         ]),
+        hosts6: if v6 {
+            HashMap::from([
+                (LOCAL.to_owned(), "::1".to_owned()),
+                (remote.clone(), "::1".to_owned()),
+            ])
+        } else {
+            HashMap::new()
+        },
     };
 
     let why = |r: anyhow::Result<String>| format!("{:#}", r.unwrap_err());
@@ -78,6 +89,9 @@ async fn two_servers_are_benchmarked_scored_and_the_result_kept() {
     same.exit = LOCAL.into();
     assert_eq!(why(bench::start(&hub, same)), "same_server");
     assert_eq!(why(bench::start(&hub, ask("fastest"))), "bad_input");
+    let mut bad_name = ask("balanced");
+    bad_name.sni = Some("not a name".into());
+    assert_eq!(why(bench::start(&hub, bad_name)), "bad_input");
     assert!(bench::last(&hub, LOCAL, &remote).unwrap().is_none());
 
     let started = std::time::Instant::now();
@@ -102,10 +116,35 @@ async fn two_servers_are_benchmarked_scored_and_the_result_kept() {
     for c in &ok {
         assert!(c.latency.as_ref().unwrap().received > 0, "{c:#?}");
     }
-    // The best few were measured for speed, and only they are ranked; the best is one of
-    // them.
+    // wss once more with the server name asked for.
+    assert!(
+        ok.iter()
+            .any(|c| c.transport == "wss" && c.sni.as_deref() == Some("front.example")),
+        "{:#?}",
+        done.candidates
+    );
+    if v6 {
+        assert_eq!(done.ipv6.as_deref(), Some("tested"));
+        for transport in ["tcpmux", "ws", "wss"] {
+            assert!(
+                ok.iter()
+                    .any(|c| c.path == "ipv6" && c.transport == transport),
+                "{transport} over IPv6 did not get through: {:#?}",
+                done.candidates
+            );
+        }
+    } else {
+        assert!(done.ipv6.as_deref().unwrap().starts_with("missing:"));
+    }
+    // The best few were measured for speed (and the best over IPv4 and over IPv6, when
+    // they are not among them), and only they are ranked; the best is one of them.
     let measured: Vec<_> = ok.iter().filter(|c| c.download_mbps.is_some()).collect();
-    assert!((1..=3).contains(&measured.len()), "{measured:#?}");
+    assert!((1..=4).contains(&measured.len()), "{measured:#?}");
+    if v6 {
+        for path in ["public", "ipv6"] {
+            assert!(measured.iter().any(|c| c.path == path), "{measured:#?}");
+        }
+    }
     for c in &ok {
         assert_eq!(c.score.is_some(), c.download_mbps.is_some(), "{c:#?}");
         assert!(c.score.unwrap_or(0) <= 100);

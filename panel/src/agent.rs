@@ -447,6 +447,7 @@ impl Agent {
                 profile,
                 port,
                 wait_ms,
+                bind,
             } => {
                 let (cert, key) = (
                     self.path.with_file_name("link-cert.pem"),
@@ -460,6 +461,7 @@ impl Agent {
                         &profile,
                         port,
                         wait_ms,
+                        bind.as_deref(),
                         (&cert, &key),
                     )
                     .await,
@@ -472,8 +474,18 @@ impl Agent {
                 profile,
                 ping_ms,
                 seconds,
+                sni,
             } => to_json(
-                &crate::bench::dial(&addr, &token, &transport, &profile, ping_ms, seconds).await,
+                &crate::bench::dial(
+                    &addr,
+                    &token,
+                    &transport,
+                    &profile,
+                    ping_ms,
+                    seconds,
+                    sni.as_deref(),
+                )
+                .await,
             ),
             Request::UpdateBegin { version, files } => ack(self.update.begin(&version, &files)),
             Request::UpdateChunk {

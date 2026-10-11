@@ -78,18 +78,22 @@ pub enum Request {
     /// Whether GRE can be made here, and the state of this server's links.
     NetStatus,
     /// Listen for one benchmark test session ([`kariz::bench`]) over `transport` with the
-    /// tunnel `profile`, on `port` of every IPv4 address (another free port when that one is
-    /// taken; 0: any). The answer says the port. The listener goes away when its session
-    /// ends, or after `wait_ms` if nobody comes.
+    /// tunnel `profile`, on `port` of every IPv4 address, or of the address `bind` (this
+    /// server's IPv6 address: a listener of its own beside the IPv4 one on the same port)
+    /// (another free port when that one is taken; 0: any). The answer says the port. The
+    /// listener goes away when its session ends, or after `wait_ms` if nobody comes.
     BenchListen {
         token: String,
         transport: String,
         profile: String,
         port: u16,
         wait_ms: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bind: Option<String>,
     },
     /// Dial a benchmark listener at `addr` and measure the link: its handshake, round trips
-    /// for `ping_ms`, and with `seconds` above 0 the rate each way for that long.
+    /// for `ping_ms`, and with `seconds` above 0 the rate each way for that long. `sni`: the
+    /// server name a `wss` link sends.
     BenchDial {
         addr: String,
         token: String,
@@ -97,6 +101,8 @@ pub enum Request {
         profile: String,
         ping_ms: u32,
         seconds: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sni: Option<String>,
     },
     /// A release is about to be sent (its three files and their sizes).
     UpdateBegin {
@@ -324,6 +330,10 @@ pub struct BenchListening {
     pub ok: bool,
     pub error: Option<String>,
     pub port: u16,
+    /// The address it listens on, for a `bind` (an agent older than `bind` leaves it out: it
+    /// listened on IPv4 only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<String>,
 }
 
 /// The answer to [`Request::BenchDial`]: what one test link measured.
@@ -339,6 +349,9 @@ pub struct BenchMeasured {
     pub download_mbps: Option<f64>,
     pub upload_mbps: Option<f64>,
     pub loaded: Option<kariz::speedtest::Latency>,
+    /// The server name it sent (an agent older than `sni` leaves it out: it sent none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
 }
 
 /// The answer to [`Request::SpeedtestStart`].

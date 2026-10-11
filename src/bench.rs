@@ -67,11 +67,16 @@ fn profile(name: &str) -> io::Result<&str> {
     }
 }
 
-fn shape<'a>(kind: TransportKind, profile_name: &'a str) -> io::Result<Shape<'a>> {
+fn shape<'a>(
+    kind: TransportKind,
+    profile_name: &'a str,
+    sni: Option<&'a str>,
+) -> io::Result<Shape<'a>> {
     Ok(Shape {
         kind,
         profile: Some(profile(profile_name)?),
         any: true,
+        sni,
     })
 }
 
@@ -85,7 +90,7 @@ pub async fn listen(
     profile_name: &str,
     tls: Option<(&Path, &Path)>,
 ) -> io::Result<Acceptor> {
-    Acceptor::bind_shape(addr, token, shape(kind, profile_name)?, tls).await
+    Acceptor::bind_shape(addr, token, shape(kind, profile_name, None)?, tls).await
 }
 
 /// Waits up to `wait` for the dialing end, then answers its test streams until it hangs up
@@ -132,15 +137,17 @@ pub async fn answer(acceptor: Acceptor, wait: Duration) -> io::Result<()> {
 }
 
 /// Dials `addr` over `kind` with `token`: the test session, and how long the connection and
-/// its handshake took (in milliseconds).
+/// its handshake took (in milliseconds). `sni` is the server name a `wss` link sends, as a
+/// tunnel with a domain would (none: none is sent, as for an IP address).
 pub async fn dial(
     addr: &str,
     token: &str,
     kind: TransportKind,
     profile_name: &str,
+    sni: Option<&str>,
     limit: Duration,
 ) -> io::Result<(Session, f64)> {
-    let dialer = Dialer::shaped(addr, token, shape(kind, profile_name)?)?;
+    let dialer = Dialer::shaped(addr, token, shape(kind, profile_name, sni)?)?;
     let start = Instant::now();
     let session = timeout(limit, dialer.connect(Side::Client))
         .await
@@ -205,12 +212,19 @@ mod tests {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
     async fn measured(kind: TransportKind, tls: Option<(&Path, &Path)>) -> (f64, Latency, Speed) {
-        let acceptor = listen("127.0.0.1:0", TOKEN, kind, "balanced", tls)
-            .await
-            .unwrap();
+        measured_at("127.0.0.1:0", kind, tls, None).await
+    }
+
+    async fn measured_at(
+        at: &str,
+        kind: TransportKind,
+        tls: Option<(&Path, &Path)>,
+        sni: Option<&str>,
+    ) -> (f64, Latency, Speed) {
+        let acceptor = listen(at, TOKEN, kind, "balanced", tls).await.unwrap();
         let addr = acceptor.local_addr().unwrap().to_string();
         let server = tokio::spawn(answer(acceptor, Duration::from_secs(10)));
-        let (session, ms) = dial(&addr, TOKEN, kind, "balanced", Duration::from_secs(10))
+        let (session, ms) = dial(&addr, TOKEN, kind, "balanced", sni, Duration::from_secs(10))
             .await
             .unwrap();
         let latency = probe(&session, Duration::from_millis(500)).await.unwrap();
@@ -268,7 +282,29 @@ mod tests {
             TransportKind::Wss,
             measured(TransportKind::Wss, Some((&cert, &key))).await,
         );
+        // A server name that is not the certificate's, as a tunnel with a domain sends it.
+        sane(
+            TransportKind::Wss,
+            measured_at(
+                "127.0.0.1:0",
+                TransportKind::Wss,
+                Some((&cert, &key)),
+                Some("front.example"),
+            )
+            .await,
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ipv6_is_measured_where_the_machine_has_it() {
+        if std::net::TcpListener::bind("[::1]:0").is_err() {
+            return;
+        }
+        sane(
+            TransportKind::Tcpmux,
+            measured_at("[::1]:0", TransportKind::Tcpmux, None, None).await,
+        );
     }
 
     #[tokio::test]
@@ -283,6 +319,7 @@ mod tests {
             "another-token-0123456789abcdef",
             TransportKind::Tcpmux,
             "gaming",
+            None,
             Duration::from_secs(1),
         )
         .await;

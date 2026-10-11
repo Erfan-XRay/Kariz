@@ -103,6 +103,8 @@ pub(crate) struct Shape<'a> {
     pub profile: Option<&'a str>,
     /// Allow the transports a management link does not use (`ws`).
     pub any: bool,
+    /// The server name a dialing `wss` end sends (none: none is sent, as for an IP address).
+    pub sni: Option<&'a str>,
 }
 
 impl Shape<'_> {
@@ -111,6 +113,7 @@ impl Shape<'_> {
             kind,
             profile: None,
             any: false,
+            sni: None,
         }
     }
 }
@@ -192,6 +195,12 @@ key = {:?}
                 "insecure = true
 ",
             );
+            if let Some(sni) = shape.sni {
+                toml.push_str(&format!(
+                    "sni = {sni:?}
+"
+                ));
+            }
         }
     }
     Ok(toml)
