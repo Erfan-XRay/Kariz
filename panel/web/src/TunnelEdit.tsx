@@ -14,7 +14,7 @@ import { GreChoice, linkWithAddress } from "./GreChoice";
 import { useNetworks } from "./Networks";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, splitTransport } from "./transport";
 import { PROFILES, addressesOf, hostOf, parsePorts, portOf } from "./Wizard";
-import { benchLabel } from "./Benchmark";
+import { benchLabel, isV6 } from "./Benchmark";
 import type { BenchChoice } from "./Benchmark";
 
 /** Editing a tunnel: everything about it on one page, no steps. */
@@ -176,15 +176,23 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   }, [ready, now]); // eslint-disable-line react-hooks/exhaustive-deps
   const dirty = !!initial && now !== initial;
 
-  // Opened from a benchmark result: once what the tunnel has is known, its direction, transport and network
-  // are put in, as changes to look over and save.
+  // Dialed at an IPv6 address, the accepting side listens on every address, IPv6 too (on every IPv4 one it
+  // would never answer).
+  useEffect(() => {
+    if (!netId && isV6(dialHost) && listenHost === "0.0.0.0") setListenHost("[::]");
+  }, [dialHost, netId, listenHost]);
+
+  // Opened from a benchmark result: once what the tunnel has is known, its direction, transport, network, the
+  // IPv6 address of an IPv6 result and the server name of a wss one are put in, as changes to look over and save.
   const [presetDone, setPresetDone] = useState(false);
   useEffect(() => {
     if (!preset || presetDone || !initial || blocked) return;
     setMode(preset.mode);
     setTransport(preset.transport === "tcpmux" ? "tcp" : preset.transport);
     setMuxOn(true);
-    setNetId(preset.network ?? "");
+    chooseNetwork(preset.network ?? "");
+    if (preset.host && (preset.path === "ipv6" || isV6(dialHost))) setDialHost(preset.host);
+    if (preset.sni) setSni(preset.sni);
     setPresetDone(true);
   }, [initial]); // eslint-disable-line react-hooks/exhaustive-deps
 

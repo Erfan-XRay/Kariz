@@ -11,7 +11,7 @@ import { MuxFields, MuxToggle, emptyMux, muxSpecOf, muxToSpec } from "./MuxField
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
-import { BenchPanel, benchLabel } from "./Benchmark";
+import { BenchPanel, benchLabel, isV6 } from "./Benchmark";
 import type { BenchChoice } from "./Benchmark";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, transportLabel } from "./transport";
 import { FIRST_TUNNEL_PORT, freeTunnelPort, hostOf, portOf, portsInUse } from "./ports";
@@ -88,9 +88,9 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   // Until a port is typed, the wizard picks a free one.
   const [portTouched, setPortTouched] = useState(false);
   const [dialHost, setDialHost] = useState("");
-  // The host the accepting side listens on: every address, or (for a tunnel that was made
-  // over a private network) its private one.
-  const listenHost = "0.0.0.0";
+  // The host the accepting side listens on: every IPv4 address, every address (IPv6 too) when it is dialed at
+  // its IPv6 address, or (for a tunnel that was made over a private network) its private one.
+  const listenHost = isV6(dialHost) ? "[::]" : "0.0.0.0";
   const [netId, setNetId] = useState("");
   const { networks, links } = useNetworks();
   const [wsPath, setWsPath] = useState("/");
@@ -134,13 +134,18 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     }
   }, [entry, exit]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // A benchmark result chosen: its direction, transport (with mux, as the benchmark measured it) and the
-  // private network of a GRE path.
+  // A benchmark result chosen: its direction, transport (with mux, as the benchmark measured it), the private
+  // network of a GRE path, and the IPv6 address of an IPv6 path (or back to the IPv4 one from an IPv6 address).
   const applyBench = (c: BenchChoice) => {
     setMode(c.mode);
     setTransport(c.transport === "tcpmux" ? "tcp" : c.transport);
     setMuxOn(true);
     setNetId(c.network ?? "");
+    if (c.host && (c.path === "ipv6" || isV6(dialHost))) {
+      setDialHost(c.host);
+      setDialTouched(true);
+    }
+    if (c.sni) setSni(c.sni);
     toast(t("bench.applied", { t: benchLabel(c.transport), mode: t(`bench.mode.${c.mode}`) }), "ok");
   };
   const acceptor = mode === "reverse" ? entry : exit;
@@ -355,7 +360,14 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     applyLabel={t("bench.useWizard")}
                     currentLabel={t("bench.chosenWizard")}
                     context="wizard"
-                    isCurrent={(c) => c.transport === joinTransport(transport, muxOn).core && c.mode === mode && (c.path === "gre") === !!netId}
+                    sni={sni}
+                    isCurrent={(c) =>
+                      c.transport === joinTransport(transport, muxOn).core &&
+                      c.mode === mode &&
+                      (c.path === "gre") === !!netId &&
+                      (c.path === "ipv6") === (!netId && isV6(dialHost)) &&
+                      !c.sni === !(transport === "wss" && sni)
+                    }
                     onApply={applyBench}
                   />
                 </div>

@@ -9,7 +9,7 @@ import { Card, Dialog, Empty, Icon, Seg, Skeleton, Stat } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { RouteScene } from "./RouteScene";
 import { SpeedTest } from "./SpeedTest";
-import { BenchPanel } from "./Benchmark";
+import { BenchPanel, isV6 } from "./Benchmark";
 import type { BenchChoice } from "./Benchmark";
 import { useNetworks } from "./Networks";
 import { linkWithAddress } from "./GreChoice";
@@ -219,6 +219,27 @@ function TunnelPage({
   const listenHost = (acceptorSide?.tunnel.listen ?? "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
   const overGre = !!linkWithAddress(links, listenHost);
   const nowCore = tunnel.transport === "tcp" ? "tcpmux" : tunnel.transport;
+  // ... whether it dials an IPv6 address, and the server name a wss tunnel sends (its own, else the WebSocket
+  // host's), which the benchmark tries wss with too.
+  const dialerSide = mode === "reverse" ? tunnel.exit : tunnel.entry;
+  const overV6 = !overGre && isV6((dialerSide?.tunnel.remote ?? "").replace(/:\d+$/, ""));
+  const [tunnelSni, setTunnelSni] = useState("");
+  const dialerId = dialerSide?.server.id;
+  useEffect(() => {
+    setTunnelSni("");
+    if (tunnel.transport !== "wss" || !dialerId) return;
+    let alive = true;
+    api
+      .tunnelSpec(dialerId, tunnel.name)
+      .then((s) => {
+        const name = s.tls_sni || s.ws_host || "";
+        if (alive && /[a-z]/i.test(name) && !name.includes(":")) setTunnelSni(name);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [dialerId, tunnel.name, tunnel.transport]);
 
   return (
     <div className="page is-on tunnel-page">
@@ -363,7 +384,8 @@ function TunnelPage({
               applyLabel={t("bench.useTunnel")}
               currentLabel={t("bench.currentTunnel")}
               context="tunnel"
-              isCurrent={(c) => c.transport === nowCore && c.mode === mode && (c.path === "gre") === overGre}
+              sni={tunnelSni}
+              isCurrent={(c) => c.transport === nowCore && c.mode === mode && (c.path === "gre") === overGre && (c.path === "ipv6") === overV6 && !c.sni === !tunnelSni}
               onApply={(choice) => onEdit(choice)}
             />
           </Card>
