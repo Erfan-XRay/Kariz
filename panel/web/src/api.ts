@@ -60,8 +60,10 @@ export interface BenchCandidate {
   key: string;
   /** The core transport: tcpmux, kcp, ws, wss or quic. */
   transport: string;
-  /** public, or gre (across the private network link between the two servers). */
-  path: "public" | "gre";
+  /** public, ipv6 (the public IPv6 addresses), or gre (across the private network link between the two servers). */
+  path: "public" | "ipv6" | "gre";
+  /** The server name a wss candidate sends (none: none, as for an IP address); missing in an older result. */
+  sni?: string | null;
   network: string | null;
   /** reverse (the entry listens) or direct (the exit listens). */
   mode: "reverse" | "direct";
@@ -92,6 +94,8 @@ export interface Bench {
   candidates: BenchCandidate[];
   best: string | null;
   error: string | null;
+  /** Whether IPv6 was measured: "tested", or "missing:ID" (that server has no public IPv6 address); missing in an older result. */
+  ipv6?: string | null;
 }
 
 export interface SpeedReport {
@@ -509,7 +513,8 @@ export const api = {
   history: (key: string, range: string) => call<{ points: [number, number][] }>("GET", `history?key=${encodeURIComponent(key)}&range=${range}`),
   events: (limit = 100) => call<{ events: EventRow[] }>("GET", `events?limit=${limit}`),
   logs: (name: string, lines = 200) => call<{ lines: LogLine[] }>("GET", `logs?name=${encodeURIComponent(name)}&lines=${lines}`),
-  benchStart: (entry: string, exit: string, profile: string, port: number) => call<{ id: string }>("POST", "bench", { entry, exit, profile, port }),
+  benchStart: (entry: string, exit: string, profile: string, port: number, sni?: string) =>
+    call<{ id: string }>("POST", "bench", { entry, exit, profile, port, ...(sni ? { sni } : {}) }),
   benchState: (id: string) => call<Bench>("GET", `bench?id=${encodeURIComponent(id)}`),
   benchStop: (id: string) => call<object>("POST", "bench/stop", { id }),
   benchLast: (entry: string, exit: string) => call<{ bench: Bench | null }>("GET", `bench/last?entry=${encodeURIComponent(entry)}&exit=${encodeURIComponent(exit)}`),

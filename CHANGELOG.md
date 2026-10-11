@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **The benchmark measures IPv6 too.** When both servers have a public IPv6 address, every
+  transport is also tried between the two IPv6 addresses, side by side with IPv4 on the same
+  port, so a run takes no longer; the best over IPv4 and the best over IPv6 are both measured
+  for speed. When one server has no IPv6 address, the result says which. Using an IPv6 result
+  puts the IPv6 address in the tunnel and has it listen on every address (`[::]`).
+- **`wss` with a server name in the benchmark.** A `wss` test sent no server name (SNI), as for
+  an IP address, while a tunnel with a domain sends one. Now the tunnel's own name (or one
+  typed) has `wss` tried once more with it, to show whether a filter judges TLS by its name.
+- **`quic` across GRE in the benchmark**, beside `tcp` with mux and `kcp`.
+
+### Changed
+
+- **A lighter benchmark.** Before a run, one line and the button; while it runs, one bar and a
+  chip per test; after it, the recommendation with three numbers (the rest under *Details*), the
+  next two, and everything else folded under one line. At most one note is shown, the one that
+  matters most.
+
+### Fixed
+
+- **A tunnel dialed at an IPv6 address.** The wizard offers a server's IPv6 address to dial, but
+  the tunnel listened on every IPv4 address only, so it never connected. It now listens on every
+  address (`[::]`) when it is dialed at an IPv6 one.
+
 ## 2.2.0 - 2026-10-10
 
 The panel now **follows a new IP address of its server**: when the address it had is filtered

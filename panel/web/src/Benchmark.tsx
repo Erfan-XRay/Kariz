@@ -1,26 +1,46 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { ApiError, api } from "./api";
 import type { Bench, BenchCandidate, ServerInfo } from "./api";
 import { useApp } from "./store";
 import { Icon, useAgo } from "./ui";
 
-/** What using a benchmark result sets: the core transport, the direction, and the network of a GRE path. */
+/**
+ * What using a benchmark result sets: the core transport, the direction, the network of a GRE path, and for a
+ * path over the public addresses the address it dialed (an IPv6 one for the IPv6 path).
+ */
 export interface BenchChoice {
   transport: string;
   mode: "reverse" | "direct";
   network: string | null;
+  path: "public" | "ipv6" | "gre";
+  host: string | null;
+  /** The server name a wss result was measured with. */
+  sni: string | null;
 }
 
-export const choiceOf = (c: BenchCandidate): BenchChoice => ({ transport: c.transport, mode: c.mode, network: c.path === "gre" ? c.network : null });
+export const choiceOf = (c: BenchCandidate): BenchChoice => ({
+  transport: c.transport,
+  mode: c.mode,
+  network: c.path === "gre" ? c.network : null,
+  path: c.path,
+  host: c.path === "gre" ? null : c.host,
+  sni: c.sni ?? null,
+});
+
+/** Whether a host is an IPv6 address (with or without brackets). */
+export const isV6 = (host: string) => host.replace(/^\[|\]$/g, "").includes(":");
 
 const LABELS: Record<string, string> = { tcpmux: "TCP", kcp: "KCP", ws: "WS", wss: "WSS", quic: "QUIC" };
 /** A transport as the benchmark shows it. */
 export const benchLabel = (transport: string) => LABELS[transport] ?? transport.toUpperCase();
 
+/** A server name a wss test can send: a domain. */
+const SNI = /^(?=.*[a-z])[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/i;
+
 /** The candidates a run measures for speed (the best few of the probe stage). */
 const SPEED_TOP = 3;
 /** About how long each stage takes, in seconds, for the time-left estimate. */
-const PROBE_SECONDS = 8;
+const PROBE_SECONDS = 9;
 const SPEED_SECONDS = 4.5;
 
 type T = (k: string, v?: Record<string, string | number>) => string;
@@ -42,7 +62,7 @@ function reason(t: T, error: string | null, names: Map<string, string>): string 
 const speedOf = (c: BenchCandidate) => (c.download_mbps != null && c.upload_mbps != null ? 0.7 * c.download_mbps + 0.3 * c.upload_mbps : null);
 const tone = (score: number) => (score >= 80 ? "good" : score >= 60 ? "mid" : "low");
 
-function ScoreRing({ score, size = 76 }: { score: number; size?: number }) {
+function ScoreRing({ score, size = 64 }: { score: number; size?: number }) {
   const { t, num } = useApp();
   const r = 30;
   const c = 2 * Math.PI * r;
@@ -57,10 +77,26 @@ function ScoreRing({ score, size = 76 }: { score: number; size?: number }) {
   );
 }
 
+/** The small marks of a candidate's path: IPv6, GRE, a server name. */
+function PathTags({ c }: { c: BenchCandidate }) {
+  return (
+    <>
+      {c.path === "ipv6" && <span className="tag via">IPv6</span>}
+      {c.path === "gre" && <span className="tag via">GRE</span>}
+      {c.sni && (
+        <span className="tag via" title={c.sni}>
+          SNI
+        </span>
+      )}
+    </>
+  );
+}
+
 /**
  * The benchmark between two servers: which transport, in which direction, gets through best. Shows the last
  * result of the pair if there is one, runs a new one (about 20 seconds, followed live), and offers each result
- * with `onApply`. `isCurrent` marks the one the tunnel (or the wizard) has now.
+ * with `onApply`. `isCurrent` marks the one the tunnel (or the wizard) has now. `sni` is a server name to try
+ * wss with too (the tunnel's own); it can be typed before a run.
  */
 export function BenchPanel({
   entry,
@@ -72,6 +108,7 @@ export function BenchPanel({
   currentLabel,
   isCurrent,
   context,
+  sni: sniGiven = "",
   onApply,
 }: {
   entry: string;
@@ -85,6 +122,7 @@ export function BenchPanel({
   isCurrent?: (c: BenchCandidate) => boolean;
   /** Where it is: the wizard (the current one is what is picked there) or a tunnel's page (what it runs on). */
   context: "wizard" | "tunnel";
+  sni?: string;
   onApply: (choice: BenchChoice, c: BenchCandidate) => void;
 }) {
   const { t, num, digitsOf } = useApp();
@@ -94,11 +132,21 @@ export function BenchPanel({
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
   const [now, setNow] = useState(Date.now());
-  const [showAll, setShowAll] = useState(false);
+  const [showMore, setShowMore] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
+  const [sni, setSni] = useState(sniGiven);
+  const [sniOpen, setSniOpen] = useState(!!sniGiven);
   const names = new Map(servers.map((s) => [s.id, s.name]));
   const name = (id: string) => names.get(id) ?? id;
   const running = !!bench && (bench.state === "probe" || bench.state === "speed");
   const runId = useRef<string | null>(null);
+  const uid = useId();
+  const sniBad = sni.trim() !== "" && !SNI.test(sni.trim());
+
+  useEffect(() => {
+    setSni(sniGiven);
+    if (sniGiven) setSniOpen(true);
+  }, [sniGiven]);
 
   // The last result of this pair, if there is one.
   useEffect(() => {
@@ -134,11 +182,13 @@ export function BenchPanel({
   }, [running, bench?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const start = async () => {
+    if (sniBad) return;
     setError("");
     setStarting(true);
-    setShowAll(false);
+    setShowMore(false);
+    setShowDetails(false);
     try {
-      const { id } = await api.benchStart(entry, exit, profile, port);
+      const { id } = await api.benchStart(entry, exit, profile, port, sni.trim() || undefined);
       setNow(Date.now());
       setBench(await api.benchState(id));
     } catch (e) {
@@ -163,6 +213,43 @@ export function BenchPanel({
     </button>
   );
 
+  // The server name to try wss with: a quiet link, the field once it is opened.
+  const sniField = (
+    <div className="bench-sni">
+      {sniOpen ? (
+        <div className="bench-sni-field">
+          <label className="small muted" htmlFor={`${uid}-sni`}>
+            {t("bench.sni.label")}
+          </label>
+          <input
+            id={`${uid}-sni`}
+            className="text mono"
+            dir="ltr"
+            value={sni}
+            placeholder="cdn.example.com"
+            aria-invalid={sniBad || undefined}
+            aria-describedby={`${uid}-sni-hint`}
+            onChange={(e) => setSni(e.target.value.trim())}
+          />
+          <span id={`${uid}-sni-hint`} className={`small ${sniBad ? "err" : "muted"}`}>
+            {sniBad ? t("bench.sni.bad") : t("bench.sni.hint")}
+          </span>
+        </div>
+      ) : (
+        <button className="linklike small" type="button" onClick={() => setSniOpen(true)}>
+          <Icon name="plus" size={14} />
+          {t("bench.sni.add")}
+        </button>
+      )}
+    </div>
+  );
+
+  const errorLine = error && (
+    <p className="err small" role="alert">
+      {error}
+    </p>
+  );
+
   if (!loaded) return <div className="bench-skel" aria-busy="true" />;
 
   // ---- nothing yet ----
@@ -170,34 +257,17 @@ export function BenchPanel({
     return (
       <div className="bench">
         <div className="bench-intro">
-          <div className="bench-intro-icon" aria-hidden="true">
-            <Icon name="gauge" size={26} />
-          </div>
+          <span className="bench-intro-icon" aria-hidden="true">
+            <Icon name="gauge" size={20} />
+          </span>
           <div className="bench-intro-text">
-            <h4>{t("bench.introTitle")}</h4>
-            <p>{t("bench.introText", { a: `⁨${name(entry)}⁩`, b: `⁨${name(exit)}⁩` })}</p>
-            <ul className="bench-facts">
-              <li>
-                <Icon name="clock" size={14} />
-                {t("bench.fact.time")}
-              </li>
-              <li>
-                <Icon name="refresh" size={14} />
-                {t("bench.fact.both")}
-              </li>
-              <li>
-                <Icon name="shield" size={14} />
-                {t("bench.fact.safe")}
-              </li>
-            </ul>
+            <h4>{t("bench.intro")}</h4>
+            <p>{t("bench.facts")}</p>
           </div>
           {startButton(t("bench.run"), true)}
         </div>
-        {error && (
-          <p className="err small" role="alert">
-            {error}
-          </p>
-        )}
+        {sniField}
+        {errorLine}
       </div>
     );
   }
@@ -205,6 +275,12 @@ export function BenchPanel({
   const cands = bench.candidates;
   const modes = (["reverse", "direct"] as const).filter((m) => cands.some((c) => c.mode === m));
   const listenerOf = (m: "reverse" | "direct") => (m === "reverse" ? bench.entry : bench.exit);
+  const chipTitle = (c: BenchCandidate) =>
+    c.state === "fail"
+      ? reason(t, c.error, names)
+      : c.state === "ok" && c.latency
+        ? `${num(c.latency.p50_ms, c.latency.p50_ms < 10 ? 1 : 0)} ms`
+        : t(`bench.st.${c.state}`);
 
   // ---- running ----
   if (running) {
@@ -212,28 +288,20 @@ export function BenchPanel({
     const probed = cands.filter((c) => c.state !== "wait" && c.state !== "probe").length;
     const measured = cands.filter((c) => c.download_mbps != null).length;
     const measuring = cands.some((c) => c.state === "speed");
+    const top = SPEED_TOP + (bench.ipv6 === "tested" ? 1 : 0);
     const fraction =
       bench.state === "probe"
-        ? 0.35 * (probed / Math.max(1, cands.length))
-        : 0.35 + 0.65 * Math.min(1, (measured + (measuring ? 0.5 : 0)) / SPEED_TOP);
+        ? 0.4 * (probed / Math.max(1, cands.length))
+        : 0.4 + 0.6 * Math.min(1, (measured + (measuring ? 0.5 : 0)) / top);
     const left =
       bench.state === "probe"
-        ? Math.max(1, PROBE_SECONDS - elapsed) + SPEED_TOP * SPEED_SECONDS
-        : Math.max(1, (SPEED_TOP - measured - (measuring ? 0.5 : 0)) * SPEED_SECONDS);
+        ? Math.max(1, PROBE_SECONDS - elapsed) + top * SPEED_SECONDS
+        : Math.max(1, (top - measured - (measuring ? 0.5 : 0)) * SPEED_SECONDS);
     return (
       <div className="bench is-running">
         <div className="bench-run-head">
-          <ol className="bench-stages" aria-label={t("bench.stages")}>
-            {(["probe", "speed"] as const).map((s, i) => (
-              <li key={s} className={bench.state === s ? "now" : bench.state === "speed" && s === "probe" ? "done" : ""} aria-current={bench.state === s ? "step" : undefined}>
-                <span className="dot">{bench.state === "speed" && s === "probe" ? <Icon name="check" size={12} /> : num(i + 1)}</span>
-                <span>
-                  <b>{t(`bench.stage.${s}`)}</b>
-                  <small>{t(`bench.stage.${s}.d`)}</small>
-                </span>
-              </li>
-            ))}
-          </ol>
+          <b>{t(`bench.stage.${bench.state}`)}</b>
+          {bench.state === "probe" && <span className="small muted num">{t("bench.count", { n: num(probed), all: num(cands.length) })}</span>}
           <span className="grow" />
           <span className="bench-left num" aria-hidden="true">
             {t("bench.left", { n: num(Math.ceil(left)) })}
@@ -249,51 +317,25 @@ export function BenchPanel({
         <p className="sr-only" role="status">
           {t(`bench.stage.${bench.state}`)}
         </p>
-        <div className={`bench-board cols-${modes.length}`}>
+        <div className="bench-chips-live">
           {modes.map((m) => (
-            <div key={m} className="bench-lane">
-              <h5>
+            <div key={m} className="bench-chip-row">
+              <span className="bench-chip-mode small muted" title={t("bench.listens", { name: name(listenerOf(m)) })}>
                 {t(`bench.mode.${m}`)}
-                <small>{t("bench.listens", { name: `⁨${name(listenerOf(m))}⁩` })}</small>
-              </h5>
+              </span>
               <ul>
                 {cands
                   .filter((c) => c.mode === m)
                   .map((c) => (
-                    <li key={c.key} className={`bench-row st-${c.state}`}>
-                      <span className="bench-glyph" aria-hidden="true">
-                        {c.state === "ok" && <Icon name="check" size={14} />}
-                        {c.state === "fail" && <Icon name="x" size={14} />}
-                        {c.state === "speed" && (
-                          <span className="bars">
-                            <i />
-                            <i />
-                            <i />
-                          </span>
-                        )}
-                      </span>
-                      <span className="bench-t mono" dir="ltr">
-                        {benchLabel(c.transport)}
-                      </span>
-                      {c.path === "gre" && <span className="tag via">GRE</span>}
-                      <span className="grow" />
-                      <span className="bench-v small">
-                        {c.state === "wait" && t("bench.st.wait")}
-                        {c.state === "probe" && t("bench.st.probe")}
-                        {c.state === "speed" && t("bench.st.speed")}
-                        {c.state === "ok" &&
-                          (c.download_mbps != null ? (
-                            <span className="num">
-                              ↓ {num(c.download_mbps, c.download_mbps < 10 ? 1 : 0)} <bdi dir="ltr">Mbps</bdi>
-                            </span>
-                          ) : c.latency ? (
-                            <span className="num">
-                              {num(c.latency.p50_ms, c.latency.p50_ms < 10 ? 1 : 0)} <bdi dir="ltr">ms</bdi>
-                            </span>
-                          ) : null)}
-                        {c.state === "fail" && <span title={c.error ?? undefined}>{reason(t, c.error, names)}</span>}
-                      </span>
-                      <span className="sr-only">{t(`bench.st.${c.state}`)}</span>
+                    <li key={c.key} className={`bench-chip st-${c.state}`} title={chipTitle(c)} dir="ltr">
+                      {c.state === "ok" && <Icon name="check" size={12} />}
+                      {c.state === "fail" && <Icon name="x" size={12} />}
+                      {(c.state === "probe" || c.state === "speed") && <span className="bench-spin" aria-hidden="true" />}
+                      <span className="mono">{benchLabel(c.transport)}</span>
+                      {c.path === "ipv6" && <small>v6</small>}
+                      {c.path === "gre" && <small>GRE</small>}
+                      {c.sni && <small>SNI</small>}
+                      <span className="sr-only">{chipTitle(c)}</span>
                     </li>
                   ))}
               </ul>
@@ -308,15 +350,22 @@ export function BenchPanel({
   const ok = cands.filter((c) => c.state === "ok");
   const ranked = cands.filter((c) => c.score != null).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
   const best = ranked[0];
-  const unranked = ok.filter((c) => c.score == null);
-  const failed = cands.filter((c) => c.state === "fail");
-  const skipped = cands.filter((c) => c.state === "skip");
+  const runnersUp = ranked.slice(1, 3);
   const finishedAgo = bench.finished ? ago(Math.max(0, (Date.now() - bench.finished) / 1000)) : null;
   const tookSecs = bench.finished ? Math.round((bench.finished - bench.started) / 1000) : null;
   const testedPort = cands.find((c) => c.port != null)?.port ?? null;
   const old = bench.finished != null && Date.now() - bench.finished > 24 * 3600 * 1000;
   const current = isCurrent ? ranked.find(isCurrent) : undefined;
   const isCurrentTransport = isCurrent ? cands.find(isCurrent)?.transport : undefined;
+  // Everything past the top three, in one list: the rest of the ranking, what got through without a speed
+  // test, what did not get through, what was not reached.
+  const rest = [
+    ...ranked.slice(3),
+    ...ok.filter((c) => c.score == null),
+    ...cands.filter((c) => c.state === "fail"),
+    ...cands.filter((c) => c.state === "skip"),
+  ];
+  const failedCount = cands.filter((c) => c.state === "fail").length;
 
   // Why the best is the best, in a few words.
   const whys: string[] = [];
@@ -338,38 +387,57 @@ export function BenchPanel({
   const blockedMode = modes.length === 2 ? modes.find((m) => ok.length > 0 && !ok.some((c) => c.mode === m)) : undefined;
   const better = best && current && current.key !== best.key && (best.score ?? 0) - (current.score ?? 0) >= 8 ? current : undefined;
   const betterThanNone = best && isCurrent && !current && !ok.some(isCurrent);
+  const missing6 = bench.ipv6?.startsWith("missing:") ? bench.ipv6.slice("missing:".length) : null;
 
-  const chips = (c: BenchCandidate) => (
-    <>
-      <span className="tag">{t(`bench.mode.${c.mode}`)}</span>
-      {c.path === "gre" && <span className="tag via">GRE</span>}
-      {isCurrent?.(c) && <span className="tag now">{currentLabel}</span>}
-    </>
-  );
+  // One note at most, the one that matters most.
+  type Note = { kind: "" | "good" | "warn" | "err"; icon: string; text: string };
+  const notes: Note[] = [];
+  if (bench.state === "failed") notes.push({ kind: "err", icon: "alert", text: t("bench.err.run", { why: bench.error ?? "" }) });
+  if (bench.state === "stopped") notes.push({ kind: "", icon: "pause", text: t("bench.stopped") });
+  if (blockedMode)
+    notes.push({
+      kind: "warn",
+      icon: "alert",
+      text: t("bench.blocked", { mode: t(`bench.mode.${blockedMode}`), name: `⁨${name(listenerOf(blockedMode))}⁩`, other: t(`bench.mode.${blockedMode === "reverse" ? "direct" : "reverse"}`) }),
+    });
+  if (better)
+    notes.push({
+      kind: "good",
+      icon: "bolt",
+      text: t(context === "wizard" ? "bench.betterPick" : "bench.better", { best: benchLabel(best!.transport), by: num((best!.score ?? 0) - (better.score ?? 0)), now: benchLabel(better.transport) }),
+    });
+  if (betterThanNone) notes.push({ kind: "", icon: "info", text: t(context === "wizard" ? "bench.pickFailed" : "bench.currentFailed", { now: benchLabel(isCurrentTransport ?? "") }) });
+  if (bench.profile !== profile) notes.push({ kind: "", icon: "info", text: t("bench.otherProfile", { p: t(`wz.pf.${bench.profile}`) }) });
+  if (old) notes.push({ kind: "", icon: "info", text: t("bench.old") });
+  const note = notes[0];
+
+  const applyButton = (c: BenchCandidate, quiet: boolean) =>
+    isCurrent?.(c) ? (
+      <span className="bench-is-now">
+        <Icon name="check" size={16} />
+        {currentLabel}
+      </span>
+    ) : (
+      <button
+        className={`btn btn-sm ${quiet ? "btn-quiet" : "btn-primary"}`}
+        type="button"
+        onClick={() => onApply(choiceOf(c), c)}
+        aria-label={quiet ? `${applyLabel}: ${benchLabel(c.transport)} ${t(`bench.mode.${c.mode}`)}` : undefined}
+      >
+        {!quiet && <span className="shine" />}
+        {!quiet && <Icon name="check" size={18} />}
+        {applyLabel}
+      </button>
+    );
+
+  const mbps = (v: number | null) => (v != null ? num(v, v < 10 ? 1 : 0) : "—");
 
   return (
     <div className="bench">
-      {old && (
-        <p className="bench-note">
-          <Icon name="info" size={16} />
-          {t("bench.old")}
-        </p>
-      )}
-      {bench.profile !== profile && (
-        <p className="bench-note">
-          <Icon name="info" size={16} />
-          {t("bench.otherProfile", { p: t(`wz.pf.${bench.profile}`) })}
-        </p>
-      )}
-      {bench.state === "stopped" && (
-        <p className="bench-note">
-          <Icon name="pause" size={16} />
-          {t("bench.stopped")}
-        </p>
-      )}
-      {bench.state === "failed" && (
-        <p className="err small" role="alert">
-          {t("bench.err.run", { why: bench.error ?? "" })}
+      {note && (
+        <p className={`bench-note ${note.kind}`} role={note.kind === "err" ? "alert" : undefined}>
+          <Icon name={note.icon} size={16} />
+          {note.text}
         </p>
       )}
 
@@ -382,42 +450,61 @@ export function BenchPanel({
               <span className="mono" dir="ltr">
                 {benchLabel(best.transport)}
               </span>
-              <span className="bench-chips">{chips(best)}</span>
+              <span className="bench-chips">
+                <span className="tag">{t(`bench.mode.${best.mode}`)}</span>
+                <PathTags c={best} />
+                {isCurrent?.(best) && <span className="tag now">{currentLabel}</span>}
+              </span>
             </h4>
             <p className="bench-why">{whys.join(t("bench.and"))}</p>
-            <dl className="bench-metrics">
-              <div>
-                <dt>{t("bench.m.down")}</dt>
-                <dd className="num">
-                  {best.download_mbps != null ? num(best.download_mbps, best.download_mbps < 10 ? 1 : 0) : "—"} <small dir="ltr">Mbps</small>
-                </dd>
-              </div>
-              <div>
-                <dt>{t("bench.m.up")}</dt>
-                <dd className="num">
-                  {best.upload_mbps != null ? num(best.upload_mbps, best.upload_mbps < 10 ? 1 : 0) : "—"} <small dir="ltr">Mbps</small>
-                </dd>
-              </div>
-              <div>
-                <dt>{t("bench.m.rtt")}</dt>
-                <dd className="num">
-                  {best.latency ? num(best.latency.p50_ms, best.latency.p50_ms < 10 ? 1 : 0) : "—"} <small dir="ltr">ms</small>
-                </dd>
-              </div>
-              <div>
-                <dt>{t("bench.m.jitter")}</dt>
-                <dd className="num">
-                  {best.latency ? num(best.latency.jitter_ms, 1) : "—"} <small dir="ltr">ms</small>
-                </dd>
-              </div>
-              <div>
-                <dt>{t("bench.m.loss")}</dt>
-                <dd className="num">{best.latency ? t("bench.pctOf", { n: num(lossOf(best), 0) }) : "—"}</dd>
-              </div>
-            </dl>
-            {best.parts && (
-              <details className="bench-parts">
-                <summary>{t("bench.howScored")}</summary>
+          </div>
+          <div className="bench-best-act">{applyButton(best, false)}</div>
+          <dl className="bench-metrics">
+            <div>
+              <dt>{t("bench.m.down")}</dt>
+              <dd className="num">
+                {mbps(best.download_mbps)} <small dir="ltr">Mbps</small>
+              </dd>
+            </div>
+            <div>
+              <dt>{t("bench.m.up")}</dt>
+              <dd className="num">
+                {mbps(best.upload_mbps)} <small dir="ltr">Mbps</small>
+              </dd>
+            </div>
+            <div>
+              <dt>{t("bench.m.rtt")}</dt>
+              <dd className="num">
+                {best.latency ? num(best.latency.p50_ms, best.latency.p50_ms < 10 ? 1 : 0) : "—"} <small dir="ltr">ms</small>
+              </dd>
+            </div>
+            <button className="linklike small bench-details-toggle" type="button" aria-expanded={showDetails} onClick={() => setShowDetails(!showDetails)}>
+              {t("bench.details")}
+              <Icon name="chevron" size={14} />
+            </button>
+          </dl>
+          {showDetails && (
+            <div className="bench-details">
+              <dl className="bench-metrics small-metrics">
+                <div>
+                  <dt>{t("bench.m.jitter")}</dt>
+                  <dd className="num">
+                    {best.latency ? num(best.latency.jitter_ms, 1) : "—"} <small dir="ltr">ms</small>
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t("bench.m.loss")}</dt>
+                  <dd className="num">{best.latency ? t("bench.pctOf", { n: num(lossOf(best), 0) }) : "—"}</dd>
+                </div>
+                <div>
+                  <dt>{t("bench.m.addr")}</dt>
+                  <dd className="mono small" dir="ltr">
+                    {best.host}
+                    {best.sni ? ` · ${best.sni}` : ""}
+                  </dd>
+                </div>
+              </dl>
+              {best.parts && (
                 <div className="bench-part-bars">
                   {(["speed", "latency", "stability"] as const).map((k) => (
                     <div key={k}>
@@ -429,24 +516,10 @@ export function BenchPanel({
                     </div>
                   ))}
                 </div>
-                <p className="small muted">{t(`bench.weights.${bench.profile}`)}</p>
-              </details>
-            )}
-          </div>
-          <div className="bench-best-act">
-            {isCurrent?.(best) ? (
-              <span className="bench-is-now">
-                <Icon name="check" size={16} />
-                {currentLabel}
-              </span>
-            ) : (
-              <button className="btn btn-primary btn-sm" type="button" onClick={() => onApply(choiceOf(best), best)}>
-                <span className="shine" />
-                <Icon name="check" size={18} />
-                {applyLabel}
-              </button>
-            )}
-          </div>
+              )}
+              <p className="small muted">{t(`bench.weights.${bench.profile}`)}</p>
+            </div>
+          )}
         </section>
       ) : (
         bench.state !== "failed" && (
@@ -464,137 +537,86 @@ export function BenchPanel({
         )
       )}
 
-      {better && (
-        <p className="bench-note good">
-          <Icon name="bolt" size={16} />
-          {t(context === "wizard" ? "bench.betterPick" : "bench.better", { best: benchLabel(best!.transport), by: num((best!.score ?? 0) - (better.score ?? 0)), now: benchLabel(better.transport) })}
-        </p>
-      )}
-      {betterThanNone && (
-        <p className="bench-note">
-          <Icon name="info" size={16} />
-          {t(context === "wizard" ? "bench.pickFailed" : "bench.currentFailed", { now: benchLabel(isCurrentTransport ?? "") })}
-        </p>
-      )}
-      {blockedMode && (
-        <p className="bench-note warn">
-          <Icon name="alert" size={16} />
-          {t("bench.blocked", { mode: t(`bench.mode.${blockedMode}`), name: `⁨${name(listenerOf(blockedMode))}⁩`, other: t(`bench.mode.${blockedMode === "reverse" ? "direct" : "reverse"}`) })}
-        </p>
-      )}
-
-      {ranked.length > 1 && (
+      {runnersUp.length > 0 && (
         <ol className="bench-rank" aria-label={t("bench.ranking")}>
-          {ranked.slice(1).map((c, i) => (
+          {runnersUp.map((c, i) => (
             <li key={c.key}>
               <span className="bench-pos num">{num(i + 2)}</span>
               <span className="bench-t mono" dir="ltr">
                 {benchLabel(c.transport)}
               </span>
-              <span className="bench-chips">{chips(c)}</span>
-              <span className="bench-score">
-                <span className={`bar ${tone(c.score ?? 0)}`} aria-hidden="true">
-                  <i style={{ width: `${c.score ?? 0}%` }} />
-                </span>
-                <b className="num">{num(c.score ?? 0)}</b>
+              <span className="bench-chips">
+                <span className="tag">{t(`bench.mode.${c.mode}`)}</span>
+                <PathTags c={c} />
               </span>
+              <span className="grow" />
               <span className="bench-mini small num">
+                <b className={`bench-score-n ${tone(c.score ?? 0)}`}>{num(c.score ?? 0)}</b>
                 <span>
-                  ↓ {c.download_mbps != null ? num(c.download_mbps, 0) : "—"} <bdi dir="ltr">Mbps</bdi>
-                </span>
-                <span>
-                  {c.latency ? num(c.latency.p50_ms, 0) : "—"} <bdi dir="ltr">ms</bdi>
+                  {mbps(c.download_mbps)} <bdi dir="ltr">Mbps</bdi>
                 </span>
               </span>
-              {isCurrent?.(c) ? (
-                <span className="bench-act-space" />
-              ) : (
-                <button className="btn btn-quiet btn-sm" type="button" onClick={() => onApply(choiceOf(c), c)} aria-label={`${applyLabel}: ${benchLabel(c.transport)} ${t(`bench.mode.${c.mode}`)}`}>
-                  {applyLabel}
-                </button>
-              )}
+              {applyButton(c, true)}
             </li>
           ))}
         </ol>
       )}
 
-      {unranked.length + failed.length + skipped.length > 0 && (
-        <div className="bench-rest">
-          <button className="linklike small" type="button" aria-expanded={showAll} onClick={() => setShowAll(!showAll)}>
-            <Icon name="chevron" size={14} />
-            {t("bench.rest", {
-              list: [
-                unranked.length && t("bench.rest.ok", { n: num(unranked.length) }),
-                failed.length && t("bench.rest.fail", { n: num(failed.length) }),
-                skipped.length && t("bench.rest.skip", { n: num(skipped.length) }),
-              ]
-                .filter(Boolean)
-                .join(t("bench.and")),
-            })}
-          </button>
-          {showAll && (
-            <ul>
-              {unranked.map((c) => (
-                <li key={c.key} className="st-ok">
-                  <Icon name="check" size={14} />
-                  <span className="bench-t mono" dir="ltr">
-                    {benchLabel(c.transport)}
-                  </span>
-                  <span className="bench-chips">{chips(c)}</span>
-                  <span className="grow" />
-                  <span className="small muted">
-                    {t("bench.notMeasured", { ms: c.latency ? num(c.latency.p50_ms, 0) : "—" })}
-                  </span>
-                </li>
-              ))}
-              {failed.map((c) => (
-                <li key={c.key} className="st-fail">
-                  <Icon name="x" size={14} />
-                  <span className="bench-t mono" dir="ltr">
-                    {benchLabel(c.transport)}
-                  </span>
-                  <span className="bench-chips">{chips(c)}</span>
-                  <span className="grow" />
-                  <span className="small" title={c.error ?? undefined}>
-                    {reason(t, c.error, names)}
-                  </span>
-                </li>
-              ))}
-              {skipped.map((c) => (
-                <li key={c.key} className="st-skip">
-                  <span className="bench-glyph" aria-hidden="true" />
-                  <span className="bench-t mono" dir="ltr">
-                    {benchLabel(c.transport)}
-                  </span>
-                  <span className="bench-chips">{chips(c)}</span>
-                  <span className="grow" />
-                  <span className="small muted">{t("bench.st.skip")}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-
       <div className="bench-foot">
+        {rest.length > 0 && (
+          <button className="linklike small" type="button" aria-expanded={showMore} onClick={() => setShowMore(!showMore)}>
+            <Icon name="chevron" size={14} />
+            {t("bench.more", { n: num(rest.length) })}
+            {failedCount > 0 && ` ${t("bench.moreFail", { n: num(failedCount) })}`}
+          </button>
+        )}
+        <span className="grow" />
         <span className="small muted">
-          {[
-            finishedAgo && t("bench.when", { ago: finishedAgo }),
-            tookSecs != null && t("bench.took", { n: num(tookSecs) }),
-            testedPort != null && digitsOf(t("bench.port", { port: String(testedPort) })),
-          ]
+          {[finishedAgo && t("bench.when", { ago: finishedAgo }), tookSecs != null && t("bench.took", { n: num(tookSecs) }), testedPort != null && digitsOf(t("bench.port", { port: String(testedPort) }))]
             .filter(Boolean)
             .join(" — ")}
         </span>
-        <span className="grow" />
         {startButton(t("bench.again"), false)}
       </div>
-      <p className="small muted bench-snapshot">{t("bench.snapshot")}</p>
-      {error && (
-        <p className="err small" role="alert">
-          {error}
-        </p>
+
+      {showMore && (
+        <div className="bench-rest">
+          <ul>
+            {rest.map((c) => (
+              <li key={c.key} className={`st-${c.state}`}>
+                {c.state === "ok" ? <Icon name="check" size={14} /> : c.state === "fail" ? <Icon name="x" size={14} /> : <span className="bench-glyph" aria-hidden="true" />}
+                <span className="bench-t mono" dir="ltr">
+                  {benchLabel(c.transport)}
+                </span>
+                <span className="bench-chips">
+                  <span className="tag">{t(`bench.mode.${c.mode}`)}</span>
+                  <PathTags c={c} />
+                </span>
+                <span className="grow" />
+                {c.score != null ? (
+                  <span className="bench-mini small num">
+                    <b className={`bench-score-n ${tone(c.score)}`}>{num(c.score)}</b>
+                    <span>
+                      {mbps(c.download_mbps)} <bdi dir="ltr">Mbps</bdi>
+                    </span>
+                  </span>
+                ) : (
+                  <span className="small">
+                    {c.state === "fail" ? reason(t, c.error, names) : c.state === "skip" ? t("bench.st.skip") : t("bench.notMeasured", { ms: c.latency ? num(c.latency.p50_ms, 0) : "—" })}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+          {missing6 && <p className="small muted">{t("bench.ipv6.missing", { name: `⁨${name(missing6)}⁩` })}</p>}
+          {cands.some((c) => c.path === "gre") && <p className="small muted">{t("bench.gre.why")}</p>}
+          <p className="small muted">{t("bench.snapshot")}</p>
+        </div>
       )}
+      {!showMore && missing6 && !note && <p className="small muted bench-snapshot">{t("bench.ipv6.missing", { name: `⁨${name(missing6)}⁩` })}</p>}
+
+      {sniField}
+      {errorLine}
     </div>
   );
 }

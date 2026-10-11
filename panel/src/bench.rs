@@ -46,8 +46,9 @@ const SPEED_SECONDS: u32 = 2;
 const SPEED_STREAMS: usize = 4;
 /// Candidates that get the speed stage.
 const SPEED_TOP: usize = 3;
-/// Test listeners an agent holds at once.
-const MAX_LISTENERS: usize = 6;
+/// Test listeners an agent holds at once (four lanes listen on one server: TCP and UDP, over
+/// IPv4 and IPv6, and a listener nobody came to waits a while before it goes).
+const MAX_LISTENERS: usize = 12;
 /// The whole run, whatever happens.
 const BUDGET: Duration = Duration::from_secs(60);
 
@@ -67,9 +68,25 @@ fn valid_token(token: &str) -> bool {
     (32..=128).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// A server name a `wss` link can send: a domain (an IP address is sent as no name at all).
+pub fn valid_sni(name: &str) -> bool {
+    (1..=253).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && name.bytes().any(|b| b.is_ascii_alphabetic())
+        && !name.starts_with(['.', '-'])
+        && !name.ends_with(['.', '-'])
+}
+
 /// [`Request::BenchListen`] on an agent: binds (the port asked for, waiting a moment for
 /// the previous test of the lane to let it go, else any free port) and answers one test
-/// session in the background. `tls` is the certificate a `wss` listener shows.
+/// session in the background. `bind` is an address of this server to listen on instead of
+/// every IPv4 one: its IPv6 address, which takes the same port as the IPv4 listener beside
+/// it (only the wildcard `[::]` would collide with `0.0.0.0`); where that address is not
+/// this server's, every address (`[::]`) on any port. `tls` is the certificate a `wss`
+/// listener shows.
+#[allow(clippy::too_many_arguments)]
 pub async fn listen(
     listeners: &Listeners,
     token: &str,
@@ -77,19 +94,32 @@ pub async fn listen(
     profile: &str,
     port: u16,
     wait_ms: u32,
+    bind: Option<&str>,
     tls: (&std::path::Path, &std::path::Path),
 ) -> BenchListening {
     let failed = |e: String| BenchListening {
         ok: false,
         error: Some(e),
         port: 0,
+        bound: None,
     };
     let Some(kind) = kind_of(transport) else {
         return failed(format!("unknown transport {transport:?}"));
     };
+    let ip: Option<std::net::IpAddr> =
+        match bind.map(|b| b.trim_start_matches('[').trim_end_matches(']').parse()) {
+            None => None,
+            Some(Ok(ip)) => Some(ip),
+            Some(Err(_)) => return failed("bad_input".into()),
+        };
     if !valid_token(token) || wait_ms == 0 || wait_ms > 15_000 {
         return failed("bad_input".into());
     }
+    let host = match ip {
+        Some(std::net::IpAddr::V6(a)) => format!("[{a}]"),
+        Some(std::net::IpAddr::V4(a)) => a.to_string(),
+        None => "0.0.0.0".into(),
+    };
     let live = listeners.0.clone();
     if live.fetch_add(1, Ordering::SeqCst) >= MAX_LISTENERS {
         live.fetch_sub(1, Ordering::SeqCst);
@@ -108,7 +138,7 @@ pub async fn listen(
     if port != 0 {
         for _ in 0..10 {
             bound =
-                kariz::bench::listen(&format!("0.0.0.0:{port}"), token, kind, profile, tls).await;
+                kariz::bench::listen(&format!("{host}:{port}"), token, kind, profile, tls).await;
             if bound.is_ok() {
                 break;
             }
@@ -116,7 +146,10 @@ pub async fn listen(
         }
     }
     if bound.is_err() {
-        bound = kariz::bench::listen("0.0.0.0:0", token, kind, profile, tls).await;
+        bound = kariz::bench::listen(&format!("{host}:0"), token, kind, profile, tls).await;
+    }
+    if bound.is_err() && ip.is_some_and(|ip| ip.is_ipv6()) {
+        bound = kariz::bench::listen("[::]:0", token, kind, profile, tls).await;
     }
     let acceptor = match bound {
         Ok(a) => a,
@@ -125,7 +158,8 @@ pub async fn listen(
             return failed(e.to_string());
         }
     };
-    let port = acceptor.local_addr().map(|a| a.port()).unwrap_or(0);
+    let local = acceptor.local_addr().ok();
+    let port = local.map(|a| a.port()).unwrap_or(0);
     tokio::spawn(async move {
         let result =
             kariz::bench::answer(acceptor, Duration::from_millis(u64::from(wait_ms))).await;
@@ -138,10 +172,12 @@ pub async fn listen(
         ok: true,
         error: None,
         port,
+        bound: bind.and(local).map(|a| a.ip().to_string()),
     }
 }
 
-/// [`Request::BenchDial`] on an agent: dials the test listener and measures the link.
+/// [`Request::BenchDial`] on an agent: dials the test listener and measures the link. `sni`
+/// is the server name a `wss` link sends.
 pub async fn dial(
     addr: &str,
     token: &str,
@@ -149,6 +185,7 @@ pub async fn dial(
     profile: &str,
     ping_ms: u32,
     seconds: u32,
+    sni: Option<&str>,
 ) -> BenchMeasured {
     let failed = |e: String| BenchMeasured {
         ok: false,
@@ -158,17 +195,23 @@ pub async fn dial(
     let Some(kind) = kind_of(transport) else {
         return failed(format!("unknown transport {transport:?}"));
     };
-    if !valid_token(token) || ping_ms > 5_000 || seconds > 5 || !crate::join::valid_host(addr) {
+    if !valid_token(token)
+        || ping_ms > 5_000
+        || seconds > 5
+        || !crate::join::valid_host(addr)
+        || sni.is_some_and(|s| kind != TransportKind::Wss || !valid_sni(s))
+    {
         return failed("bad_input".into());
     }
     let (session, connect_ms) =
-        match kariz::bench::dial(addr, token, kind, profile, DIAL_LIMIT).await {
+        match kariz::bench::dial(addr, token, kind, profile, sni, DIAL_LIMIT).await {
             Ok(v) => v,
             Err(e) => return failed(e.to_string()),
         };
     let mut out = BenchMeasured {
         ok: true,
         connect_ms,
+        sni: sni.map(str::to_owned),
         ..Default::default()
     };
     if ping_ms > 0 {
@@ -210,8 +253,12 @@ pub struct Candidate {
     pub key: String,
     /// The core transport (`tcpmux`, `kcp`, `ws`, `wss`, `quic`).
     pub transport: String,
-    /// `public`, or `gre` (across the private network link between the two).
+    /// `public`, `ipv6` (the public IPv6 addresses, where both servers have one) or `gre`
+    /// (across the private network link between the two).
     pub path: String,
+    /// The server name a `wss` candidate sends (none: none, as a tunnel dialing an IP does).
+    #[serde(default)]
+    pub sni: Option<String>,
     /// The GRE link's network (id), for `gre`.
     pub network: Option<String>,
     /// `reverse` (the entry listens) or `direct` (the exit listens).
@@ -257,6 +304,10 @@ pub struct Bench {
     /// The best candidate's key.
     pub best: Option<String>,
     pub error: Option<String>,
+    /// Whether IPv6 was measured: `tested`, or `missing:ID` (that server has no public IPv6
+    /// address). None in a result from before IPv6 was measured.
+    #[serde(default)]
+    pub ipv6: Option<String>,
 }
 
 /// The runs of the last while, and the stop switches of the running ones.
@@ -315,10 +366,17 @@ pub struct Ask {
     /// `reverse`, `direct`, or both (none: both).
     #[serde(default)]
     pub modes: Vec<String>,
-    /// Where to dial a server instead of its address (the tests, on one machine: a
-    /// loopback address is never a server's address). Not read from a request.
+    /// A server name to try `wss` with too (the tunnel's own, or one typed): a filter that
+    /// lets TLS through by its name, or stops it, shows.
+    #[serde(default)]
+    pub sni: Option<String>,
+    /// Where to dial a server instead of its address, over IPv4 and over IPv6 (the tests,
+    /// on one machine: a loopback address is never a server's address). Not read from a
+    /// request.
     #[serde(skip)]
     pub hosts: HashMap<String, String>,
+    #[serde(skip)]
+    pub hosts6: HashMap<String, String>,
 }
 
 fn balanced() -> String {
@@ -329,10 +387,29 @@ fn is_udp(transport: &str) -> bool {
     matches!(transport, "kcp" | "quic")
 }
 
-/// The candidates for `ask`: every transport in each direction over the public addresses,
-/// and `tcpmux` and `kcp` across a GRE link if the two servers have one (a private link is
-/// not filtered: the transports differ there only by their own cost).
-fn candidates(hub: &Hub, ask: &Ask) -> Result<Vec<Candidate>> {
+/// Whether `host` is an IPv6 address (with or without brackets).
+fn is_v6(host: &str) -> bool {
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::Ipv6Addr>()
+        .is_ok()
+}
+
+/// The candidates for `ask`, and whether IPv6 is measured (see [`Bench::ipv6`]):
+///
+/// * every transport in each direction over the public addresses, and `wss` once more with
+///   `ask.sni`;
+/// * the same over the public IPv6 addresses, when both servers have one (and the address
+///   a server is known by is not already its IPv6 one);
+/// * across a GRE link, if the two servers have one: one transport over TCP (`tcpmux`) and
+///   the ones over UDP (`kcp`, `quic`). A filter sees the GRE packets, not what is inside
+///   them, so the transports differ there only by their own cost (and `ws` or `wss` would
+///   only add theirs).
+fn candidates(
+    hub: &Hub,
+    views: &[crate::hub::ServerView],
+    ask: &Ask,
+) -> Result<(Vec<Candidate>, String)> {
     let links = hub.networks.links(None)?;
     let link = links
         .iter()
@@ -342,6 +419,25 @@ fn candidates(hub: &Hub, ask: &Ask) -> Result<Vec<Candidate>> {
     } else {
         ask.modes.iter().map(String::as_str).collect()
     };
+    let v6_of = |id: &String| {
+        ask.hosts6.get(id).cloned().or_else(|| {
+            views
+                .iter()
+                .find(|s| &s.id == id)
+                .and_then(|s| s.ip6.clone())
+        })
+    };
+    let (entry6, exit6) = (v6_of(&ask.entry), v6_of(&ask.exit));
+    let ipv6 = match (&entry6, &exit6) {
+        (None, _) => format!("missing:{}", ask.entry),
+        (_, None) => format!("missing:{}", ask.exit),
+        _ => "tested".to_owned(),
+    };
+    let gre_transports: Vec<&str> = kariz::bench::TRANSPORTS
+        .iter()
+        .map(|k| k.name())
+        .filter(|t| matches!(*t, "tcpmux" | "kcp" | "quic"))
+        .collect();
     let mut out = Vec::new();
     for mode in modes {
         let listener = match mode {
@@ -355,11 +451,20 @@ fn candidates(hub: &Hub, ask: &Ask) -> Result<Vec<Candidate>> {
             .cloned()
             .or_else(|| hub.addr_of(listener))
             .unwrap_or_default();
-        let mut add = |transport: &str, path: &str, host: String, network: Option<String>| {
+        let mut add = |transport: &str,
+                       path: &str,
+                       host: String,
+                       network: Option<String>,
+                       sni: Option<String>| {
+            let mut key = format!("{mode}:{path}:{transport}");
+            if sni.is_some() {
+                key.push_str(":sni");
+            }
             out.push(Candidate {
-                key: format!("{mode}:{path}:{transport}"),
+                key,
                 transport: transport.into(),
                 path: path.into(),
+                sni,
                 network,
                 mode: mode.into(),
                 listener: listener.clone(),
@@ -376,8 +481,24 @@ fn candidates(hub: &Hub, ask: &Ask) -> Result<Vec<Candidate>> {
                 error: None,
             });
         };
-        for kind in kariz::bench::TRANSPORTS {
-            add(kind.name(), "public", public.clone(), None);
+        let mut paths = vec![("public", public.clone())];
+        if let (Some(_), Some(_)) = (&entry6, &exit6) {
+            let own6 = if listener == &ask.entry {
+                &entry6
+            } else {
+                &exit6
+            };
+            if let Some(v6) = own6.clone().filter(|v6| !is_v6(&public) || v6 != &public) {
+                paths.push(("ipv6", v6));
+            }
+        }
+        for (path, host) in paths {
+            for kind in kariz::bench::TRANSPORTS {
+                add(kind.name(), path, host.clone(), None, None);
+                if kind == TransportKind::Wss && ask.sni.is_some() {
+                    add(kind.name(), path, host.clone(), None, ask.sni.clone());
+                }
+            }
         }
         if let Some(l) = link {
             let private = if &l.a == listener {
@@ -385,12 +506,18 @@ fn candidates(hub: &Hub, ask: &Ask) -> Result<Vec<Candidate>> {
             } else {
                 &l.addr_b
             };
-            for transport in ["tcpmux", "kcp"] {
-                add(transport, "gre", private.clone(), Some(l.network.clone()));
+            for transport in &gre_transports {
+                add(
+                    transport,
+                    "gre",
+                    private.clone(),
+                    Some(l.network.clone()),
+                    None,
+                );
             }
         }
     }
-    Ok(out)
+    Ok((out, ipv6))
 }
 
 /// Starts a run; its id comes back at once, and [`Runs::get`] follows it. Errors: `bad_input`,
@@ -399,7 +526,9 @@ pub fn start(hub: &Arc<Hub>, ask: Ask) -> Result<String> {
     if ask.entry == ask.exit {
         bail!("same_server");
     }
-    if !matches!(ask.profile.as_str(), "balanced" | "ultraspeed" | "gaming") {
+    if !matches!(ask.profile.as_str(), "balanced" | "ultraspeed" | "gaming")
+        || ask.sni.as_deref().is_some_and(|s| !valid_sni(s))
+    {
         bail!("bad_input");
     }
     let views = hub.snapshot()?;
@@ -411,7 +540,7 @@ pub fn start(hub: &Arc<Hub>, ask: Ask) -> Result<String> {
             None => bail!("bad_input"),
         }
     }
-    let candidates = candidates(hub, &ask)?;
+    let (candidates, ipv6) = candidates(hub, &views, &ask)?;
     let id = random_hex(8)?;
     {
         let mut runs = hub.bench.lock();
@@ -439,6 +568,7 @@ pub fn start(hub: &Arc<Hub>, ask: Ask) -> Result<String> {
             candidates,
             best: None,
             error: None,
+            ipv6: Some(ipv6),
         });
     }
     let stop = Arc::new(AtomicBool::new(false));
@@ -496,20 +626,19 @@ async fn run_all(
     stop: &AtomicBool,
 ) -> Result<()> {
     let bench = hub.bench.get(id).ok_or_else(|| anyhow!("gone"))?;
-    // Stage 1: lanes side by side, each one's candidates in turn.
-    let mut lanes: Vec<(String, bool, Vec<Candidate>)> = Vec::new();
+    // Stage 1: lanes side by side, each one's candidates in turn. A lane is one listening
+    // server, TCP or UDP, over IPv4 or IPv6: the IPv6 lane listens on the server's IPv6
+    // address, on the same port as the IPv4 one.
+    let mut lanes: Vec<((String, bool, bool), Vec<Candidate>)> = Vec::new();
     for c in bench.candidates {
-        let udp = is_udp(&c.transport);
-        match lanes
-            .iter_mut()
-            .find(|(l, u, _)| *l == c.listener && *u == udp)
-        {
-            Some(lane) => lane.2.push(c),
-            None => lanes.push((c.listener.clone(), udp, vec![c])),
+        let lane_key = (c.listener.clone(), is_udp(&c.transport), is_v6(&c.host));
+        match lanes.iter_mut().find(|(k, _)| *k == lane_key) {
+            Some(lane) => lane.1.push(c),
+            None => lanes.push((lane_key, vec![c])),
         }
     }
     let mut running = tokio::task::JoinSet::new();
-    for (_, _, lane) in lanes {
+    for (_, lane) in lanes {
         let (hub, id, token, ask) = (hub.clone(), id.to_owned(), token.to_owned(), ask.clone());
         let stop = hub
             .bench
@@ -567,6 +696,15 @@ async fn run_all(
     for c in &ranked {
         if picked.len() < SPEED_TOP && !picked.iter().any(|p| p.key == c.key) {
             picked.push((*c).clone());
+        }
+    }
+    // IPv4 and IPv6 are compared on speed too: the best of each that got through is
+    // measured, even past the first few.
+    for path in ["public", "ipv6"] {
+        if !picked.iter().any(|p| p.path == path) {
+            if let Some(c) = ranked.iter().find(|c| c.path == path) {
+                picked.push((*c).clone());
+            }
         }
     }
     for c in picked {
@@ -630,6 +768,9 @@ async fn measure(
     if c.host.is_empty() {
         return (None, failed(format!("no_address:{}", c.listener)));
     }
+    // Over IPv6 the listener takes the address it is dialed at: every IPv4 address is
+    // another listener's, on the same port.
+    let bind = is_v6(&c.host).then(|| c.host.clone());
     let listening: BenchListening = match hub
         .ask_as_within(
             &c.listener,
@@ -639,6 +780,7 @@ async fn measure(
                 profile: profile.into(),
                 port,
                 wait_ms: LISTEN_WAIT.as_millis() as u32,
+                bind: bind.clone(),
             },
             Duration::from_secs(10),
         )
@@ -653,13 +795,17 @@ async fn measure(
             failed(listening.error.unwrap_or_else(|| "failed".into())),
         );
     }
-    let host = if c.host.contains(':') {
+    if bind.is_some() && listening.bound.is_none() {
+        // An agent from before IPv6 was measured listened on IPv4 only.
+        return (None, failed("agent_old".into()));
+    }
+    let host = if is_v6(&c.host) && !c.host.starts_with('[') {
         format!("[{}]", c.host)
     } else {
         c.host.clone()
     };
-    let measured: BenchMeasured = match hub
-        .ask_as_within(
+    let measured = match hub
+        .ask_as_within::<BenchMeasured>(
             dialer,
             &Request::BenchDial {
                 addr: format!("{host}:{}", listening.port),
@@ -668,11 +814,16 @@ async fn measure(
                 profile: profile.into(),
                 ping_ms: ping.as_millis() as u32,
                 seconds,
+                sni: c.sni.clone(),
             },
             Duration::from_secs(20),
         )
         .await
     {
+        Ok(m) if c.sni.is_some() && m.ok && m.sni.is_none() => {
+            // An agent from before server names were sent measured it without one.
+            failed("agent_old".into())
+        }
         Ok(m) => m,
         Err(e) => failed(agent_error(&e)),
     };
@@ -830,6 +981,7 @@ mod tests {
             key: key.into(),
             transport: key.into(),
             path: "public".into(),
+            sni: None,
             network: None,
             mode: "reverse".into(),
             listener: "a".into(),
@@ -865,7 +1017,34 @@ mod tests {
             candidates,
             best: None,
             error: None,
+            ipv6: None,
         }
+    }
+
+    #[test]
+    fn server_names_and_ipv6_addresses_are_told_apart() {
+        assert!(valid_sni("cdn.example.com"));
+        assert!(valid_sni("a-b.example"));
+        assert!(!valid_sni(""));
+        assert!(!valid_sni("198.51.100.1"));
+        assert!(!valid_sni("a.example/x"));
+        assert!(!valid_sni("-a.example"));
+        assert!(!valid_sni("a b.example"));
+        assert!(is_v6("2001:db8::1"));
+        assert!(is_v6("[2001:db8::1]"));
+        assert!(!is_v6("198.51.100.1"));
+        assert!(!is_v6("panel.example"));
+    }
+
+    #[test]
+    fn an_old_result_without_the_new_fields_still_reads() {
+        let mut old =
+            serde_json::to_value(bench("balanced", vec![cand("kcp", "ok", 50.0, None)])).unwrap();
+        old.as_object_mut().unwrap().remove("ipv6");
+        old["candidates"][0].as_object_mut().unwrap().remove("sni");
+        let read: Bench = serde_json::from_value(old).unwrap();
+        assert_eq!(read.ipv6, None);
+        assert_eq!(read.candidates[0].sni, None);
     }
 
     #[test]
