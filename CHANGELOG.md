@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 2.3.0 - 2026-10-11
+
+The **benchmark** now measures **IPv6** (when both servers have an address), tries `wss` **with
+a server name** to show whether a filter judges TLS by it, and measures `quic` across GRE; its
+card is much lighter to read. A tunnel dialed at an IPv6 address now connects. Nothing changes
+for 2.2.0 agents. Update the panel first (*Settings, Updates*), then the agents from the panel:
+the IPv6 and server-name tests need both servers on 2.3.0 (an older agent is reported as one).
 
 ### Added
 
