@@ -1,5 +1,70 @@
 # Changelog
 
+## 2.5.1 - 2026-10-14
+
+The stable release after 2.3.0, with everything of the two betas
+([2.4.0-beta.1](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#240-beta1---2026-10-14) and
+[2.5.0-beta.1](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#250-beta1---2026-10-14));
+there is no 2.5.0. Built for busy evenings: a tunnel takes **4096 streams per connection**
+instead of 512, says so when it is full, a **health probe** tells whether a new connection gets
+through, and Xray behind a tunnel can see **each user's real address** (PROXY protocol), so
+device limits in 3x-ui or Marzban work behind a tunnel too.
+
+Update the panel first, then the agents from the panel (or `kariz-manager update` on each
+server): each side checks its own stream limit, and the probe and the PROXY header need this
+version on both servers. A server on one of the betas is offered 2.5.1 on either channel.
+
+### Added
+
+- **Real user addresses for Xray (PROXY protocol).** Every user reached the target from the exit
+  server's own Kariz process, so Xray saw `127.0.0.1` for everyone: per-account IP and device
+  limits in 3x-ui or Marzban, Xray's logs, IP routing rules and fail2ban on the exit server all
+  saw one address. A forward rule can now have `proxy_protocol = "v1"` or `"v2"`: the exit side
+  starts each TCP connection to the target with a PROXY header carrying the user's address and
+  port (UDP flows never get one). In the panel: *Real user IPs (PROXY protocol)* in the wizard
+  and on the edit page, written to every TCP port of the tunnel. **The target must expect the
+  header**: turn on `acceptProxyProtocol` on the Xray inbound behind those ports (in 3x-ui, the
+  inbound's *Proxy Protocol* switch), or every connection through them breaks. Both servers need
+  2.5 or newer; the panel refuses the setting while either runs an older version.
+  See [configuration](https://github.com/Erfan-XRay/Kariz/blob/main/docs/configuration.md#real-user-addresses-proxy_protocol).
+- **A health probe: does a new connection get through?** A tunnel could be connected, moving
+  60-100 Mbit/s for the users already on it, while every new connection failed: a busy evening
+  had taken every stream, or the target (Xray) was down. Every 15 seconds the entry side now
+  opens a connection the way a user's is opened and has the exit side connect to a forwarded
+  target. `kariz status` shows the result on a `health` line, the status document has it as
+  `probe`, the tunnel's page in the panel has a **Health** card, *Needs attention* lists such a
+  tunnel, and the Telegram bot tells when three probes in a row fail (and when it is fixed). An
+  exit side older than 2.4 is shown as not answering probes, never as a failure.
+- **How full a tunnel is.** The status document has `streams` and `streams_max` (with mux), and
+  `full`: new connections that failed because every connection was full. The panel draws it as a
+  bar, lists a tunnel at 80 % in *Needs attention* and the Telegram bot tells once.
+- **A limit per user address** (`tuning.max_conns_per_ip`, off by default): connections and UDP
+  flows one client address may hold open, over all forwarded ports; more are closed at once and
+  counted (`refused_per_ip`). In the panel: *Connections per user address* in the wizard and on
+  the edit page. Users on mobile networks often share one address, so it stays off unless set.
+
+### Changed
+
+- **4096 streams per connection by default, up from 512** (`tunnel.mux.max_streams`, now up to
+  16384). With four connections a tunnel took only 2048 user connections and UDP flows at once
+  (1024 with the gaming profile or QUIC), which a busy server reaches; then new connections waited
+  20 seconds and failed while the open ones kept working. A stream that is not in use costs
+  nothing. Each side checks its own limit, so update both servers.
+- **A full tunnel says so.** A connection that found every session full failed with *no tunnel
+  connection available (is the other side running?)*, at debug level. Now it says *every tunnel
+  connection is full (N streams open)* with what to raise, as a warning (at most every 30
+  seconds).
+
+### Fixed
+
+- **The panel names the server to update.** When a tunnel used something one server was too old
+  for (a chosen cipher, sealed QUIC, the 2.4 limits), checking or saving it failed with
+  *internal* instead of saying which server to update.
+- **Betas past nine.** The panel's updater compared `2.4.0-beta.10` and `2.4.0-beta.9` as text,
+  so the tenth beta looked older and was not offered. The parts after the dash are compared as
+  semver does now.
+- The panel's mux form showed 4 connections as QUIC's default; it is 2.
+
 ## 2.5.0-beta.1 - 2026-10-14
 
 A **beta**: a prerelease that only panels on the *Beta* channel are offered (*Settings,
