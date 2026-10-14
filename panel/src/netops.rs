@@ -344,6 +344,7 @@ mod tests {
             encryption: None,
             quic_obfs: false,
             max_conns_per_ip: None,
+            proxy_protocol: None,
             tls_cert: None,
             tls_key: None,
             tls_host: None,

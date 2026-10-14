@@ -253,6 +253,12 @@ pub struct Spec {
     /// or newer reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_conns_per_ip: Option<u32>,
+    /// Entry side: the `proxy_protocol` (`v1` or `v2`) of every TCP forward rule, so the
+    /// target sees each user's address. Left out: off. Only an agent of 2.5 or newer reads
+    /// it; it is here and not on [`ForwardInfo`] because an older agent would drop an
+    /// unknown field there without a word.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_protocol: Option<String>,
     #[serde(default)]
     pub forwards: Vec<ForwardInfo>,
 }

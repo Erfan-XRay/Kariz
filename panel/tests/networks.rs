@@ -207,6 +207,7 @@ async fn links_are_made_on_both_servers_reused_undone_and_protected() {
         encryption: None,
         quic_obfs: false,
         max_conns_per_ip: None,
+        proxy_protocol: None,
         tls_cert: None,
         tls_key: None,
         tls_host: None,

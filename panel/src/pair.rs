@@ -51,6 +51,10 @@ pub struct PairRequest {
     /// The entry side's `tuning.max_conns_per_ip`; left out or 0: no limit.
     #[serde(default)]
     pub max_conns_per_ip: Option<u32>,
+    /// `v1` or `v2`: every TCP port of the tunnel starts its connections to the target with
+    /// a PROXY header naming the user. Left out or `off`: none.
+    #[serde(default)]
+    pub proxy_protocol: Option<String>,
     /// wss: the files of a real certificate on the listening side (from [`certificate`]),
     /// instead of a self-signed one the dialing side pins.
     #[serde(default)]
@@ -95,6 +99,10 @@ impl PairRequest {
             encryption: self.chosen_encryption().map(str::to_owned),
             quic_obfs: self.sealed(),
             max_conns_per_ip: (role == "entry").then(|| self.per_ip_limit()).flatten(),
+            // Only the entry side has forward rules; the exit side needs nothing written.
+            proxy_protocol: (role == "entry")
+                .then(|| self.proxy_version().map(str::to_owned))
+                .flatten(),
             tls_sni: (!accepts).then(|| self.dial_sni()).flatten(),
             tls_pin: (!accepts && self.transport == "wss" && self.tls_cert.is_none())
                 .then(|| pin.map(str::to_owned))
@@ -168,45 +176,64 @@ impl PairRequest {
         (self.per_ip_limit().is_some() || streams, streams)
     }
 
+    /// The PROXY header to write on the entry side's TCP rules, if there is one.
+    fn proxy_version(&self) -> Option<&str> {
+        self.proxy_protocol.as_deref().filter(|v| *v != "off")
+    }
+
     /// The cipher to write: `None` for `auto`.
     fn chosen_encryption(&self) -> Option<&str> {
         self.encryption.as_deref().filter(|e| *e != "auto")
     }
 
-    /// An error (`old_agent:SERVER:VERSION`, or `old_agent_enc:...` for a cipher and
-    /// `old_agent_obfs:...` for sealed QUIC) naming the
-    /// first server that is too old.
+    /// An error (`old_agent:SERVER:VERSION`, or `old_agent_enc:...` for a cipher,
+    /// `old_agent_obfs:...` for sealed QUIC, `old_agent_limits:...` for 2.4's limits and
+    /// `old_agent_proxy:...` for PROXY headers) naming the first server that is too old.
     fn require_new_enough(&self, hub: &Hub) -> Result<()> {
-        let enc = self.chosen_encryption().is_some();
-        let obfs = self.sealed();
-        let (entry_2_4, exit_2_4) = self.needs_2_4();
-        if !self.needs_new_servers() && !enc && !obfs && !entry_2_4 {
+        let anything_new = self.needs_new_servers()
+            || self.chosen_encryption().is_some()
+            || self.sealed()
+            || self.needs_2_4().0
+            || self.proxy_version().is_some();
+        if !anything_new {
             return Ok(());
         }
         for server in hub.snapshot()? {
-            if server.id != self.entry && server.id != self.exit {
-                continue;
+            if server.id == self.entry || server.id == self.exit {
+                self.require_version(&server.id, &server.version)?;
             }
-            // A cipher setting came after 1.5.2; auto and mux settings with 1.5.0.
-            if enc && !version_at_least(&server.version, (1, 5, 3)) {
-                bail!("old_agent_enc:{}:{}", server.id, server.version);
-            }
-            // Sealing QUIC came with 1.7: an older agent refuses a spec that has it.
-            if obfs && !version_at_least(&server.version, (1, 7, 0)) {
-                bail!("old_agent_obfs:{}:{}", server.id, server.version);
-            }
-            if self.needs_new_servers() && !version_at_least(&server.version, (1, 5, 0)) {
-                bail!("old_agent:{}:{}", server.id, server.version);
-            }
-            // The per-address limit and up to 16384 streams came with 2.4.
-            let needs = if server.id == self.entry {
-                entry_2_4
-            } else {
-                exit_2_4
-            };
-            if needs && !version_at_least(&server.version, (2, 4, 0)) {
-                bail!("old_agent_limits:{}:{}", server.id, server.version);
-            }
+        }
+        Ok(())
+    }
+
+    /// [`Self::require_new_enough`] for one of the two servers.
+    fn require_version(&self, id: &str, version: &str) -> Result<()> {
+        // A cipher setting came after 1.5.2; auto and mux settings with 1.5.0.
+        if self.chosen_encryption().is_some() && !version_at_least(version, (1, 5, 3)) {
+            bail!("old_agent_enc:{id}:{version}");
+        }
+        // Sealing QUIC came with 1.7: an older agent refuses a spec that has it.
+        if self.sealed() && !version_at_least(version, (1, 7, 0)) {
+            bail!("old_agent_obfs:{id}:{version}");
+        }
+        if self.needs_new_servers() && !version_at_least(version, (1, 5, 0)) {
+            bail!("old_agent:{id}:{version}");
+        }
+        // The per-address limit and up to 16384 streams came with 2.4.
+        let (entry_2_4, exit_2_4) = self.needs_2_4();
+        let needs = if id == self.entry {
+            entry_2_4
+        } else {
+            exit_2_4
+        };
+        if needs && !version_at_least(version, (2, 4, 0)) {
+            bail!("old_agent_limits:{id}:{version}");
+        }
+        // PROXY headers came with 2.5, and both sides take part: the entry side sends the
+        // user's address along (an older one refuses the spec), the exit side writes the
+        // header (an older one refuses the open request, and every connection fails).
+        if self.proxy_version().is_some() && !version_at_least(version, (2, 5, 0)) {
+            bail!("old_agent_proxy:{id}:{version}");
         }
         Ok(())
     }
@@ -236,6 +263,11 @@ impl PairRequest {
         if let Some(host) = self.tls_host.as_deref().map(str::trim) {
             if !host.is_empty() && !crate::manage::valid_cert_host(&host.to_ascii_lowercase()) {
                 bail!("bad_tls_host");
+            }
+        }
+        if let Some(v) = &self.proxy_protocol {
+            if !matches!(v.as_str(), "off" | "v1" | "v2") {
+                bail!("bad_proxy_protocol");
             }
         }
         Ok(())
@@ -1193,6 +1225,7 @@ mod tests {
             encryption: enc.map(str::to_owned),
             quic_obfs: false,
             max_conns_per_ip: None,
+            proxy_protocol: None,
             forwards: Vec::new(),
             rotate: false,
             network: None,
@@ -1251,6 +1284,7 @@ mod tests {
             encryption: None,
             quic_obfs: obfs,
             max_conns_per_ip: None,
+            proxy_protocol: None,
             tls_cert: None,
             tls_key: None,
             tls_host: None,
@@ -1294,6 +1328,7 @@ mod tests {
             encryption: None,
             quic_obfs: false,
             max_conns_per_ip: limit,
+            proxy_protocol: None,
             tls_cert: None,
             tls_key: None,
             tls_host: None,
@@ -1320,6 +1355,66 @@ mod tests {
     }
 
     #[test]
+    fn the_proxy_header_goes_to_the_entry_side_and_needs_2_5_on_both() {
+        let req = |proxy: Option<&str>| PairRequest {
+            name: "t".into(),
+            entry: "a".into(),
+            exit: "b".into(),
+            mode: "reverse".into(),
+            transport: "tcpmux".into(),
+            profile: None,
+            listen: "0.0.0.0:3080".into(),
+            dial: "1.2.3.4:3080".into(),
+            pool: None,
+            ws_path: None,
+            ws_host: None,
+            tls_sni: None,
+            mux: None,
+            encryption: None,
+            quic_obfs: false,
+            max_conns_per_ip: None,
+            proxy_protocol: proxy.map(str::to_owned),
+            tls_cert: None,
+            tls_key: None,
+            tls_host: None,
+            forwards: Vec::new(),
+            rotate: false,
+            network: None,
+        };
+        let (entry, exit) = req(Some("v1")).specs(None, None);
+        assert_eq!(
+            (entry.proxy_protocol.as_deref(), exit.proxy_protocol),
+            (Some("v1"), None)
+        );
+        // `off`, or left out: nothing is written, and any version will do.
+        for off in [None, Some("off")] {
+            let (entry, _) = req(off).specs(None, None);
+            assert_eq!(entry.proxy_protocol, None);
+            for server in ["a", "b"] {
+                assert!(req(off).require_version(server, "2.3.0").is_ok());
+            }
+        }
+        // Both sides must run 2.5: a beta of 2.4 does not know it.
+        for server in ["a", "b"] {
+            for old in ["2.4.0", "2.4.0-beta.1", "1.9.5"] {
+                let err = req(Some("v2")).require_version(server, old).unwrap_err();
+                assert_eq!(err.to_string(), format!("old_agent_proxy:{server}:{old}"));
+            }
+            for new in ["2.5.0", "2.5.0-beta.1", "v3.0.0"] {
+                assert!(
+                    req(Some("v2")).require_version(server, new).is_ok(),
+                    "{new}"
+                );
+            }
+        }
+        assert!(req(Some("v2")).validate().is_ok());
+        assert_eq!(
+            req(Some("v3")).validate().unwrap_err().to_string(),
+            "bad_proxy_protocol"
+        );
+    }
+
+    #[test]
     fn auto_and_mux_settings_need_new_servers() {
         let req = |transport: &str, mux: Option<crate::wire::MuxSpec>| PairRequest {
             name: "t".into(),
@@ -1337,6 +1432,7 @@ mod tests {
             mux,
             quic_obfs: false,
             max_conns_per_ip: None,
+            proxy_protocol: None,
             tls_cert: None,
             tls_key: None,
             tls_host: None,
@@ -1377,6 +1473,7 @@ mod tests {
             encryption: None,
             quic_obfs: false,
             max_conns_per_ip: None,
+            proxy_protocol: None,
             tls_cert: real
                 .then(|| "/etc/letsencrypt/live/kariz-panel-t-example-com/fullchain.pem".into()),
             tls_key: real

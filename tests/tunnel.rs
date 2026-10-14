@@ -147,6 +147,8 @@ struct Setup {
     max_conns_per_ip: u32,
     /// `tuning.dial_timeout_secs` and `handshake_timeout_secs`; 0 keeps the defaults.
     timeouts_secs: u64,
+    /// The forward rule's `proxy_protocol` (`v1`, `v2`); empty leaves it out.
+    proxy_protocol: &'static str,
 }
 
 impl Setup {
@@ -175,6 +177,14 @@ impl Setup {
             max_streams: 0,
             max_conns_per_ip: 0,
             timeouts_secs: 0,
+            proxy_protocol: "",
+        }
+    }
+
+    const fn proxy_protocol(self, proxy_protocol: &'static str) -> Self {
+        Self {
+            proxy_protocol,
+            ..self
         }
     }
 
@@ -616,6 +626,10 @@ async fn start_via(
         (0, _) => String::new(),
         (copies, gap) => format!("duplicate = {copies}\nduplicate_gap_ms = {gap}"),
     };
+    let proxy_protocol = match setup.proxy_protocol {
+        "" => String::new(),
+        v => format!("proxy_protocol = \"{v}\""),
+    };
     let profile = |setup: Setup| match setup.profile {
         "" => String::new(),
         p => format!("profile = \"{p}\""),
@@ -631,6 +645,7 @@ async fn start_via(
         target = "127.0.0.1:{target_port}"
         protocol = "tcp+udp"
         {duplicate}
+        {proxy_protocol}
         [tunnel]
         {entry_tunnel}
         token = "{entry_token}"
@@ -1310,6 +1325,115 @@ async fn connections_beyond_the_per_address_limit_are_closed() {
     drop(first);
     tokio::time::sleep(Duration::from_millis(200)).await;
     held_connection(tunnel.user_port).await;
+}
+
+/// A target that reads a PROXY header (v1 or v2), the way Xray with `acceptProxyProtocol`
+/// does, then the client's `hello`, and answers with the two addresses the header named
+/// (`v1 SRC DST` / `v2 SRC DST`), or `none` when the connection had no header.
+async fn proxy_header_reporter() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else {
+                continue;
+            };
+            tokio::spawn(async move {
+                let answer = read_proxy_header(&mut s).await;
+                let _ = s.write_all(answer.as_bytes()).await;
+                let _ = s.shutdown().await;
+            });
+        }
+    });
+    port
+}
+
+async fn read_proxy_header(s: &mut TcpStream) -> String {
+    // Both headers and the client's `hello` are at least 5 bytes long.
+    let mut first = [0u8; 5];
+    s.read_exact(&mut first).await.unwrap();
+    let answer = if &first == b"PROXY" {
+        let mut line = first.to_vec();
+        while !line.ends_with(b"\r\n") {
+            line.push(s.read_u8().await.unwrap());
+            assert!(line.len() <= 107, "a v1 header is at most 107 bytes");
+        }
+        let line = String::from_utf8(line).unwrap();
+        let f: Vec<&str> = line.trim_end().split(' ').collect();
+        assert_eq!((f.len(), f[1]), (6, "TCP4"), "{line:?}");
+        format!("v1 {}:{} {}:{}", f[2], f[4], f[3], f[5])
+    } else if &first == b"\r\n\r\n\0" {
+        let mut head = [0u8; 11];
+        s.read_exact(&mut head).await.unwrap();
+        assert_eq!(&head[..7], b"\r\nQUIT\n", "the rest of the signature");
+        assert_eq!((head[7], head[8]), (0x21, 0x11), "v2 PROXY, TCP over IPv4");
+        let len = u16::from_be_bytes([head[9], head[10]]);
+        assert_eq!(len, 12);
+        let mut a = [0u8; 12];
+        s.read_exact(&mut a).await.unwrap();
+        let ip = |at: usize| std::net::Ipv4Addr::new(a[at], a[at + 1], a[at + 2], a[at + 3]);
+        let port = |at: usize| u16::from_be_bytes([a[at], a[at + 1]]);
+        format!("v2 {}:{} {}:{}", ip(0), port(8), ip(4), port(10))
+    } else {
+        assert_eq!(&first, b"hello");
+        return "none".into();
+    };
+    // Then the user's own bytes, untouched.
+    let mut hello = [0u8; 5];
+    s.read_exact(&mut hello).await.unwrap();
+    assert_eq!(&hello, b"hello");
+    answer
+}
+
+/// What the target behind the tunnel heard about a user connection.
+async fn proxy_header_seen(tunnel: &Tunnel) -> (String, std::net::SocketAddr) {
+    let mut s = TcpStream::connect(("127.0.0.1", tunnel.user_port))
+        .await
+        .unwrap();
+    let me = s.local_addr().unwrap();
+    s.write_all(b"hello").await.unwrap();
+    let mut answer = String::new();
+    tokio::time::timeout(Duration::from_secs(10), s.read_to_string(&mut answer))
+        .await
+        .expect("an answer in time")
+        .unwrap();
+    (answer, me)
+}
+
+/// With `proxy_protocol`, the target sees each user's own address and port (and the
+/// entry port they connected to), over every way an open request travels: in the hello
+/// (direct, no mux), on a pooled link (reverse, no mux), in a mux SYN and on a QUIC
+/// stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_target_sees_the_users_address_in_a_proxy_header() {
+    let target = proxy_header_reporter().await;
+    for (setup, version) in [
+        (Setup::tcp("direct"), "v1"),
+        (Setup::tcp("reverse"), "v2"),
+        (Setup::tcp("direct").transport("tcpmux").mux(), "v2"),
+        (Setup::tcp("reverse").transport("tcpmux").mux(), "v1"),
+        (Setup::quic("direct"), "v2"),
+    ] {
+        let tunnel = start(setup.proxy_protocol(version), TOKEN, TOKEN, target).await;
+        for _ in 0..3 {
+            let (answer, me) = proxy_header_seen(&tunnel).await;
+            let want = format!("{version} {me} 127.0.0.1:{}", tunnel.user_port);
+            assert_eq!(answer, want, "{setup:?}");
+        }
+    }
+}
+
+/// A rule without `proxy_protocol` sends the target nothing but the user's bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_the_option_the_target_gets_no_header() {
+    let target = proxy_header_reporter().await;
+    for setup in [
+        Setup::tcp("direct"),
+        Setup::tcp("direct").transport("tcpmux").mux(),
+    ] {
+        let tunnel = start(setup, TOKEN, TOKEN, target).await;
+        assert_eq!(proxy_header_seen(&tunnel).await.0, "none", "{setup:?}");
+    }
 }
 
 /// The case of a busy evening: every stream of every session is taken. New connections

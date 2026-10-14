@@ -40,7 +40,7 @@ Open **Tunnels**, then **New tunnel**. The wizard asks five short things and exp
 | **Servers** | a name, the *entry* (where your users connect) and the *exit* (which reaches the real services) |
 | **Kind** | *reverse* (the exit dials the entry; the exit opens no port) or *direct*; the transport (for `quic`, whether every packet is sealed, on by default); the profile |
 | **Connection** | the port the accepting side listens on, and the address the other side reaches it at |
-| **Ports** | what the entry opens for your users: `443, 8080-8090, 2053=53`, TCP, UDP or both |
+| **Ports** | what the entry opens for your users: `443, 8080-8090, 2053=53`, TCP, UDP or both; optionally a limit of connections per user address, and *Real user IPs (PROXY protocol)* so Xray sees each user's address (only with `acceptProxyProtocol` on in Xray, see [configuration](configuration.md#real-user-addresses-proxy_protocol)) |
 | **Build** | a review, then the panel builds both sides and shows every step |
 
 The wizard picks the port for you: 3080 for the first tunnel on a server, then 3081, 3082 and so on, the

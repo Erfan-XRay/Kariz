@@ -106,6 +106,38 @@ One table per rule; as many as needed.
 | `protocol` | `tcp`, `udp`, `tcp+udp` | `tcp` | `tcp+udp` serves both on the same port. Use mux for UDP. |
 | `duplicate` | 1-3 | 1 | UDP: send each packet this many times in all, both ways. Copies go only where packets may be lost (`kcp`, `quic`). |
 | `duplicate_gap_ms` | 0-50 | 5 | Time between the copies of a packet. |
+| `proxy_protocol` | `v1`, `v2` | off | TCP rules (`tcp`, `tcp+udp`): the exit starts every connection to the target with a PROXY protocol header carrying the user's address. See below. |
+
+### Real user addresses (`proxy_protocol`)
+
+Without it, every user reaches the target from the exit server's own Kariz process, so
+Xray sees `127.0.0.1` for everyone: per-account IP and device limits in 3x-ui or
+Marzban, Xray's access log, IP routing rules and fail2ban on the exit server all see one
+address. With `proxy_protocol`, the exit writes a PROXY header (HAProxy's format, `v1`
+text or `v2` binary) to the target before any user data, naming the user's address and
+port and the entry port they connected to. Xray reads both versions; `v2` is the
+smaller.
+
+```toml
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"
+proxy_protocol = "v2"
+```
+
+> **Warning:** the target must expect the header. In Xray turn on
+> `"acceptProxyProtocol": true` in the inbound's `streamSettings.sockopt` (in 3x-ui: the
+> inbound's **Proxy Protocol** switch) for exactly the ports behind these rules. A target
+> that does not expect it reads the header as the start of the user's traffic, and every
+> connection through that port breaks. Turn it on in Xray and in Kariz together.
+
+- Both servers need Kariz 2.5 or newer: the entry sends the user's address with each
+  connection, and an older exit refuses such connections.
+- TCP only. UDP flows never get a header (Xray does not take one on UDP), so a
+  `tcp+udp` rule sends one on its TCP connections only, and a `udp` rule refuses the
+  setting.
+- The health probe only connects to the target and closes, sending nothing, so it does
+  not trip a target that expects headers.
 
 ## `[tuning]`
 

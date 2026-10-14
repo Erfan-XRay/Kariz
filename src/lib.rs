@@ -8,6 +8,7 @@ pub mod crypto;
 pub mod link;
 pub mod mux;
 pub mod proto;
+pub mod proxy_header;
 pub mod session;
 pub mod transport;
 
