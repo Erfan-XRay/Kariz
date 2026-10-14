@@ -126,7 +126,7 @@ export const LABELS: Record<string, Record<Lang, string>> = {
   profiles: { en: "Profiles", fa: "پروفایل‌ها" },
   "udp-and-games": { en: "UDP and games", fa: "UDP و بازی" },
   cdn: { en: "Behind a CDN", fa: "پشت CDN" },
-  networks: { en: "Private networks (GRE)", fa: "شبکه‌های خصوصی (GRE)" },
+  networks: { en: "Private networks (GRE, VXLAN)", fa: "شبکه‌های خصوصی (GRE، VXLAN)" },
   troubleshooting: { en: "Troubleshooting", fa: "عیب‌یابی" },
   speedtest: { en: "Speed test", fa: "تست سرعت" },
   telegram: { en: "Telegram alerts", fa: "اعلان تلگرام" },
