@@ -36,7 +36,7 @@ or off on both sides.
 |---|---|---|---|
 | `enabled` | `true`, `false` | on for `tcpmux`, `ws`, `wss`, `kcp`, `quic`; off for `tcp` | `tcpmux` and `quic` cannot turn it off. |
 | `connections` | 1-64 | profile (`quic`: 2) | Long-lived connections the dialing side keeps. |
-| `max_streams` | 1-4096 | 512 | Concurrent streams per connection. |
+| `max_streams` | 1-16384 | 4096 | Concurrent streams per connection. A stream is one user connection or UDP flow; when every connection has this many, new ones wait and then fail (*every tunnel connection is full* in the log), while the open ones keep working. Each side checks its own limit. |
 | `stream_window` | 16 KiB - 16 MiB | profile | Bytes a stream may have in flight. One stream moves at most one window per round trip. |
 | `max_lifetime_secs` | at least 60 | off | Replace each connection after this long (streams on it finish first). |
 | `coalesce` | `true`, `false` | on (`gaming`: off) | Gather frames into larger writes (speed) or write each at once (latency). |
@@ -121,6 +121,7 @@ Overrides of the profile's values.
 | `threads` | at least 1 | one per CPU core | Worker threads. |
 | `udp_timeout_secs` | 5-3600 | 60 | A UDP flow ends after this long without packets. |
 | `udp_max_flows` | 1-65536 | 1024 | UDP flows (client addresses) per rule; packets from more clients are dropped. |
+| `max_conns_per_ip` | 0 or more | 0 (off) | Entry side: user connections and UDP flows one client address may have open, over all rules; more are closed at once. Users on mobile networks often share one address, so keep it well above what one person uses. |
 | `dscp` | a name (`ef`, `af41`, `cs4`, ...) or 0-63 | off | DSCP mark on tunnel sockets and the exit's UDP sockets to targets. Not on QUIC sockets. See [UDP and games](udp-and-games.md#dscp). |
 
 ## `[control]`

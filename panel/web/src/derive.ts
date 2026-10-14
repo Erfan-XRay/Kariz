@@ -1,6 +1,6 @@
 // Turns what each server reports into what the panel shows: a tunnel is one config on the
 // entry server and one on the exit server, with the same name.
-import type { ServerInfo, TunnelInfo } from "./api";
+import type { ProbeStatus, ServerInfo, TunnelInfo, TunnelStatus } from "./api";
 
 export type TunnelState = "up" | "down" | "off";
 
@@ -27,6 +27,35 @@ export interface Tunnel {
   connections: number;
   rtt: number | null;
   error: string | null;
+  /** The entry side's health probe (Kariz 2.4 and newer). */
+  probe: ProbeStatus | null;
+  /** With mux: streams in use and the most the connections take, on the fuller side. */
+  capacity: { streams: number; max: number } | null;
+  /** Connected, and still users cannot get through: every stream taken, the target down, or no way through. */
+  blocked: "full" | "target" | "path" | null;
+}
+
+/** Failed probes in a row (15 s apart) before the panel shows a tunnel as letting no one through. */
+const BLOCKED_AFTER = 2;
+
+/** Streams in use over the most, on the side that is fuller. */
+function capacityOf(statuses: (TunnelStatus | null | undefined)[]): { streams: number; max: number } | null {
+  let worst: { streams: number; max: number } | null = null;
+  for (const s of statuses) {
+    const streams = s?.peer.streams;
+    const max = s?.peer.streams_max;
+    if (streams == null || !max) continue;
+    if (!worst || streams / max > worst.streams / worst.max) worst = { streams, max };
+  }
+  return worst;
+}
+
+function blockedOf(probe: ProbeStatus | null, capacity: { streams: number; max: number } | null): Tunnel["blocked"] {
+  if (!probe) return null;
+  if (probe.outcome === "target_failed" && probe.target_fails >= BLOCKED_AFTER) return "target";
+  if (probe.outcome !== "failed" || probe.fails < BLOCKED_AFTER) return null;
+  const full = (probe.error ?? "").includes("is full") || (!!capacity && capacity.streams >= capacity.max);
+  return full ? "full" : "path";
 }
 
 export function pairTunnels(servers: ServerInfo[]): Tunnel[] {
@@ -48,6 +77,8 @@ export function pairTunnels(servers: ServerInfo[]): Tunnel[] {
     const stopped = sides.some((s) => s.tunnel.active === false);
     const state: TunnelState = connected ? "up" : stopped ? "off" : "down";
     const status = entry?.tunnel.status ?? null;
+    const probe = status?.probe ?? null;
+    const capacity = capacityOf([status, exit?.tunnel.status]);
     return {
       name,
       entry,
@@ -62,6 +93,9 @@ export function pairTunnels(servers: ServerInfo[]): Tunnel[] {
       connections: status ? status.totals.tcp_open + status.totals.udp_flows : 0,
       rtt: status?.peer.rtt_ms ?? exit?.tunnel.status?.peer.rtt_ms ?? null,
       error: sides.find((s) => s.tunnel.error)?.tunnel.error ?? status?.peer.last_error?.text ?? null,
+      probe,
+      capacity,
+      blocked: state === "up" ? blockedOf(probe, capacity) : null,
     };
   });
 }

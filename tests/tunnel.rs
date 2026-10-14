@@ -141,6 +141,12 @@ struct Setup {
     control: bool,
     /// `tunnel.speedtest = false`.
     no_speedtest: bool,
+    /// `tunnel.mux.max_streams`; 0 keeps the default.
+    max_streams: usize,
+    /// `tuning.max_conns_per_ip`; 0 keeps it off.
+    max_conns_per_ip: u32,
+    /// `tuning.dial_timeout_secs` and `handshake_timeout_secs`; 0 keeps the defaults.
+    timeouts_secs: u64,
 }
 
 impl Setup {
@@ -166,6 +172,30 @@ impl Setup {
             profile: "",
             control: false,
             no_speedtest: false,
+            max_streams: 0,
+            max_conns_per_ip: 0,
+            timeouts_secs: 0,
+        }
+    }
+
+    const fn max_streams(self, max_streams: usize) -> Self {
+        Self {
+            max_streams,
+            ..self
+        }
+    }
+
+    const fn max_conns_per_ip(self, max_conns_per_ip: u32) -> Self {
+        Self {
+            max_conns_per_ip,
+            ..self
+        }
+    }
+
+    const fn timeouts(self, timeouts_secs: u64) -> Self {
+        Self {
+            timeouts_secs,
+            ..self
         }
     }
 
@@ -343,6 +373,9 @@ impl Setup {
         if self.stream_window > 0 {
             options += &format!("stream_window = {}\n", self.stream_window);
         }
+        if self.max_streams > 0 {
+            options += &format!("max_streams = {}\n", self.max_streams);
+        }
         if self.transport.starts_with("ws") {
             options += &format!("[tunnel.ws]\npath = \"{}\"\n", self.ws_path);
             if self.early_data && !listening {
@@ -391,6 +424,15 @@ impl Setup {
         }
         if self.udp_max_flows > 0 {
             options += &format!("udp_max_flows = {}\n", self.udp_max_flows);
+        }
+        if self.max_conns_per_ip > 0 {
+            options += &format!("max_conns_per_ip = {}\n", self.max_conns_per_ip);
+        }
+        if self.timeouts_secs > 0 {
+            options += &format!(
+                "dial_timeout_secs = {0}\nhandshake_timeout_secs = {0}\n",
+                self.timeouts_secs
+            );
         }
         options
     }
@@ -1235,6 +1277,60 @@ async fn udp_max_flows_is_enforced() {
         "third flow must be refused"
     );
     assert!(udp_roundtrip(&a, b"a2", wait).await.is_some());
+}
+
+/// An open connection through the tunnel that has echoed once: it holds a stream.
+async fn held_connection(port: u16) -> TcpStream {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    s.write_all(b"ping").await.unwrap();
+    let mut buf = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut buf))
+        .await
+        .expect("echo in time")
+        .unwrap();
+    assert_eq!(&buf, b"ping");
+    s
+}
+
+/// A client address gets `max_conns_per_ip` connections; more are closed at once, and a
+/// slot that frees up can be used again.
+#[tokio::test(flavor = "multi_thread")]
+async fn connections_beyond_the_per_address_limit_are_closed() {
+    let target = echo_server().await;
+    let setup = Setup::tcp("direct")
+        .transport("tcpmux")
+        .mux()
+        .max_conns_per_ip(2);
+    let tunnel = start(setup, TOKEN, TOKEN, target).await;
+    let first = held_connection(tunnel.user_port).await;
+    let _second = held_connection(tunnel.user_port).await;
+    let started = std::time::Instant::now();
+    expect_closed_without_data(&tunnel).await;
+    assert!(started.elapsed() < Duration::from_secs(2), "closed at once");
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    held_connection(tunnel.user_port).await;
+}
+
+/// The case of a busy evening: every stream of every session is taken. New connections
+/// fail (after the open timeout) while the ones already open keep working.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_tunnel_fails_new_connections_and_keeps_the_open_ones() {
+    let target = echo_server().await;
+    let setup = Setup::tcp("direct")
+        .transport("tcpmux")
+        .mux()
+        .mux_connections(1)
+        .max_streams(2)
+        .timeouts(1);
+    let tunnel = start(setup, TOKEN, TOKEN, target).await;
+    let mut a = held_connection(tunnel.user_port).await;
+    let _b = held_connection(tunnel.user_port).await;
+    expect_closed_without_data(&tunnel).await;
+    a.write_all(b"more").await.unwrap();
+    let mut buf = [0u8; 4];
+    a.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"more");
 }
 
 /// A TCP proxy that forwards at most `rate` bytes per second each way, with small
@@ -2122,6 +2218,78 @@ async fn status_counts_traffic_on_both_sides() {
                 3 * (1 << 20) + 700,
                 "{name}: {exit:?}"
             );
+        })
+    });
+    for run in runs {
+        run.await.unwrap();
+    }
+}
+
+/// The entry side's health probe gets through to the target in every kind of tunnel and
+/// says so in `status`, with the capacity; a target that is down is named.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn status_reports_health_and_capacity() {
+    use kariz::stats::ProbeOutcome;
+    let setups = [
+        (
+            "tcpmux direct",
+            Setup::tcp("direct").transport("tcpmux").mux(),
+            true,
+        ),
+        ("tcp reverse, no mux", Setup::tcp("reverse"), true),
+        ("tcp direct, no mux", Setup::tcp("direct"), true),
+        ("quic direct", Setup::quic("direct"), true),
+        (
+            "tcpmux, target down",
+            Setup::tcp("direct").transport("tcpmux").mux(),
+            false,
+        ),
+    ];
+    let runs = setups.map(|(name, setup, target_up)| {
+        tokio::spawn(async move {
+            let target = if target_up {
+                echo_server().await
+            } else {
+                free_port()
+            };
+            let tunnel = start(setup.control(), TOKEN, TOKEN, target).await;
+            let socket = tunnel.control.clone().unwrap();
+            // The first probe goes a few seconds after the start.
+            let mut status = status_of(&socket).await;
+            for _ in 0..100 {
+                if status.probe.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                status = status_of(&socket).await;
+            }
+            let probe = status
+                .probe
+                .clone()
+                .unwrap_or_else(|| panic!("{name}: no probe"));
+            assert_eq!(probe.target, format!("127.0.0.1:{target}"), "{name}");
+            if target_up {
+                assert_eq!(probe.outcome, ProbeOutcome::Ok, "{name}: {probe:?}");
+                assert!(probe.ms.is_some(), "{name}: {probe:?}");
+            } else {
+                assert_eq!(
+                    probe.outcome,
+                    ProbeOutcome::TargetFailed,
+                    "{name}: {probe:?}"
+                );
+                assert_eq!(probe.target_fails, 1, "{name}: {probe:?}");
+            }
+            if setup.mux {
+                let max = status.peer.streams_max.unwrap_or_default();
+                assert!(max >= 4096, "{name}: {:?}", status.peer);
+                assert!(status.peer.streams.is_some(), "{name}");
+            } else {
+                assert_eq!(status.peer.streams_max, None, "{name}");
+            }
+            // Probes are no user's: the exit side does not count them.
+            let exit = status_of(tunnel.exit_control.as_ref().unwrap()).await;
+            assert_eq!(exit.exit.unwrap().streams_total, 0, "{name}");
         })
     });
     for run in runs {

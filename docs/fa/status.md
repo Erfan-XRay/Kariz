@@ -14,12 +14,13 @@ kariz status -c /etc/kariz/main.toml
 
 ```text
   tunnel main · entry · reverse · tcpmux · up 1 d 2 h
-  exit side  connected · 2 of 2 sessions · rtt 38 ms · no errors
+  exit side  connected · 2 of 2 sessions · rtt 38 ms · for 1 h 0 min · 140 of 8192 streams
+  health     ● users can connect · 46 ms to 127.0.0.1:443 · checked 4 s ago
   forward    [::]:443 -> 127.0.0.1:443 (tcp)       12 open   ↑ 1.2 Mbit/s  ↓ 41.8 Mbit/s
              [::]:2053 -> 127.0.0.1:53 (tcp+udp)    0 open   3 flows  ↑ 12 kbit/s  ↓ 30 kbit/s
 ```
 
-شمارنده‌ها را دو بار، با یک ثانیه فاصله، می‌خواند تا نرخ‌ها را نشان دهد.
+شمارنده‌ها را دو بار، با یک ثانیه فاصله، می‌خواند تا نرخ‌ها را نشان دهد. streamها از ۸۰٪ سقف زرد می‌شوند. `health` همان probe سمت ورودی است (پایین‌تر): وقتی شکست بخورد دلیلش را می‌گوید، مثلاً *new connections do not get through (3 in a row): every tunnel connection is full* یا *127.0.0.1:443 cannot be reached from the exit side*.
 
 | گزینه | معنی |
 |---|---|
@@ -61,7 +62,10 @@ daemon -> client   ---\n<JSON document>\n
     "rtt_ms": 38.4,
     "handshakes_ok": 14,
     "handshakes_failed": 0,
-    "last_error": null
+    "last_error": null,
+    "streams": 140,
+    "streams_max": 8192,
+    "full": 0
   },
   "totals": {
     "bytes_up": 104857600, "bytes_down": 2147483648,
@@ -71,9 +75,14 @@ daemon -> client   ---\n<JSON document>\n
     {
       "listen": "[::]:443", "target": "127.0.0.1:443", "protocol": "tcp",
       "tcp_open": 12, "tcp_total": 5120, "udp_flows": 0, "udp_total": 0,
-      "bytes_up": 104857600, "bytes_down": 2147483648, "open_failures": 0
+      "bytes_up": 104857600, "bytes_down": 2147483648, "open_failures": 0,
+      "refused_per_ip": 0
     }
-  ]
+  ],
+  "probe": {
+    "outcome": "ok", "ms": 46, "target": "127.0.0.1:443", "error": null,
+    "fails": 0, "target_fails": 0, "ok_total": 233, "failed_total": 0, "secs_ago": 4
+  }
 }
 ```
 
@@ -99,6 +108,8 @@ daemon -> client   ---\n<JSON document>\n
 | `rtt_ms` | زمان رفت‌وبرگشت تا سمت دیگر، میانگین روی sessionها: از pingهای mux (هموارشده، ۷/۸ قدیم + ۱/۸ جدید) یا برآورد خود QUIC. بدون mux و تا وقتی اولین ping جواب نگرفته `null` |
 | `handshakes_ok`، `handshakes_failed` | handshakeهای تانل از شروع، در هر دو جهت. روی سمت شنونده شکست‌ها اتصال‌های اسکنرها را هم شامل می‌شوند |
 | `last_error` | `{ "secs_ago": 12, "text": "authentication failed" }` برای آخرین اتصال یا handshakeِ ناموفق، یا `null`. سمت دیگرِ ردکننده یا دست‌نیافتنی فوراً دیده می‌شود؛ ناهمخوانی توکن دیرتر: سمت شنونده یک اتصال ناموفق را ۵ تا ۳۰ ثانیهٔ تصادفی باز نگه می‌دارد تا رها کند (تا probeها چیزی یاد نگیرند) و سمت وصل‌شونده وقتی گزارشش می‌کند که handshake‌اش timeout بخورد (`tuning.handshake_timeout_secs`، ۱۰ ثانیه) |
+| `streams`، `streams_max` | با mux: streamهای باز روی همهٔ sessionهای زنده، و این sessionها روی هم چندتا را می‌برند (هرکدام `mux.max_streams`؛ sessionی که در حال جایگزینی است چیزی نمی‌برد). بدون mux برابر `null` |
+| `full` | اتصال‌ها و جریان‌های تازه‌ای که رد شدند چون همهٔ sessionها پر بودند (سمت ورودی) |
 
 ### `totals` و `forwards`
 
@@ -109,7 +120,8 @@ daemon -> client   ---\n<JSON document>\n
 | `tcp_open`، `tcp_total` | اتصال‌های کاربرِ باز در همین لحظه، و از شروع |
 | `udp_flows`، `udp_total` | جریان‌های UDP (یکی برای هر آدرس client) باز در همین لحظه، و از شروع |
 | `bytes_up`، `bytes_down` | از شروع، همان‌طور که داده می‌گذرد شمرده می‌شود (نه وقتی اتصال تمام می‌شود) |
-| `open_failures` | اتصال‌ها و جریان‌های کاربری که حمل نشدند: session به سمت خروجی به‌موقع نبود، یا خروجی نتوانست به مقصد برسد |
+| `open_failures` | اتصال‌ها و جریان‌های کاربری که حمل نشدند: session به سمت خروجی به‌موقع نبود، همهٔ sessionها پر بودند، یا خروجی نتوانست به مقصد برسد |
+| `refused_per_ip` | اتصال‌ها و جریان‌های کاربری که فوراً بسته شدند چون آدرسشان به `tuning.max_conns_per_ip` رسیده بود |
 
 بایت‌ها مجموع‌اند؛ خواننده نرخ را با دوبار پرسیدن می‌گیرد. بایت‌های UDP یک جریان شلوغ در دسته‌های ۶۴ بسته‌ای یا دست‌کم ثانیه‌ای یک‌بار اضافه می‌شوند، پس نرخ UDP خوانده‌شده در پنجرهٔ یک‌ثانیه‌ای تا یک ثانیه می‌تواند عقب باشد.
 
@@ -120,3 +132,19 @@ daemon -> client   ---\n<JSON document>\n
 | `exit.streams_total` | اتصال‌های کاربر و جریان‌های UDPِ سرویس‌داده‌شده از شروع |
 | `exit.dial_failures` | مقصدهایی که نشد به آن‌ها رسید |
 | `exit.last_dial_error` | `{ "secs_ago", "text" }` با مقصد و دلیل، یا `null` |
+
+### `probe`: کاربر می‌تواند وصل شود؟
+
+تانل می‌تواند وصل باشد و باز هم کسی از آن رد نشود: همهٔ sessionها پر باشند، یا مقصد (مثلاً Xray) خوابیده باشد. سمت ورودی هر ۱۵ ثانیه یک اتصال، درست مثل اتصال یک کاربر، باز می‌کند و از سمت خروجی می‌خواهد به یک مقصد وصل شود؛ هر بار یکی از مقصدهای فورواردشده (وقتی فقط UDP فوروارد شده، فقط خود تانل). سمت خروجی جواب می‌دهد و می‌بندد و probeها را جزو کاربرها نمی‌شمارد. `probe` آخرین نتیجه است (تا اولین probe، حدود ۵ ثانیه بعد از شروع، نیست):
+
+| فیلد | معنی |
+|---|---|
+| `outcome` | `ok`؛ `target_failed` (سمت خروجی نتوانست به `target` وصل شود)؛ `failed` (راهی نبود: session نبود، همهٔ sessionها پر بودند، یا تا ۱۰ ثانیه جوابی نیامد)؛ `unsupported` (سمت خروجی از ۲٫۴ قدیمی‌تر است؛ هر ۱۰ دقیقه دوباره پرسیده می‌شود) |
+| `ms` | از شروع باز کردن تا جواب سمت خروجی؛ وقتی جوابی نیامد `null` |
+| `target` | چیزی که از سمت خروجی خواسته شد به آن وصل شود؛ برای خود تانل خالی |
+| `error` | دلیل شکست، یا `null` |
+| `fails`، `target_fails` | نتیجه‌های `failed` و `target_failed` پشت سر هم |
+| `ok_total`، `failed_total` | از شروع |
+| `secs_ago` | از آخرین probe |
+
+پنل وب این را در صفحهٔ هر تانل و در *نیازمند توجه* نشان می‌دهد، و ربات تلگرام وقتی سه probe پشت سر هم شکست بخورند خبر می‌دهد ([تلگرام](telegram.md)).

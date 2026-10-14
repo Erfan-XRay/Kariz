@@ -18,13 +18,14 @@ use crate::auto::{self, Dial};
 use crate::channel::{self, Channel, Link};
 use crate::config::{Config, Forward, Mode, TransportKind, Tuning};
 use crate::crypto::{Crypto, ReplayFilter};
+use crate::limit::PerIp;
 use crate::mux::{MuxSession, SessionConfig, Side};
-use crate::proto::{self, Open};
+use crate::proto::{self, Open, STATUS_DIAL_FAILED, STATUS_OK};
 use crate::relay::{relay, relay_stream, Counters};
 #[cfg(feature = "quic")]
 use crate::session::quic::{accept_sessions, QuicSession};
-use crate::session::{maintain, Session, SessionPool};
-use crate::stats::{ForwardStats, Stats};
+use crate::session::{is_full, maintain, ResetReason, Session, SessionPool};
+use crate::stats::{ForwardStats, ProbeOutcome, Stats};
 #[cfg(feature = "quic")]
 use crate::transport::quic::{QuicDialer, QuicListener, QuicSettings};
 use crate::transport::{Dialer, Listener, Settings};
@@ -35,12 +36,25 @@ const POOL_CAPACITY: usize = 1024;
 /// Direct mode without mux: how often the entry tries the exit side when idle, so the
 /// tunnel's state is the truth.
 const PROBE_EVERY: Duration = Duration::from_secs(10);
+/// How often the health probe goes through the tunnel to a target, the way a user's
+/// connection does; the first one waits a little for the sessions to come up.
+const HEALTH_EVERY: Duration = Duration::from_secs(15);
+const HEALTH_FIRST: Duration = Duration::from_secs(5);
+/// A probe without an answer by then failed.
+const HEALTH_WAIT: Duration = Duration::from_secs(10);
+/// An exit side too old to answer probes is asked again this rarely (it may be updated).
+const HEALTH_UNSUPPORTED_EVERY: Duration = Duration::from_secs(600);
+/// At most one warning about a full tunnel this often.
+const FULL_WARN_INTERVAL: Duration = Duration::from_secs(30);
 
 struct Entry {
     crypto: Crypto,
     tuning: Tuning,
     source: Source,
     stats: Arc<Stats>,
+    /// `tuning.max_conns_per_ip`, shared by all forward rules.
+    per_ip: Option<Arc<PerIp>>,
+    last_full_warning: std::sync::Mutex<Option<Instant>>,
 }
 
 enum Source {
@@ -195,11 +209,14 @@ pub async fn run(config: Config) -> Result<()> {
         }
     };
 
+    let per_ip = tuning.max_conns_per_ip.map(PerIp::new);
     let entry = Arc::new(Entry {
         crypto,
         tuning,
         source,
         stats: stats.clone(),
+        per_ip,
+        last_full_warning: std::sync::Mutex::default(),
     });
 
     // `kariz status` reads the counters and `kariz speedtest` reaches the live sessions
@@ -236,11 +253,13 @@ pub async fn run(config: Config) -> Result<()> {
             };
             let (udp_tuning, target) = (entry.tuning.udp.clone(), forward.target.clone());
             let (listen, duplicate) = (forward.listen.clone(), forward.duplication());
-            let counters = counters.clone();
+            let (counters, per_ip) = (counters.clone(), entry.per_ip.clone());
             tasks.spawn(async move {
-                udp::serve(socket, udp_tuning, target, duplicate, counters, opener)
-                    .await
-                    .with_context(|| format!("UDP forward port {listen} failed"))
+                udp::serve(
+                    socket, udp_tuning, target, duplicate, counters, per_ip, opener,
+                )
+                .await
+                .with_context(|| format!("UDP forward port {listen} failed"))
             });
         }
         info!(
@@ -250,6 +269,8 @@ pub async fn run(config: Config) -> Result<()> {
             "forward ready"
         );
     }
+
+    tasks.spawn(health(entry.clone(), probe_targets(&config.forward)));
 
     // Accept loops only return on fatal errors.
     match tasks.join_next().await {
@@ -395,9 +416,20 @@ async fn accept_users(
                 continue;
             }
         };
+        let slot = match &entry.per_ip {
+            Some(limit) => match limit.acquire(peer.ip()) {
+                Some(slot) => Some(slot),
+                None => {
+                    counters.refused_per_ip();
+                    continue;
+                }
+            },
+            None => None,
+        };
         let (entry, open) = (entry.clone(), open.clone());
         let (target, counters) = (forward.target.clone(), counters.clone());
         tokio::spawn(async move {
+            let _slot = slot;
             if let Err(e) = handle_user(&entry, user, &open, &counters).await {
                 debug!(%peer, %target, error = %e, "connection ended with error");
             }
@@ -447,16 +479,94 @@ impl Entry {
     /// Gets a channel to the exit side and has the exit connect it to the target
     /// described by the encoded `open` request.
     async fn open_channel(&self, open: &Bytes) -> io::Result<Channel> {
+        let deadline = Instant::now() + self.tuning.handshake_timeout + self.tuning.dial_timeout;
+        self.open_channel_until(open, deadline, true).await
+    }
+
+    /// [`Self::open_channel`] giving up at `deadline`. `retry`: on a pooled link (reverse
+    /// mode without mux) that fails, try the next one.
+    async fn open_channel_until(
+        &self,
+        open: &Bytes,
+        deadline: Instant,
+        retry: bool,
+    ) -> io::Result<Channel> {
         match &self.source {
-            Source::Direct(dialer) => self.open_direct(dialer, open).await.map(Channel::Link),
-            Source::Reverse(pool) => self.open_reverse(pool, open).await.map(Channel::Link),
+            Source::Direct(dialer) => {
+                let link = timeout_at(deadline, self.open_direct(dialer, open)).await;
+                link.map_err(|_| exit_late())?.map(Channel::Link)
+            }
+            Source::Reverse(pool) => self
+                .open_reverse(pool, open, deadline, retry)
+                .await
+                .map(Channel::Link),
             // Optimistic: the stream is used right away; if the exit cannot reach the
             // target it resets the stream, which ends the relay.
-            Source::Mux(pool) => {
-                let deadline =
-                    Instant::now() + self.tuning.handshake_timeout + self.tuning.dial_timeout;
-                Ok(Channel::Stream(pool.open(open.clone(), deadline).await?))
+            Source::Mux(pool) => match pool.open(open.clone(), deadline).await {
+                Ok(stream) => Ok(Channel::Stream(stream)),
+                Err(e) => {
+                    if is_full(&e) {
+                        self.stats.peer.full();
+                        self.warn_full(&e);
+                    }
+                    Err(e)
+                }
+            },
+        }
+    }
+
+    /// Logs that the tunnel is full, at most every [`FULL_WARN_INTERVAL`]: users cannot
+    /// connect while it is, and nothing else says so.
+    fn warn_full(&self, e: &io::Error) {
+        let now = Instant::now();
+        let mut last = self
+            .last_full_warning
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if last.map_or(true, |t| now.duration_since(t) >= FULL_WARN_INTERVAL) {
+            *last = Some(now);
+            warn!(error = %e, "new connections are failing");
+        }
+    }
+
+    /// One health probe: opens a channel the way a user connection is opened and has
+    /// the exit side connect to the target of `open` (an [`Open::probe`]). Errors:
+    /// `ConnectionRefused` when the target could not be reached, `Unsupported` when the
+    /// exit side does not know probes.
+    async fn probe(&self, open: &Bytes, wait: Duration) -> io::Result<()> {
+        let deadline = Instant::now() + wait;
+        let late = || io::Error::new(io::ErrorKind::TimedOut, "no answer through the tunnel");
+        let channel = timeout_at(deadline, self.open_channel_until(open, deadline, false))
+            .await
+            .map_err(|_| late())?
+            .map_err(|e| match e.kind() {
+                // An exit side that does not know the kind closes without a status byte.
+                io::ErrorKind::UnexpectedEof => unsupported(),
+                _ => e,
+            })?;
+        // Without mux the status byte was read when the channel was opened.
+        let Channel::Stream(stream) = channel else {
+            return Ok(());
+        };
+        let answer = match timeout_at(deadline, stream.recv()).await {
+            Err(_) => return Err(late()),
+            Ok(Err(_)) if stream.reset_reason() == Some(ResetReason::Protocol) => {
+                return Err(unsupported())
             }
+            Ok(Err(e)) => return Err(e),
+            Ok(Ok(answer)) => answer,
+        };
+        // The exit side ends the stream after its answer; ending ours too closes it
+        // cleanly on both sides.
+        let _ = stream.finish();
+        let _ = timeout_at(deadline, stream.recv()).await;
+        match answer.as_deref() {
+            Some([STATUS_OK, ..]) => Ok(()),
+            Some([STATUS_DIAL_FAILED, ..]) => Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "exit side could not connect to the target",
+            )),
+            _ => Err(unsupported()),
         }
     }
 
@@ -471,17 +581,19 @@ impl Entry {
             Ok(link)
         })
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "exit side did not answer in time"))?
+        .map_err(|_| exit_late())?
     }
 
     /// Takes pooled links until one accepts the open request. Pooled links may have
-    /// died while idle, so failures other than "target unreachable" are retried.
+    /// died while idle, so failures other than "target unreachable" are retried, unless
+    /// `retry` is off: then the first link that took the request gives the answer.
     async fn open_reverse(
         &self,
         pool: &Mutex<mpsc::Receiver<Link>>,
         open: &[u8],
+        deadline: Instant,
+        retry: bool,
     ) -> io::Result<Link> {
-        let deadline = Instant::now() + self.tuning.handshake_timeout + self.tuning.dial_timeout;
         loop {
             let mut channel = timeout_at(deadline, async { pool.lock().await.recv().await })
                 .await
@@ -501,15 +613,238 @@ impl Entry {
             }
             match timeout_at(deadline, proto::read_status(&mut channel)).await {
                 Ok(Ok(())) => return Ok(channel),
-                Ok(Err(e)) if e.kind() == io::ErrorKind::ConnectionRefused => return Err(e),
-                Ok(Err(_)) => continue,
-                Err(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "exit side did not answer in time",
-                    ))
+                Ok(Err(e)) if e.kind() == io::ErrorKind::ConnectionRefused || !retry => {
+                    return Err(e)
                 }
+                Ok(Err(_)) => continue,
+                Err(_) => return Err(exit_late()),
             }
         }
+    }
+}
+
+fn exit_late() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "exit side did not answer in time")
+}
+
+fn unsupported() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the other server does not answer health probes (update it)",
+    )
+}
+
+/// What the health probe connects to: each TCP target once, in turn; the tunnel alone
+/// when only UDP is forwarded (a UDP target cannot be checked by connecting).
+fn probe_targets(forwards: &[Forward]) -> Vec<String> {
+    let mut targets: Vec<String> = Vec::new();
+    for f in forwards.iter().filter(|f| f.protocol.has_tcp()) {
+        if !targets.contains(&f.target) {
+            targets.push(f.target.clone());
+        }
+    }
+    if targets.is_empty() {
+        targets.push(String::new());
+    }
+    targets
+}
+
+/// Probes the way through the tunnel every [`HEALTH_EVERY`], one target at a time, and
+/// keeps what it found in the stats (`status`). A tunnel can be up and still let no one
+/// through (every session full, the target down); this is what tells.
+async fn health(entry: Arc<Entry>, targets: Vec<String>) -> Result<()> {
+    sleep(HEALTH_FIRST).await;
+    for target in targets.iter().cycle() {
+        let open = encode_open(Open::probe(target.clone()));
+        let started = Instant::now();
+        let result = entry.probe(&open, HEALTH_WAIT).await;
+        let took = started.elapsed();
+        let outcome = match &result {
+            Ok(()) => ProbeOutcome::Ok,
+            Err(e) => match e.kind() {
+                io::ErrorKind::ConnectionRefused => ProbeOutcome::TargetFailed,
+                io::ErrorKind::Unsupported => ProbeOutcome::Unsupported,
+                _ => ProbeOutcome::Failed,
+            },
+        };
+        if let Err(e) = &result {
+            debug!(%target, error = %e, "health probe failed");
+        }
+        let answered = matches!(outcome, ProbeOutcome::Ok | ProbeOutcome::TargetFailed);
+        let error = result.err().map(|e| e.to_string());
+        entry
+            .stats
+            .probe
+            .record(target, outcome, answered.then_some(took), error);
+        sleep(if outcome == ProbeOutcome::Unsupported {
+            HEALTH_UNSUPPORTED_EVERY
+        } else {
+            HEALTH_EVERY
+        })
+        .await;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mux::tests::config as session_config;
+    use crate::session::is_full;
+
+    const TOKEN: &str = "0123456789abcdef0123";
+
+    fn config(role: &str) -> Config {
+        let side = if role == "entry" {
+            "remote = \"127.0.0.1:9\"\n[[forward]]\nlisten = \"127.0.0.1:0\"\ntarget = \"127.0.0.1:9\"\n"
+        } else {
+            "listen = \"127.0.0.1:9\"\n"
+        };
+        let text = format!(
+            "role = \"{role}\"\nmode = \"direct\"\n[tunnel]\ntransport = \"tcpmux\"\n\
+             token = \"{TOKEN}\"\n{side}"
+        );
+        Config::parse(&text).unwrap()
+    }
+
+    /// An entry whose pool has one session of at most `max_streams`; `serve` runs the
+    /// other end of it.
+    fn entry_with(max_streams: usize, serve: impl FnOnce(MuxSession)) -> Entry {
+        let (a, b) = tokio::io::duplex(256 * 1024);
+        let client = SessionConfig {
+            max_streams,
+            ..session_config()
+        };
+        let pool = Arc::new(SessionPool::default());
+        pool.add(Arc::new(Session::Kmux(MuxSession::new(
+            a,
+            Side::Client,
+            client,
+        ))));
+        serve(MuxSession::new(b, Side::Server, session_config()));
+        let config = config("entry");
+        Entry {
+            crypto: Crypto::new(TOKEN, config.tunnel.encryption),
+            tuning: config.tuning(),
+            source: Source::Mux(pool),
+            stats: Stats::new(&config),
+            per_ip: None,
+            last_full_warning: std::sync::Mutex::default(),
+        }
+    }
+
+    /// The other end served by a real exit side.
+    fn entry_to_exit(max_streams: usize) -> Entry {
+        entry_with(max_streams, |server| {
+            crate::exit::serve_for_test(&config("exit"), Arc::new(Session::Kmux(server)));
+        })
+    }
+
+    fn probe_of(target: &str) -> Bytes {
+        encode_open(Open::probe(target))
+    }
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn a_probe_reaches_the_target_through_the_exit_side() {
+        // One stream at a time: each probe gets through only if the last one let go of it.
+        let entry = entry_to_exit(1);
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = target.local_addr().unwrap().to_string();
+        entry.probe(&probe_of(&addr), WAIT).await.unwrap();
+        // The tunnel alone (only UDP forwarded).
+        entry.probe(&probe_of(""), WAIT).await.unwrap();
+        // A target nobody listens on.
+        drop(target);
+        let err = entry.probe(&probe_of(&addr), WAIT).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused, "{err}");
+        entry.probe(&probe_of(""), WAIT).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_full_tunnel_fails_the_probe_and_is_counted() {
+        let entry = entry_to_exit(1);
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = target.local_addr().unwrap().to_string();
+        // A user connection takes the only stream.
+        let user = entry
+            .open_channel(&encode_open(Open::tcp(addr.clone())))
+            .await
+            .unwrap();
+        let err = entry
+            .probe(&probe_of(&addr), Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert!(is_full(&err), "{err}");
+        assert_eq!(entry.stats.snapshot().peer.full, 1);
+        drop(user);
+        entry.probe(&probe_of(&addr), WAIT).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_exit_side_without_probes_is_told_apart() {
+        // An older exit side resets a stream of a kind it does not know.
+        let entry = entry_with(16, |server| {
+            tokio::spawn(async move {
+                while let Some((stream, _)) = server.accept().await {
+                    stream.reset(ResetReason::Protocol);
+                }
+            });
+        });
+        let err = entry.probe(&probe_of(""), WAIT).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{err}");
+    }
+
+    #[tokio::test]
+    async fn without_a_session_the_probe_fails() {
+        let config = config("entry");
+        let entry = Entry {
+            crypto: Crypto::new(TOKEN, config.tunnel.encryption),
+            tuning: config.tuning(),
+            source: Source::Mux(Arc::new(SessionPool::default())),
+            stats: Stats::new(&config),
+            per_ip: None,
+            last_full_warning: std::sync::Mutex::default(),
+        };
+        let err = entry
+            .probe(&probe_of(""), Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        assert!(
+            !matches!(
+                err.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::Unsupported
+            ),
+            "{err}"
+        );
+        assert!(!is_full(&err));
+    }
+
+    #[test]
+    fn probes_go_to_each_tcp_target_once() {
+        let forwards = |text: &str| {
+            Config::parse(&format!(
+                "role = \"entry\"\nmode = \"reverse\"\n[tunnel]\nlisten = \"0.0.0.0:3080\"\n\
+                 token = \"{TOKEN}\"\n{text}"
+            ))
+            .unwrap()
+            .forward
+        };
+        let rule = |port: u16, target: &str, protocol: &str| {
+            format!(
+                "[[forward]]\nlisten = \"0.0.0.0:{port}\"\ntarget = \"{target}\"\n\
+                 protocol = \"{protocol}\"\n"
+            )
+        };
+        let mixed = forwards(&format!(
+            "{}{}{}",
+            rule(443, "127.0.0.1:443", "tcp"),
+            rule(8443, "127.0.0.1:443", "tcp+udp"),
+            rule(53, "127.0.0.1:53", "udp"),
+        ));
+        assert_eq!(probe_targets(&mixed), ["127.0.0.1:443"]);
+        let udp_only = forwards(&rule(53, "127.0.0.1:53", "udp"));
+        assert_eq!(probe_targets(&udp_only), [""]);
     }
 }

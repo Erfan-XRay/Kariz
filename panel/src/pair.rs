@@ -48,6 +48,9 @@ pub struct PairRequest {
     /// on both sides. Ignored for other transports.
     #[serde(default)]
     pub quic_obfs: bool,
+    /// The entry side's `tuning.max_conns_per_ip`; left out or 0: no limit.
+    #[serde(default)]
+    pub max_conns_per_ip: Option<u32>,
     /// wss: the files of a real certificate on the listening side (from [`certificate`]),
     /// instead of a self-signed one the dialing side pins.
     #[serde(default)]
@@ -91,6 +94,7 @@ impl PairRequest {
             mux: self.mux.clone().filter(|m| !m.is_empty()),
             encryption: self.chosen_encryption().map(str::to_owned),
             quic_obfs: self.sealed(),
+            max_conns_per_ip: (role == "entry").then(|| self.per_ip_limit()).flatten(),
             tls_sni: (!accepts).then(|| self.dial_sni()).flatten(),
             tls_pin: (!accepts && self.transport == "wss" && self.tls_cert.is_none())
                 .then(|| pin.map(str::to_owned))
@@ -148,6 +152,22 @@ impl PairRequest {
         self.quic_obfs && self.transport == "quic"
     }
 
+    /// The per-address limit to write on the entry side, if there is one.
+    fn per_ip_limit(&self) -> Option<u32> {
+        self.max_conns_per_ip.filter(|v| *v > 0)
+    }
+
+    /// Whether this tunnel uses what came with 2.4: a per-address limit (entry side), or
+    /// more than 4096 streams per connection (both sides refused that before).
+    fn needs_2_4(&self) -> (bool, bool) {
+        let streams = self
+            .mux
+            .as_ref()
+            .and_then(|m| m.max_streams)
+            .is_some_and(|v| v > 4096);
+        (self.per_ip_limit().is_some() || streams, streams)
+    }
+
     /// The cipher to write: `None` for `auto`.
     fn chosen_encryption(&self) -> Option<&str> {
         self.encryption.as_deref().filter(|e| *e != "auto")
@@ -159,7 +179,8 @@ impl PairRequest {
     fn require_new_enough(&self, hub: &Hub) -> Result<()> {
         let enc = self.chosen_encryption().is_some();
         let obfs = self.sealed();
-        if !self.needs_new_servers() && !enc && !obfs {
+        let (entry_2_4, exit_2_4) = self.needs_2_4();
+        if !self.needs_new_servers() && !enc && !obfs && !entry_2_4 {
             return Ok(());
         }
         for server in hub.snapshot()? {
@@ -176,6 +197,15 @@ impl PairRequest {
             }
             if self.needs_new_servers() && !version_at_least(&server.version, (1, 5, 0)) {
                 bail!("old_agent:{}:{}", server.id, server.version);
+            }
+            // The per-address limit and up to 16384 streams came with 2.4.
+            let needs = if server.id == self.entry {
+                entry_2_4
+            } else {
+                exit_2_4
+            };
+            if needs && !version_at_least(&server.version, (2, 4, 0)) {
+                bail!("old_agent_limits:{}:{}", server.id, server.version);
             }
         }
         Ok(())
@@ -1162,6 +1192,7 @@ mod tests {
             tls_host: None,
             encryption: enc.map(str::to_owned),
             quic_obfs: false,
+            max_conns_per_ip: None,
             forwards: Vec::new(),
             rotate: false,
             network: None,
@@ -1219,6 +1250,7 @@ mod tests {
             mux: None,
             encryption: None,
             quic_obfs: obfs,
+            max_conns_per_ip: None,
             tls_cert: None,
             tls_key: None,
             tls_host: None,
@@ -1241,6 +1273,53 @@ mod tests {
     }
 
     #[test]
+    fn the_per_address_limit_goes_to_the_entry_side_and_needs_2_4() {
+        let req = |limit: Option<u32>, max_streams: Option<u32>| PairRequest {
+            name: "t".into(),
+            entry: "a".into(),
+            exit: "b".into(),
+            mode: "reverse".into(),
+            transport: "tcpmux".into(),
+            profile: None,
+            listen: "0.0.0.0:3080".into(),
+            dial: "1.2.3.4:3080".into(),
+            pool: None,
+            ws_path: None,
+            ws_host: None,
+            tls_sni: None,
+            mux: max_streams.map(|v| crate::wire::MuxSpec {
+                max_streams: Some(v),
+                ..Default::default()
+            }),
+            encryption: None,
+            quic_obfs: false,
+            max_conns_per_ip: limit,
+            tls_cert: None,
+            tls_key: None,
+            tls_host: None,
+            forwards: Vec::new(),
+            rotate: false,
+            network: None,
+        };
+        let (entry, exit) = req(Some(300), None).specs(None, None);
+        assert_eq!(
+            (entry.max_conns_per_ip, exit.max_conns_per_ip),
+            (Some(300), None)
+        );
+        // 0 is no limit: nothing is written, and nothing new is needed.
+        let (entry, _) = req(Some(0), None).specs(None, None);
+        assert_eq!(entry.max_conns_per_ip, None);
+        assert_eq!(req(Some(0), None).needs_2_4(), (false, false));
+        // Which side must run 2.4: the entry for the limit, both for many streams.
+        assert_eq!(req(Some(300), None).needs_2_4(), (true, false));
+        assert_eq!(req(None, Some(4096)).needs_2_4(), (false, false));
+        assert_eq!(req(None, Some(8192)).needs_2_4(), (true, true));
+        // A beta of 2.4 is 2.4.
+        assert!(version_at_least("2.4.0-beta.1", (2, 4, 0)));
+        assert!(!version_at_least("2.3.0", (2, 4, 0)));
+    }
+
+    #[test]
     fn auto_and_mux_settings_need_new_servers() {
         let req = |transport: &str, mux: Option<crate::wire::MuxSpec>| PairRequest {
             name: "t".into(),
@@ -1257,6 +1336,7 @@ mod tests {
             tls_sni: None,
             mux,
             quic_obfs: false,
+            max_conns_per_ip: None,
             tls_cert: None,
             tls_key: None,
             tls_host: None,
@@ -1296,6 +1376,7 @@ mod tests {
             mux: None,
             encryption: None,
             quic_obfs: false,
+            max_conns_per_ip: None,
             tls_cert: real
                 .then(|| "/etc/letsencrypt/live/kariz-panel-t-example-com/fullchain.pem".into()),
             tls_key: real

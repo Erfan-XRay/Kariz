@@ -50,6 +50,7 @@ pub struct ForwardStats {
     udp_open: AtomicU64,
     udp_total: AtomicU64,
     open_failures: AtomicU64,
+    refused_per_ip: AtomicU64,
 }
 
 impl ForwardStats {
@@ -64,6 +65,7 @@ impl ForwardStats {
             udp_open: AtomicU64::new(0),
             udp_total: AtomicU64::new(0),
             open_failures: AtomicU64::new(0),
+            refused_per_ip: AtomicU64::new(0),
         })
     }
 
@@ -84,6 +86,11 @@ impl ForwardStats {
     /// A channel for a user could not be opened, or the exit side refused it.
     pub fn open_failed(&self) {
         self.open_failures.fetch_add(1, Relaxed);
+    }
+
+    /// A user connection or UDP flow was closed: its address had `max_conns_per_ip` open.
+    pub fn refused_per_ip(&self) {
+        self.refused_per_ip.fetch_add(1, Relaxed);
     }
 }
 
@@ -173,9 +180,18 @@ pub struct Peer {
     handshakes_failed: AtomicU64,
     last_ok: Mutex<Option<Instant>>,
     last_error: Mutex<Option<(Instant, String)>>,
+    /// `mux.max_streams`: each live session takes this many streams; 0 without mux.
+    max_streams: u64,
+    /// New connections that found every session full.
+    full: AtomicU64,
 }
 
 impl Peer {
+    /// A user connection or flow could not be opened: every session had `max_streams`.
+    pub fn full(&self) {
+        self.full.fetch_add(1, Relaxed);
+    }
+
     /// A session to the other side is up (the handshake succeeded).
     pub fn session_up(&self, session: &Arc<Session>) {
         self.link_up();
@@ -225,6 +241,9 @@ impl Peer {
             let mean = rtts.iter().sum::<Duration>() / rtts.len() as u32;
             (mean.as_secs_f64() * 10_000.0).round() / 10.0
         });
+        // A draining session still carries its streams but takes no new ones.
+        let streams = sessions.iter().map(|(_, s)| s.stream_count() as u64).sum();
+        let open_sessions = sessions.iter().filter(|(_, s)| !s.is_draining()).count() as u64;
         PeerStatus {
             transport: (!via.is_empty()).then(|| via.join("+")),
             connected,
@@ -238,7 +257,101 @@ impl Peer {
                 secs_ago: now.duration_since(at).as_secs(),
                 text,
             }),
+            streams: mux.then_some(streams),
+            streams_max: (mux && self.max_streams > 0).then_some(open_sessions * self.max_streams),
+            full: self.full.load(Relaxed),
         }
+    }
+}
+
+/// What the entry side's health probe found: every few seconds it opens a connection the
+/// way a user's is opened and has the exit side connect to a target (`entry::probe`).
+#[derive(Debug, Default)]
+pub struct Probe {
+    state: Mutex<Option<ProbeState>>,
+}
+
+#[derive(Debug)]
+struct ProbeState {
+    at: Instant,
+    outcome: ProbeOutcome,
+    ms: Option<u64>,
+    target: String,
+    error: Option<String>,
+    fails: u32,
+    target_fails: u32,
+    ok_total: u64,
+    failed_total: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeOutcome {
+    /// Through the tunnel and connected to the target.
+    Ok,
+    /// Through the tunnel, but the exit side could not connect to the target.
+    TargetFailed,
+    /// No way through: no session, every session full, or no answer in time.
+    Failed,
+    /// The exit side is older than the probe.
+    Unsupported,
+}
+
+impl Probe {
+    /// Records one probe of `target`. `took`: until the answer came.
+    pub fn record(
+        &self,
+        target: &str,
+        outcome: ProbeOutcome,
+        took: Option<Duration>,
+        error: Option<String>,
+    ) {
+        let mut state = lock(&self.state);
+        let (mut fails, mut target_fails, mut ok_total, mut failed_total) =
+            state.as_ref().map_or((0, 0, 0, 0), |s| {
+                (s.fails, s.target_fails, s.ok_total, s.failed_total)
+            });
+        match outcome {
+            ProbeOutcome::Ok => {
+                (fails, target_fails) = (0, 0);
+                ok_total += 1;
+            }
+            ProbeOutcome::TargetFailed => {
+                fails = 0;
+                target_fails += 1;
+                failed_total += 1;
+            }
+            ProbeOutcome::Failed => {
+                fails += 1;
+                failed_total += 1;
+            }
+            ProbeOutcome::Unsupported => {}
+        }
+        *state = Some(ProbeState {
+            at: Instant::now(),
+            outcome,
+            ms: took.map(|d| d.as_millis() as u64),
+            target: target.to_owned(),
+            error,
+            fails,
+            target_fails,
+            ok_total,
+            failed_total,
+        });
+    }
+
+    fn snapshot(&self) -> Option<ProbeStatus> {
+        lock(&self.state).as_ref().map(|s| ProbeStatus {
+            outcome: s.outcome,
+            ms: s.ms,
+            target: s.target.clone(),
+            error: s.error.clone(),
+            fails: s.fails,
+            target_fails: s.target_fails,
+            ok_total: s.ok_total,
+            failed_total: s.failed_total,
+            secs_ago: s.at.elapsed().as_secs(),
+        })
     }
 }
 
@@ -277,6 +390,8 @@ pub struct Stats {
     pub forwards: Vec<Arc<ForwardStats>>,
     /// Exit side.
     pub targets: Targets,
+    /// Entry side.
+    pub probe: Probe,
 }
 
 impl Stats {
@@ -296,6 +411,11 @@ impl Stats {
             mux: mux.enabled,
             peer: Arc::new(Peer {
                 wanted,
+                max_streams: if mux.enabled {
+                    mux.max_streams as u64
+                } else {
+                    0
+                },
                 ..Peer::default()
             }),
             forwards: config
@@ -304,6 +424,7 @@ impl Stats {
                 .map(|f| ForwardStats::new(&f.listen, &f.target, f.protocol.name()))
                 .collect(),
             targets: Targets::default(),
+            probe: Probe::default(),
         })
     }
 
@@ -323,6 +444,7 @@ impl Stats {
                 bytes_up: f.traffic.up.load(Relaxed),
                 bytes_down: f.traffic.down.load(Relaxed),
                 open_failures: f.open_failures.load(Relaxed),
+                refused_per_ip: f.refused_per_ip.load(Relaxed),
             })
             .collect();
         let mut totals = Totals::default();
@@ -361,6 +483,7 @@ impl Stats {
             totals,
             forwards,
             exit,
+            probe: self.probe.snapshot(),
         }
     }
 }
@@ -382,6 +505,9 @@ pub struct Status {
     /// Exit side only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<ExitStatus>,
+    /// Entry side, once the first probe is done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<ProbeStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -402,6 +528,14 @@ pub struct PeerStatus {
     pub handshakes_ok: u64,
     pub handshakes_failed: u64,
     pub last_error: Option<LastError>,
+    /// With mux: streams open over all live sessions, and how many they can take.
+    #[serde(default)]
+    pub streams: Option<u64>,
+    #[serde(default)]
+    pub streams_max: Option<u64>,
+    /// New connections that failed because every session was full.
+    #[serde(default)]
+    pub full: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -432,6 +566,26 @@ pub struct ForwardStatus {
     pub bytes_up: u64,
     pub bytes_down: u64,
     pub open_failures: u64,
+    /// Closed at once: the client's address had `tuning.max_conns_per_ip` open.
+    #[serde(default)]
+    pub refused_per_ip: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProbeStatus {
+    pub outcome: ProbeOutcome,
+    /// From starting to open until the exit side answered.
+    pub ms: Option<u64>,
+    /// The target the exit side was asked to connect to (empty: the tunnel alone).
+    pub target: String,
+    pub error: Option<String>,
+    /// Probes in a row that found no way through, and that reached the exit side but not
+    /// the target.
+    pub fails: u32,
+    pub target_fails: u32,
+    pub ok_total: u64,
+    pub failed_total: u64,
+    pub secs_ago: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

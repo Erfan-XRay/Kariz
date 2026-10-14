@@ -32,6 +32,7 @@ use tracing::{debug, warn};
 use crate::channel::Channel;
 use crate::config::{Tuning, UdpTuning};
 use crate::crypto::datagram::ReplayWindow;
+use crate::limit::{PerIp, Slot};
 use crate::mux::Transport;
 use crate::proto::{self, Duplicate, MAX_DATAGRAM};
 use crate::relay::Counters;
@@ -543,14 +544,15 @@ impl Flows {
 }
 
 /// Entry side: serves one UDP forward rule on `socket`. `open` opens a tunnel path for a
-/// new flow (the open request is the caller's, and carries `duplicate`). Runs until the
-/// socket fails.
+/// new flow (the open request is the caller's, and carries `duplicate`). A flow holds a
+/// slot of `per_ip` while it lives. Runs until the socket fails.
 pub async fn serve<O, F>(
     socket: UdpSocket,
     udp: UdpTuning,
     target: String,
     duplicate: Option<Duplicate>,
     stats: Arc<ForwardStats>,
+    per_ip: Option<Arc<PerIp>>,
     open: O,
 ) -> io::Result<()>
 where
@@ -579,8 +581,10 @@ where
                 Err(PushError::Full) => continue,
                 // The flow just ended; start a new one.
                 Err(PushError::Closed(p)) => {
-                    let rule = (&udp, target.as_str(), duplicate, &stats);
-                    start_flow(table, client, p, &socket, rule, &flows, &open);
+                    if let Some(slot) = slot_for(table, client, per_ip.as_ref(), &stats) {
+                        let rule = (&udp, target.as_str(), duplicate, &stats);
+                        start_flow(table, client, p, slot, &socket, rule, &flows, &open);
+                    }
                     continue;
                 }
             },
@@ -597,17 +601,46 @@ where
             }
             continue;
         }
+        let Some(slot) = slot_for(table, client, per_ip.as_ref(), &stats) else {
+            continue;
+        };
         let rule = (&udp, target.as_str(), duplicate, &stats);
-        start_flow(table, client, packet, &socket, rule, &flows, &open);
+        start_flow(table, client, packet, slot, &socket, rule, &flows, &open);
     }
+}
+
+/// The per-address slot for a new flow of `client` (`Some(None)` without a limit), or
+/// `None` when its address has its fill: the client is then ignored for a while, like
+/// one whose flow could not be opened, so its packets are not counted one by one.
+fn slot_for(
+    table: &mut Flows,
+    client: SocketAddr,
+    per_ip: Option<&Arc<PerIp>>,
+    stats: &ForwardStats,
+) -> Option<Option<Slot>> {
+    let Some(limit) = per_ip else {
+        return Some(None);
+    };
+    if let Some(slot) = limit.acquire(client.ip()) {
+        return Some(Some(slot));
+    }
+    stats.refused_per_ip();
+    if matches!(table.map.get(&client), Some(FlowState::Active { .. })) {
+        table.active -= 1;
+    }
+    let until = Instant::now() + FAILED_BACKOFF;
+    table.map.insert(client, FlowState::Failed { until });
+    None
 }
 
 /// Starts a flow for `client` with `packet` as its first packet. `rule`: the rule's
 /// tuning, target, duplication and counters.
+#[allow(clippy::too_many_arguments)]
 fn start_flow<O, F>(
     table: &mut Flows,
     client: SocketAddr,
     packet: Bytes,
+    slot: Option<Slot>,
     socket: &Arc<UdpSocket>,
     rule: (&UdpTuning, &str, Option<Duplicate>, &Arc<ForwardStats>),
     flows: &Arc<Mutex<Flows>>,
@@ -633,6 +666,7 @@ fn start_flow<O, F>(
     tokio::spawn(async move {
         debug!(%client, %target, "UDP flow opened");
         let _open = stats.udp_flow();
+        let _slot = slot;
         let mut opened = false;
         let result = async {
             // Boxed: opening (dial, handshake, waiting for a session) needs far more state
@@ -698,6 +732,16 @@ mod tests {
 
     /// Serves a rule whose opener only counts calls and fails (or never finishes).
     async fn serve_counting(max_flows: usize, fail: bool) -> (SocketAddr, Arc<AtomicUsize>) {
+        let (addr, calls, _) = serve_limited(max_flows, fail, None).await;
+        (addr, calls)
+    }
+
+    /// Also with a per-address limit; the rule's counters come back too.
+    async fn serve_limited(
+        max_flows: usize,
+        fail: bool,
+        per_ip: Option<Arc<PerIp>>,
+    ) -> (SocketAddr, Arc<AtomicUsize>, Arc<ForwardStats>) {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = socket.local_addr().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
@@ -712,15 +756,17 @@ mod tests {
                 }
             }
         };
+        let stats = ForwardStats::new("127.0.0.1:0", "target", "udp");
         tokio::spawn(serve(
             socket,
             tuning(max_flows),
             "target".into(),
             None,
-            ForwardStats::new("127.0.0.1:0", "target", "udp"),
+            stats.clone(),
+            per_ip,
             opener,
         ));
-        (addr, calls)
+        (addr, calls, stats)
     }
 
     async fn client(to: SocketAddr) -> UdpSocket {
@@ -750,6 +796,36 @@ mod tests {
         }
         // One attempt, then the client is ignored for FAILED_BACKOFF.
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_address_gets_only_its_share_of_flows() {
+        let limit = PerIp::new(2);
+        let (addr, calls, stats) = serve_limited(10, false, Some(limit)).await;
+        // Five clients from one address (127.0.0.1): two flows, the rest refused.
+        let mut clients = Vec::new();
+        for _ in 0..5 {
+            let c = client(addr).await;
+            c.send(b"x").await.unwrap();
+            c.send(b"y").await.unwrap();
+            clients.push(c);
+        }
+        sleep(Duration::from_millis(200)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let refused = stats_of(&stats).refused_per_ip;
+        assert_eq!(refused, 3, "counted once per client, not per packet");
+    }
+
+    fn stats_of(stats: &Arc<ForwardStats>) -> crate::stats::ForwardStatus {
+        let config = crate::config::Config::parse(
+            "role = \"entry\"\nmode = \"reverse\"\n[tunnel]\nlisten = \"0.0.0.0:3080\"\n\
+             token = \"0123456789abcdef0123\"\n[[forward]]\nlisten = \"127.0.0.1:0\"\n\
+             target = \"127.0.0.1:53\"\nprotocol = \"udp\"\n",
+        )
+        .unwrap();
+        let mut all = crate::stats::Stats::new(&config);
+        Arc::get_mut(&mut all).unwrap().forwards = vec![stats.clone()];
+        all.snapshot().forwards.remove(0)
     }
 
     #[tokio::test]

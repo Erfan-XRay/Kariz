@@ -65,8 +65,37 @@ impl Ord for Version {
                 (None, None) => Ordering::Equal,
                 (None, Some(_)) => Ordering::Greater,
                 (Some(_), None) => Ordering::Less,
-                (Some(a), Some(b)) => a.cmp(b),
+                (Some(a), Some(b)) => cmp_pre(a, b),
             })
+    }
+}
+
+/// Orders the parts after the dash as semver does: dot-separated, numbers by value (so
+/// `beta.10` comes after `beta.9`), a number before a word, and fewer parts first when
+/// the rest are equal (`beta` before `beta.1`).
+fn cmp_pre(a: &str, b: &str) -> Ordering {
+    let (mut a, mut b) = (a.split('.'), b.split('.'));
+    loop {
+        let (x, y) = match (a.next(), b.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => (x, y),
+        };
+        let numeric = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit());
+        let order = match (numeric(x), numeric(y)) {
+            // Longer digit strings are bigger numbers (leading zeros aside).
+            (true, true) => {
+                let (x, y) = (x.trim_start_matches('0'), y.trim_start_matches('0'));
+                x.len().cmp(&y.len()).then_with(|| x.cmp(y))
+            }
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            (false, false) => x.cmp(y),
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
     }
 }
 
@@ -599,6 +628,21 @@ mod tests {
         assert!(v("1.0.0") > v("0.99.99"));
         assert!(v("0.8.0") > v("0.8.0-beta"), "a release beats its own beta");
         assert!(v("0.8.0-beta") > v("0.7.9"));
+        // Betas in order, also past nine.
+        let betas = [
+            "2.4.0-beta",
+            "2.4.0-beta.1",
+            "2.4.0-beta.2",
+            "2.4.0-beta.9",
+            "2.4.0-beta.10",
+            "2.4.0-rc.1",
+            "2.4.0",
+        ];
+        for pair in betas.windows(2) {
+            assert!(v(pair[0]) < v(pair[1]), "{} < {}", pair[0], pair[1]);
+        }
+        assert!(v("2.4.0-1") < v("2.4.0-beta"), "a number before a word");
+        assert_eq!(v("2.4.0-beta.01"), v("2.4.0-beta.01"));
         for bad in ["", "1.2", "1.2.3.4", "a.b.c", "1.2.3-", "latest"] {
             assert!(Version::parse(bad).is_none(), "{bad}");
         }

@@ -32,6 +32,9 @@ old one are dropped.
 | 🟢 Server *name* is back | it came back, with how long it was offline |
 | 🔴 Tunnel *name* is down | a tunnel stayed down for its wait time (30 seconds); the last error is shown |
 | 🟢 Tunnel *name* is up again | it is connected again, with how long it was down |
+| 🟠 Tunnel *name* is connected, but users cannot connect | three health probes in a row (45 seconds) found no way through: every stream taken, or the target the exit side connects to is down, which it names ([Status](status.md)) |
+| 🟢 Users get through tunnel *name* again | a probe got through again, with how long it was blocked |
+| 🟡 Tunnel *name* is nearly full | 80 % of its streams are in use; told once, and again only after it dropped below 70 % |
 
 So that you are not woken up for nothing:
 

@@ -12,9 +12,16 @@
 //! * a subject that goes down again and again is said to be unstable, then left alone
 //!   until it settles.
 //!
+//! A tunnel can also be connected and still let no one through: every stream taken, or
+//! the target down. The entry side's health probe finds that ([`ProbeStatus`]); a few
+//! failed probes in a row are told like a tunnel going down. A tunnel whose streams are
+//! nearly all taken is told about once, before it gets there.
+//!
 //! No clock and no network in here: `step` is given the time, so it is tested directly.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+
+use kariz::stats::{ProbeOutcome, ProbeStatus};
 
 use crate::hub::ServerView;
 
@@ -25,6 +32,14 @@ const FLAP_WINDOW: i64 = 3600;
 
 /// How long after the panel starts nothing is said.
 pub const STARTUP_GRACE: i64 = 60;
+
+/// Failed health probes in a row (15 s apart) before a tunnel counts as letting no one
+/// through.
+const BLOCKED_AFTER: u32 = 3;
+/// Share of the streams in use, in tenths, at which a tunnel is told to be nearly full,
+/// and below which it may be told again.
+const BUSY_AT: u64 = 8;
+const BUSY_CLEAR: u64 = 7;
 
 /// What the user chose to hear about, and how long a thing has to stay down first.
 #[derive(Debug, Clone, Copy)]
@@ -71,6 +86,24 @@ pub enum Notice {
     Unstable {
         name: String,
     },
+    /// Connected, but new connections do not get through: `target` when the exit side
+    /// cannot reach it, otherwise `error` says why (every stream taken, no answer).
+    TunnelBlocked {
+        name: String,
+        server: String,
+        target: Option<String>,
+        error: Option<String>,
+    },
+    TunnelUnblocked {
+        name: String,
+        blocked_secs: i64,
+    },
+    /// Most of the tunnel's streams are in use: soon new connections will wait and fail.
+    TunnelBusy {
+        name: String,
+        streams: u64,
+        max: u64,
+    },
 }
 
 /// A subject that is down, since when, and whether the user was told.
@@ -83,6 +116,8 @@ struct Track {
     server: String,
     error: Option<String>,
     tunnels: Vec<String>,
+    /// A blocked tunnel: the target its exit side cannot reach.
+    target: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -96,6 +131,12 @@ pub struct Alerter {
     started: i64,
     servers: HashMap<String, Track>,
     tunnels: HashMap<String, Track>,
+    /// Tunnels that are connected but let no one through.
+    blocked: HashMap<String, Track>,
+    /// Tunnels told to be nearly full, until they are well below that again.
+    busy: HashSet<String>,
+    /// Nearly full tunnels found by the last look, to be told.
+    busy_due: Vec<Notice>,
     /// When each subject was last announced down.
     announced: HashMap<String, VecDeque<i64>>,
     /// Subjects called unstable: their messages are held back.
@@ -118,6 +159,9 @@ impl Alerter {
             started: now,
             servers: HashMap::new(),
             tunnels: HashMap::new(),
+            blocked: HashMap::new(),
+            busy: HashSet::new(),
+            busy_due: Vec::new(),
             announced: HashMap::new(),
             unstable: HashSet::new(),
             recoveries: Vec::new(),
@@ -130,6 +174,7 @@ impl Alerter {
     pub fn step(&mut self, views: &[ServerView], now: i64, rules: Rules) -> Vec<Notice> {
         self.look_at_servers(views, now);
         self.look_at_tunnels(views, now);
+        self.look_at_health(views, now);
 
         let mut out = Vec::new();
         if now >= self.started + STARTUP_GRACE {
@@ -179,7 +224,42 @@ impl Alerter {
                     Flap::HeldBack => {}
                 }
             }
+            // A few failed probes already took their time: no grace on top.
+            let mut due: Vec<String> = self
+                .blocked
+                .iter()
+                .filter(|(_, t)| !t.announced)
+                .map(|(k, _)| k.clone())
+                .collect();
+            due.sort();
+            for key in due {
+                let flap = self.flap(&blocked_subject(&key), now);
+                let Some(t) = self.blocked.get_mut(&key) else {
+                    continue;
+                };
+                t.announced = true;
+                if !rules.tunnels {
+                    continue;
+                }
+                match flap {
+                    Flap::Send => out.push(Notice::TunnelBlocked {
+                        name: t.name.clone(),
+                        server: t.server.clone(),
+                        target: t.target.clone(),
+                        error: t.error.clone(),
+                    }),
+                    Flap::FirstHeldBack => out.push(Notice::Unstable {
+                        name: t.name.clone(),
+                    }),
+                    Flap::HeldBack => {}
+                }
+            }
+            if rules.tunnels {
+                out.append(&mut self.busy_due);
+            }
         }
+        // Found nearly full while nothing is said: not told late.
+        self.busy_due.clear();
         for (subject, is_server, notice) in std::mem::take(&mut self.recoveries) {
             let wanted = if is_server {
                 rules.servers
@@ -219,6 +299,7 @@ impl Alerter {
                     server: String::new(),
                     error: None,
                     tunnels: s.tunnels.iter().map(|t| t.info.name.clone()).collect(),
+                    target: None,
                 });
             }
         }
@@ -269,6 +350,7 @@ impl Alerter {
                         server: server.clone(),
                         error: None,
                         tunnels: Vec::new(),
+                        target: None,
                     });
                     t.error = error;
                     t.server = server;
@@ -298,6 +380,96 @@ impl Alerter {
         self.tunnels.retain(|k, _| present.contains(k.as_str()));
     }
 
+    /// The entry side's probe and both sides' streams, for tunnels that are connected (one
+    /// that is down is told about as such, and is not also blocked).
+    fn look_at_health(&mut self, views: &[ServerView], now: i64) {
+        let mut blocked: HashMap<String, (String, Option<String>, Option<String>)> = HashMap::new();
+        let mut healthy: HashSet<String> = HashSet::new();
+        let mut fullest: HashMap<String, (u64, u64)> = HashMap::new();
+        for s in views.iter().filter(|s| s.online) {
+            for t in &s.tunnels {
+                let Some(status) = t.info.status.as_ref().filter(|st| st.peer.connected) else {
+                    continue;
+                };
+                let name = &t.info.name;
+                if let (Some(n), Some(max)) = (status.peer.streams, status.peer.streams_max) {
+                    let worst = fullest.entry(name.clone()).or_insert((n, max));
+                    // n/max above the kept one (compared without dividing).
+                    if max > 0
+                        && u128::from(n) * u128::from(worst.1)
+                            > u128::from(worst.0) * u128::from(max)
+                    {
+                        *worst = (n, max);
+                    }
+                }
+                if t.info.role != "entry" {
+                    continue;
+                }
+                match status.probe.as_ref().map(probe_state) {
+                    Some(ProbeState::Blocked { target, error }) => {
+                        blocked.insert(name.clone(), (s.name.clone(), target, error));
+                    }
+                    Some(ProbeState::Healthy) => {
+                        healthy.insert(name.clone());
+                    }
+                    Some(ProbeState::Unsure) | None => {}
+                }
+            }
+        }
+        for (name, (server, target, error)) in blocked {
+            let t = self.blocked.entry(name.clone()).or_insert_with(|| Track {
+                name: name.clone(),
+                since: now,
+                announced: false,
+                server: server.clone(),
+                error: None,
+                tunnels: Vec::new(),
+                target: None,
+            });
+            (t.server, t.target, t.error) = (server, target, error);
+        }
+        for name in healthy {
+            if let Some(t) = self.blocked.remove(&name) {
+                if t.announced {
+                    self.recoveries.push((
+                        blocked_subject(&name),
+                        false,
+                        Notice::TunnelUnblocked {
+                            name,
+                            blocked_secs: now - t.since,
+                        },
+                    ));
+                }
+            }
+        }
+        // A tunnel that went down is told about as down; its "blocked" ends quietly.
+        let down: HashSet<&String> = self.tunnels.keys().collect();
+        self.blocked.retain(|k, _| !down.contains(k));
+
+        for (name, (n, max)) in fullest {
+            if max == 0 {
+                continue;
+            }
+            if n * 10 >= max * BUSY_AT {
+                if self.busy.insert(name.clone()) {
+                    self.busy_due.push(Notice::TunnelBusy {
+                        name,
+                        streams: n,
+                        max,
+                    });
+                }
+            } else if n * 10 < max * BUSY_CLEAR {
+                self.busy.remove(&name);
+            }
+        }
+        let present: HashSet<&str> = views
+            .iter()
+            .flat_map(|s| s.tunnels.iter().map(|t| t.info.name.as_str()))
+            .collect();
+        self.blocked.retain(|k, _| present.contains(k.as_str()));
+        self.busy.retain(|k| present.contains(k.as_str()));
+    }
+
     /// Whether a subject going down may be told, or has been going down too often.
     fn flap(&mut self, subject: &str, now: i64) -> Flap {
         let times = self.announced.entry(subject.to_owned()).or_default();
@@ -321,12 +493,42 @@ fn subject(is_server: bool, key: &str) -> String {
     format!("{}:{key}", if is_server { "srv" } else { "tun" })
 }
 
+fn blocked_subject(key: &str) -> String {
+    format!("blk:{key}")
+}
+
+/// What one probe reading says about a tunnel.
+enum ProbeState {
+    Blocked {
+        target: Option<String>,
+        error: Option<String>,
+    },
+    Healthy,
+    /// A failure or two (not yet a pattern), or an exit side too old to answer.
+    Unsure,
+}
+
+fn probe_state(p: &ProbeStatus) -> ProbeState {
+    match p.outcome {
+        ProbeOutcome::Ok => ProbeState::Healthy,
+        ProbeOutcome::Failed if p.fails >= BLOCKED_AFTER => ProbeState::Blocked {
+            target: None,
+            error: p.error.clone(),
+        },
+        ProbeOutcome::TargetFailed if p.target_fails >= BLOCKED_AFTER => ProbeState::Blocked {
+            target: Some(p.target.clone()),
+            error: p.error.clone(),
+        },
+        _ => ProbeState::Unsure,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::hub::TunnelView;
     use crate::wire::TunnelInfo;
-    use kariz::stats::{PeerStatus, Status, Totals};
+    use kariz::stats::{PeerStatus, ProbeOutcome, ProbeStatus, Status, Totals};
 
     fn status(connected: bool) -> Status {
         Status {
@@ -347,6 +549,9 @@ mod tests {
                 handshakes_ok: 0,
                 handshakes_failed: 0,
                 last_error: None,
+                streams: None,
+                streams_max: None,
+                full: 0,
             },
             totals: Totals {
                 bytes_up: 0,
@@ -358,6 +563,7 @@ mod tests {
             },
             forwards: Vec::new(),
             exit: None,
+            probe: None,
         }
     }
 
@@ -590,5 +796,120 @@ mod tests {
         a.step(&down, 0, R);
         a.step(&gone, 10, R);
         assert!(a.step(&gone, 100, R).is_empty());
+    }
+
+    /// An entry side that is connected, with a probe reading and streams in use.
+    fn probed(name: &str, probe: Option<(ProbeOutcome, u32)>, streams: (u64, u64)) -> TunnelView {
+        let mut t = tunnel(name, "entry", Some(true));
+        let status = t.info.status.as_mut().unwrap();
+        status.peer.streams = Some(streams.0);
+        status.peer.streams_max = Some(streams.1);
+        status.probe = probe.map(|(outcome, fails)| ProbeStatus {
+            outcome,
+            ms: None,
+            target: "127.0.0.1:443".into(),
+            error: Some("every tunnel connection is full (16384 streams open)".into()),
+            fails: if outcome == ProbeOutcome::Failed {
+                fails
+            } else {
+                0
+            },
+            target_fails: if outcome == ProbeOutcome::TargetFailed {
+                fails
+            } else {
+                0
+            },
+            ok_total: 1,
+            failed_total: u64::from(fails),
+            secs_ago: 1,
+        });
+        t
+    }
+
+    #[test]
+    fn a_connected_tunnel_that_lets_no_one_through_is_told_and_its_recovery_too() {
+        let mut a = settled();
+        let at = |p| [server("a", true, vec![probed("t", p, (10, 16384))])];
+        // One or two failures are not a pattern.
+        assert!(a
+            .step(&at(Some((ProbeOutcome::Failed, 2))), 0, R)
+            .is_empty());
+        assert_eq!(
+            a.step(&at(Some((ProbeOutcome::Failed, 3))), 15, R),
+            vec![Notice::TunnelBlocked {
+                name: "t".into(),
+                server: "A".into(),
+                target: None,
+                error: Some("every tunnel connection is full (16384 streams open)".into()),
+            }]
+        );
+        // Said once, and a probe of an old exit side changes nothing.
+        assert!(a
+            .step(&at(Some((ProbeOutcome::Failed, 4))), 30, R)
+            .is_empty());
+        assert!(a
+            .step(&at(Some((ProbeOutcome::Unsupported, 0))), 45, R)
+            .is_empty());
+        assert_eq!(
+            a.step(&at(Some((ProbeOutcome::Ok, 0))), 90, R),
+            vec![Notice::TunnelUnblocked {
+                name: "t".into(),
+                blocked_secs: 75,
+            }]
+        );
+        // A target that is down names the target.
+        a.step(&at(Some((ProbeOutcome::TargetFailed, 3))), 200, R);
+        let notes = a.step(&at(Some((ProbeOutcome::TargetFailed, 4))), 215, R);
+        assert!(notes.is_empty(), "already told: {notes:?}");
+    }
+
+    #[test]
+    fn a_blocked_tunnel_that_goes_down_is_told_as_down_only() {
+        let mut a = settled();
+        let blocked = [server(
+            "a",
+            true,
+            vec![probed("t", Some((ProbeOutcome::Failed, 3)), (0, 0))],
+        )];
+        assert_eq!(a.step(&blocked, 0, R).len(), 1);
+        let down = [server("a", true, vec![tunnel("t", "entry", Some(false))])];
+        a.step(&down, 10, R);
+        assert!(matches!(
+            a.step(&down, 40, R)[..],
+            [Notice::TunnelDown { .. }]
+        ));
+        let up = [server(
+            "a",
+            true,
+            vec![probed("t", Some((ProbeOutcome::Ok, 0)), (0, 0))],
+        )];
+        let notes = a.step(&up, 100, R);
+        assert!(matches!(notes[..], [Notice::TunnelUp { .. }]), "{notes:?}");
+    }
+
+    #[test]
+    fn a_nearly_full_tunnel_is_told_once_until_it_empties() {
+        let mut a = settled();
+        let at = |n| [server("a", true, vec![probed("t", None, (n, 16384))])];
+        assert!(a.step(&at(12_000), 0, R).is_empty());
+        assert_eq!(
+            a.step(&at(13_200), 10, R),
+            vec![Notice::TunnelBusy {
+                name: "t".into(),
+                streams: 13_200,
+                max: 16_384,
+            }]
+        );
+        assert!(a.step(&at(14_000), 20, R).is_empty());
+        // Down a little is not enough to be told again.
+        a.step(&at(12_000), 30, R);
+        assert!(a.step(&at(13_500), 40, R).is_empty());
+        // Well below, and full again: told again.
+        a.step(&at(5_000), 50, R);
+        assert_eq!(a.step(&at(13_500), 60, R).len(), 1);
+        // Nothing while the panel has just started, and not late either.
+        let mut fresh = Alerter::new(0);
+        assert!(fresh.step(&at(15_000), 10, R).is_empty());
+        assert!(fresh.step(&at(15_000), 100, R).is_empty());
     }
 }

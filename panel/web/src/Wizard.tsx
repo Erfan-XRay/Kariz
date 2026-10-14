@@ -11,6 +11,7 @@ import { MuxFields, MuxToggle, emptyMux, muxSpecOf, muxToSpec } from "./MuxField
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
+import { PerIpLimit, perIpOf } from "./PerIpLimit";
 import { BenchPanel, benchLabel, isV6 } from "./Benchmark";
 import type { BenchChoice } from "./Benchmark";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, transportLabel } from "./transport";
@@ -107,6 +108,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [ports, setPorts] = useState("");
   const [protocol, setProtocol] = useState("tcp");
   const [target, setTarget] = useState("127.0.0.1");
+  const [perIp, setPerIp] = useState("");
   const [pool, setPool] = useState<number | undefined>();
   const [check, setCheck] = useState<{ entry: CheckReply; exit: CheckReply } | null>(null);
   const [checking, setChecking] = useState(false);
@@ -195,6 +197,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     mux: muxSpecOf(mux, transport, muxOn),
     encryption: cipherOf(enc, transport),
     quic_obfs: obfsOf(obfs, transport),
+    max_conns_per_ip: perIpOf(perIp).value,
     tls_cert: transport === "wss" && tls.mode === "real" && tls.cert ? tls.cert : undefined,
     tls_key: transport === "wss" && tls.mode === "real" && tls.key ? tls.key : undefined,
     tls_host: transport === "wss" && tls.mode === "real" && tls.cert && tls.host ? tls.host : undefined,
@@ -218,6 +221,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     if (s === 1 && !cipherReady(enc, transport, encAck)) return t("enc.needAck");
     if (s === 1 && muxToSpec(mux).bad) return t(`mux.${muxToSpec(mux).bad}`) + ": " + t("mux.badValue");
     if (s === 3 && parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
+    if (s === 3 && perIpOf(perIp).bad) return t("perip.bad");
     return "";
   };
 
@@ -570,6 +574,9 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     <label htmlFor="wz-target">{t("wz.targetHost")}</label>
                     <input className="text mono" id="wz-target" dir="ltr" value={target} onChange={(e) => setTarget(e.target.value.trim())} />
                   </div>
+                </div>
+                <div style={{ maxWidth: 520 }}>
+                  <PerIpLimit id="wz-perip" value={perIp} onChange={setPerIp} />
                 </div>
               </>
             )}

@@ -1,6 +1,6 @@
 //! How `kariz status` shows a daemon's status (docs/status.md).
 
-use kariz::stats::{ForwardStatus, LastError, Status};
+use kariz::stats::{ForwardStatus, LastError, ProbeOutcome, ProbeStatus, Status};
 
 use crate::logging::{Style, AQUA, BOLD, DIM, RED, TEAL, YELLOW};
 
@@ -87,7 +87,62 @@ fn forward_line(style: &Style, f: &ForwardStatus, before: Option<(&ForwardStatus
     if f.open_failures > 0 {
         line.push_str(&style.paint(RED, &format!("   {} failed", f.open_failures)));
     }
+    if f.refused_per_ip > 0 {
+        line.push_str(&style.paint(
+            YELLOW,
+            &format!("   {} over the per-address limit", f.refused_per_ip),
+        ));
+    }
     line
+}
+
+/// The health probe's last finding, entry side.
+fn health_line(style: &Style, p: &ProbeStatus) -> String {
+    let target = if p.target.is_empty() {
+        "the tunnel".to_string()
+    } else {
+        p.target.clone()
+    };
+    let checked = format!("checked {} ago", duration(p.secs_ago));
+    let in_a_row = |n: u32| {
+        if n > 1 {
+            format!(" ({n} in a row)")
+        } else {
+            String::new()
+        }
+    };
+    let error = p.error.as_deref().unwrap_or_default();
+    match p.outcome {
+        ProbeOutcome::Ok => format!(
+            "{} · {} to {target} · {checked}",
+            style.paint(&format!("{BOLD}{TEAL}"), "● users can connect"),
+            style.paint(AQUA, &format!("{} ms", p.ms.unwrap_or_default())),
+        ),
+        ProbeOutcome::TargetFailed => format!(
+            "{} · {checked}",
+            style.paint(
+                RED,
+                &format!(
+                    "○ {target} cannot be reached from the exit side{}",
+                    in_a_row(p.target_fails)
+                )
+            ),
+        ),
+        ProbeOutcome::Failed => format!(
+            "{} · {checked}",
+            style.paint(
+                RED,
+                &format!(
+                    "○ new connections do not get through{}: {error}",
+                    in_a_row(p.fails)
+                )
+            ),
+        ),
+        ProbeOutcome::Unsupported => style.paint(
+            DIM,
+            "not checked: the other server is too old to answer health probes",
+        ),
+    }
 }
 
 /// The whole view. `name`: the tunnel's name (its config file). `before`: an earlier
@@ -132,6 +187,15 @@ pub fn render(style: &Style, name: &str, now: &Status, before: Option<(&Status, 
         if let Some(secs) = p.connected_secs {
             parts.push(format!("for {}", duration(secs)));
         }
+        if let (Some(n), Some(max)) = (p.streams, p.streams_max) {
+            let text = format!("{n} of {max} streams");
+            // Near the limit new connections start to wait and fail.
+            parts.push(if max > 0 && n * 10 >= max * 8 {
+                style.paint(YELLOW, &text)
+            } else {
+                text
+            });
+        }
     } else {
         parts.push(style.paint(&format!("{BOLD}{RED}"), "○ not connected"));
     }
@@ -141,11 +205,24 @@ pub fn render(style: &Style, name: &str, now: &Status, before: Option<(&Status, 
             &format!("{} failed handshakes", p.handshakes_failed),
         ));
     }
+    if p.full > 0 {
+        parts.push(style.paint(
+            RED,
+            &format!("{} connections failed: every session was full", p.full),
+        ));
+    }
     match &p.last_error {
         Some(e) if !p.connected || e.secs_ago < 60 => parts.push(error_text(style, e)),
         _ => {}
     }
     out.push(format!("  {} {}", label(other), parts.join(" · ")));
+    if let Some(probe) = &now.probe {
+        out.push(format!(
+            "  {} {}",
+            label("health"),
+            health_line(style, probe)
+        ));
+    }
 
     if let Some(exit) = &now.exit {
         let before = before.map(|(b, secs)| (b.totals.bytes_up, b.totals.bytes_down, secs));
@@ -212,6 +289,9 @@ mod tests {
                 handshakes_ok: 2,
                 handshakes_failed: 0,
                 last_error: None,
+                streams: Some(140),
+                streams_max: Some(8192),
+                full: 0,
             },
             totals: Totals::default(),
             forwards: vec![ForwardStatus {
@@ -225,8 +305,10 @@ mod tests {
                 bytes_up: 1 << 20,
                 bytes_down,
                 open_failures: 0,
+                refused_per_ip: 0,
             }],
             exit: None,
+            probe: None,
         }
     }
 
@@ -240,9 +322,12 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("● connected · 2 of 2 sessions · rtt 38.4 ms · for 1 h 0 min"),
+            text.contains(
+                "● connected · 2 of 2 sessions · rtt 38.4 ms · for 1 h 0 min · 140 of 8192 streams"
+            ),
             "{text}"
         );
+        assert!(!text.contains("health"), "no probe yet: {text}");
         assert!(
             text.contains("[::]:443 -> 127.0.0.1:443 (tcp+udp)"),
             "{text}"
@@ -298,5 +383,52 @@ mod tests {
             text.contains("last error 1 min ago: 10.0.0.5:22: connection refused"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn health_capacity_and_refusals_are_shown() {
+        let mut status = entry(0);
+        let probe = |outcome, error: Option<&str>| ProbeStatus {
+            outcome,
+            ms: Some(46),
+            target: "127.0.0.1:443".into(),
+            error: error.map(str::to_owned),
+            fails: 3,
+            target_fails: 2,
+            ok_total: 10,
+            failed_total: 5,
+            secs_ago: 4,
+        };
+        status.probe = Some(probe(ProbeOutcome::Ok, None));
+        let text = render(&plain(), "main", &status, None);
+        assert!(
+            text.contains(
+                "health      ● users can connect · 46 ms to 127.0.0.1:443 · checked 4 s ago"
+            ),
+            "{text}"
+        );
+        status.probe = Some(probe(
+            ProbeOutcome::Failed,
+            Some("every tunnel connection is full"),
+        ));
+        let text = render(&plain(), "main", &status, None);
+        assert!(
+            text.contains("○ new connections do not get through (3 in a row): every tunnel connection is full"),
+            "{text}"
+        );
+        status.probe = Some(probe(ProbeOutcome::TargetFailed, None));
+        let text = render(&plain(), "main", &status, None);
+        assert!(
+            text.contains("○ 127.0.0.1:443 cannot be reached from the exit side (2 in a row)"),
+            "{text}"
+        );
+        status.peer.full = 7;
+        status.forwards[0].refused_per_ip = 4;
+        let text = render(&plain(), "main", &status, None);
+        assert!(
+            text.contains("7 connections failed: every session was full"),
+            "{text}"
+        );
+        assert!(text.contains("4 over the per-address limit"), "{text}");
     }
 }
