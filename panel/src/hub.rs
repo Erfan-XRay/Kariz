@@ -84,6 +84,8 @@ pub struct GreJoin {
     /// The panel's end of the link (what the agent dials) and the new server's.
     pub panel_addr: String,
     pub server_addr: String,
+    /// GRE or VXLAN, as the network makes its links.
+    pub kind: LinkKind,
 }
 
 /// How a server that comes in over a GRE link is reached: its agent dials the panel's end
@@ -956,6 +958,7 @@ impl Hub {
                 name: name.to_owned(),
                 panel_addr,
                 server_addr: theirs.address,
+                kind: link.kind,
                 network: self
                     .networks
                     .networks()?

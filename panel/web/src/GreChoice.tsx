@@ -1,3 +1,4 @@
+import { kindLabel } from "./api";
 import type { Link, Network } from "./api";
 import { useApp } from "./store";
 
@@ -9,7 +10,7 @@ export const linkBetween = (links: Link[], network: string, a: string, b: string
 export const linkWithAddress = (links: Link[], host: string): Link | undefined => (host ? links.find((l) => l.addr_a === host || l.addr_b === host) : undefined);
 
 /**
- * Run the tunnel over a private GRE network: it listens on and dials the private address of the
+ * Run the tunnel over a private (GRE or VXLAN) network: it listens on and dials the private address of the
  * server that accepts its connections, in either mode, so it never uses the public ones. Used by the
  * wizard and by the edit page (where unticking it puts the tunnel back on the public addresses).
  */
@@ -49,7 +50,7 @@ export function GreChoice({
           <select className="select" aria-label={t("wz.greNet")} value={value} onChange={(e) => onChange(e.target.value)} style={{ maxWidth: 360 }}>
             {networks.map((n) => (
               <option key={n.id} value={n.id}>
-                {n.name} ({n.cidr})
+                {n.name} ({n.cidr}, {kindLabel(n.kind)})
               </option>
             ))}
           </select>

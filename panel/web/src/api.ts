@@ -164,7 +164,13 @@ export interface SpeedPoll {
 /** How an agent reaches the panel: `auto` tries every transport in turn. */
 export type LinkTransport = "auto" | "tcpmux" | "kcp" | "wss" | "quic";
 
-/** The panel's address on a private (GRE) network link to another server: what that server's agent can dial. */
+/** How a private network's links are made. */
+export type LinkKind = "gre" | "vxlan";
+
+/** "GRE" or "VXLAN", as a label. */
+export const kindLabel = (kind: LinkKind | undefined) => (kind === "vxlan" ? "VXLAN" : "GRE");
+
+/** The panel's address on a private (GRE or VXLAN) network link to another server: what that server's agent can dial. */
 export interface GreAddr {
   link: string;
   network: string;
@@ -172,6 +178,7 @@ export interface GreAddr {
   server: string;
   addr: string;
   peer_addr: string;
+  kind?: LinkKind;
 }
 
 export interface PanelAddresses {
@@ -205,9 +212,10 @@ export interface GreJoin {
   name: string;
   /** The private network the link's addresses come from. */
   network: string;
-  /** The panel's end of the GRE link (what the agent dials) and the new server's. */
+  /** The panel's end of the link (what the agent dials) and the new server's. */
   panel_addr: string;
   server_addr: string;
+  kind?: LinkKind;
 }
 
 export interface LinkError {
@@ -260,7 +268,7 @@ export interface ServerInfo {
   /** Why its link last ended or was refused, until it connects again. */
   last_error?: LinkError | null;
   /** The private network link its agent connects through, when it does. */
-  gre?: { link: string; network: string } | null;
+  gre?: { link: string; network: string; kind?: LinkKind } | null;
   /** Where the panel dials it, for a server the panel connects to (reverse). */
   reverse?: ReverseTarget | null;
   /** The transport its agent's link uses now (tcpmux or kcp). */
@@ -409,6 +417,9 @@ export interface Network {
   id: string;
   name: string;
   cidr: string;
+  /** GRE, or VXLAN over UDP `port` (0 for GRE). */
+  kind: LinkKind;
+  port: number;
   created: number;
   links: number;
   capacity: number;
@@ -422,8 +433,11 @@ export interface Link {
   subnet: string;
   addr_a: string;
   addr_b: string;
+  /** The GRE key, or for VXLAN the VNI. */
   gre_key: number;
   ifname: string;
+  kind: LinkKind;
+  port: number;
 }
 
 export interface UpdateStatus {
@@ -560,7 +574,8 @@ export const api = {
   backup: (passphrase: string) => call<{ data: string }>("POST", "backup", { passphrase }),
   restore: (passphrase: string, data: string, replace: boolean) => call<{ servers: number; restart: boolean }>("POST", "restore", { passphrase, data, replace }),
   networks: () => call<{ networks: Network[]; links: Link[] }>("GET", "networks"),
-  createNetwork: (name: string, cidr: string) => call<Network>("POST", "networks", { name, cidr }),
+  createNetwork: (name: string, cidr: string, kind: LinkKind = "gre", port?: number) =>
+    call<Network>("POST", "networks", { name, cidr, kind, ...(kind === "vxlan" && port ? { port } : {}) }),
   deleteNetwork: (id: string) => call<object>("POST", "networks/delete", { id }),
   createLinks: (network: string, servers: string[], hub?: string) => call<{ op: string }>("POST", "networks/links", { network, servers, hub }),
   deleteLink: (id: string) => call<object>("POST", "networks/links/delete", { id }),

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ApiError } from "./api";
+import { api, ApiError, kindLabel } from "./api";
 import type { GreJoin, LinkTransport, PanelAddresses, ServerInfo } from "./api";
 import { NewGreLinkFields, greJoinError, ipv4Ok } from "./GreLink";
 import { useNetworks } from "./Networks";
@@ -112,7 +112,7 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
     ...(own?.v4 ? [[t("add.addr.v4"), own.v4] as [string, string]] : []),
     ...(own?.v6 ? [[t("add.addr.v6"), own.v6] as [string, string]] : []),
     ...(here && here !== own?.v4 && here !== own?.v6 ? [[t("add.addr.here"), here] as [string, string]] : []),
-    ...(own?.gre ?? []).filter((g) => g.server === server.id).map((g) => [t("fix.addr.gre", { network: g.network }), g.addr] as [string, string]),
+    ...(own?.gre ?? []).filter((g) => g.server === server.id).map((g) => [t("fix.addr.gre", { kind: kindLabel(g.kind), network: g.network }), g.addr] as [string, string]),
   ];
   const greNow = (own?.gre ?? []).find((g) => g.server === server.id && g.addr === host.trim());
   const portText = (x: LinkTransport) => (port == null ? "?" : String(x === "wss" ? port + 1 : port));
@@ -250,7 +250,7 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
               <div className="addr-picks" role="group" aria-label={t("fix.rev.gre.which")}>
                 {mine.map((g) => (
                   <button key={g.link} type="button" className="addr-pick" aria-pressed={viaLink?.link === g.link} onClick={() => setGreLink(g.link)}>
-                    <span>{t("fix.addr.gre", { network: g.network })}</span>
+                    <span>{t("fix.addr.gre", { kind: kindLabel(g.kind), network: g.network })}</span>
                     <code dir="ltr">{g.peer_addr}</code>
                   </button>
                 ))}
@@ -346,7 +346,7 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
         <>
           {madeGre && (
             <div className="gre-made">
-              <span className="badge">{t("srv.greChip", { network: madeGre.network })}</span>
+              <span className="badge">{t("srv.greChip", { kind: kindLabel(madeGre.kind), network: madeGre.network })}</span>
               {/* The addresses are isolated left to right, so a Persian sentence around them keeps its order. */}
               <span className="small">{t("add.gre.link", { panel: `\u2066${madeGre.panel_addr}\u2069`, server: `\u2066${madeGre.server_addr}\u2069`, name: `\u2068${madeGre.name}\u2069` })}</span>
               <span className="help">{t("fix.rev.gre.made", { addr: `\u2066${madeGre.server_addr}:${rport}\u2069` })}</span>

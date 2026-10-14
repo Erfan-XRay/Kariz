@@ -1,9 +1,17 @@
 import { useEffect, useState } from "react";
-import { ApiError, api } from "./api";
-import type { Link, Network, ServerInfo } from "./api";
+import { ApiError, api, kindLabel } from "./api";
+import type { Link, LinkKind, Network, ServerInfo } from "./api";
 import { Checklist, describeError, useOp } from "./ops";
 import { useApp } from "./store";
-import { Card, Dialog, Empty, Icon } from "./ui";
+import { Card, Dialog, Empty, Icon, Seg } from "./ui";
+
+/** VXLAN's usual UDP port. */
+const VXLAN_PORT = 4789;
+
+/** A network's kind as a short tag: `GRE`, or `VXLAN · UDP 4789`. */
+export function kindTag(n: { kind?: LinkKind; port?: number }): string {
+  return n.kind === "vxlan" ? `VXLAN · UDP ${n.port || VXLAN_PORT}` : "GRE";
+}
 
 /** The networks and links of the panel, kept fresh while the page is open. */
 export function useNetworks(): { networks: Network[]; links: Link[]; loaded: boolean; reload: () => void } {
@@ -55,12 +63,16 @@ function NewNetwork({ onClose, servers }: { onClose: () => void; servers: Server
   const used = servers.flatMap((s) => s.health?.routes ?? []);
   const free = (c: string) => !used.some((r) => overlaps(c, r));
   const [cidr, setCidr] = useState<string>(POOLS.find(free) ?? POOLS[0]);
+  const [kind, setKind] = useState<LinkKind>("gre");
+  const [port, setPort] = useState(String(VXLAN_PORT));
   const [error, setError] = useState("");
   const names = new Map(servers.map((s) => [s.id, s.name]));
+  const portNum = Number(port.trim());
+  const portOk = kind === "gre" || (/^\d{1,5}$/.test(port.trim()) && portNum >= 1 && portNum <= 65535);
   const make = async () => {
     setError("");
     try {
-      await api.createNetwork(name.trim(), cidr.trim());
+      await api.createNetwork(name.trim(), cidr.trim(), kind, kind === "vxlan" ? portNum : undefined);
       onClose();
     } catch (e) {
       setError(e instanceof ApiError ? describeError(t, e.code, names) : String(e));
@@ -75,13 +87,33 @@ function NewNetwork({ onClose, servers }: { onClose: () => void; servers: Server
           <button className="btn btn-ghost btn-sm" type="button" onClick={onClose}>
             {t("cancel")}
           </button>
-          <button className="btn btn-primary btn-sm" type="button" onClick={() => void make()}>
+          <button className="btn btn-primary btn-sm" type="button" disabled={!portOk} onClick={() => void make()}>
             {t("net.make")}
           </button>
         </>
       }
     >
       <p className="muted small">{t("net.newText")}</p>
+      <div className="field">
+        <span className="label">{t("net.kind")}</span>
+        <Seg<LinkKind>
+          value={kind}
+          options={[
+            ["gre", "GRE"],
+            ["vxlan", "VXLAN"],
+          ]}
+          onChange={setKind}
+        />
+        <span className="help">{t(kind === "vxlan" ? "net.kind.vxlan" : "net.kind.gre")}</span>
+      </div>
+      {kind === "vxlan" && (
+        <div className="field">
+          <label htmlFor="nn-port">{t("net.port")}</label>
+          <input className="text mono" id="nn-port" dir="ltr" inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value)} />
+          <span className="help">{t("net.portHelp")}</span>
+          {!portOk && <span className="err">{t("net.portBad")}</span>}
+        </div>
+      )}
       <div className="field">
         <label htmlFor="nn-name">{t("wz.name")}</label>
         <input className="text mono" id="nn-name" dir="ltr" value={name} onChange={(e) => setName(e.target.value)} />
@@ -152,7 +184,7 @@ function AddLinks({ network, servers, onClose }: { network: Network; servers: Se
     >
       {!id && (
         <>
-          <p className="muted small">{t("net.linksText")}</p>
+          <p className="muted small">{t("net.linksText", { kind: kindLabel(network.kind) })}</p>
           <div className="pick-list" role="group" aria-label={t("m.servers")}>
             {servers.map((s) => (
               <label key={s.id} className="pick" aria-disabled={!s.online} style={{ gridTemplateColumns: "auto 1fr auto" }}>
@@ -329,7 +361,10 @@ export function NetworksPage({ servers, onChanged }: { servers: ServerInfo[]; on
             className="net-card"
             title={
               <>
-                {n.name} <span className="tag">{n.cidr}</span>
+                {n.name} <span className="tag">{n.cidr}</span>{" "}
+                <span className="tag" dir="ltr">
+                  {kindTag(n)}
+                </span>
               </>
             }
           >
@@ -360,8 +395,8 @@ export function NetworksPage({ servers, onChanged }: { servers: ServerInfo[]; on
                       <td className="mono" dir="ltr">
                         {l.addr_a} · {l.addr_b}
                       </td>
-                      <td className="mono hide-sm">
-                        {l.gre_key} · {l.ifname}
+                      <td className="mono hide-sm" dir="ltr">
+                        {l.kind === "vxlan" ? `VNI ${l.gre_key}` : l.gre_key} · {l.ifname}
                       </td>
                       <td>
                         <button className="btn btn-ghost btn-sm" type="button" onClick={() => void remove(() => api.deleteLink(l.id))}>
@@ -389,7 +424,9 @@ export function NetworksPage({ servers, onChanged }: { servers: ServerInfo[]; on
       })}
       <div className="banner info net-honest">
         <Icon name="info" size={18} />
-        <span>{t("net.honest")}</span>
+        <span>
+          {t("net.honest")} {t("net.honestVxlan")}
+        </span>
       </div>
 
       {dialog === "new" && (

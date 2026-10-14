@@ -563,6 +563,7 @@ fn gre_made(made: &crate::hub::GreJoin) -> Response {
             "network": made.network,
             "panel_addr": made.panel_addr,
             "server_addr": made.server_addr,
+            "kind": made.kind,
         }),
     )
 }
