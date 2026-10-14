@@ -29,7 +29,7 @@ use crate::config::random_hex;
 use crate::db::Db;
 use crate::join::{self, JoinCode, JOIN_TTL};
 use crate::manage::{Services, Systemd};
-use crate::wire::{Ack, Health, HelloReply, NetSpec, Request, TunnelInfo, MAX_REPLY};
+use crate::wire::{Ack, Health, HelloReply, LinkKind, NetSpec, Request, TunnelInfo, MAX_REPLY};
 
 /// How often the panel asks an agent for its state.
 pub const POLL: Duration = Duration::from_secs(2);
@@ -54,6 +54,8 @@ pub struct GreRef {
     pub link: String,
     /// The name of its network.
     pub network: String,
+    /// GRE or VXLAN.
+    pub kind: LinkKind,
 }
 
 /// A GRE link between the panel's own server and another one, as an address to dial the
@@ -66,6 +68,7 @@ pub struct GreAddr {
     pub server: String,
     pub addr: String,
     pub peer_addr: String,
+    pub kind: LinkKind,
 }
 
 /// A server added to come in through a private (GRE) network: the code its agent joins
@@ -196,6 +199,7 @@ fn gre_via(
         .map(|l| GreRef {
             link: l.id.clone(),
             network: names.get(&l.network).cloned().unwrap_or_default(),
+            kind: l.kind,
         })
 }
 
@@ -212,6 +216,7 @@ fn gre_waiting(
         .map(|l| GreRef {
             link: l.id.clone(),
             network: names.get(&l.network).cloned().unwrap_or_default(),
+            kind: l.kind,
         })
 }
 
@@ -741,7 +746,10 @@ impl Hub {
         if name.is_some_and(|n| !join::valid_name(n)) {
             bail!("bad_input");
         }
-        let panels = self.gre_ready(None, public_ip, transport, way).await?;
+        let kind = self.join_kind(network)?;
+        let panels = self
+            .gre_ready(None, public_ip, transport, way, kind)
+            .await?;
         let network = self.network_for_join(network)?;
         let (id, name) = self.add_waiting(name, public_ip)?;
         let made = self
@@ -776,7 +784,22 @@ impl Hub {
         let Some(name) = name.filter(|_| id != LOCAL) else {
             bail!("no_such_server");
         };
-        let panels = self.gre_ready(Some(id), public_ip, transport, way).await?;
+        let kind = self.join_kind(network)?;
+        // The server's own agent makes its end: an agent older than VXLAN would refuse it.
+        if kind == LinkKind::Vxlan {
+            let version = self
+                .snapshot()?
+                .into_iter()
+                .find(|s| s.id == id)
+                .map(|s| s.version)
+                .unwrap_or_default();
+            if !crate::pair::version_at_least(&version, crate::netops::VXLAN_SINCE) {
+                bail!("old_agent_vxlan:{id}:{version}");
+            }
+        }
+        let panels = self
+            .gre_ready(Some(id), public_ip, transport, way, kind)
+            .await?;
         let network = self.network_for_join(network)?;
         let before = self.saved_addr(id);
         let made = self
@@ -788,15 +811,16 @@ impl Hub {
         made
     }
 
-    /// What a GRE join needs before anything is made: a valid public IPv4 address that no
-    /// other server has, and a panel's server with an IPv4 address of its own (returned) and
-    /// GRE support.
+    /// What a GRE (or VXLAN) join needs before anything is made: a valid public IPv4 address
+    /// that no other server has, and a panel's server with an IPv4 address of its own
+    /// (returned) that can make links of `kind`.
     async fn gre_ready(
         self: &Arc<Self>,
         server: Option<&str>,
         public_ip: &str,
         transport: Option<&str>,
         way: GreWay,
+        kind: LinkKind,
     ) -> Result<String> {
         if transport.is_some_and(|x| !join::valid_transport(x))
             || !crate::netops::valid_addr(public_ip)
@@ -825,6 +849,12 @@ impl Hub {
         {
             bail!("address_taken:{other}");
         }
+        if kind == LinkKind::Vxlan {
+            crate::netops::check_kind(self, LOCAL, kind)
+                .await
+                .map_err(|e| anyhow!(e))?;
+            return Ok(panels);
+        }
         let status: crate::wire::NetStatus = self
             .ask_as(LOCAL, &Request::NetStatus)
             .await
@@ -833,6 +863,21 @@ impl Hub {
             bail!("no_gre:{LOCAL}");
         }
         Ok(panels)
+    }
+
+    /// The kind of link a join makes: that of the network it takes its addresses from (the
+    /// one asked for, else the first there is), or GRE for the network it would make.
+    fn join_kind(&self, wanted: Option<&str>) -> Result<LinkKind> {
+        let all = self.networks.networks()?;
+        let found = match wanted {
+            Some(id) => Some(
+                all.into_iter()
+                    .find(|n| n.id == id)
+                    .ok_or_else(|| anyhow!("no_such_network"))?,
+            ),
+            None => all.into_iter().next(),
+        };
+        Ok(found.map(|n| n.kind).unwrap_or_default())
     }
 
     /// Gives server `id` the address `public_ip`, makes its GRE link to the panel's server in
@@ -998,6 +1043,7 @@ impl Hub {
                 server,
                 addr,
                 peer_addr,
+                kind: l.kind,
             });
         }
         Ok(out)
@@ -1870,6 +1916,7 @@ mod tests {
                 server: "far".into(),
                 addr: "10.77.0.2".into(),
                 peer_addr: "10.77.0.1".into(),
+                kind: LinkKind::Gre,
             }]
         );
 
@@ -1896,7 +1943,8 @@ mod tests {
             s.gre,
             Some(GreRef {
                 link: link.id.clone(),
-                network: "main".into()
+                network: "main".into(),
+                kind: LinkKind::Gre,
             })
         );
         assert_eq!(s.ip4, None, "a GRE address is not a public address");

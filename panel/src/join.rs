@@ -173,6 +173,8 @@ mod tests {
             peer: "10.77.0.2".into(),
             prefix: 30,
             mtu: 1476,
+            kind: Default::default(),
+            port: 0,
         }
     }
 
