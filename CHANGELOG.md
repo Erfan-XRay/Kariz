@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 2.5.0-beta.1 - 2026-10-14
+
+A **beta**: a prerelease that only panels on the *Beta* channel are offered (*Settings,
+Updates, Channel*); `kariz-manager update` and the stable channel stay on 2.3.0. To try it on
+a server by hand: `kariz-manager install --version v2.5.0-beta.1`. On a server that runs the
+beta, `kariz-manager update` installs the latest stable release (2.3.0) again: update it from
+the panel instead.
+
+Xray behind a tunnel can now see **each user's real address** (PROXY protocol), so device
+limits in 3x-ui or Marzban work behind a tunnel too. It is off unless chosen, and **Xray must be set to
+expect it first** (`acceptProxyProtocol`), or every connection through those ports breaks.
+Both servers need this version: update the panel first, then the agents from the panel. It
+also carries everything of [2.4.0-beta.1](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#240-beta1---2026-10-14) (4096 streams per
+connection, the health probe, the per-address limit).
 
 ### Added
 
@@ -14,7 +27,7 @@
   header**: turn on `acceptProxyProtocol` on the Xray inbound behind those ports (in 3x-ui, the
   inbound's *Proxy Protocol* switch), or every connection through them breaks. Both servers need
   2.5 or newer; the panel refuses the setting while either runs an older version.
-  See [configuration](docs/configuration.md#real-user-addresses-proxy_protocol).
+  See [configuration](https://github.com/Erfan-XRay/Kariz/blob/main/docs/configuration.md#real-user-addresses-proxy_protocol).
 
 ### Fixed
 
