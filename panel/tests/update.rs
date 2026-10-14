@@ -90,8 +90,10 @@ fn repo(tag: &str, tweak: impl FnOnce(&mut HashMap<String, Vec<u8>>)) -> (String
         .iter()
         .map(|n| format!(r#"{{"name":"{n}","browser_download_url":"{base}/dl/{n}"}}"#))
         .collect();
+    // A tag with a dash is published as a prerelease (release.yml).
+    let pre = tag.contains('-');
     let listing = format!(
-        r#"[{{"tag_name":"{tag}","body":"what is new","prerelease":false,"draft":false,"assets":[{}]}}]"#,
+        r#"[{{"tag_name":"{tag}","body":"what is new","prerelease":{pre},"draft":false,"assets":[{}]}}]"#,
         assets.join(",")
     );
     let api = serve(HashMap::from([(
@@ -235,6 +237,12 @@ async fn the_same_or_an_older_release_is_not_an_update_and_a_dead_repository_is_
     let dir = tempfile::tempdir().unwrap();
     let (api, key) = repo(&format!("v{}", kariz_panel::version()), |_| {});
     let hub = hub_for(&api, &key, dir.path());
+    // A beta of the panel is only seen on the beta channel (the stable one leaves
+    // prereleases out).
+    if kariz_panel::version().contains('-') {
+        hub.set_update_options(Some(update::Channel::Beta), None)
+            .unwrap();
+    }
     hub.check_update().await.unwrap();
     assert_eq!(hub.update_status()["state"], "same");
     assert_eq!(

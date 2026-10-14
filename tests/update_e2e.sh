@@ -25,8 +25,9 @@ out=$("$NEW" release-key --out "$WORK/key")
 hexkey=$(sed -n 's/^public key (hex): //p' <<<"$out")
 mkdir -p "$WORK/www/repos/x/y" "$WORK/www/dl"
 
-make_release() { # tag: a release of the newer program under that tag
-    local tag=$1 name="kariz-$1-$arch-linux"
+make_release() { # tag: a release of the newer program under that tag (a prerelease with a dash)
+    local tag=$1 name="kariz-$1-$arch-linux" pre=false
+    [[ $tag == *-* ]] && pre=true
     rm -rf "$WORK/www/dl"/* "$WORK/pack"
     mkdir -p "$WORK/pack/$name"
     cp "$NEW" "$WORK/pack/$name/kariz-panel"
@@ -38,8 +39,8 @@ make_release() { # tag: a release of the newer program under that tag
     for f in "$name.tar.gz" "$name.tar.gz.sha256" "$name.tar.gz.sig"; do
         assets+="{\"name\":\"$f\",\"browser_download_url\":\"http://127.0.0.1:$PORT/dl/$f\"},"
     done
-    printf '[{"tag_name":"%s","body":"a test release","prerelease":false,"draft":false,"assets":[%s]}]' \
-        "$tag" "${assets%,}" >"$WORK/www/repos/x/y/releases"
+    printf '[{"tag_name":"%s","body":"a test release","prerelease":%s,"draft":false,"assets":[%s]}]' \
+        "$tag" "$pre" "${assets%,}" >"$WORK/www/repos/x/y/releases"
 }
 
 (cd "$WORK/www" && exec python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
@@ -69,6 +70,10 @@ api() { curl -sk -b "$WORK/jar" -H "X-Kariz-CSRF: $csrf" -H 'Content-Type: appli
 version() { { curl -sk "${base}api/version" || true; } | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'; }
 original=$(version)
 echo "the panel is $original"
+# A beta is only seen on the beta channel (the stable one leaves prereleases out).
+if [[ $original == *-* ]]; then
+    api -X POST "${base}api/update/settings" -d '{"channel":"beta"}' >/dev/null
+fi
 
 # nothing to find yet
 make_release "v$original"
