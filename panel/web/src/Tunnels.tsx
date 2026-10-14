@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { ApiError, api } from "./api";
 import type { ServerInfo } from "./api";
 import { pairTunnels, rateParts } from "./derive";
 import type { Tunnel, TunnelState } from "./derive";
 import { useApp } from "./store";
 import { Chart } from "./Chart";
-import { Card, Dialog, Empty, Icon, Seg, Skeleton, Stat } from "./ui";
+import { Card, Dialog, Empty, Icon, Seg, Skeleton, Stat, useAgo } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { RouteScene } from "./RouteScene";
 import { SpeedTest } from "./SpeedTest";
@@ -175,6 +176,59 @@ function SideFacts({ side, label }: { side: Tunnel["entry"]; label: string }) {
   );
 }
 
+/** What the entry side's health probe found, and how full the tunnel's connections are. */
+function HealthBlock({ tunnel }: { tunnel: Tunnel }) {
+  const { t, num } = useApp();
+  const ago = useAgo();
+  const p = tunnel.probe;
+  const target = p?.target || t("td.health.tunnelOnly");
+  let line: ReactNode;
+  if (!p) {
+    line = <span className="muted">{t("td.health.none")}</span>;
+  } else if (p.outcome === "ok") {
+    line = (
+      <span>
+        <b className="ok">{t("td.health.ok")}</b> · <span dir="ltr">{num(p.ms ?? 0)} ms</span> · <span className="mono" dir="ltr">{target}</span>
+      </span>
+    );
+  } else if (p.outcome === "target_failed") {
+    line = <b className="err">{t("td.health.target", { target })}</b>;
+  } else if (p.outcome === "failed") {
+    line = <b className="err">{t("td.health.failed")}</b>;
+  } else {
+    line = <span className="muted">{t("td.health.old")}</span>;
+  }
+  const c = tunnel.capacity;
+  const pct = c ? Math.min(100, (c.streams / c.max) * 100) : 0;
+  return (
+    <div className="grid-2 td-health">
+      <div className="field">
+        <span className="label">{t("td.health.title")}</span>
+        <p className="small" aria-live="polite">
+          {line}
+        </p>
+        {p && p.outcome !== "unsupported" && (
+          <span className="help">
+            {t("td.health.checked", { ago: ago(p.secs_ago), ok: num(p.ok_total), failed: num(p.failed_total) })}
+          </span>
+        )}
+      </div>
+      <div className="field">
+        <div className={`meter ${pct >= 80 ? "hot" : ""}`}>
+          <div className="top">
+            <span>{t("td.capacity")}</span>
+            <b dir="ltr">{c ? `${num(c.streams)} / ${num(c.max)}` : "—"}</b>
+          </div>
+          <div className="bar" role="progressbar" aria-label={t("td.capacity")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
+            <i style={{ width: `${pct}%` }} />
+          </div>
+        </div>
+        <span className="help">{c ? t("td.capacityHelp") : t("td.capacityNone")}</span>
+      </div>
+    </div>
+  );
+}
+
 function bytes(n: number): { value: number; unit: string; decimals: number } {
   const units = ["B", "KB", "MB", "GB", "TB"];
   let i = 0;
@@ -321,6 +375,35 @@ function TunnelPage({
           </button>
         </div>
       )}
+      {tunnel.state === "up" && tunnel.blocked && (
+        <div className="diagnosis" role="alert">
+          <div className="diag-icon">
+            <Icon name="alert" size={18} />
+          </div>
+          <div>
+            <h3>{t("td.blocked")}</h3>
+            <p>{t(`td.blocked.${tunnel.blocked}`, { target: tunnel.probe?.target ?? "" })}</p>
+            {tunnel.blocked === "path" && tunnel.probe?.error && (
+              <p className="mono small diag-err" dir="auto">
+                {t("td.diagLast", { e: tunnel.probe.error })}
+              </p>
+            )}
+          </div>
+          {tunnel.blocked === "full" ? (
+            <button className="btn btn-primary btn-sm" type="button" disabled={!tunnel.paired} onClick={() => onEdit()}>
+              <span className="shine" />
+              <Icon name="edit" size={18} />
+              {t("tun.edit")}
+            </button>
+          ) : (
+            <button className="btn btn-primary btn-sm" type="button" onClick={() => onAct("restart")}>
+              <span className="shine" />
+              <Icon name="restart" size={18} />
+              {t("tun.restart")}
+            </button>
+          )}
+        </div>
+      )}
       {tunnel.state === "off" && (
         <div className="diagnosis calm">
           <div className="diag-icon">
@@ -361,6 +444,12 @@ function TunnelPage({
           <Stat label={t("td.moved")} icon="download" value={status ? num(moved.value, moved.decimals) : "—"} unit={status ? moved.unit : undefined} />
         </div>
       </div>
+
+      {tunnel.state === "up" && (
+        <Card title={t("td.health.card")} sub={t("td.health.sub")}>
+          <HealthBlock tunnel={tunnel} />
+        </Card>
+      )}
 
       <Card title={t("ar.title")} sub={t("ar.subTunnel")}>
         <AutoRestartBlock tunnel={tunnel.name} />

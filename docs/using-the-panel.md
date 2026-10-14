@@ -58,7 +58,8 @@ step failed and why. You cannot end with half a tunnel.
   then the map: each server is a well; each tunnel is a channel, with its name and its rate
   now. Flowing water is traffic, a dashed empty channel is a stopped tunnel, a red pulse is a
   broken one. Hover for details, click a tunnel to open it. Under the map: the tunnels,
-  **Needs attention** (a broken tunnel, an offline server, a busy CPU, servers behind on the
+  **Needs attention** (a broken tunnel, a tunnel that is connected but lets no user through, one
+  whose streams are nearly all taken, an offline server, a busy CPU, servers behind on the
   version, each with a button to go there) and every server's load.
 - **The top bar** says *Live* while the panel answers. If it stops answering, a notice says
   so and the page keeps the last numbers until it is back.
@@ -69,7 +70,10 @@ step failed and why. You cannot end with half a tunnel.
   **IPv6** address (or the address set for it) to copy it: the chip shows a check and a note says
   what was copied. On a phone each address is a full-width row, easy to hit.
 - **Tunnels:** click a row. You see both sides, live charts of throughput and round trip (1 hour to
-  30 days), and the ports it forwards with their traffic.
+  30 days), and the ports it forwards with their traffic. **Health** says whether a new connection
+  gets through right now (checked every 15 seconds, the way a user connects) and how many of the
+  tunnel's streams are in use; a tunnel that is connected but lets no one through says why, with
+  the fix.
 - **Logs:** pick a tunnel and read both sides interleaved by time. Filter by level or text.
 - **Events:** a server going offline, a tunnel losing its connection, and coming back.
 

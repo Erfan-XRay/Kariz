@@ -20,7 +20,7 @@ use crate::mux::{MuxSession, MuxStream};
 use quic::{QuicSession, QuicStream};
 
 pub use crate::mux::ResetReason;
-pub use manager::{maintain, SessionPool};
+pub use manager::{is_full, maintain, SessionPool};
 
 /// One tunnel connection carrying streams and datagrams.
 pub enum Session {

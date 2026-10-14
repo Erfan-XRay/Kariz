@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! entry -> exit : kind (1) | target_len (2, big-endian) | target      kind: 1 TCP, 2 UDP,
-//!                                                                      4 speed test
+//!                                                                      4 speed test,
+//!                                                                      5 health probe
 //!                 [ | copies (1) | gap_ms (1) ]                        kind 3: UDP with
 //!                                                                      duplication
 //! exit  -> entry: status (1)                                           (not with mux)
@@ -28,6 +29,10 @@ const KIND_UDP_DUPLICATED: u8 = 3;
 /// consumes or echoes data as the target says (`down`, `up`, `echo`, `udp`), see
 /// `src/speedtest.rs`. Older exits reject it as an unknown kind.
 pub const KIND_SPEEDTEST: u8 = 4;
+/// A health probe (v2.4): the exit side connects to the target (none if it is empty),
+/// answers with one status byte, with mux too, and closes. Older exits reject it as an
+/// unknown kind.
+pub const KIND_PROBE: u8 = 5;
 
 /// Packet duplication of a UDP flow: each packet is sent `copies` times in all,
 /// `gap_ms` apart, in both directions.
@@ -75,6 +80,15 @@ impl Open {
         Self {
             kind: KIND_SPEEDTEST,
             target: command.into(),
+            duplicate: None,
+        }
+    }
+
+    /// A health probe of `target` (empty: of the tunnel alone).
+    pub fn probe(target: impl Into<String>) -> Self {
+        Self {
+            kind: KIND_PROBE,
+            target: target.into(),
             duplicate: None,
         }
     }
@@ -151,7 +165,7 @@ fn options_len(kind: u8) -> usize {
 fn check_kind(kind: u8) -> io::Result<()> {
     if matches!(
         kind,
-        KIND_TCP | KIND_UDP | KIND_UDP_DUPLICATED | KIND_SPEEDTEST
+        KIND_TCP | KIND_UDP | KIND_UDP_DUPLICATED | KIND_SPEEDTEST | KIND_PROBE
     ) {
         Ok(())
     } else {
@@ -263,6 +277,18 @@ mod tests {
         assert_eq!(buf[0], KIND_SPEEDTEST);
         assert_eq!(Open::decode(&buf).unwrap(), open);
         assert_eq!(Open::read(&mut &buf[..]).await.unwrap(), open);
+    }
+
+    #[tokio::test]
+    async fn probe_open_roundtrip() {
+        for target in ["127.0.0.1:443", ""] {
+            let open = Open::probe(target);
+            let mut buf = Vec::new();
+            open.encode(&mut buf);
+            assert_eq!(buf[0], KIND_PROBE);
+            assert_eq!(Open::decode(&buf).unwrap(), open);
+            assert_eq!(Open::read(&mut &buf[..]).await.unwrap(), open);
+        }
     }
 
     #[tokio::test]

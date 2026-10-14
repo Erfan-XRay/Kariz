@@ -249,6 +249,10 @@ pub struct Spec {
     /// reads it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub quic_obfs: bool,
+    /// Entry side: `[tuning] max_conns_per_ip`. Left out: no limit. Only an agent of 2.4
+    /// or newer reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_conns_per_ip: Option<u32>,
     #[serde(default)]
     pub forwards: Vec<ForwardInfo>,
 }

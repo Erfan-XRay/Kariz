@@ -95,6 +95,8 @@ export function MapPage({
   const offline = servers.filter((s) => !s.online);
   const hot = online.filter((s) => (s.health?.cpu_pct ?? 0) > 85);
   const broken = tunnels.filter((x) => x.state === "down");
+  const blocked = tunnels.filter((x) => x.blocked);
+  const crowded = tunnels.filter((x) => !x.blocked && x.capacity && x.capacity.streams >= x.capacity.max * 0.8);
   const maxRate = Math.max(1, ...tunnels.map((x) => x.rate));
   const hoveredServer = tip?.kind === "server" ? servers.find((s) => s.id === tip.id) : undefined;
   const hoveredTunnel = tip?.kind === "tunnel" ? tunnels.find((x) => x.name === tip.id) : undefined;
@@ -124,6 +126,20 @@ export function MapPage({
       tone: "danger" as const,
       icon: "tunnels",
       text: t("att.broken", { name: x.name }),
+      action: [t("att.open"), () => navigate({ page: "tunnels", tunnel: x.name })] as [string, () => void],
+    })),
+    ...blocked.map((x) => ({
+      key: `b-${x.name}`,
+      tone: "danger" as const,
+      icon: "tunnels",
+      text: t("att.blocked", { name: x.name }),
+      action: [t("att.open"), () => navigate({ page: "tunnels", tunnel: x.name })] as [string, () => void],
+    })),
+    ...crowded.map((x) => ({
+      key: `f-${x.name}`,
+      tone: "warn" as const,
+      icon: "tunnels",
+      text: t("att.crowded", { name: x.name, n: num(Math.round(((x.capacity?.streams ?? 0) / (x.capacity?.max ?? 1)) * 100)) }),
       action: [t("att.open"), () => navigate({ page: "tunnels", tunnel: x.name })] as [string, () => void],
     })),
     ...offline.map((s) => ({

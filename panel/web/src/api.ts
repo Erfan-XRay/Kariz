@@ -18,9 +18,36 @@ export interface Health {
   routes?: string[];
 }
 
+/** The entry side's health probe (2.4): a connection made the way a user's is, to the target. */
+export interface ProbeStatus {
+  outcome: "ok" | "target_failed" | "failed" | "unsupported";
+  ms: number | null;
+  /** Empty: the tunnel alone (only UDP forwarded). */
+  target: string;
+  error: string | null;
+  fails: number;
+  target_fails: number;
+  ok_total: number;
+  failed_total: number;
+  secs_ago: number;
+}
+
 export interface TunnelStatus {
-  peer: { connected: boolean; transport?: string | null; sessions: number | null; rtt_ms: number | null; last_error: { secs_ago: number; text: string } | null };
+  peer: {
+    connected: boolean;
+    transport?: string | null;
+    sessions: number | null;
+    rtt_ms: number | null;
+    last_error: { secs_ago: number; text: string } | null;
+    /** With mux (2.4): streams in use and how many the live connections take. */
+    streams?: number | null;
+    streams_max?: number | null;
+    /** New connections that failed because every connection was full. */
+    full?: number;
+  };
   totals: { bytes_up: number; bytes_down: number; tcp_open: number; udp_flows: number };
+  forwards?: { listen: string; open_failures: number; refused_per_ip?: number }[];
+  probe?: ProbeStatus | null;
 }
 
 export interface TunnelInfo {
@@ -297,6 +324,8 @@ export interface PairRequest {
   encryption?: string;
   /** quic: seal every UDP packet with a key from the token (`[tunnel.quic] obfs`). */
   quic_obfs?: boolean;
+  /** The entry side's limit of open connections per client address; left out or 0: none. */
+  max_conns_per_ip?: number;
   forwards: ForwardSpec[];
   rotate?: boolean;
   /** Direct mode: run over this private GRE network (its id). */
@@ -322,6 +351,7 @@ export interface Spec {
   tls_key?: string;
   encryption?: string;
   quic_obfs?: boolean;
+  max_conns_per_ip?: number;
   forwards: ForwardSpec[];
 }
 

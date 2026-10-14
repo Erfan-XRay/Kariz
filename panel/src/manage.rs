@@ -123,6 +123,11 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
         tunnel.insert("tls".into(), Value::Table(tls));
     }
     root.insert("tunnel".into(), Value::Table(tunnel));
+    if let Some(limit) = spec.max_conns_per_ip.filter(|v| *v > 0) {
+        let mut tuning = Table::new();
+        tuning.insert("max_conns_per_ip".into(), Value::Integer(i64::from(limit)));
+        root.insert("tuning".into(), Value::Table(tuning));
+    }
     let forwards: Vec<Value> = spec
         .forwards
         .iter()
@@ -359,6 +364,7 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
         encryption: (c.tunnel.encryption != kariz::config::Encryption::Auto)
             .then(|| c.tunnel.encryption.name().to_owned()),
         quic_obfs: c.tunnel.quic.as_ref().is_some_and(|q| q.obfs),
+        max_conns_per_ip: c.tuning.max_conns_per_ip.filter(|v| *v > 0),
         mux: Some(crate::wire::MuxSpec {
             enabled: c.tunnel.mux.enabled,
             connections: c.tunnel.mux.connections.and_then(|v| u32::try_from(v).ok()),
@@ -1324,6 +1330,27 @@ mod tests {
         // A spec without it reads as before: the field is left out of what is sent.
         let json = serde_json::to_string(&get(&d.0, "tcp-sealed").unwrap()).unwrap();
         assert!(!json.contains("quic_obfs"), "{json}");
+    }
+
+    #[test]
+    fn the_per_address_limit_is_written_and_read_back() {
+        let d = Dir::new();
+        let mut s = spec("limited");
+        s.max_conns_per_ip = Some(300);
+        put(&d.0, &s).unwrap();
+        assert_eq!(get(&d.0, "limited").unwrap().max_conns_per_ip, Some(300));
+        let text = std::fs::read_to_string(d.0.join("limited.toml")).unwrap();
+        assert!(
+            text.contains("[tuning]") && text.contains("max_conns_per_ip = 300"),
+            "{text}"
+        );
+        // Off: nothing written, and an older agent is not sent a field it does not know.
+        s.max_conns_per_ip = None;
+        put(&d.0, &s).unwrap();
+        let got = get(&d.0, "limited").unwrap();
+        assert_eq!(got.max_conns_per_ip, None);
+        let json = serde_json::to_string(&got).unwrap();
+        assert!(!json.contains("max_conns_per_ip"), "{json}");
     }
 
     #[test]

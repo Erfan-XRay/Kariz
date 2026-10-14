@@ -49,26 +49,33 @@ impl SessionPool {
     }
 
     /// Opens a stream on the live session with the fewest streams, waiting until
-    /// `deadline` for one to become available.
+    /// `deadline` for one to become available. When none did because every session was
+    /// full, the error is [`is_full`].
     pub async fn open(&self, syn: Bytes, deadline: Instant) -> io::Result<SessionStream> {
         loop {
             let added = self.added.notified();
             tokio::pin!(added);
             added.as_mut().enable();
-            if let Some(stream) = self.try_open(&syn) {
-                return Ok(stream);
-            }
+            let streams = match self.try_open(&syn) {
+                Ok(stream) => return Ok(stream),
+                Err(streams) => streams,
+            };
             if Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "no tunnel connection available (is the other side running?)",
-                ));
+                return Err(match streams {
+                    Some(streams) => io::Error::other(Full { streams }),
+                    None => io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "no tunnel connection available (is the other side running?)",
+                    ),
+                });
             }
             let _ = timeout_at(deadline.min(Instant::now() + RETRY), added).await;
         }
     }
 
-    fn try_open(&self, syn: &Bytes) -> Option<SessionStream> {
+    /// `Err(Some(streams))`: there are sessions, but none took the stream (they carry
+    /// `streams` in all); `Err(None)`: there is no session to try.
+    fn try_open(&self, syn: &Bytes) -> Result<SessionStream, Option<usize>> {
         let mut sessions = self.lock();
         sessions.retain(|s| !s.is_closed());
         let mut candidates: Vec<(usize, &Arc<Session>)> = sessions
@@ -77,10 +84,37 @@ impl SessionPool {
             .map(|s| (s.stream_count(), s))
             .collect();
         candidates.sort_by_key(|(streams, _)| *streams);
+        let streams = (!candidates.is_empty()).then(|| candidates.iter().map(|c| c.0).sum());
         candidates
             .into_iter()
             .find_map(|(_, s)| s.open(syn.clone()).ok())
+            .ok_or(streams)
     }
+}
+
+/// Every session to the other side had `mux.max_streams` open for as long as a new one
+/// was waited for.
+#[derive(Debug)]
+struct Full {
+    streams: usize,
+}
+
+impl std::fmt::Display for Full {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "every tunnel connection is full ({} streams open); raise tunnel.mux.max_streams \
+             or tunnel.mux.connections",
+            self.streams
+        )
+    }
+}
+
+impl std::error::Error for Full {}
+
+/// Whether `e` says every session was full (see [`SessionPool::open`]).
+pub fn is_full(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|e| e.is::<Full>())
 }
 
 /// Keeps one session up on the dialing side. `connect` opens, authenticates and starts a
@@ -206,8 +240,37 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(!is_full(&err), "no session is not a full session");
         assert_eq!(pool.available(), 0);
         drop((first, second));
+    }
+
+    #[tokio::test]
+    async fn a_pool_whose_sessions_are_all_full_says_so() {
+        let (a, b) = tokio::io::duplex(64 * 1024);
+        let one_stream = crate::mux::SessionConfig {
+            max_streams: 1,
+            ..config()
+        };
+        let session = Arc::new(Session::Kmux(MuxSession::new(a, Side::Client, one_stream)));
+        let _peer = MuxSession::new(b, Side::Server, config());
+        let pool = SessionPool::default();
+        pool.add(session);
+        let soon = || Instant::now() + Duration::from_millis(200);
+        let held = pool.open(Bytes::from_static(b"t"), soon()).await.unwrap();
+        let err = pool
+            .open(Bytes::from_static(b"t"), soon())
+            .await
+            .unwrap_err();
+        assert!(is_full(&err), "{err}");
+        assert!(err.to_string().contains("1 streams open"), "{err}");
+        // A slot that frees up while waiting is taken.
+        let wait = Instant::now() + Duration::from_secs(5);
+        let (next, ()) = tokio::join!(pool.open(Bytes::from_static(b"t"), wait), async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            drop(held);
+        });
+        assert!(next.is_ok());
     }
 
     #[tokio::test]

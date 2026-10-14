@@ -525,6 +525,9 @@ pub struct TuningOverrides {
     pub udp_timeout_secs: Option<u64>,
     /// Concurrent UDP flows (client addresses) per UDP forward rule.
     pub udp_max_flows: Option<usize>,
+    /// Entry side: open user connections and UDP flows one client address may have, over
+    /// all forward rules; more are closed at once. Unset or 0: no limit.
+    pub max_conns_per_ip: Option<u32>,
     /// DSCP mark for tunnel sockets and the exit's UDP sockets to targets (unset: none).
     pub dscp: Option<Dscp>,
 }
@@ -632,6 +635,9 @@ pub struct Tuning {
     pub handshake_timeout: Duration,
     pub threads: Option<usize>,
     pub udp: UdpTuning,
+    /// Open user connections and UDP flows per client address (entry side); `None`: no
+    /// limit.
+    pub max_conns_per_ip: Option<u32>,
     /// `TCP_NOTSENT_LOWAT` for tunnel connections, set when they carry mux. It keeps the
     /// kernel from queueing much unsent data, so what is sent next is decided by the mux
     /// writer (datagrams first, streams in turn) rather than by the order data entered
@@ -690,6 +696,7 @@ impl Tuning {
             handshake_timeout: Duration::from_secs(10),
             threads: None,
             udp: UdpTuning::for_profile(profile),
+            max_conns_per_ip: None,
             notsent_lowat: None,
             dscp: None,
         }
@@ -719,6 +726,9 @@ impl Tuning {
         }
         if let Some(v) = o.udp_max_flows {
             self.udp.max_flows = v;
+        }
+        if let Some(v) = o.max_conns_per_ip {
+            self.max_conns_per_ip = (v > 0).then_some(v);
         }
         // An invalid value is reported by `Config::validate`.
         if let Some(d) = &o.dscp {
@@ -776,7 +786,7 @@ impl MuxSettings {
         Self {
             enabled: transport != TransportKind::Tcp,
             connections,
-            max_streams: 512,
+            max_streams: MUX_DEFAULT_MAX_STREAMS,
             stream_window,
             max_lifetime: None,
             coalesce: profile != Profile::Gaming,
@@ -823,7 +833,11 @@ impl MuxSettings {
 }
 
 const MUX_CONNECTIONS: std::ops::RangeInclusive<usize> = 1..=64;
-const MUX_MAX_STREAMS: std::ops::RangeInclusive<usize> = 1..=4096;
+const MUX_MAX_STREAMS: std::ops::RangeInclusive<usize> = 1..=16384;
+/// Streams per tunnel connection by default. A stream is one user connection or UDP flow
+/// and costs nothing until it is used; at the limit new connections wait and then fail,
+/// so it is set far above what a busy server carries (four connections: 16384 streams).
+const MUX_DEFAULT_MAX_STREAMS: usize = 4096;
 const MUX_STREAM_WINDOW: std::ops::RangeInclusive<usize> = 16 * 1024..=16 * 1024 * 1024;
 const KCP_INTERVAL_MS: std::ops::RangeInclusive<u32> = 10..=1000;
 const KCP_MAX_RESEND: u32 = 10;
@@ -1674,6 +1688,39 @@ path = \"/x\""
             let err = parse_err(&format!("{}[tuning]\n{bad}\n", entry_reverse()));
             assert!(err.contains("tuning.udp_"), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn the_per_address_limit_is_off_unless_set() {
+        assert_eq!(
+            Tuning::for_profile(Profile::Balanced).max_conns_per_ip,
+            None
+        );
+        let with = |line: &str| {
+            parse_unchecked(&format!("{}[tuning]\n{line}\n", entry_reverse()))
+                .tuning()
+                .max_conns_per_ip
+        };
+        assert_eq!(with("max_conns_per_ip = 300"), Some(300));
+        assert_eq!(with("max_conns_per_ip = 0"), None);
+    }
+
+    #[test]
+    fn mux_carries_thousands_of_streams_by_default() {
+        for profile in ["balanced", "ultraspeed", "gaming"] {
+            let c = parse_unchecked(&format!("profile = \"{profile}\"\n{}", entry_reverse()));
+            assert_eq!(c.mux().max_streams, 4096, "{profile}");
+        }
+        let c = parse_unchecked(&format!(
+            "{}[tunnel.mux]\nmax_streams = 16384\n",
+            entry_reverse()
+        ));
+        assert!(c.validate_mux().is_ok());
+        let c = parse_unchecked(&format!(
+            "{}[tunnel.mux]\nmax_streams = 16385\n",
+            entry_reverse()
+        ));
+        assert!(c.validate_mux().is_err());
     }
 
     #[test]

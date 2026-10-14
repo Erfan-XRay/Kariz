@@ -17,7 +17,8 @@ use crate::config::{Config, Mode, TransportKind, Tuning};
 use crate::crypto::{Crypto, ReplayFilter};
 use crate::mux::{MuxSession, SessionConfig, Side};
 use crate::proto::{
-    self, Open, KIND_SPEEDTEST, KIND_UDP, STATUS_DIAL_FAILED, STATUS_OK, STATUS_UNSUPPORTED,
+    self, Open, KIND_PROBE, KIND_SPEEDTEST, KIND_UDP, STATUS_DIAL_FAILED, STATUS_OK,
+    STATUS_UNSUPPORTED,
 };
 use crate::relay::{relay, relay_stream, Counters};
 #[cfg(feature = "quic")]
@@ -35,6 +36,11 @@ const BACKOFF_MAX: Duration = Duration::from_secs(10);
 
 /// Speed test streams the exit serves at once.
 const SPEEDTEST_STREAMS: usize = 48;
+/// A health probe's connection to its target gives up after this long, well before the
+/// entry side stops waiting for the answer.
+const PROBE_DIAL: Duration = Duration::from_secs(5);
+/// How long a probe stream waits for the entry side to close it after the answer.
+const PROBE_LINGER: Duration = Duration::from_secs(10);
 
 struct Exit {
     crypto: Crypto,
@@ -363,6 +369,11 @@ async fn accept_direct(
 }
 
 async fn serve(exit: &Exit, mut tunnel: Link, open: Open) {
+    if open.kind == KIND_PROBE {
+        let status = probe_target(exit, &open.target).await;
+        let _ = proto::write_status(&mut tunnel, status).await;
+        return;
+    }
     if open.kind == KIND_SPEEDTEST {
         let Ok(_slot) = exit.speedtest_slot() else {
             let _ = proto::write_status(&mut tunnel, STATUS_UNSUPPORTED).await;
@@ -426,6 +437,18 @@ async fn serve_stream(exit: &Exit, stream: SessionStream, syn: Bytes) {
             return stream.reset(ResetReason::Protocol);
         }
     };
+    if open.kind == KIND_PROBE {
+        let status = probe_target(exit, &open.target).await;
+        if stream.send(Bytes::copy_from_slice(&[status])).await.is_ok() && stream.finish().is_ok() {
+            // Dropped before the entry side is done, the stream would be reset, which
+            // can overtake the answer: wait for its end first.
+            let _ = timeout(PROBE_LINGER, async {
+                while let Ok(Some(_)) = stream.recv().await {}
+            })
+            .await;
+        }
+        return;
+    }
     if open.kind == KIND_SPEEDTEST {
         let _slot = match exit.speedtest_slot() {
             Ok(slot) => slot,
@@ -457,6 +480,26 @@ async fn serve_stream(exit: &Exit, stream: SessionStream, syn: Bytes) {
     let size = exit.tuning.buffer_size;
     if let Err(e) = relay_stream(&mut target, &stream, size, exit.target_counters()).await {
         debug!(target = %open.target, error = %e, "connection ended with error");
+    }
+}
+
+/// What a health probe of `target` answers: whether it could be connected to (an empty
+/// target asks about the tunnel alone). The connection is closed at once and, being no
+/// user's, is not counted.
+async fn probe_target(exit: &Exit, target: &str) -> u8 {
+    if target.is_empty() {
+        return STATUS_OK;
+    }
+    match timeout(PROBE_DIAL, tcp::connect(target, &exit.tuning)).await {
+        Ok(Ok(_)) => STATUS_OK,
+        Ok(Err(e)) => {
+            debug!(%target, error = %e, "health probe: could not connect to target");
+            STATUS_DIAL_FAILED
+        }
+        Err(_) => {
+            debug!(%target, "health probe: connecting to target timed out");
+            STATUS_DIAL_FAILED
+        }
     }
 }
 
@@ -495,4 +538,17 @@ async fn relay_udp(exit: &Exit, tunnel: Channel, socket: tokio::net::UdpSocket, 
         Ok(()) => debug!(target = %open.target, "UDP flow closed"),
         Err(e) => debug!(target = %open.target, error = %e, "UDP flow ended with error"),
     }
+}
+
+/// Serves the streams of `session` as an exit side with `config` would (for tests of the
+/// entry side against the real thing).
+#[cfg(test)]
+pub(crate) fn serve_for_test(config: &Config, session: Arc<Session>) {
+    let exit = Arc::new(Exit {
+        crypto: Crypto::new(&config.tunnel.token, config.tunnel.encryption),
+        tuning: config.tuning(),
+        speedtest: None,
+        stats: Stats::new(config),
+    });
+    tokio::spawn(run_session(exit, session));
 }

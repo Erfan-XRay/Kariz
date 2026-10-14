@@ -833,6 +833,75 @@ pub mod text {
                         );
                     }
                 }
+                Notice::TunnelBlocked {
+                    name,
+                    server,
+                    target,
+                    error,
+                } => {
+                    let (name, server) = (esc(name), esc(server));
+                    match (fa, target) {
+                        (true, Some(target)) => {
+                            let _ = write!(
+                                out,
+                                "🟠 تانل <b>{name}</b> وصل است، ولی سرور خارج به مقصد <code>{}</code> نمی‌رسد؛ کاربرها نمی‌توانند وصل شوند (گزارش از {server})",
+                                esc(target)
+                            );
+                        }
+                        (true, None) => {
+                            let _ = write!(
+                                out,
+                                "🟠 تانل <b>{name}</b> وصل است، ولی اتصال تازه از آن رد نمی‌شود؛ کاربرها نمی‌توانند وصل شوند (گزارش از {server})"
+                            );
+                        }
+                        (false, Some(target)) => {
+                            let _ = write!(
+                                out,
+                                "🟠 Tunnel <b>{name}</b> is connected, but its exit side cannot reach <code>{}</code>: users cannot connect (reported by {server})",
+                                esc(target)
+                            );
+                        }
+                        (false, None) => {
+                            let _ = write!(
+                                out,
+                                "🟠 Tunnel <b>{name}</b> is connected, but new connections do not get through: users cannot connect (reported by {server})"
+                            );
+                        }
+                    }
+                    if let Some(e) = error.as_ref().filter(|_| target.is_none()) {
+                        let _ = write!(out, "\n<i>{}</i>", esc(e));
+                    }
+                }
+                Notice::TunnelUnblocked { name, blocked_secs } => {
+                    let (name, d) = (esc(name), duration(fa, *blocked_secs));
+                    if fa {
+                        let _ = write!(
+                            out,
+                            "🟢 کاربرها دوباره از تانل <b>{name}</b> وصل می‌شوند (مشکل بود: {d})"
+                        );
+                    } else {
+                        let _ = write!(
+                            out,
+                            "🟢 Users get through tunnel <b>{name}</b> again (blocked for {d})"
+                        );
+                    }
+                }
+                Notice::TunnelBusy { name, streams, max } => {
+                    let name = esc(name);
+                    if fa {
+                        let _ = write!(
+                            out,
+                            "🟡 تانل <b>{name}</b> نزدیک پر شدن است: {} از {} جریان در حال استفاده است. اگر پر شود اتصال‌های تازه رد می‌شوند؛ «جریان در هر اتصال» یا «تعداد اتصال» را در تنظیمات mux تانل بالا ببرید.",
+                            n(fa, streams),
+                            n(fa, max)
+                        );
+                    } else {
+                        let _ = write!(
+                            out,
+                            "🟡 Tunnel <b>{name}</b> is nearly full: {streams} of {max} streams in use. When it is full new connections fail; raise \"Streams per connection\" or \"Connections\" in its mux settings."
+                        );
+                    }
+                }
             }
         }
         out
@@ -1362,6 +1431,45 @@ mod tests {
         assert!(en.contains("down for 4m 12s"));
         let fa = text::notices(true, &notes);
         assert!(fa.contains("۴ دقیقه و ۱۲ ثانیه"));
+    }
+
+    #[test]
+    fn a_blocked_or_busy_tunnel_says_what_users_see() {
+        let notes = [
+            Notice::TunnelBlocked {
+                name: "t".into(),
+                server: "ir".into(),
+                target: Some("127.0.0.1:443".into()),
+                error: Some("exit side could not connect to the target".into()),
+            },
+            Notice::TunnelBlocked {
+                name: "t".into(),
+                server: "ir".into(),
+                target: None,
+                error: Some("every tunnel connection is full (8192 streams open)".into()),
+            },
+            Notice::TunnelBusy {
+                name: "t".into(),
+                streams: 13200,
+                max: 16384,
+            },
+            Notice::TunnelUnblocked {
+                name: "t".into(),
+                blocked_secs: 75,
+            },
+        ];
+        let en = text::notices(false, &notes);
+        assert!(
+            en.contains("cannot reach <code>127.0.0.1:443</code>"),
+            "{en}"
+        );
+        // The reason is shown only when there is no target to name.
+        assert_eq!(en.matches("<i>").count(), 1, "{en}");
+        assert!(en.contains("8192 streams open"), "{en}");
+        assert!(en.contains("13200 of 16384 streams"), "{en}");
+        assert!(en.contains("blocked for 1m 15s"), "{en}");
+        let fa = text::notices(true, &notes);
+        assert!(fa.contains("۱۳۲۰۰ از ۱۶۳۸۴"), "{fa}");
     }
 
     #[test]

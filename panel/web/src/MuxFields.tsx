@@ -31,7 +31,7 @@ export function muxFromSpec(m?: MuxSpec | null): MuxForm {
 
 const RANGES: Record<Exclude<keyof MuxForm, "coalesce">, [number, number]> = {
   connections: [1, 64],
-  max_streams: [1, 4096],
+  max_streams: [1, 16384],
   stream_window: [16, 16384],
   max_lifetime_secs: [60, 86400 * 30],
   ping_interval_secs: [1, 600],
@@ -62,8 +62,8 @@ export function muxSpecOf(f: MuxForm, transport: string, on: boolean): MuxSpec |
 function defaults(profile: string, transport: string) {
   const p = profile === "ultraspeed" || profile === "throughput" ? 1 : profile === "gaming" ? 2 : 0;
   return {
-    connections: [4, 8, 2][p],
-    max_streams: 512,
+    connections: transport === "quic" ? 2 : [4, 8, 2][p],
+    max_streams: 4096,
     stream_window: [256, 1024, 64][p],
     ping_interval_secs: transport === "auto" ? 2 : p === 2 ? 10 : 30,
     coalesce: p !== 2,

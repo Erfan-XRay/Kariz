@@ -10,6 +10,7 @@ import { MuxFields, MuxToggle, muxFromSpec, muxSpecOf, muxToSpec } from "./MuxFi
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
+import { PerIpLimit, perIpOf } from "./PerIpLimit";
 import { GreChoice, linkWithAddress } from "./GreChoice";
 import { useNetworks } from "./Networks";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, splitTransport } from "./transport";
@@ -44,6 +45,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   const [enc, setEnc] = useState("auto");
   const [encAck, setEncAck] = useState(false);
   const [obfs, setObfs] = useState(false);
+  const [perIp, setPerIp] = useState("");
   // The private GRE network the tunnel runs over (its id), or none: found from the address the
   // tunnel listens on once the networks have come in.
   const [netId, setNetId] = useState("");
@@ -110,6 +112,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
         setMux(muxFromSpec(a.mux ?? b.mux));
         setEnc(a.encryption ?? "auto");
         setObfs(!!(a.quic_obfs ?? b.quic_obfs));
+        setPerIp(String(a.max_conns_per_ip ?? b.max_conns_per_ip ?? ""));
         // A tunnel that has no encryption already was confirmed when it was made.
         setEncAck((a.encryption ?? "auto") === "none");
         setTls(real ? { mode: "real", host: dia.tls_sni || hostOf(dia.remote), email: "", ...real } : emptyTls());
@@ -161,6 +164,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     mux: muxSpecOf(mux, transport, muxOn),
     encryption: cipherOf(enc, transport),
     quic_obfs: obfsOf(obfs, transport),
+    max_conns_per_ip: perIpOf(perIp).value,
     tls_cert: transport === "wss" && tls.mode === "real" && tls.cert ? tls.cert : undefined,
     tls_key: transport === "wss" && tls.mode === "real" && tls.key ? tls.key : undefined,
     tls_host: transport === "wss" && tls.mode === "real" && tls.cert && tls.host ? tls.host : undefined,
@@ -204,6 +208,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     if (!cipherReady(enc, transport, encAck)) return t("enc.needAck");
     if (parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
     if (muxSpec.bad) return `${t(`mux.${muxSpec.bad}`)}: ${t("mux.badValue")}`;
+    if (perIpOf(perIp).bad) return t("perip.bad");
     return "";
   };
 
@@ -386,6 +391,9 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                 <label htmlFor="te-target">{t("wz.targetHost")}</label>
                 <input className="text mono" id="te-target" dir="ltr" value={target} onChange={(e) => setTarget(e.target.value.trim())} />
               </div>
+            </div>
+            <div style={{ maxWidth: 520 }}>
+              <PerIpLimit id="te-perip" value={perIp} onChange={setPerIp} />
             </div>
           </fieldset>
 
