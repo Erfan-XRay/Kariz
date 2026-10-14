@@ -635,9 +635,18 @@ mod tests {
             .create_links(&gre.id, &[("c".into(), "e".into())], &Routes::new())
             .unwrap();
         assert_eq!((g[0].kind, g[0].gre_key, g[0].port), (LinkKind::Gre, 1, 0));
-        // and the list shows each network's kind
-        let kinds: Vec<_> = n.networks().unwrap().iter().map(|x| x.kind).collect();
-        assert_eq!(kinds, vec![LinkKind::Vxlan, LinkKind::Gre]);
+        // and the list shows each network's kind (two made in the same second come in any order)
+        let mut kinds: Vec<_> = n
+            .networks()
+            .unwrap()
+            .into_iter()
+            .map(|x| (x.name, x.kind))
+            .collect();
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            vec![("g".into(), LinkKind::Gre), ("vx".into(), LinkKind::Vxlan)]
+        );
     }
 
     #[test]

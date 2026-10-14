@@ -180,9 +180,15 @@ else
     vup kz-vx1 1 4789 10.78.0.1 10.78.0.2
     ip netns exec kza "$BIN" net ping kz-vx1 --state "$WORK/a-state.toml"
     ip netns exec kza ping -c 2 -W 2 10.78.0.2 >/dev/null
-    ip -n kza -d link show kz-vx1 | grep -q 'vxlan id 1 remote 192.0.2.2 local 192.0.2.1'
-    ip -n kza -d link show kz-vx1 | grep -q 'dstport 4789'
-    ip -n kza -d link show kz-vx1 | grep -q 'mtu 1450'
+    # iproute2's wording differs between versions (Ubuntu adds fan-map fields): each part alone
+    vx=$(ip -n kza -d link show kz-vx1)
+    for want in 'vxlan id 1 ' 'remote 192.0.2.2' 'local 192.0.2.1' 'dstport 4789' 'mtu 1450'; do
+        if ! grep -qF "$want" <<<"$vx"; then
+            echo "kz-vx1 lacks '$want':" >&2
+            echo "$vx" >&2
+            exit 1
+        fi
+    done
     echo "vxlan one: the private addresses answer, over UDP 4789"
 
     # a second VXLAN link between the same servers needs its own VNI on that port...
