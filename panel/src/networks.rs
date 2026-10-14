@@ -642,7 +642,7 @@ mod tests {
             .into_iter()
             .map(|x| (x.name, x.kind))
             .collect();
-        kinds.sort();
+        kinds.sort_by(|x, y| x.0.cmp(&y.0));
         assert_eq!(
             kinds,
             vec![("g".into(), LinkKind::Gre), ("vx".into(), LinkKind::Vxlan)]
