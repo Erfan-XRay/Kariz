@@ -3,7 +3,8 @@
 # 192.0.2.1 and 192.0.2.2. `kariz-panel net` (what an agent does when the panel asks) makes
 # a GRE link between them; the private addresses must ping across it, a second link between
 # the same pair needs its own key, a filtered GRE path makes the ping fail, and `net down`
-# removes the interface. Needs root (CI runs it with sudo) and the ip_gre module.
+# removes the interface. Then the same for VXLAN links (UDP, a VNI each, a port per network).
+# Needs root (CI runs it with sudo) and the ip_gre module; VXLAN is skipped without its module.
 set -euo pipefail
 
 BIN=${1:?usage: gre_ns.sh PATH-TO-kariz-panel [PATH-TO-kariz]}
@@ -20,6 +21,7 @@ cleanup() {
 trap cleanup EXIT
 
 modprobe ip_gre 2>/dev/null || true
+modprobe vxlan 2>/dev/null || true
 ip netns add kza
 ip netns add kzb
 ip link add va type veth peer name vb
@@ -149,6 +151,87 @@ EOF
     echo "a Kariz tunnel works over the private addresses"
     for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
     PIDS=()
+fi
+
+# ---- VXLAN ----
+vspec() { # name side local remote vni port address peer
+    cat >"$WORK/$1-$2.toml" <<EOF
+name = "$1"
+local = "$3"
+remote = "$4"
+key = $5
+address = "$7"
+peer = "$8"
+prefix = 30
+mtu = 1450
+kind = "vxlan"
+port = $6
+EOF
+}
+vup() { # name vni port address-a address-b
+    vspec "$1" a 192.0.2.1 192.0.2.2 "$2" "$3" "$4" "$5"
+    vspec "$1" b 192.0.2.2 192.0.2.1 "$2" "$3" "$5" "$4"
+    ip netns exec kza "$BIN" net up "$WORK/$1-a.toml" --state "$WORK/a-state.toml"
+    ip netns exec kzb "$BIN" net up "$WORK/$1-b.toml" --state "$WORK/b-state.toml"
+}
+if ! ip netns exec kza "$BIN" net status | grep -q '"vxlan":true'; then
+    echo "::warning::this kernel cannot make VXLAN interfaces; the VXLAN test was skipped"
+else
+    vup kz-vx1 1 4789 10.78.0.1 10.78.0.2
+    ip netns exec kza "$BIN" net ping kz-vx1 --state "$WORK/a-state.toml"
+    ip netns exec kza ping -c 2 -W 2 10.78.0.2 >/dev/null
+    # iproute2's wording differs between versions (Ubuntu adds fan-map fields): each part alone
+    vx=$(ip -n kza -d link show kz-vx1)
+    for want in 'vxlan id 1 ' 'remote 192.0.2.2' 'local 192.0.2.1' 'dstport 4789' 'mtu 1450'; do
+        if ! grep -qF "$want" <<<"$vx"; then
+            echo "kz-vx1 lacks '$want':" >&2
+            echo "$vx" >&2
+            exit 1
+        fi
+    done
+    echo "vxlan one: the private addresses answer, over UDP 4789"
+
+    # a second VXLAN link between the same servers needs its own VNI on that port...
+    vspec kz-dup a 192.0.2.1 192.0.2.2 1 4789 10.78.0.9 10.78.0.10
+    if ip netns exec kza "$BIN" net up "$WORK/kz-dup-a.toml" --state "$WORK/dup.toml" 2>/dev/null; then
+        echo "the kernel took a VNI twice on one port; the panel's rule would not be needed" >&2
+        exit 1
+    fi
+    vup kz-vx2 2 4789 10.78.0.5 10.78.0.6
+    # ...while another network's port may use VNI 1 again
+    vup kz-vx3 1 8472 10.79.0.1 10.79.0.2
+    ip -n kza -d link show kz-vx3 | grep -q 'dstport 8472'
+    for l in kz-vx1 kz-vx2 kz-vx3; do
+        ip netns exec kza "$BIN" net ping "$l" --state "$WORK/a-state.toml" >/dev/null
+    done
+    ip netns exec kza ping -c 1 -W 2 10.78.0.2 >/dev/null
+    echo "vxlan: three links at once, a VNI each per port; GRE still answers too"
+    ip netns exec kza ping -c 1 -W 2 10.77.0.2 >/dev/null
+
+    # its UDP port filtered on the way in: the path test fails, the other port still passes
+    if command -v iptables >/dev/null; then
+        ip netns exec kzb iptables -A INPUT -p udp --dport 4789 -j DROP
+        if ip netns exec kza "$BIN" net ping kz-vx1 --state "$WORK/a-state.toml" >/dev/null; then
+            echo "the ping passed with UDP 4789 filtered" >&2
+            exit 1
+        fi
+        ip netns exec kza "$BIN" net ping kz-vx3 --state "$WORK/a-state.toml" >/dev/null
+        ip netns exec kzb iptables -D INPUT -p udp --dport 4789 -j DROP
+        ip netns exec kza "$BIN" net ping kz-vx1 --state "$WORK/a-state.toml" >/dev/null
+        echo "vxlan: a filtered port fails the test, another port passes"
+    fi
+
+    # the saved list says VXLAN (the agent makes them again from it after a reboot)
+    grep -q 'kind = "vxlan"' "$WORK/a-state.toml"
+    grep -q 'port = 8472' "$WORK/a-state.toml"
+    for l in kz-vx1 kz-vx2 kz-vx3; do
+        ip netns exec kza "$BIN" net down "$l"
+        if ip -n kza link show "$l" >/dev/null 2>&1; then
+            echo "$l is still there" >&2
+            exit 1
+        fi
+    done
+    echo "the VXLAN test passed"
 fi
 
 # down removes the interface

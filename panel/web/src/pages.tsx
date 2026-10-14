@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, api } from "./api";
+import { ApiError, api, kindLabel } from "./api";
 import type { GreJoin, LinkTransport, PanelAddresses, ServerInfo, SessionRow } from "./api";
 import { bytesPerSec, pairTunnels, rateParts } from "./derive";
 import type { TunnelState } from "./derive";
@@ -542,7 +542,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
     ...(own?.v4 ? [[t("add.addr.v4"), own.v4] as [string, string]] : []),
     ...(own?.v6 ? [[t("add.addr.v6"), own.v6] as [string, string]] : []),
     ...(here && here !== own?.v4 && here !== own?.v6 ? [[t("add.addr.here"), here] as [string, string]] : []),
-    ...(own?.gre ?? []).map((g) => [t("add.addr.gre", { network: g.network, server: servers.find((s) => s.id === g.server)?.name ?? g.server }), g.addr] as [string, string]),
+    ...(own?.gre ?? []).map((g) => [t("add.addr.gre", { kind: kindLabel(g.kind), network: g.network, server: servers.find((s) => s.id === g.server)?.name ?? g.server }), g.addr] as [string, string]),
   ];
   const greHost = (own?.gre ?? []).some((g) => g.addr === host.trim());
   const portText = (x: LinkTransport) => (port == null ? "?" : String(x === "wss" || x === "quic" ? port + 1 : port));
@@ -743,7 +743,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
           )}
           {gre && (
             <div className="gre-made">
-              <span className="badge">{t("srv.greChip", { network: gre.network })}</span>
+              <span className="badge">{t("srv.greChip", { kind: kindLabel(gre.kind), network: gre.network })}</span>
               {/* The addresses are isolated left to right, so a Persian sentence around them keeps its order. */}
               <span className="small">{t("add.gre.link", { panel: `⁦${gre.panel_addr}⁩`, server: `⁦${gre.server_addr}⁩`, name: `⁨${gre.name}⁩` })}</span>
               <span className="help">{t(rev ? "add.rev.gre.made" : "add.gre.made")}</span>
@@ -903,7 +903,7 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                 {s.gre && (
                   <div className="srv-ips">
                     <span className="badge" title={t("srv.viaGre", { network: s.gre.network })}>
-                      {t("srv.greChip", { network: s.gre.network })}
+                      {t("srv.greChip", { kind: kindLabel(s.gre.kind), network: s.gre.network })}
                     </span>
                   </div>
                 )}

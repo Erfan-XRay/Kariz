@@ -19,6 +19,8 @@ use kariz_panel::pair::{self, PairRequest};
 struct Fake {
     calls: Mutex<Vec<String>>,
     ping_fails: AtomicBool,
+    /// The kernel refuses VXLAN interfaces.
+    fail_vxlan: AtomicBool,
 }
 
 impl Fake {
@@ -33,7 +35,8 @@ impl Exec for Fake {
             .lock()
             .unwrap()
             .push(format!("{program} {}", args.join(" ")));
-        let ok = !(program == "ping" && self.ping_fails.load(Ordering::SeqCst));
+        let ok = !(program == "ping" && self.ping_fails.load(Ordering::SeqCst))
+            && !(args.iter().any(|a| a == "vxlan") && self.fail_vxlan.load(Ordering::SeqCst));
         let out = if program == "ping" {
             "rtt min/avg/max/mdev = 1.0/1.5/2.0/0.2 ms\n".to_owned()
         } else {
@@ -657,4 +660,147 @@ async fn a_reverse_server_is_reached_across_a_gre_link() {
     .await
     .unwrap();
     assert_eq!(hub.networks.links(None).unwrap().len(), 2);
+}
+
+/// The panel's own server and one agent, both with their `ip` and `ping` recorded, and
+/// both with a public address.
+async fn two_servers(root: &std::path::Path) -> (Arc<Hub>, String, Arc<Fake>, Arc<Fake>) {
+    let (local_fake, agent_fake) = (Arc::new(Fake::default()), Arc::new(Fake::default()));
+    let hub = Hub::with_options(
+        Db::in_memory().unwrap(),
+        root.join("kariz"),
+        Arc::new(Systemd),
+        Duration::from_secs(5),
+        Some(root.join("panel")),
+        Some(local_fake.clone()),
+    );
+    std::fs::create_dir_all(root.join("panel")).unwrap();
+    let acceptor = kariz::link::Acceptor::bind("127.0.0.1:0", &hub.link_token().unwrap())
+        .await
+        .unwrap();
+    let addr = acceptor.local_addr().unwrap().to_string();
+    tokio::spawn(hub.clone().serve_agents(acceptor));
+    let code = hub.create_join(Some("far-away"), &addr).unwrap();
+    let agent_dir = root.join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let agent_file = agent_dir.join("agent.toml");
+    let config = agent::enroll_from_code(&code, &agent_file).unwrap();
+    config.save(&agent_file).unwrap();
+    let agent = Agent::with_exec(&agent_file, config, Arc::new(Systemd), agent_fake.clone());
+    tokio::spawn(agent.run());
+    let mut remote = None;
+    for _ in 0..100 {
+        remote = hub
+            .snapshot()
+            .unwrap()
+            .into_iter()
+            .find(|s| !s.local && s.online)
+            .map(|s| s.id);
+        if remote.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let remote = remote.expect("the agent joined");
+    hub.set_addr(LOCAL, "192.0.2.1").unwrap();
+    hub.set_addr(&remote, "192.0.2.2").unwrap();
+    (hub, remote, local_fake, agent_fake)
+}
+
+#[tokio::test]
+async fn a_vxlan_network_makes_vxlan_links_on_its_port_with_a_vni_of_their_own() {
+    use kariz_panel::wire::LinkKind;
+    let root = tempfile::tempdir().unwrap();
+    let (hub, remote, local_fake, agent_fake) = two_servers(root.path()).await;
+    let both = vec![LOCAL.to_owned(), remote.clone()];
+
+    // a port is VXLAN's alone, and a VXLAN network without one takes 4789
+    assert!(hub
+        .networks
+        .create_network_of("g", "10.70.0.0/24", LinkKind::Gre, 4789, &[])
+        .is_err());
+    let plain = hub
+        .networks
+        .create_network_of("plain", "10.71.0.0/24", LinkKind::Vxlan, 0, &[])
+        .unwrap();
+    assert_eq!((plain.kind, plain.port), (LinkKind::Vxlan, 4789));
+
+    let net = hub
+        .networks
+        .create_network_of("vx", "10.77.0.0/24", LinkKind::Vxlan, 8472, &[])
+        .unwrap();
+    let op = netops::create_links(&hub, &net.id, both.clone(), None).unwrap();
+    let done = finished(&hub, &op).await;
+    assert_eq!(done.state, "done", "{done:?}");
+    let link = hub.networks.links(Some(&net.id)).unwrap().remove(0);
+    assert_eq!(
+        (link.kind, link.port, link.gre_key),
+        (LinkKind::Vxlan, 8472, 1)
+    );
+    let made = |fake: &Fake| {
+        fake.calls()
+            .into_iter()
+            .find(|c| c.starts_with(&format!("ip link add {} type vxlan", link.ifname)))
+            .expect("the VXLAN interface was made")
+    };
+    assert_eq!(
+        made(&local_fake),
+        format!(
+            "ip link add {} type vxlan id 1 local 192.0.2.1 remote 192.0.2.2 dstport 8472 ttl 64",
+            link.ifname
+        )
+    );
+    assert!(made(&agent_fake).contains("local 192.0.2.2 remote 192.0.2.1 dstport 8472"));
+    assert!(local_fake
+        .calls()
+        .contains(&format!("ip link set {} mtu 1450 up", link.ifname)));
+    // the panel's list for the agent carries the kind and port, so a reconnect keeps it VXLAN
+    let specs = hub.net_specs(&remote).unwrap();
+    assert_eq!((specs[0].kind, specs[0].port), (LinkKind::Vxlan, 8472));
+
+    // a GRE network beside it: a GRE link between the same pair, with a key of its own
+    let gre = hub
+        .networks
+        .create_network("gre", "10.78.0.0/24", &[])
+        .unwrap();
+    let op = netops::create_links(&hub, &gre.id, both.clone(), None).unwrap();
+    assert_eq!(finished(&hub, &op).await.state, "done");
+    let g = hub.networks.links(Some(&gre.id)).unwrap().remove(0);
+    assert_eq!((g.kind, g.port, g.gre_key), (LinkKind::Gre, 0, 2));
+
+    // a blocked UDP path: the test fails, says which port, and the link goes again
+    let other = hub
+        .networks
+        .create_network_of("vx2", "10.79.0.0/24", LinkKind::Vxlan, 0, &[])
+        .unwrap();
+    agent_fake.ping_fails.store(true, Ordering::SeqCst);
+    local_fake.ping_fails.store(true, Ordering::SeqCst);
+    let op = netops::create_links(&hub, &other.id, both.clone(), None).unwrap();
+    let done = finished(&hub, &op).await;
+    assert_eq!(done.state, "failed");
+    assert_eq!(done.error.as_deref(), Some("vxlan_blocked:4789"));
+    assert!(hub.networks.links(Some(&other.id)).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_server_that_cannot_make_vxlan_is_named_and_nothing_is_made() {
+    use kariz_panel::wire::LinkKind;
+    let root = tempfile::tempdir().unwrap();
+    let (hub, remote, _local_fake, agent_fake) = two_servers(root.path()).await;
+    // The far server's kernel refuses VXLAN (no module, a container).
+    agent_fake.fail_vxlan.store(true, Ordering::SeqCst);
+    let net = hub
+        .networks
+        .create_network_of("vx", "10.77.0.0/24", LinkKind::Vxlan, 0, &[])
+        .unwrap();
+    let op =
+        netops::create_links(&hub, &net.id, vec![LOCAL.to_owned(), remote.clone()], None).unwrap();
+    let done = finished(&hub, &op).await;
+    assert_eq!(done.state, "failed");
+    assert_eq!(done.error, Some(format!("no_vxlan:{remote}")));
+    assert!(hub.networks.links(None).unwrap().is_empty());
+    assert!(!agent_fake
+        .calls()
+        .iter()
+        .any(|c| c.contains("type vxlan") && !c.contains("kz-probev")));
 }

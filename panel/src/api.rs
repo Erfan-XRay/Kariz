@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 use crate::auth::{self, Session};
 use crate::http::AppState;
 use crate::pair::{self, PairRequest};
+use crate::wire::LinkKind;
 
 const COOKIE: &str = "__Host-kariz";
 const CSRF_HEADER: &str = "x-kariz-csrf";
@@ -562,6 +563,7 @@ fn gre_made(made: &crate::hub::GreJoin) -> Response {
             "network": made.network,
             "panel_addr": made.panel_addr,
             "server_addr": made.server_addr,
+            "kind": made.kind,
         }),
     )
 }
@@ -1693,7 +1695,9 @@ fn net_error(e: anyhow::Error) -> Response {
     let code = text.split(':').next().unwrap_or_default();
     match code {
         "bad_name" | "bad_cidr" | "not_private" | "too_small" | "overlaps_route"
-        | "overlaps_network" | "bad_input" | "same_server" => error(StatusCode::BAD_REQUEST, &text),
+        | "overlaps_network" | "bad_input" | "same_server" | "bad_port" => {
+            error(StatusCode::BAD_REQUEST, &text)
+        }
         "name_taken" | "in_use" | "agent_uses" | "pool_full" | "busy" => {
             error(StatusCode::CONFLICT, &text)
         }
@@ -1724,6 +1728,12 @@ async fn networks_list(State(state): State<AppState>, headers: HeaderMap) -> Res
 struct NetworkBody {
     name: String,
     cidr: String,
+    /// `gre` (left out) or `vxlan`.
+    #[serde(default)]
+    kind: Option<String>,
+    /// VXLAN's UDP port; left out or 0: 4789.
+    #[serde(default)]
+    port: Option<u16>,
 }
 
 async fn network_create(
@@ -1746,17 +1756,26 @@ async fn network_create(
                 .collect()
         })
         .unwrap_or_default();
-    match state
-        .hub
-        .networks
-        .create_network(&body.name, &body.cidr, &named)
-    {
+    let Some(kind) = LinkKind::parse(body.kind.as_deref().unwrap_or("gre")) else {
+        return error(StatusCode::BAD_REQUEST, "bad_kind");
+    };
+    match state.hub.networks.create_network_of(
+        &body.name,
+        &body.cidr,
+        kind,
+        body.port.unwrap_or(0),
+        &named,
+    ) {
         Ok(n) => {
+            let how = match n.kind {
+                LinkKind::Gre => "GRE".to_owned(),
+                LinkKind::Vxlan => format!("VXLAN, UDP {}", n.port),
+            };
             audit(
                 &state,
                 &format!("session {}", me.id),
                 &ip_of(&peer),
-                &format!("made network {} ({})", n.name, n.cidr),
+                &format!("made network {} ({}, {how})", n.name, n.cidr),
             );
             reply(StatusCode::OK, json!(n))
         }

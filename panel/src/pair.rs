@@ -276,7 +276,7 @@ impl PairRequest {
 
 /// Whether `version` (`1.5.0`, maybe with a suffix after a dash) is at least `min`. One that
 /// cannot be read counts as too old.
-fn version_at_least(version: &str, min: (u32, u32, u32)) -> bool {
+pub(crate) fn version_at_least(version: &str, min: (u32, u32, u32)) -> bool {
     let mut parts = version
         .trim_start_matches('v')
         .split('-')

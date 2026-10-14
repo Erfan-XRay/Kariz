@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.6.0-beta.1 - 2026-10-15
+
+A **beta**: a prerelease that only panels on the *Beta* channel are offered (*Settings,
+Updates, Channel*); `kariz-manager update` and the stable channel stay on 2.5.1. To try it on
+a server by hand: `kariz-manager install --version v2.6.0-beta.1`. On a server that runs the
+beta, `kariz-manager update` installs the latest stable release (2.5.1) again: update it from
+the panel instead.
+
+Private networks can now be **VXLAN** as well as GRE: for two servers between which GRE
+(protocol 47) does not pass but UDP does. Both servers of a VXLAN link need this version:
+update the panel first, then the agents from the panel. The GRE networks and links you have
+stay as they are.
+
+### Added
+
+- **VXLAN private networks.** In *Networks*, *New network* now asks for the link type: GRE, or
+  VXLAN over a UDP port (4789 by default; every network has its own, so when one port is
+  blocked, make another network on another port). Each link of a VXLAN network is a one-peer
+  VXLAN interface (`ip link add kz-XXXXX type vxlan id VNI local A remote B dstport PORT`) with
+  an MTU of 1450, and the panel gives it a VNI that no other VXLAN link of either server has.
+  Everything a GRE network does works over VXLAN too: mesh and hub and spoke, tunnels that listen
+  on and dial the private addresses, an agent that reaches the panel across a link, adding a
+  server over a link, and links that come back after a reboot. Before it makes anything the panel
+  checks that both servers can make VXLAN (the `vxlan` module) and run 2.6 or newer, and it pings
+  across each link before it keeps it; a UDP port blocked on the way is named, with the iptables
+  line that opens it.
+  See [private networks](https://github.com/Erfan-XRay/Kariz/blob/main/docs/networks.md#gre-or-vxlan).
+
+### Changed
+
+- A network's card shows its kind (and, for VXLAN, its port), the links table the VNI, and the
+  wizard's network list, the panel's addresses and the server chips (*via VXLAN · network*) say
+  which kind a link is.
+
 ## 2.5.1 - 2026-10-14
 
 The stable release after 2.3.0, with everything of the two betas

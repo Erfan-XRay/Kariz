@@ -137,13 +137,57 @@ pub struct NetSpec {
     /// This server's public address, and the other server's.
     pub local: String,
     pub remote: String,
-    /// Tells two GRE tunnels between the same two addresses apart.
+    /// Tells two GRE tunnels between the same two addresses apart; for VXLAN it is the VNI,
+    /// which no two VXLAN links of one server share.
     pub key: u32,
     /// This end's private address, the other end's, and the prefix length (30 or 31).
     pub address: String,
     pub peer: String,
     pub prefix: u8,
     pub mtu: u32,
+    /// GRE, or VXLAN over UDP `port`. Both are left out for GRE: an agent older than VXLAN
+    /// refuses fields it does not know, so it still takes a GRE link and refuses a VXLAN
+    /// one (instead of making GRE of it).
+    #[serde(default, skip_serializing_if = "LinkKind::is_gre")]
+    pub kind: LinkKind,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub port: u16,
+}
+
+fn is_zero(port: &u16) -> bool {
+    *port == 0
+}
+
+/// How the links of a private network are made.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkKind {
+    /// IP protocol 47.
+    #[default]
+    Gre,
+    /// Ethernet frames in UDP datagrams.
+    Vxlan,
+}
+
+impl LinkKind {
+    pub fn is_gre(&self) -> bool {
+        *self == Self::Gre
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gre => "gre",
+            Self::Vxlan => "vxlan",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "gre" => Some(Self::Gre),
+            "vxlan" => Some(Self::Vxlan),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +205,12 @@ pub struct NetStatus {
     /// Why not, when it cannot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// This server can make VXLAN interfaces (the `vxlan` module). An agent older than
+    /// VXLAN does not say, which reads as no.
+    #[serde(default)]
+    pub vxlan: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vxlan_reason: Option<String>,
     #[serde(default)]
     pub links: Vec<NetIface>,
 }

@@ -12,10 +12,11 @@ use anyhow::{bail, Result};
 
 use crate::hub::Hub;
 use crate::networks::{mesh, Link};
-use crate::wire::{Ack, NetSpec, NetStatus, PingReply, Request};
+use crate::wire::{Ack, LinkKind, NetSpec, NetStatus, PingReply, Request};
 
-/// The MTU of a GRE link on a 1500-byte path.
-const MTU: u32 = crate::net::DEFAULT_MTU;
+/// The first version whose agent makes VXLAN links. An older one refuses the spec (it does
+/// not know its fields), so the panel says so before it tries.
+pub const VXLAN_SINCE: (u32, u32, u32) = (2, 6, 0);
 
 /// Whether `text` is an address a server can be reached at: IPv4, unicast.
 pub fn valid_addr(text: &str) -> bool {
@@ -36,7 +37,9 @@ pub(crate) fn spec_for(link: &Link, server: &str, local: &str, remote: &str) -> 
         address: if first { &link.addr_a } else { &link.addr_b }.clone(),
         peer: if first { &link.addr_b } else { &link.addr_a }.clone(),
         prefix: 30,
-        mtu: MTU,
+        mtu: crate::net::max_mtu(link.kind),
+        kind: link.kind,
+        port: link.port,
     }
 }
 
@@ -170,23 +173,47 @@ async fn bring_up(hub: &Hub, link: &Link) -> Result<(), String> {
     if reply.ok {
         Ok(())
     } else {
-        Err("gre_blocked".to_owned())
+        Err(match link.kind {
+            LinkKind::Gre => "gre_blocked".to_owned(),
+            LinkKind::Vxlan => format!("vxlan_blocked:{}", link.port),
+        })
     }
 }
 
-/// Checks that each server is connected, knows its public address, and can make GRE.
-async fn check_servers(hub: &Hub, servers: &[&str]) -> Result<(), String> {
+/// Whether `server` can make links of `kind`: connected, with an agent new enough, and a
+/// kernel that allows it. Errors: `offline:ID`, `old_agent_vxlan:ID:VERSION`, `no_gre:ID`,
+/// `no_vxlan:ID`.
+pub async fn check_kind(hub: &Hub, server: &str, kind: LinkKind) -> Result<(), String> {
+    if kind == LinkKind::Vxlan {
+        let version = hub
+            .snapshot()
+            .ok()
+            .and_then(|all| all.into_iter().find(|s| s.id == server))
+            .map(|s| s.version)
+            .unwrap_or_default();
+        if !crate::pair::version_at_least(&version, VXLAN_SINCE) {
+            return Err(format!("old_agent_vxlan:{server}:{version}"));
+        }
+    }
+    let status: NetStatus = hub
+        .ask_as(server, &Request::NetStatus)
+        .await
+        .map_err(|_| format!("offline:{server}"))?;
+    match kind {
+        LinkKind::Gre if !status.gre => Err(format!("no_gre:{server}")),
+        LinkKind::Vxlan if !status.vxlan => Err(format!("no_vxlan:{server}")),
+        _ => Ok(()),
+    }
+}
+
+/// Checks that each server is connected, knows its public address, and can make links of
+/// `kind`.
+async fn check_servers(hub: &Hub, servers: &[&str], kind: LinkKind) -> Result<(), String> {
     for server in servers {
         if hub.addr_of(server).is_none() {
             return Err(format!("no_address:{server}"));
         }
-        let status: NetStatus = hub
-            .ask_as(server, &Request::NetStatus)
-            .await
-            .map_err(|_| format!("offline:{server}"))?;
-        if !status.gre {
-            return Err(format!("no_gre:{server}"));
-        }
+        check_kind(hub, server, kind).await?;
     }
     Ok(())
 }
@@ -211,8 +238,15 @@ pub async fn ensure_link(
         ops.end(op, false, Some(e.clone()));
         e
     };
+    let kind = hub
+        .networks
+        .networks()
+        .ok()
+        .and_then(|all| all.into_iter().find(|n| n.id == network))
+        .map(|n| n.kind)
+        .unwrap_or_default();
     ops.run(op, "net_check");
-    if let Err(e) = check_servers(hub, &[a, b]).await {
+    if let Err(e) = check_servers(hub, &[a, b], kind).await {
         return Err(step_fail(e));
     }
     ops.end(op, true, None);
@@ -313,6 +347,8 @@ mod tests {
             gre_key: 1,
             ifname: "kz-12345".into(),
             created: 0,
+            kind: LinkKind::Gre,
+            port: 0,
         }
     }
 
@@ -375,6 +411,23 @@ mod tests {
         );
         assert_eq!((a.name.as_str(), a.key, a.prefix), ("kz-12345", 1, 30));
         assert!(crate::net::validate(&a).is_ok() && crate::net::validate(&b).is_ok());
+        assert_eq!((a.kind, a.port, a.mtu), (LinkKind::Gre, 0, 1476));
+    }
+
+    #[test]
+    fn a_vxlan_links_spec_carries_its_vni_port_and_smaller_mtu() {
+        let l = Link {
+            kind: LinkKind::Vxlan,
+            port: 8472,
+            gre_key: 9,
+            ..link()
+        };
+        let a = spec_for(&l, "aaa", "192.0.2.1", "192.0.2.2");
+        assert_eq!(
+            (a.kind, a.port, a.key, a.mtu),
+            (LinkKind::Vxlan, 8472, 9, 1450)
+        );
+        assert!(crate::net::validate(&a).is_ok());
     }
 
     #[test]

@@ -144,6 +144,9 @@ const MIGRATIONS: &[&str] = &[
          result TEXT NOT NULL,
          PRIMARY KEY (entry, exit)
      );",
+    // 14: how a network's links are made: GRE, or VXLAN over a UDP port (0 for GRE).
+    "ALTER TABLE networks ADD COLUMN kind TEXT NOT NULL DEFAULT 'gre';
+     ALTER TABLE networks ADD COLUMN port INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

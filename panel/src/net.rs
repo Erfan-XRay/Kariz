@@ -1,4 +1,4 @@
-//! What an agent does for a private GRE network: make the
+//! What an agent does for a private network (GRE or VXLAN): make the
 //! `kz-` interface of a link, address it, take it down, test the path across it, and keep
 //! the list so the interfaces come back after a reboot.
 //!
@@ -15,10 +15,27 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::manage::Fut;
-use crate::wire::{NetIface, NetSpec, NetStatus, PingReply};
+use crate::wire::{LinkKind, NetIface, NetSpec, NetStatus, PingReply};
 
 /// GRE adds 24 bytes to every packet on a 1500-byte path.
 pub const DEFAULT_MTU: u32 = 1476;
+
+/// VXLAN adds 50 (outer IPv4, UDP, VXLAN and the inner Ethernet header).
+pub const VXLAN_MTU: u32 = 1450;
+
+/// The UDP port VXLAN uses unless a network says otherwise (IANA's).
+pub const VXLAN_PORT: u16 = 4789;
+
+/// The largest VNI a link may take: the very last one (2^24 - 1) is the probe's.
+pub const VNI_MAX: u32 = (1 << 24) - 2;
+
+/// The largest MTU a link of this kind may have.
+pub fn max_mtu(kind: LinkKind) -> u32 {
+    match kind {
+        LinkKind::Gre => DEFAULT_MTU,
+        LinkKind::Vxlan => VXLAN_MTU,
+    }
+}
 
 /// `kz-` and one to eight small letters or digits.
 pub fn valid_ifname(name: &str) -> bool {
@@ -59,11 +76,27 @@ pub fn validate(spec: &NetSpec) -> Result<(Ipv4Addr, Ipv4Addr, Ipv4Addr, Ipv4Add
     if !(30..=31).contains(&spec.prefix) {
         bail!("prefix must be 30 or 31");
     }
-    if spec.key == 0 {
-        bail!("the GRE key must be 1 or more");
+    match spec.kind {
+        LinkKind::Gre => {
+            if spec.key == 0 {
+                bail!("the GRE key must be 1 or more");
+            }
+            if spec.port != 0 {
+                bail!("a GRE link has no port");
+            }
+        }
+        LinkKind::Vxlan => {
+            if !(1..=VNI_MAX).contains(&spec.key) {
+                bail!("the VXLAN VNI must be between 1 and {VNI_MAX}");
+            }
+            if spec.port == 0 {
+                bail!("a VXLAN link needs a UDP port");
+            }
+        }
     }
-    if !(576..=DEFAULT_MTU).contains(&spec.mtu) {
-        bail!("mtu must be between 576 and {DEFAULT_MTU}");
+    let most = max_mtu(spec.kind);
+    if !(576..=most).contains(&spec.mtu) {
+        bail!("mtu must be between 576 and {most}");
     }
     let mask = u32::MAX << (32 - u32::from(spec.prefix));
     if u32::from(address) & mask != u32::from(peer) & mask || address == peer {
@@ -85,8 +118,8 @@ pub fn validate(spec: &NetSpec) -> Result<(Ipv4Addr, Ipv4Addr, Ipv4Addr, Ipv4Add
 pub fn commands(spec: &NetSpec) -> Result<Vec<Vec<String>>> {
     let (local, remote, address, _) = validate(spec)?;
     let s = |x: &str| x.to_owned();
-    Ok(vec![
-        vec![
+    let make = match spec.kind {
+        LinkKind::Gre => vec![
             s("tunnel"),
             s("add"),
             spec.name.clone(),
@@ -101,6 +134,27 @@ pub fn commands(spec: &NetSpec) -> Result<Vec<Vec<String>>> {
             s("ttl"),
             s("64"),
         ],
+        // One peer: the kernel sends every frame to `remote`, so nothing is flooded.
+        LinkKind::Vxlan => vec![
+            s("link"),
+            s("add"),
+            spec.name.clone(),
+            s("type"),
+            s("vxlan"),
+            s("id"),
+            spec.key.to_string(),
+            s("local"),
+            local.to_string(),
+            s("remote"),
+            remote.to_string(),
+            s("dstport"),
+            spec.port.to_string(),
+            s("ttl"),
+            s("64"),
+        ],
+    };
+    Ok(vec![
+        make,
         vec![
             s("addr"),
             s("add"),
@@ -357,44 +411,66 @@ impl Net {
         }
     }
 
-    /// Whether this server can make GRE interfaces, and the state of the links it keeps.
-    pub async fn status(&self) -> NetStatus {
-        let probe = "kz-probe";
-        let _ = self
-            .exec
-            .run("ip", vec!["link".into(), "del".into(), probe.into()])
-            .await;
+    /// Makes a throwaway interface with `args` (`ip` arguments that add `name`) and removes
+    /// it again: whether it could be made, and why not.
+    async fn probe(&self, name: &str, args: &[&str]) -> (bool, Option<String>) {
+        let del = || vec!["link".to_owned(), "del".to_owned(), name.to_owned()];
+        let _ = self.exec.run("ip", del()).await;
         let made = self
             .exec
-            .run(
-                "ip",
-                [
+            .run("ip", args.iter().map(|s| (*s).to_owned()).collect())
+            .await;
+        let out = match made {
+            Ok((true, _)) => (true, None),
+            Ok((false, text)) => (false, Some(text.trim().to_owned())),
+            Err(e) => (false, Some(format!("{e:#}"))),
+        };
+        if out.0 {
+            let _ = self.exec.run("ip", del()).await;
+        }
+        out
+    }
+
+    /// Whether this server can make GRE and VXLAN interfaces, and the state of the links it
+    /// keeps.
+    pub async fn status(&self) -> NetStatus {
+        let (gre, reason) = self
+            .probe(
+                "kz-probe",
+                &[
                     "tunnel",
                     "add",
-                    probe,
+                    "kz-probe",
                     "mode",
                     "gre",
                     "local",
                     "192.0.2.1",
                     "remote",
                     "192.0.2.2",
-                ]
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
+                ],
             )
             .await;
-        let (gre, reason) = match made {
-            Ok((true, _)) => (true, None),
-            Ok((false, text)) => (false, Some(text.trim().to_owned())),
-            Err(e) => (false, Some(format!("{e:#}"))),
-        };
-        if gre {
-            let _ = self
-                .exec
-                .run("ip", vec!["link".into(), "del".into(), probe.into()])
-                .await;
-        }
+        // The VNI no link takes (VNI_MAX + 1), so the probe never clashes with a link.
+        let (vxlan, vxlan_reason) = self
+            .probe(
+                "kz-probev",
+                &[
+                    "link",
+                    "add",
+                    "kz-probev",
+                    "type",
+                    "vxlan",
+                    "id",
+                    "16777215",
+                    "local",
+                    "192.0.2.1",
+                    "remote",
+                    "192.0.2.2",
+                    "dstport",
+                    "4789",
+                ],
+            )
+            .await;
         let links = self
             .load()
             .link
@@ -413,7 +489,13 @@ impl Net {
                 }
             })
             .collect();
-        NetStatus { gre, reason, links }
+        NetStatus {
+            gre,
+            reason,
+            vxlan,
+            vxlan_reason,
+            links,
+        }
     }
 }
 
@@ -433,6 +515,18 @@ mod tests {
             peer: "10.77.0.2".into(),
             prefix: 30,
             mtu: 1476,
+            kind: LinkKind::Gre,
+            port: 0,
+        }
+    }
+
+    fn vxlan() -> NetSpec {
+        NetSpec {
+            key: 7,
+            mtu: VXLAN_MTU,
+            kind: LinkKind::Vxlan,
+            port: VXLAN_PORT,
+            ..spec()
         }
     }
 
@@ -474,6 +568,63 @@ mod tests {
                 "link set kz-a1b2c mtu 1476 up",
             ]
         );
+    }
+
+    #[test]
+    fn a_vxlan_link_makes_one_peer_vxlan_interface_on_its_port() {
+        let lines: Vec<String> = commands(&vxlan())
+            .unwrap()
+            .iter()
+            .map(|c| c.join(" "))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "link add kz-a1b2c type vxlan id 7 local 203.0.113.5 remote 198.51.100.7 dstport 4789 ttl 64",
+                "addr add 10.77.0.1/30 dev kz-a1b2c",
+                "link set kz-a1b2c mtu 1450 up",
+            ]
+        );
+        let other = NetSpec {
+            port: 8472,
+            ..vxlan()
+        };
+        assert!(commands(&other).unwrap()[0]
+            .join(" ")
+            .contains("dstport 8472"));
+    }
+
+    #[test]
+    fn a_vxlan_link_is_checked_for_its_own_limits() {
+        let bad = |f: &dyn Fn(&mut NetSpec)| {
+            let mut s = vxlan();
+            f(&mut s);
+            validate(&s).is_err()
+        };
+        assert!(validate(&vxlan()).is_ok());
+        assert!(bad(&|s| s.port = 0), "VXLAN needs a port");
+        assert!(bad(&|s| s.key = 0));
+        assert!(bad(&|s| s.key = 1 << 24), "a VNI has 24 bits");
+        assert!(bad(&|s| s.key = VNI_MAX + 1), "the probe's VNI");
+        assert!(!bad(&|s| s.key = VNI_MAX));
+        assert!(bad(&|s| s.mtu = 1476), "VXLAN needs 50 bytes, not 24");
+        // and a GRE link has no port
+        let mut gre = spec();
+        gre.port = 4789;
+        assert!(validate(&gre).is_err());
+    }
+
+    #[test]
+    fn a_gre_spec_is_written_as_before_and_an_old_one_reads_as_gre() {
+        // An agent older than VXLAN refuses fields it does not know: a GRE link must not
+        // carry the new ones, and a list saved before them must still read.
+        let text = toml::to_string(&spec()).unwrap();
+        assert!(!text.contains("kind") && !text.contains("port"), "{text}");
+        let back: NetSpec = toml::from_str(&text).unwrap();
+        assert_eq!(back, spec());
+        let json = serde_json::to_string(&vxlan()).unwrap();
+        assert!(json.contains(r#""kind":"vxlan""#) && json.contains(r#""port":4789"#));
+        assert_eq!(serde_json::from_str::<NetSpec>(&json).unwrap(), vxlan());
     }
 
     #[test]
@@ -719,5 +870,28 @@ mod tests {
         });
         let no = Net::with_exec(None, fake).status().await;
         assert!(!no.gre && no.reason.is_some());
+        assert!(no.vxlan, "VXLAN is probed on its own");
+    }
+
+    #[tokio::test]
+    async fn status_says_whether_vxlan_can_be_made_and_cleans_up_its_probe() {
+        let fake = Arc::new(Fake::default());
+        let ok = Net::with_exec(None, fake.clone()).status().await;
+        assert!(ok.gre && ok.vxlan);
+        let c = calls(&fake);
+        assert!(c
+            .iter()
+            .any(|l| l.starts_with("ip link add kz-probev type vxlan id 16777215")));
+        assert_eq!(c.last().unwrap(), "ip link del kz-probev");
+        let no = Net::with_exec(
+            None,
+            Arc::new(Fake {
+                fail_on: Some("type vxlan"),
+                ..Fake::default()
+            }),
+        )
+        .status()
+        .await;
+        assert!(no.gre && !no.vxlan && no.vxlan_reason.is_some());
     }
 }

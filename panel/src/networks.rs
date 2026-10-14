@@ -16,6 +16,8 @@ use serde::Serialize;
 use crate::auth::now;
 use crate::config::random_hex;
 use crate::db::Db;
+use crate::net::{VNI_MAX, VXLAN_PORT};
+use crate::wire::LinkKind;
 
 /// An IPv4 network: the address of its first host bit pattern, and how many bits are fixed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +108,9 @@ pub struct Network {
     pub id: String,
     pub name: String,
     pub cidr: String,
+    /// How its links are made, and for VXLAN the UDP port (0 for GRE).
+    pub kind: LinkKind,
+    pub port: u16,
     pub created: i64,
     /// Links that take a /30 of it now, and how many it can hold at most.
     pub links: u32,
@@ -122,11 +127,15 @@ pub struct Link {
     pub subnet: String,
     pub addr_a: String,
     pub addr_b: String,
-    /// Tells two GRE tunnels between the same two public addresses apart.
+    /// Tells two GRE tunnels between the same two public addresses apart; for VXLAN, the
+    /// VNI (no two VXLAN links of a server share one).
     pub gre_key: u32,
     /// The interface name on both servers (`kz-` and five hex digits).
     pub ifname: String,
     pub created: i64,
+    /// Its network's kind and port.
+    pub kind: LinkKind,
+    pub port: u16,
 }
 
 /// Which servers a link joins, and how a set of servers is joined.
@@ -172,7 +181,7 @@ impl Networks {
         Self { db }
     }
 
-    /// Makes a network. `routes` are what the connected servers already route
+    /// Makes a GRE network. `routes` are what the connected servers already route
     /// (`(server name, its networks)`), so the pool never overlaps one of them.
     pub fn create_network(
         &self,
@@ -180,9 +189,28 @@ impl Networks {
         cidr: &str,
         routes: &[(String, Vec<String>)],
     ) -> Result<Network> {
+        self.create_network_of(name, cidr, LinkKind::Gre, 0, routes)
+    }
+
+    /// Makes a network whose links are `kind`; a VXLAN one runs over UDP `port` (0: the
+    /// usual 4789). Errors as [`Self::create_network`], and `bad_port`.
+    pub fn create_network_of(
+        &self,
+        name: &str,
+        cidr: &str,
+        kind: LinkKind,
+        port: u16,
+        routes: &[(String, Vec<String>)],
+    ) -> Result<Network> {
         if !valid_name(name) {
             bail!("bad_name");
         }
+        let port = match kind {
+            LinkKind::Gre if port != 0 => bail!("bad_port"),
+            LinkKind::Gre => 0,
+            LinkKind::Vxlan if port == 0 => VXLAN_PORT,
+            LinkKind::Vxlan => port,
+        };
         let pool = Cidr::parse(cidr)?;
         check_pool(pool)?;
         for (server, list) in routes {
@@ -208,8 +236,8 @@ impl Networks {
         }
         let id = random_hex(6)?;
         tx.execute(
-            "INSERT INTO networks (id, name, cidr, created) VALUES (?1, ?2, ?3, ?4)",
-            params![id, name, pool.to_string(), now()],
+            "INSERT INTO networks (id, name, cidr, created, kind, port) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, name, pool.to_string(), now(), kind.as_str(), port],
         )?;
         tx.commit()?;
         drop(conn);
@@ -230,7 +258,8 @@ impl Networks {
     pub fn networks(&self) -> Result<Vec<Network>> {
         let conn = self.db.conn();
         let mut stmt = conn.prepare(
-            "SELECT n.id, n.name, n.cidr, n.created, (SELECT COUNT(*) FROM net_links l WHERE l.network = n.id)
+            "SELECT n.id, n.name, n.cidr, n.created, (SELECT COUNT(*) FROM net_links l WHERE l.network = n.id),
+                    n.kind, n.port
              FROM networks n ORDER BY n.created, n.id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -242,6 +271,8 @@ impl Networks {
                 cidr,
                 created: r.get(3)?,
                 links: r.get(4)?,
+                kind: kind_of(&r.get::<_, String>(5)?),
+                port: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -250,8 +281,10 @@ impl Networks {
     pub fn links(&self, network: Option<&str>) -> Result<Vec<Link>> {
         let conn = self.db.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, network, a, b, subnet, addr_a, addr_b, gre_key, ifname, created
-             FROM net_links WHERE (?1 IS NULL OR network = ?1) ORDER BY created, id",
+            "SELECT l.id, l.network, l.a, l.b, l.subnet, l.addr_a, l.addr_b, l.gre_key, l.ifname,
+                    l.created, n.kind, n.port
+             FROM net_links l JOIN networks n ON n.id = l.network
+             WHERE (?1 IS NULL OR l.network = ?1) ORDER BY l.created, l.id",
         )?;
         let rows = stmt.query_map([network], |r| {
             Ok(Link {
@@ -265,6 +298,8 @@ impl Networks {
                 gre_key: r.get(7)?,
                 ifname: r.get(8)?,
                 created: r.get(9)?,
+                kind: kind_of(&r.get::<_, String>(10)?),
+                port: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -282,11 +317,14 @@ impl Networks {
     ) -> Result<Vec<Link>> {
         let mut conn = self.db.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let cidr: String = tx
-            .query_row("SELECT cidr FROM networks WHERE id = ?1", [network], |r| {
-                r.get(0)
-            })
+        let (cidr, kind, port): (String, String, u16) = tx
+            .query_row(
+                "SELECT cidr, kind, port FROM networks WHERE id = ?1",
+                [network],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .map_err(|_| anyhow!("no_such_network"))?;
+        let kind = kind_of(&kind);
         let pool = Cidr::parse(&cidr)?;
         let mut used: HashSet<u32> = {
             let mut stmt = tx.prepare("SELECT subnet FROM net_links WHERE network = ?1")?;
@@ -316,14 +354,23 @@ impl Networks {
                 })
                 .ok_or_else(|| anyhow!("pool_full"))?;
             used.insert(subnet);
-            // The smallest key this pair has not used yet.
+            // GRE: the smallest key this pair has not used yet. VXLAN: the smallest VNI that
+            // no link of either server has (the kernel takes a VNI once per UDP port on a
+            // server, whoever the peer is); it is also new for the pair, as the schema wants.
             let taken: HashSet<u32> = {
-                let mut stmt =
-                    tx.prepare("SELECT gre_key FROM net_links WHERE a = ?1 AND b = ?2")?;
+                let sql = match kind {
+                    LinkKind::Gre => "SELECT gre_key FROM net_links WHERE a = ?1 AND b = ?2",
+                    LinkKind::Vxlan => {
+                        "SELECT gre_key FROM net_links WHERE a IN (?1, ?2) OR b IN (?1, ?2)"
+                    }
+                };
+                let mut stmt = tx.prepare(sql)?;
                 let rows = stmt.query_map(params![a, b], |r| r.get::<_, u32>(0))?;
                 rows.collect::<rusqlite::Result<_>>()?
             };
-            let gre_key = (1u32..).find(|k| !taken.contains(k)).unwrap_or(1);
+            let gre_key = (1u32..=VNI_MAX)
+                .find(|k| !taken.contains(k))
+                .ok_or_else(|| anyhow!("pool_full"))?;
             let id = random_hex(6)?;
             let link = Link {
                 ifname: format!("kz-{}", &id[..5]),
@@ -340,6 +387,8 @@ impl Networks {
                 addr_b: Ipv4Addr::from(subnet + 2).to_string(),
                 gre_key,
                 created: now(),
+                kind,
+                port,
             };
             tx.execute(
                 "INSERT INTO net_links (id, network, a, b, subnet, addr_a, addr_b, gre_key, ifname, created)
@@ -376,6 +425,11 @@ impl Networks {
         }
         Ok(conn.execute("DELETE FROM networks WHERE id = ?1", [id])? > 0)
     }
+}
+
+/// A kind as the database keeps it; anything else is the GRE it was before there was a kind.
+fn kind_of(text: &str) -> LinkKind {
+    LinkKind::parse(text).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -549,6 +603,65 @@ mod tests {
             again[0].subnet, first[0].subnet,
             "a freed subnet is used again"
         );
+    }
+
+    #[test]
+    fn no_two_vxlan_links_of_a_server_share_a_vni() {
+        let n = nets();
+        let vx = n
+            .create_network_of("vx", "10.77.0.0/16", LinkKind::Vxlan, 0, &[])
+            .unwrap();
+        assert_eq!((vx.kind, vx.port), (LinkKind::Vxlan, 4789));
+        let link = |x: &str, y: &str| {
+            n.create_links(&vx.id, &[(x.into(), y.into())], &Routes::new())
+                .unwrap()
+                .remove(0)
+        };
+        // The kernel takes a VNI once per port on a server, whoever the peer is: a-b and
+        // a-c may not share one, while c-d (no server in common with a-b) may.
+        let ab = link("a", "b");
+        let ac = link("a", "c");
+        let cd = link("c", "d");
+        let bd = link("b", "d");
+        assert_eq!((ab.gre_key, ac.gre_key), (1, 2));
+        assert_eq!(cd.gre_key, 1, "c-d shares no server with a-b");
+        assert_eq!(bd.gre_key, 2, "b has 1, d has 1: the next free one");
+        assert!([&ab, &ac, &cd, &bd]
+            .iter()
+            .all(|l| l.kind == LinkKind::Vxlan && l.port == 4789));
+        // GRE keys stay per pair, as before
+        let gre = n.create_network("g", "10.78.0.0/16", &[]).unwrap();
+        let g = n
+            .create_links(&gre.id, &[("c".into(), "e".into())], &Routes::new())
+            .unwrap();
+        assert_eq!((g[0].kind, g[0].gre_key, g[0].port), (LinkKind::Gre, 1, 0));
+        // and the list shows each network's kind (two made in the same second come in any order)
+        let mut kinds: Vec<_> = n
+            .networks()
+            .unwrap()
+            .into_iter()
+            .map(|x| (x.name, x.kind))
+            .collect();
+        kinds.sort_by(|x, y| x.0.cmp(&y.0));
+        assert_eq!(
+            kinds,
+            vec![("g".into(), LinkKind::Gre), ("vx".into(), LinkKind::Vxlan)]
+        );
+    }
+
+    #[test]
+    fn a_network_kind_takes_its_own_port_rules() {
+        let n = nets();
+        assert_eq!(
+            why(n.create_network_of("g", "10.77.0.0/16", LinkKind::Gre, 4789, &[])),
+            "bad_port"
+        );
+        let v = n
+            .create_network_of("v", "10.77.0.0/16", LinkKind::Vxlan, 8472, &[])
+            .unwrap();
+        assert_eq!(v.port, 8472);
+        let g = n.create_network("g", "10.78.0.0/16", &[]).unwrap();
+        assert_eq!((g.kind, g.port), (LinkKind::Gre, 0));
     }
 
     #[test]
