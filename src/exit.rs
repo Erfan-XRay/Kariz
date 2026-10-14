@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
@@ -390,7 +392,7 @@ async fn serve(exit: &Exit, mut tunnel: Link, open: Open) {
     if open.kind == KIND_UDP {
         return serve_udp(exit, tunnel, open).await;
     }
-    let mut target = match tcp::connect(&open.target, &exit.tuning).await {
+    let mut target = match connect_target(exit, &open).await {
         Ok(t) => t,
         Err(e) => {
             exit.stats.targets.dial_failed(&open.target, &e);
@@ -469,7 +471,7 @@ async fn serve_stream(exit: &Exit, stream: SessionStream, syn: Bytes) {
         };
         return relay_udp(exit, Channel::Stream(stream), socket, &open).await;
     }
-    let mut target = match tcp::connect(&open.target, &exit.tuning).await {
+    let mut target = match connect_target(exit, &open).await {
         Ok(t) => t,
         Err(e) => {
             exit.stats.targets.dial_failed(&open.target, &e);
@@ -483,9 +485,21 @@ async fn serve_stream(exit: &Exit, stream: SessionStream, syn: Bytes) {
     }
 }
 
+/// Connects to the target of a TCP `open` and, when the entry side asked for one, writes
+/// the PROXY header to it before anything of the user's.
+async fn connect_target(exit: &Exit, open: &Open) -> io::Result<TcpStream> {
+    let mut target = tcp::connect(&open.target, &exit.tuning).await?;
+    if let Some(proxy) = &open.proxy {
+        target.write_all(&proxy.to_bytes()).await?;
+    }
+    Ok(target)
+}
+
 /// What a health probe of `target` answers: whether it could be connected to (an empty
 /// target asks about the tunnel alone). The connection is closed at once and, being no
-/// user's, is not counted.
+/// user's, is not counted. It sends nothing, no PROXY header either: a target that
+/// expects one (Xray with `acceptProxyProtocol`) sees a connection that ends before the
+/// header would have come, and simply drops it.
 async fn probe_target(exit: &Exit, target: &str) -> u8 {
     if target.is_empty() {
         return STATUS_OK;

@@ -21,6 +21,7 @@ use crate::crypto::{Crypto, ReplayFilter};
 use crate::limit::PerIp;
 use crate::mux::{MuxSession, SessionConfig, Side};
 use crate::proto::{self, Open, STATUS_DIAL_FAILED, STATUS_OK};
+use crate::proxy_header::ProxyHeader;
 use crate::relay::{relay, relay_stream, Counters};
 #[cfg(feature = "quic")]
 use crate::session::quic::{accept_sessions, QuicSession};
@@ -266,6 +267,7 @@ pub async fn run(config: Config) -> Result<()> {
             listen = %forward.listen,
             target = %forward.target,
             protocol = forward.protocol.name(),
+            proxy_protocol = forward.proxy_protocol.map_or("off", |v| v.name()),
             "forward ready"
         );
     }
@@ -426,7 +428,26 @@ async fn accept_users(
             },
             None => None,
         };
-        let (entry, open) = (entry.clone(), open.clone());
+        let open = match forward.proxy_protocol {
+            None => open.clone(),
+            // The header names this user and the address they reached, so the request is
+            // theirs alone.
+            Some(version) => match user.local_addr() {
+                Ok(destination) => {
+                    let proxy = ProxyHeader {
+                        version,
+                        source: peer,
+                        destination,
+                    };
+                    encode_open(Open::tcp_proxied(forward.target.clone(), proxy))
+                }
+                Err(e) => {
+                    debug!(%peer, error = %e, "user connection has no local address");
+                    continue;
+                }
+            },
+        };
+        let entry = entry.clone();
         let (target, counters) = (forward.target.clone(), counters.clone());
         tokio::spawn(async move {
             let _slot = slot;

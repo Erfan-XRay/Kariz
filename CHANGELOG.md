@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Real user addresses for Xray (PROXY protocol).** Every user reached the target from the exit
+  server's own Kariz process, so Xray saw `127.0.0.1` for everyone: per-account IP and device
+  limits in 3x-ui or Marzban, Xray's logs, IP routing rules and fail2ban on the exit server all
+  saw one address. A forward rule can now have `proxy_protocol = "v1"` or `"v2"`: the exit side
+  starts each TCP connection to the target with a PROXY header carrying the user's address and
+  port (UDP flows never get one). In the panel: *Real user IPs (PROXY protocol)* in the wizard
+  and on the edit page, written to every TCP port of the tunnel. **The target must expect the
+  header**: turn on `acceptProxyProtocol` on the Xray inbound behind those ports (in 3x-ui, the
+  inbound's *Proxy Protocol* switch), or every connection through them breaks. Both servers need
+  2.5 or newer; the panel refuses the setting while either runs an older version.
+  See [configuration](docs/configuration.md#real-user-addresses-proxy_protocol).
+
+### Fixed
+
+- **The panel names the server to update.** When a tunnel used something one server was too old
+  for (a chosen cipher, sealed QUIC, the 2.4 limits), checking or saving it failed with
+  *internal* instead of saying which server to update.
+
 ## 2.4.0-beta.1 - 2026-10-14
 
 A **beta**: a prerelease that only panels on the *Beta* channel are offered (*Settings,

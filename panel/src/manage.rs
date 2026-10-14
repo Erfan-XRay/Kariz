@@ -136,6 +136,12 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
             t.insert("listen".into(), text(&f.listen));
             t.insert("target".into(), text(&f.target));
             t.insert("protocol".into(), text(&f.protocol));
+            // PROXY headers are for TCP: a UDP rule would refuse the setting.
+            if let Some(v) = &spec.proxy_protocol {
+                if matches!(f.protocol.as_str(), "tcp" | "tcp+udp") {
+                    t.insert("proxy_protocol".into(), text(v));
+                }
+            }
             Value::Table(t)
         })
         .collect();
@@ -233,6 +239,7 @@ fn plain_text(spec: &Spec) -> Result<()> {
         &spec.ws_host,
         &spec.tls_sni,
         &spec.tls_pin,
+        &spec.proxy_protocol,
     ];
     let fields = [&spec.role, &spec.mode, &spec.transport]
         .into_iter()
@@ -365,6 +372,13 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
             .then(|| c.tunnel.encryption.name().to_owned()),
         quic_obfs: c.tunnel.quic.as_ref().is_some_and(|q| q.obfs),
         max_conns_per_ip: c.tuning.max_conns_per_ip.filter(|v| *v > 0),
+        // The panel writes the same one on every TCP rule.
+        proxy_protocol: c
+            .forward
+            .iter()
+            .find(|f| f.protocol.has_tcp())
+            .and_then(|f| f.proxy_protocol)
+            .map(|v| v.name().to_owned()),
         mux: Some(crate::wire::MuxSpec {
             enabled: c.tunnel.mux.enabled,
             connections: c.tunnel.mux.connections.and_then(|v| u32::try_from(v).ok()),
@@ -1351,6 +1365,40 @@ mod tests {
         assert_eq!(got.max_conns_per_ip, None);
         let json = serde_json::to_string(&got).unwrap();
         assert!(!json.contains("max_conns_per_ip"), "{json}");
+    }
+
+    #[test]
+    fn the_proxy_header_goes_on_tcp_rules_and_is_read_back() {
+        let d = Dir::new();
+        let mut s = spec("proxied");
+        let rule = |port: u16, protocol: &str| ForwardInfo {
+            listen: format!("0.0.0.0:{port}"),
+            target: "127.0.0.1:443".into(),
+            protocol: protocol.into(),
+        };
+        s.forwards = vec![rule(8443, "tcp"), rule(9443, "tcp+udp"), rule(53, "udp")];
+        s.proxy_protocol = Some("v2".into());
+        put(&d.0, &s).unwrap();
+        assert_eq!(
+            get(&d.0, "proxied").unwrap().proxy_protocol.as_deref(),
+            Some("v2")
+        );
+        let config = Config::load(&d.0.join("proxied.toml")).unwrap();
+        let written: Vec<_> = config.forward.iter().map(|f| f.proxy_protocol).collect();
+        let v2 = Some(kariz::config::ProxyVersion::V2);
+        assert_eq!(written, [v2, v2, None], "nothing on the UDP rule");
+        // Only v1 or v2: the agent's config check refuses anything else.
+        s.proxy_protocol = Some("v3".into());
+        assert!(put(&d.0, &s).is_err());
+        // Off: nothing written, and an older agent is not sent a field it does not know.
+        s.proxy_protocol = None;
+        put(&d.0, &s).unwrap();
+        let got = get(&d.0, "proxied").unwrap();
+        assert_eq!(got.proxy_protocol, None);
+        let text = std::fs::read_to_string(d.0.join("proxied.toml")).unwrap();
+        assert!(!text.contains("proxy_protocol"), "{text}");
+        let json = serde_json::to_string(&got).unwrap();
+        assert!(!json.contains("proxy_protocol"), "{json}");
     }
 
     #[test]

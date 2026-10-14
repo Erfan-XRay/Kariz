@@ -19,6 +19,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::proto::Duplicate;
+pub use crate::proxy_header::ProxyVersion;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -493,6 +494,12 @@ pub struct Forward {
     pub duplicate: Option<u8>,
     /// Milliseconds between the copies of a packet (0-50; default 5).
     pub duplicate_gap_ms: Option<u8>,
+    /// TCP rules: the exit side starts each connection to the target with a PROXY
+    /// protocol header (`v1` or `v2`) carrying the user's address, so the target sees who
+    /// connected instead of the exit side. The target must expect it (Xray:
+    /// `acceptProxyProtocol`), or every connection through this port breaks. Needs an
+    /// exit side of 2.5 or newer. UDP flows never get one.
+    pub proxy_protocol: Option<ProxyVersion>,
 }
 
 impl Forward {
@@ -1052,6 +1059,14 @@ impl Config {
             if (f.duplicate.is_some() || f.duplicate_gap_ms.is_some()) && !f.protocol.has_udp() {
                 bail!(
                     "forward {}: duplicate and duplicate_gap_ms are for UDP rules",
+                    f.listen
+                );
+            }
+            // Xray takes no PROXY header on UDP, and a UDP flow has no connection to
+            // start with one.
+            if f.proxy_protocol.is_some() && !f.protocol.has_tcp() {
+                bail!(
+                    "forward {}: proxy_protocol is for TCP rules (tcp or tcp+udp)",
                     f.listen
                 );
             }
@@ -1824,6 +1839,30 @@ path = \"/x\""
             let err = parse_err(&dup(protocol, "kcp", lines));
             assert!(err.contains(needle), "{lines}: {err}");
         }
+    }
+
+    #[test]
+    fn proxy_protocol_on_tcp_rules() {
+        let rule = |protocol: &str, line: &str| {
+            with_forward(protocol, "tcpmux", "").replace(
+                &format!("protocol = \"{protocol}\""),
+                &format!("protocol = \"{protocol}\"\n{line}"),
+            )
+        };
+        let off = Config::parse(&with_forward("tcp", "tcpmux", "")).unwrap();
+        assert_eq!(off.forward[0].proxy_protocol, None);
+        for (protocol, line, want) in [
+            ("tcp", "proxy_protocol = \"v1\"", ProxyVersion::V1),
+            ("tcp", "proxy_protocol = \"v2\"", ProxyVersion::V2),
+            ("tcp+udp", "proxy_protocol = \"v2\"", ProxyVersion::V2),
+        ] {
+            let c = Config::parse(&rule(protocol, line)).unwrap();
+            assert_eq!(c.forward[0].proxy_protocol, Some(want), "{protocol} {line}");
+        }
+        let err = parse_err(&rule("udp", "proxy_protocol = \"v2\""));
+        assert!(err.contains("proxy_protocol is for TCP rules"), "{err}");
+        let err = parse_err(&rule("tcp", "proxy_protocol = \"v3\""));
+        assert!(err.contains("v3"), "{err}");
     }
 
     #[test]

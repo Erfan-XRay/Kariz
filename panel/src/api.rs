@@ -1072,9 +1072,13 @@ fn pair_error(e: anyhow::Error) -> Response {
     let code = format!("{e:#}");
     match code.as_str() {
         "bad_name" | "same_server" | "bad_mode" | "bad_action" | "bad_encryption"
-        | "encryption_quic" => error(StatusCode::BAD_REQUEST, &code),
+        | "encryption_quic" | "bad_tls_host" | "bad_proxy_protocol" => {
+            error(StatusCode::BAD_REQUEST, &code)
+        }
         "busy" => error(StatusCode::CONFLICT, "busy"),
-        _ if code.starts_with("old_agent:") => error(StatusCode::CONFLICT, &code),
+        // `old_agent:`, and the ones that name what needs the newer version
+        // (`old_agent_enc:`, `old_agent_limits:`, ...): the page says which server to update.
+        _ if code.starts_with("old_agent") => error(StatusCode::CONFLICT, &code),
         _ => internal(e),
     }
 }
