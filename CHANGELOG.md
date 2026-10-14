@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 2.4.0-beta.1 - 2026-10-14
+
+A **beta**: a prerelease that only panels on the *Beta* channel are offered (*Settings,
+Updates, Channel*); `kariz-manager update` and the stable channel stay on 2.3.0. To try it on
+a server by hand: `kariz-manager install --version v2.4.0-beta.1`. On a server that runs the
+beta, `kariz-manager update` installs the latest stable release (2.3.0) again: update it from
+the panel instead.
+
+Built for busy evenings: a tunnel takes **4096 streams per connection** instead of 512, says so
+when it is full, and a **health probe** tells whether a new connection gets through, not only
+whether the tunnel is connected. Update the panel first, then the agents from the panel:
+each side checks its own stream limit, and the probe needs 2.4 on both servers (with an older
+exit side it is shown as not checked, never as a failure).
 
 ### Added
 
