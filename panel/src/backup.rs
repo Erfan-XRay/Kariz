@@ -40,6 +40,13 @@ struct ReverseRow {
     transport: Option<String>,
 }
 
+/// A server with an agents port of its own: the port its agent dials.
+#[derive(Debug, Serialize, Deserialize)]
+struct PortRow {
+    server: String,
+    port: u16,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Payload {
     format: u32,
@@ -50,6 +57,9 @@ struct Payload {
     /// Not in backups from before reverse links: then there are none.
     #[serde(default)]
     reverse: Vec<ReverseRow>,
+    /// Not in backups from before agents ports of a server's own: then there are none.
+    #[serde(default)]
+    ports: Vec<PortRow>,
 }
 
 fn derive(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
@@ -112,6 +122,17 @@ pub fn export(db: &Db, passphrase: &str) -> Result<Vec<u8>> {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
+    let ports = {
+        let conn = db.conn();
+        let mut stmt = conn.prepare("SELECT server, port FROM agent_ports ORDER BY server")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PortRow {
+                server: r.get(0)?,
+                port: r.get(1)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
     let payload = Payload {
         format: 1,
         created: now(),
@@ -119,6 +140,7 @@ pub fn export(db: &Db, passphrase: &str) -> Result<Vec<u8>> {
         link_token: db.meta("link_token")?,
         servers,
         reverse,
+        ports,
     };
     let salt = random::<16>()?;
     let nonce = random::<12>()?;
@@ -182,6 +204,13 @@ pub fn import(db: &Db, passphrase: &str, file: &[u8], replace: bool) -> Result<u
             params![r.server, r.host, r.port, r.transport],
         )?;
     }
+    tx.execute("DELETE FROM agent_ports", [])?;
+    for p in &payload.ports {
+        tx.execute(
+            "INSERT INTO agent_ports (server, port) VALUES (?1, ?2)",
+            params![p.server, p.port],
+        )?;
+    }
     if let Some(token) = &payload.link_token {
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('link_token', ?1) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -201,7 +230,7 @@ mod tests {
         db.set_meta("link_token", "the-link-token").unwrap();
         db.conn()
             .execute(
-                "INSERT INTO servers (id, name, key, created) VALUES ('a1', 'frankfurt', 'k1', 100), ('b2', 'istanbul', 'k2', 200)",
+                "INSERT INTO servers (id, name, key, created) VALUES ('a1', 'frankfurt', 'key-of-frankfurt-7f3a9c2e', 100), ('b2', 'istanbul', 'key-of-istanbul-5b1d8e04', 200)",
                 [],
             )
             .unwrap();
@@ -212,16 +241,26 @@ mod tests {
                 [],
             )
             .unwrap();
+        // frankfurt's agent dials a port of its own.
+        db.conn()
+            .execute(
+                "INSERT INTO agent_ports (server, port) VALUES ('a1', 8443)",
+                [],
+            )
+            .unwrap();
         db
     }
 
     #[test]
     fn a_backup_restores_the_servers_and_the_link_token_on_a_fresh_panel() {
         let file = export(&db_with_servers(), "a long enough passphrase").unwrap();
-        // the file does not show what is in it
+        // the file does not show what is in it (long enough strings that random bytes never
+        // spell them by chance; a two-letter key once did)
         let text = String::from_utf8_lossy(&file);
         assert!(
-            !text.contains("frankfurt") && !text.contains("k1") && !text.contains("the-link-token")
+            !text.contains("frankfurt")
+                && !text.contains("key-of-frankfurt-7f3a9c2e")
+                && !text.contains("the-link-token")
         );
 
         let fresh = Db::in_memory().unwrap();
@@ -249,6 +288,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(at, ("ist.example.com".to_owned(), 29001));
+        // And the agents port of its own one of them dials.
+        let own: u16 = fresh
+            .conn()
+            .query_row(
+                "SELECT port FROM agent_ports WHERE server = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(own, 8443);
     }
 
     #[test]

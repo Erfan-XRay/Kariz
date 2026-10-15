@@ -496,35 +496,23 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
             // (UDP, always sealed) on the next.
             let token = hub.link_token()?;
             let (cert, key) = (config.cert(), config.key());
-            for kind in kariz::link::LINK_TRANSPORTS {
-                let wss_kind = kind == kariz::config::TransportKind::Wss;
-                let addr = &kariz::link::address_for(listen, kind)?;
-                let mut bound = 0;
-                let mut last = None;
-                for one in kariz_panel::agent::listen_addresses(addr) {
-                    let made = if wss_kind {
-                        kariz::link::Acceptor::bind_wss(&one, &token, &cert, &key).await
-                    } else {
-                        kariz::link::Acceptor::bind_via(&one, &token, kind).await
-                    };
-                    match made {
-                        Ok(acceptor) => {
-                            tracing::info!(address = %one, transport = kind.name(), "listening for agents");
-                            tokio::spawn(hub.clone().serve_agents(acceptor));
-                            bound += 1;
-                        }
-                        Err(e) => last = Some(e),
-                    }
-                }
-                if bound == 0 {
-                    let e = last.map(|e| e.to_string()).unwrap_or_default();
-                    // tcpmux is what every agent can use: without it no server joins.
-                    if kind == kariz::config::TransportKind::Tcpmux {
-                        anyhow::bail!("failed to listen for agents on {addr}: {e}");
-                    }
-                    tracing::warn!(address = %addr, transport = kind.name(), error = %e, "agents cannot use this transport");
-                }
+            for acceptor in kariz_panel::agent_ports::bind(listen, &token, &cert, &key).await? {
+                tokio::spawn(hub.clone().serve_agents(acceptor));
             }
+            // Servers with an agents port of their own: the panel listens there too.
+            hub.set_agent_listen(kariz_panel::agent_ports::AgentListen {
+                listen: listen.clone(),
+                web_port: config
+                    .listen
+                    .parse::<std::net::SocketAddr>()
+                    .map_or(0, |a| a.port()),
+                cert,
+                key,
+            });
+            tokio::spawn({
+                let hub = hub.clone();
+                async move { hub.open_saved_agent_ports().await }
+            });
             state.agent_port = config.agent_port();
         }
         let app = http::router(&config.path, state);

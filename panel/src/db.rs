@@ -147,6 +147,8 @@ const MIGRATIONS: &[&str] = &[
     // 14: how a network's links are made: GRE, or VXLAN over a UDP port (0 for GRE).
     "ALTER TABLE networks ADD COLUMN kind TEXT NOT NULL DEFAULT 'gre';
      ALTER TABLE networks ADD COLUMN port INTEGER NOT NULL DEFAULT 0;",
+    // 15: an agents port of a server's own, which the panel listens on for its agent alone.
+    "CREATE TABLE agent_ports (server TEXT PRIMARY KEY, port INTEGER NOT NULL UNIQUE);",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

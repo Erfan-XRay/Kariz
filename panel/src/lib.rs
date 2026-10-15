@@ -1,6 +1,7 @@
 //! The Kariz web panel.
 
 pub mod agent;
+pub mod agent_ports;
 pub mod agent_update;
 pub mod alerts;
 pub mod api;

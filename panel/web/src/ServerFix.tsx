@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, ApiError, kindLabel } from "./api";
 import type { GreJoin, LinkKind, LinkTransport, PanelAddresses, ServerInfo } from "./api";
 import { NewGreLinkFields, greJoinError, ipv4Ok, networkOfKind } from "./GreLink";
+import { AgentPortField, agentPortError, agentPortOf, agentPortOk } from "./AgentPort";
 import { useNetworks } from "./Networks";
 import { useApp } from "./store";
 import { linkPorts, reverseOk } from "./transport";
@@ -39,6 +40,8 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
   const { networks } = useNetworks();
   const [netId, setNetId] = useState("");
   const [linkKind, setLinkKind] = useState<LinkKind>("gre");
+  // The agents port its agent dials (empty: the panel's), as it has it now.
+  const [ownPort, setOwnPort] = useState(server.agent_port ? String(server.agent_port) : "");
   const [madeGre, setMadeGre] = useState<GreJoin | null>(null);
   const [own, setOwn] = useState<PanelAddresses | null>(null);
   const [code, setCode] = useState("");
@@ -97,11 +100,12 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
       const made =
         way === "reverse"
           ? await api.reconnectServer(server.id, "", transport, { host: viaLink ? viaLink.peer_addr : rhost.trim().replace(/^\[|\]$/g, ""), port: +rport })
-          : await api.reconnectServer(server.id, host.trim(), transport);
+          : await api.reconnectServer(server.id, host.trim(), transport, undefined, undefined, agentPortOf(ownPort, port) ?? undefined);
       setCode(made.code);
       setLeft(made.valid_for);
     } catch (e) {
       if (newLink) setError(e instanceof ApiError ? greJoinError(t, e.code, new Map(servers.map((s) => [s.id, s.name]))) : String(e));
+      else if (e instanceof ApiError && agentPortError(t, e.code, new Map(servers.map((s) => [s.id, s.name])))) setError(agentPortError(t, e.code, new Map(servers.map((s) => [s.id, s.name]))) ?? "");
       else setError(e instanceof ApiError && e.code === "agents_off" ? t("add.off") : t(way === "reverse" ? "add.rev.err.input" : "add.bad"));
     }
   };
@@ -116,7 +120,8 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
     ...(own?.gre ?? []).filter((g) => g.server === server.id).map((g) => [t("fix.addr.gre", { kind: kindLabel(g.kind), network: g.network }), g.addr] as [string, string]),
   ];
   const greNow = (own?.gre ?? []).find((g) => g.server === server.id && g.addr === host.trim());
-  const portText = (x: LinkTransport) => (port == null ? "?" : String(x === "wss" ? port + 1 : port));
+  const dialPort = agentPortOf(ownPort, port);
+  const portText = (x: LinkTransport) => (dialPort == null ? "?" : String(x === "wss" ? dialPort + 1 : dialPort));
   const seenAgo = live.last_seen ? ago(Math.max(0, Date.now() / 1000 - live.last_seen)) : null;
   const err = live.last_error;
   const title = live.online ? t("fix.titleOnline", { name: live.name }) : t("fix.title", { name: live.name });
@@ -124,7 +129,7 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
   const blocked = !agentsOn && way === "dial";
   const portOk = /^\d+$/.test(rport) && +rport > 0 && +rport < 65535;
   const panelPublic = own ? (own.gre_local ?? null) : undefined;
-  const ready = way === "reverse" ? (newLink ? ipv4Ok(ip) && panelPublic !== null && portOk : viaLink ? portOk : reverseOk(rhost, rport)) : !!host.trim();
+  const ready = way === "reverse" ? (newLink ? ipv4Ok(ip) && panelPublic !== null && portOk : viaLink ? portOk : reverseOk(rhost, rport)) : !!host.trim() && agentPortOk(ownPort);
 
   return (
     <Dialog
@@ -342,6 +347,7 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
             {!greNow && (own?.gre ?? []).some((g) => g.server === server.id) && <span className="help">{t("fix.greAvailable")}</span>}
             <span className="err">{error}</span>
           </div>
+          <AgentPortField id="fix-port" value={ownPort} onChange={setOwnPort} main={port} />
           <div className="field">
             <span className="label">{t("fix.protocol")}</span>
             <Seg<LinkTransport> value={transport} options={TRANSPORTS.map((x) => [x, t(`add.x.${x}`)] as [LinkTransport, string])} onChange={setTransport} />

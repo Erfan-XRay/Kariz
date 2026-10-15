@@ -462,6 +462,21 @@ struct JoinBody {
     host: String,
     /// The one link transport the agent is to use; none or `auto`: all of them in turn.
     transport: Option<String>,
+    /// An agents port of the server's own (and the next one): the panel listens there for
+    /// its agent alone. None, or the panel's agents port: that port.
+    #[serde(default)]
+    port: Option<u16>,
+}
+
+/// An error from giving a server an agents port of its own, as the page explains it.
+fn port_failed(e: &anyhow::Error) -> Response {
+    let why = format!("{e:#}");
+    match why.split(':').next().unwrap_or_default() {
+        "bad_port" => error(StatusCode::BAD_REQUEST, &why),
+        "port_taken" | "port_busy" | "agents_off" => error(StatusCode::CONFLICT, &why),
+        "no_such_server" => error(StatusCode::NOT_FOUND, &why),
+        _ => internal(anyhow::anyhow!(why)),
+    }
 }
 
 /// The panel's own public addresses, to offer in *Add server*, and its agents ports.
@@ -651,6 +666,41 @@ async fn join_code(
     } else {
         host.to_owned()
     };
+    // A port of its own: the server is listed now (waiting for its agent), the panel
+    // listens on that port for it, and the code makes the agent that server.
+    if let Some(own) = body.port.filter(|p| *p != port) {
+        let (id, name) = match state.hub.add_waiting(name, "") {
+            Ok(made) => made,
+            Err(e) => return internal(e),
+        };
+        if let Err(e) = state.hub.set_agent_port(&id, Some(own)).await {
+            let _ = state.hub.remove(&id);
+            return port_failed(&e);
+        }
+        return match state
+            .hub
+            .rejoin_code(&id, &format!("{host}:{own}"), transport, None, None)
+        {
+            Ok(code) => {
+                audit(
+                    &state,
+                    &format!("session {}", me.id),
+                    &ip_of(&peer),
+                    &format!(
+                        "added server {name} ({id}) to join on an agents port of its own, {own}"
+                    ),
+                );
+                reply(
+                    StatusCode::OK,
+                    json!({ "code": code, "valid_for": crate::join::JOIN_TTL, "id": id, "name": name, "port": own }),
+                )
+            }
+            Err(e) => {
+                let _ = state.hub.remove(&id);
+                internal(e)
+            }
+        };
+    }
     match state
         .hub
         .create_join_via(name, &format!("{host}:{port}"), transport)
@@ -794,6 +844,10 @@ struct ReconnectBody {
     /// A GRE link is made between the panel's server and this one, and the link to the
     /// panel goes across it (with `reverse`, its port; `host` is then not used).
     gre: Option<GreBody>,
+    /// The agents port its agent dials: one of its own, or the panel's agents port (it then
+    /// has none of its own). Left out: the one it has.
+    #[serde(default)]
+    port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -901,6 +955,13 @@ async fn reconnect_server(
     } else {
         host.to_owned()
     };
+    if let Some(want) = body.port {
+        let own = (want != port).then_some(want);
+        if let Err(e) = state.hub.set_agent_port(&body.id, own).await {
+            return port_failed(&e);
+        }
+    }
+    let port = state.hub.agent_port_of(&body.id).unwrap_or(port);
     match state
         .hub
         .create_rejoin(&body.id, &format!("{host}:{port}"), transport)
@@ -1692,8 +1753,11 @@ async fn restore(
     };
     match crate::backup::import(&state.db, &body.passphrase, &file, body.replace) {
         Ok(n) => {
-            // The servers it connects to, from the backup, are dialed from now on.
+            // The servers it connects to, from the backup, are dialed from now on, and the
+            // ports of their own agents dial are listened on.
             state.hub.start_reverse_links();
+            let hub = state.hub.clone();
+            tokio::spawn(async move { hub.open_saved_agent_ports().await });
             audit(
                 &state,
                 &format!("session {}", me.id),
