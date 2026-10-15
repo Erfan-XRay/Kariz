@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 2.6.0-beta.2 - 2026-10-15
+
+A **beta**, like [2.6.0-beta.1](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#260-beta1---2026-10-15):
+only panels on the *Beta* channel are offered it; `kariz-manager update` and the stable channel
+stay on 2.5.1. To try it on a server by hand: `kariz-manager install --version v2.6.0-beta.2`.
+
+VXLAN now also where an agent is set up, and in the benchmark: a server that GRE does not reach
+the panel's server from but UDP does can be added **over a VXLAN link**, and a benchmark measures
+GRE and VXLAN links each on their own. Update the panel first, then the agents from the panel.
 
 ### Added
 
