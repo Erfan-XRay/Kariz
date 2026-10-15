@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 2.6.0-beta.3 - 2026-10-15
+
+A **beta**, like [2.6.0-beta.2](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#260-beta2---2026-10-15):
+only panels on the *Beta* channel are offered it; `kariz-manager update` and the stable channel
+stay on 2.5.1. To try it on a server by hand: `kariz-manager install --version v2.6.0-beta.3`.
+
+A new server can now have **an agents port of its own**: the panel listens there for that
+server's agent alone, for when the main agents port is filtered from that server's network.
+Only the panel needs this version; the agents do not.
 
 ### Added
 
