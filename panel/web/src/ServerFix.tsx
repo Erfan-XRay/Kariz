@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError, kindLabel } from "./api";
-import type { GreJoin, LinkTransport, PanelAddresses, ServerInfo } from "./api";
-import { NewGreLinkFields, greJoinError, ipv4Ok } from "./GreLink";
+import type { GreJoin, LinkKind, LinkTransport, PanelAddresses, ServerInfo } from "./api";
+import { NewGreLinkFields, greJoinError, ipv4Ok, networkOfKind } from "./GreLink";
 import { useNetworks } from "./Networks";
 import { useApp } from "./store";
 import { linkPorts, reverseOk } from "./transport";
@@ -38,6 +38,7 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
   const [ip, setIp] = useState(server.addr ?? server.ip4 ?? "");
   const { networks } = useNetworks();
   const [netId, setNetId] = useState("");
+  const [linkKind, setLinkKind] = useState<LinkKind>("gre");
   const [madeGre, setMadeGre] = useState<GreJoin | null>(null);
   const [own, setOwn] = useState<PanelAddresses | null>(null);
   const [code, setCode] = useState("");
@@ -87,7 +88,7 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
     setError("");
     try {
       if (newLink) {
-        const made = await api.reconnectServer(server.id, "", transport, { host: "", port: +rport }, { ip: ip.trim(), network: netId || undefined });
+        const made = await api.reconnectServer(server.id, "", transport, { host: "", port: +rport }, { ip: ip.trim(), network: networkOfKind(networks, netId, linkKind), kind: linkKind });
         setMadeGre(made as GreJoin);
         setCode(made.code);
         setLeft(made.valid_for);
@@ -263,7 +264,19 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
             </div>
           )}
           {newLink && (
-            <NewGreLinkFields id="fix-rip" ip={ip} onIp={setIp} ipLabel={t("fix.rev.gre.ip")} error={error} networks={networks} netId={netId} onNet={setNetId} panelPublic={panelPublic} />
+            <NewGreLinkFields
+              id="fix-rip"
+              ip={ip}
+              onIp={setIp}
+              ipLabel={t("fix.rev.gre.ip")}
+              error={error}
+              networks={networks}
+              netId={netId}
+              onNet={setNetId}
+              panelPublic={panelPublic}
+              kind={linkKind}
+              onKind={setLinkKind}
+            />
           )}
           <div className="grid-2">
             {!greOn && (

@@ -745,14 +745,29 @@ impl Hub {
         transport: Option<&str>,
         way: GreWay,
     ) -> Result<GreJoin> {
+        self.create_link_join(name, public_ip, network, None, transport, way)
+            .await
+    }
+
+    /// [`Self::create_gre_join`] with the kind of link asked for: without a `network`, the
+    /// first network of that kind, else a new one (`kariz`, or `kariz-vxlan` on UDP 4789).
+    pub async fn create_link_join(
+        self: &Arc<Self>,
+        name: Option<&str>,
+        public_ip: &str,
+        network: Option<&str>,
+        kind: Option<LinkKind>,
+        transport: Option<&str>,
+        way: GreWay,
+    ) -> Result<GreJoin> {
         if name.is_some_and(|n| !join::valid_name(n)) {
             bail!("bad_input");
         }
-        let kind = self.join_kind(network)?;
+        let kind = self.join_kind(network, kind)?;
         let panels = self
             .gre_ready(None, public_ip, transport, way, kind)
             .await?;
-        let network = self.network_for_join(network)?;
+        let network = self.network_for_join(network, kind)?;
         let (id, name) = self.add_waiting(name, public_ip)?;
         let made = self
             .gre_join_code(&id, &name, public_ip, &panels, &network, transport, way)
@@ -778,6 +793,21 @@ impl Hub {
         transport: Option<&str>,
         way: GreWay,
     ) -> Result<GreJoin> {
+        self.create_link_rejoin(id, public_ip, network, None, transport, way)
+            .await
+    }
+
+    /// [`Self::create_gre_rejoin`] with the kind of link asked for (as
+    /// [`Self::create_link_join`]).
+    pub async fn create_link_rejoin(
+        self: &Arc<Self>,
+        id: &str,
+        public_ip: &str,
+        network: Option<&str>,
+        kind: Option<LinkKind>,
+        transport: Option<&str>,
+        way: GreWay,
+    ) -> Result<GreJoin> {
         let name: Option<String> = self
             .db
             .conn()
@@ -786,7 +816,7 @@ impl Hub {
         let Some(name) = name.filter(|_| id != LOCAL) else {
             bail!("no_such_server");
         };
-        let kind = self.join_kind(network)?;
+        let kind = self.join_kind(network, kind)?;
         // The server's own agent makes its end: an agent older than VXLAN would refuse it.
         if kind == LinkKind::Vxlan {
             let version = self
@@ -802,7 +832,7 @@ impl Hub {
         let panels = self
             .gre_ready(Some(id), public_ip, transport, way, kind)
             .await?;
-        let network = self.network_for_join(network)?;
+        let network = self.network_for_join(network, kind)?;
         let before = self.saved_addr(id);
         let made = self
             .gre_join_code(id, &name, public_ip, &panels, &network, transport, way)
@@ -867,19 +897,22 @@ impl Hub {
         Ok(panels)
     }
 
-    /// The kind of link a join makes: that of the network it takes its addresses from (the
-    /// one asked for, else the first there is), or GRE for the network it would make.
-    fn join_kind(&self, wanted: Option<&str>) -> Result<LinkKind> {
+    /// The kind of link a join makes: that of the network asked for (which must be of the
+    /// kind asked for, if one is), else the kind asked for, else that of the first network
+    /// there is, or GRE for the network it would make.
+    fn join_kind(&self, wanted: Option<&str>, asked: Option<LinkKind>) -> Result<LinkKind> {
         let all = self.networks.networks()?;
-        let found = match wanted {
-            Some(id) => Some(
-                all.into_iter()
-                    .find(|n| n.id == id)
-                    .ok_or_else(|| anyhow!("no_such_network"))?,
-            ),
-            None => all.into_iter().next(),
-        };
-        Ok(found.map(|n| n.kind).unwrap_or_default())
+        if let Some(id) = wanted {
+            let found = all
+                .into_iter()
+                .find(|n| n.id == id)
+                .ok_or_else(|| anyhow!("no_such_network"))?;
+            if asked.is_some_and(|k| k != found.kind) {
+                bail!("bad_input");
+            }
+            return Ok(found.kind);
+        }
+        Ok(asked.unwrap_or_else(|| all.first().map(|n| n.kind).unwrap_or_default()))
     }
 
     /// Gives server `id` the address `public_ip`, makes its GRE link to the panel's server in
@@ -997,9 +1030,10 @@ impl Hub {
         Ok((id, name))
     }
 
-    /// The private network a server added over GRE takes its addresses from: the one asked
-    /// for, else the first there is, else a new one (`kariz`, on a pool no server routes).
-    fn network_for_join(&self, wanted: Option<&str>) -> Result<String> {
+    /// The private network a server added over a link takes its addresses from: the one
+    /// asked for, else the first of `kind` there is, else a new one of that kind (`kariz` for
+    /// GRE, `kariz-vxlan` on UDP 4789 for VXLAN, on a pool no server routes).
+    fn network_for_join(&self, wanted: Option<&str>, kind: LinkKind) -> Result<String> {
         let all = self.networks.networks()?;
         if let Some(id) = wanted {
             return all
@@ -1008,13 +1042,31 @@ impl Hub {
                 .map(|n| n.id)
                 .ok_or_else(|| anyhow!("no_such_network"));
         }
-        if let Some(first) = all.into_iter().next() {
-            return Ok(first.id);
+        if let Some(first) = all.iter().find(|n| n.kind == kind) {
+            return Ok(first.id.clone());
         }
+        let base = match kind {
+            LinkKind::Gre => "kariz",
+            LinkKind::Vxlan => "kariz-vxlan",
+        };
+        // A name taken by a network of the other kind gets a number.
+        let name = (1..)
+            .map(|i| {
+                if i == 1 {
+                    base.to_owned()
+                } else {
+                    format!("{base}-{i}")
+                }
+            })
+            .find(|n| !all.iter().any(|x| &x.name == n))
+            .unwrap_or_else(|| base.to_owned());
         let routes: Vec<(String, Vec<String>)> = self.routes().into_iter().collect();
         let mut last = anyhow!("pool_full");
         for pool in JOIN_POOLS {
-            match self.networks.create_network("kariz", pool, &routes) {
+            match self
+                .networks
+                .create_network_of(&name, pool, kind, 0, &routes)
+            {
                 Ok(made) => return Ok(made.id),
                 Err(e) => last = e,
             }

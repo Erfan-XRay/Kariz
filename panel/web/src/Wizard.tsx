@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ApiError, api } from "./api";
+import { ApiError, api, isPrivatePath } from "./api";
 import type { CheckReply, ForwardSpec, PairRequest, ServerInfo } from "./api";
 import { useApp } from "./store";
 import { Icon, Seg, useFocusTrap } from "./ui";
@@ -372,7 +372,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     isCurrent={(c) =>
                       c.transport === joinTransport(transport, muxOn).core &&
                       c.mode === mode &&
-                      (c.path === "gre") === !!netId &&
+                      (isPrivatePath(c.path) ? c.network === netId : !netId) &&
                       (c.path === "ipv6") === (!netId && isV6(dialHost)) &&
                       !c.sni === !(transport === "wss" && sni)
                     }

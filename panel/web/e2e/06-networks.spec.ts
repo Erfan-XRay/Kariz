@@ -41,3 +41,23 @@ test("a network is made as GRE or as VXLAN on a port of its own", async ({ page 
     await expect(card).toHaveCount(0);
   }
 });
+
+// Add server offers VXLAN beside GRE: with no VXLAN network yet, the panel says it makes one.
+test("a server can be added over a VXLAN link as well as a GRE one", async ({ page }) => {
+  await signIn(page);
+  await goTo(page, "servers");
+  await page.locator(".page-band .btn-primary").click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: /Over a GRE link/ }).click();
+  await expect(dialog.getByText(/a new private network, kariz/)).toBeVisible();
+  await dialog.getByRole("button", { name: /Over a VXLAN link/ }).click();
+  await expect(dialog.getByRole("button", { name: /Over a VXLAN link/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.getByText(/a new VXLAN network, kariz-vxlan/)).toBeVisible();
+  await expect(dialog.getByText(/Only UDP to the network's port/)).toBeVisible();
+
+  // Reverse, across a link: the kind is a choice there.
+  await dialog.getByRole("button", { name: /The panel connects to it/ }).click();
+  await dialog.getByLabel(/Across a private link/).check();
+  await dialog.getByRole("button", { name: "VXLAN", exact: true }).click();
+  await expect(dialog.getByText(/a new VXLAN network, kariz-vxlan/)).toBeVisible();
+});

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api, kindLabel } from "./api";
-import type { GreJoin, LinkTransport, PanelAddresses, ServerInfo, SessionRow } from "./api";
+import type { GreJoin, LinkKind, LinkTransport, PanelAddresses, ServerInfo, SessionRow } from "./api";
 import { bytesPerSec, pairTunnels, rateParts } from "./derive";
 import type { TunnelState } from "./derive";
 import type { Route } from "./App";
@@ -13,7 +13,7 @@ import { TelegramSection } from "./Telegram";
 import { AutoRestartDialog } from "./AutoRestart";
 import { ServerFixDialog } from "./ServerFix";
 import { useNetworks } from "./Networks";
-import { NewGreLinkFields, greJoinError, ipv4Ok } from "./GreLink";
+import { NewGreLinkFields, greJoinError, ipv4Ok, networkOfKind } from "./GreLink";
 import { hostPort, linkPorts, reverseOk, transportLabel } from "./transport";
 import { Card, CodeBlock, CopyValue, Dialog, Empty, Icon, Odo, Seg, Sep, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
 
@@ -449,7 +449,7 @@ function Meter({ label, pct }: { label: string; pct: number | null }) {
  * How a new server joins: its agent dials the panel over the internet (the panel's public address) or over a
  * private GRE link the panel sets up for it, or the panel dials the agent (reverse).
  */
-type JoinWay = "internet" | "gre" | "reverse";
+type JoinWay = "internet" | "gre" | "vxlan" | "reverse";
 
 /** The port a reverse agent listens on, until another is typed. */
 const REVERSE_PORT = "29001";
@@ -471,6 +471,10 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   const [rev, setRev] = useState<{ addr: string; port: number } | null>(null);
   // Reverse across a GRE link the panel makes: the new server's public IPv4 and network are the ones above.
   const [revGre, setRevGre] = useState(false);
+  const [revKind, setRevKind] = useState<LinkKind>("gre");
+  // Over a private link the panel makes (GRE or VXLAN), and its kind.
+  const overLink = way === "gre" || way === "vxlan";
+  const linkKind: LinkKind = way === "vxlan" ? "vxlan" : "gre";
   const [busy, setBusy] = useState(false);
   const [own, setOwn] = useState<PanelAddresses | null>(null);
   const [code, setCode] = useState("");
@@ -503,13 +507,13 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
     setBusy(true);
     try {
       known.current = new Set(servers.map((s) => s.id));
-      if (way === "gre") {
-        const made = await api.joinGre(name.trim() || undefined, ip.trim(), netId || undefined, "auto");
+      if (overLink) {
+        const made = await api.joinGre(name.trim() || undefined, ip.trim(), networkOfKind(networks, netId, linkKind), "auto", linkKind);
         setGre(made);
         setCode(made.code);
         setLeft(made.valid_for);
       } else if (way === "reverse" && revGre) {
-        const made = await api.joinReverse(name.trim() || undefined, "", +rport, transport, { ip: ip.trim(), network: netId || undefined });
+        const made = await api.joinReverse(name.trim() || undefined, "", +rport, transport, { ip: ip.trim(), network: networkOfKind(networks, netId, revKind), kind: revKind });
         setGre(made as GreJoin);
         setRev({ addr: hostPort(made.server_addr ?? "", rport.trim()), port: +rport });
         setCode(made.code);
@@ -525,7 +529,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
         setLeft(made.valid_for);
       }
     } catch (e) {
-      if (way === "gre") setError(e instanceof ApiError ? greJoinError(t, e.code, names) : String(e));
+      if (overLink) setError(e instanceof ApiError ? greJoinError(t, e.code, names) : String(e));
       else if (way === "reverse" && revGre && !portOk) setError(t("add.rev.err.input"));
       else if (way === "reverse" && revGre) setError(e instanceof ApiError ? greJoinError(t, e.code, names) : String(e));
       else if (way === "reverse") setError(e instanceof ApiError && e.code !== "bad_input" ? greJoinError(t, e.code, names) : t("add.rev.err.input"));
@@ -552,7 +556,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   const ipOk = ipv4Ok(ip);
   const portOk = /^\d+$/.test(rport) && +rport > 0 && +rport < 65535;
   const ready =
-    way === "gre" ? ipOk && panelPublic !== null : way === "reverse" ? (revGre ? ipOk && panelPublic !== null && portOk : reverseOk(rhost, rport)) : !!host.trim();
+    overLink ? ipOk && panelPublic !== null : way === "reverse" ? (revGre ? ipOk && panelPublic !== null && portOk : reverseOk(rhost, rport)) : !!host.trim();
   // The panel needs no agents port of its own when it is the one that connects.
   const blocked = !agentsOn && way !== "reverse";
   const transportField = (help: string) => (
@@ -603,7 +607,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
           <div className="field">
             <span className="label">{t("add.way")}</span>
             <div className="join-ways" role="group" aria-label={t("add.way")}>
-              {(["internet", "gre", "reverse"] as JoinWay[]).map((w) => (
+              {(["internet", "gre", "vxlan", "reverse"] as JoinWay[]).map((w) => (
                 <button
                   key={w}
                   type="button"
@@ -614,7 +618,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
                     setError("");
                   }}
                 >
-                  <Icon name={w === "gre" ? "networks" : w === "reverse" ? "back" : "map"} size={18} />
+                  <Icon name={w === "gre" || w === "vxlan" ? "networks" : w === "reverse" ? "back" : "map"} size={18} />
                   <b>{t(`add.way.${w}`)}</b>
                   <span>{t(`add.way.${w}.d`)}</span>
                 </button>
@@ -624,7 +628,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
           <div className="field">
             <label htmlFor="add-name">{t("add.name")}</label>
             <input className="text mono" id="add-name" dir="ltr" placeholder="istanbul-1" value={name} onChange={(e) => setName(e.target.value)} />
-            <span className="help">{t(way === "gre" ? "add.gre.nameHelp" : "add.nameHelp")}</span>
+            <span className="help">{t(overLink ? "add.gre.nameHelp" : "add.nameHelp")}</span>
           </div>
           {way === "internet" && (
             <>
@@ -680,7 +684,19 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
                 <span className="help">{t("add.rev.gre.d")}</span>
               </div>
               {revGre && (
-                <NewGreLinkFields id="add-rip" ip={ip} onIp={setIp} ipLabel={t("add.gre.ip")} error={error} networks={networks} netId={netId} onNet={setNetId} panelPublic={panelPublic} />
+                <NewGreLinkFields
+                  id="add-rip"
+                  ip={ip}
+                  onIp={setIp}
+                  ipLabel={t("add.gre.ip")}
+                  error={error}
+                  networks={networks}
+                  netId={netId}
+                  onNet={setNetId}
+                  panelPublic={panelPublic}
+                  kind={revKind}
+                  onKind={setRevKind}
+                />
               )}
               <div className="grid-2">
                 {!revGre && (
@@ -712,19 +728,19 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
                 </p>
               )}
               <ol className="gre-steps">
-                <li>{t(revGre ? "add.rev.gre.step1" : "add.rev.step1")}</li>
+                <li>{t(revGre ? "add.rev.gre.step1" : "add.rev.step1", { kind: kindLabel(revKind) })}</li>
                 <li>{t(revGre ? "add.rev.gre.step2" : "add.rev.step2")}</li>
                 <li>{t(revGre ? "add.rev.gre.step3" : "add.rev.step3")}</li>
               </ol>
             </>
           )}
-          {way === "gre" && (
+          {overLink && (
             <>
-              <NewGreLinkFields id="add-ip" ip={ip} onIp={setIp} ipLabel={t("add.gre.ip")} error={error} networks={networks} netId={netId} onNet={setNetId} panelPublic={panelPublic} />
+              <NewGreLinkFields id="add-ip" ip={ip} onIp={setIp} ipLabel={t("add.gre.ip")} error={error} networks={networks} netId={netId} onNet={setNetId} panelPublic={panelPublic} kind={linkKind} />
               <ol className="gre-steps">
-                <li>{t("add.gre.step1")}</li>
+                <li>{t("add.gre.step1", { kind: kindLabel(linkKind) })}</li>
                 <li>{t("add.gre.step2")}</li>
-                <li>{t("add.gre.step3")}</li>
+                <li>{t(linkKind === "vxlan" ? "add.vx.step3" : "add.gre.step3")}</li>
               </ol>
             </>
           )}
@@ -752,7 +768,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
           <div className="field">
             <span className="label">{t("add.run")}</span>
             <CodeBlock text={`bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh) --agent ${code}`} />
-            <span className="help">{t(gre && rev ? "add.rev.gre.runHelp" : gre ? "add.gre.runHelp" : rev ? "add.rev.runHelp" : "add.runHelp")}</span>
+            <span className="help">{t(gre && rev ? "add.rev.gre.runHelp" : gre ? "add.gre.runHelp" : rev ? "add.rev.runHelp" : "add.runHelp", { kind: kindLabel(gre?.kind) })}</span>
             <span className="label" style={{ marginTop: "var(--sp-3)" }}>
               {t("add.runInstalled")}
             </span>

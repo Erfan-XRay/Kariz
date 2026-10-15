@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ApiError, api } from "./api";
+import { ApiError, api, isPrivatePath } from "./api";
 import type { ServerInfo } from "./api";
 import { pairTunnels, rateParts } from "./derive";
 import type { Tunnel, TunnelState } from "./derive";
@@ -271,7 +271,8 @@ function TunnelPage({
   // direction, and whether it listens on a private network link.
   const acceptorSide = mode === "reverse" ? tunnel.entry : tunnel.exit;
   const listenHost = (acceptorSide?.tunnel.listen ?? "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
-  const overGre = !!linkWithAddress(links, listenHost);
+  const overLink = linkWithAddress(links, listenHost);
+  const overGre = !!overLink;
   const nowCore = tunnel.transport === "tcp" ? "tcpmux" : tunnel.transport;
   // ... whether it dials an IPv6 address, and the server name a wss tunnel sends (its own, else the WebSocket
   // host's), which the benchmark tries wss with too.
@@ -474,7 +475,7 @@ function TunnelPage({
               currentLabel={t("bench.currentTunnel")}
               context="tunnel"
               sni={tunnelSni}
-              isCurrent={(c) => c.transport === nowCore && c.mode === mode && (c.path === "gre") === overGre && (c.path === "ipv6") === overV6 && !c.sni === !tunnelSni}
+              isCurrent={(c) => c.transport === nowCore && c.mode === mode && (isPrivatePath(c.path) ? c.network === overLink?.network : !overGre) && (c.path === "ipv6") === overV6 && !c.sni === !tunnelSni}
               onApply={(choice) => onEdit(choice)}
             />
           </Card>
