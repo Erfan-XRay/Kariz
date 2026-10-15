@@ -14,6 +14,7 @@ import { AutoRestartDialog } from "./AutoRestart";
 import { ServerFixDialog } from "./ServerFix";
 import { useNetworks } from "./Networks";
 import { NewGreLinkFields, greJoinError, ipv4Ok, networkOfKind } from "./GreLink";
+import { AgentPortField, agentPortError, agentPortOf, agentPortOk } from "./AgentPort";
 import { hostPort, linkPorts, reverseOk, transportLabel } from "./transport";
 import { Card, CodeBlock, CopyValue, Dialog, Empty, Icon, Odo, Seg, Sep, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
 
@@ -460,6 +461,8 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   const [name, setName] = useState("");
   const [host, setHost] = useState(location.hostname.replace(/^\[|\]$/g, ""));
   const [transport, setTransport] = useState<LinkTransport>("auto");
+  // An agents port of its own (empty: the panel's).
+  const [ownPort, setOwnPort] = useState("");
   // Over GRE: the new server's public IPv4 address, and the network its link takes its addresses from.
   const [ip, setIp] = useState("");
   const { networks } = useNetworks();
@@ -524,7 +527,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
         setCode(made.code);
         setLeft(made.valid_for);
       } else {
-        const made = await api.joinCode(name.trim() || undefined, host.trim(), transport);
+        const made = await api.joinCode(name.trim() || undefined, host.trim(), transport, ownPort ? +ownPort : undefined);
         setCode(made.code);
         setLeft(made.valid_for);
       }
@@ -533,6 +536,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
       else if (way === "reverse" && revGre && !portOk) setError(t("add.rev.err.input"));
       else if (way === "reverse" && revGre) setError(e instanceof ApiError ? greJoinError(t, e.code, names) : String(e));
       else if (way === "reverse") setError(e instanceof ApiError && e.code !== "bad_input" ? greJoinError(t, e.code, names) : t("add.rev.err.input"));
+      else if (e instanceof ApiError && agentPortError(t, e.code, names)) setError(agentPortError(t, e.code, names) ?? "");
       else setError(e instanceof ApiError && e.code === "agents_off" ? t("add.off") : t("add.bad"));
     } finally {
       setBusy(false);
@@ -540,7 +544,8 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   };
 
   const mmss = `${String(Math.floor(left / 60)).padStart(2, "0")}:${String(left % 60).padStart(2, "0")}`;
-  const port = own?.agent_port ?? null;
+  const mainPort = own?.agent_port ?? null;
+  const port = way === "internet" ? agentPortOf(ownPort, mainPort) : mainPort;
   const here = location.hostname.replace(/^\[|\]$/g, "");
   const choices: [string, string][] = [
     ...(own?.v4 ? [[t("add.addr.v4"), own.v4] as [string, string]] : []),
@@ -556,7 +561,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   const ipOk = ipv4Ok(ip);
   const portOk = /^\d+$/.test(rport) && +rport > 0 && +rport < 65535;
   const ready =
-    overLink ? ipOk && panelPublic !== null : way === "reverse" ? (revGre ? ipOk && panelPublic !== null && portOk : reverseOk(rhost, rport)) : !!host.trim();
+    overLink ? ipOk && panelPublic !== null : way === "reverse" ? (revGre ? ipOk && panelPublic !== null && portOk : reverseOk(rhost, rport)) : !!host.trim() && agentPortOk(ownPort);
   // The panel needs no agents port of its own when it is the one that connects.
   const blocked = !agentsOn && way !== "reverse";
   const transportField = (help: string) => (
@@ -649,6 +654,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
                 {greHost && <span className="help">{t("add.greHelp")}</span>}
                 <span className="err">{error}</span>
               </div>
+              <AgentPortField id="add-port" value={ownPort} onChange={setOwnPort} main={mainPort} />
               <div className="field">
                 <span className="label">{t("add.transport")}</span>
                 <Seg
@@ -920,6 +926,13 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                   <div className="srv-ips">
                     <span className="badge" title={t("srv.viaGre", { network: s.gre.network })}>
                       {t("srv.greChip", { kind: kindLabel(s.gre.kind), network: s.gre.network })}
+                    </span>
+                  </div>
+                )}
+                {s.agent_port && !s.reverse && (
+                  <div className="srv-ips">
+                    <span className="badge" title={t("srv.portTitle", { port: s.agent_port })}>
+                      {t("srv.portChip", { port: s.agent_port })}
                     </span>
                   </div>
                 )}

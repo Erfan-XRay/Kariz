@@ -105,6 +105,16 @@ panel within seconds.
   the agents port listens on both. A server that has a private (GRE) link to the panel's server
   can go through it: its *Edit* offers the panel's address on the link
   ([details](networks.md#the-agents-link-over-a-network)).
+- **An agents port of its own.** *Agents port* (optional) under the address: left empty, the
+  agent dials the panel's agents port, as every agent does. With a port (say `8443`), the panel
+  also listens on that port and the next one (`8444`), TCP and UDP, for this server's agent
+  alone, so a server whose network filters the main agents port can use one that gets through;
+  open both in the panel server's firewall. The server is listed at once, waiting for its agent,
+  and its card shows *agents port 8443*. Another agent on that port is turned away. *Edit*
+  changes it (empty: back to the main port); removing the server closes the port. The port and
+  the next must be free of the panel's page, its agents ports and other servers' own ports, and
+  nothing else may listen there. A backup keeps it. API: `port` in
+  `POST /api/servers/join-code` and `POST /api/servers/reconnect`.
 - **Only GRE gets through?** Choose **Over a GRE link** and type the new server's public IPv4
   address: the panel makes its end of a GRE link at once, and the command makes the other end
   before the agent connects across it ([details](networks.md#add-a-server-over-gre)).

@@ -604,6 +604,7 @@ mod tests {
             last_error: None,
             gre: None,
             reverse: None,
+            agent_port: None,
             health: None,
             ip4: None,
             ip6: None,

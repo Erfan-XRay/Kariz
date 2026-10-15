@@ -147,6 +147,8 @@ pub struct ServerView {
     pub gre: Option<GreRef>,
     /// Where the panel dials this server, for one it connects to (reverse).
     pub reverse: Option<crate::reverse::Reverse>,
+    /// The agents port of its own its agent dials, if it has one (`crate::agent_ports`).
+    pub agent_port: Option<u16>,
     pub health: Option<Health>,
     /// The server's public IPv4 and IPv6 addresses, when they are known: what its agent
     /// reports, or the address its link comes from.
@@ -279,6 +281,8 @@ pub struct Hub {
     pub checked: Mutex<crate::updater::Checked>,
     /// The Telegram bot's connect code and how it is going.
     pub telegram: crate::telegram::State,
+    /// Agents ports of a server's own (`crate::agent_ports`).
+    pub(crate) ports: crate::agent_ports::Ports,
 }
 
 pub const LOCAL: &str = "local";
@@ -356,6 +360,7 @@ impl Hub {
             update_settings: std::sync::OnceLock::new(),
             checked: Mutex::new(crate::updater::Checked::default()),
             telegram: crate::telegram::State::default(),
+            ports: crate::agent_ports::Ports::default(),
             kariz_dir,
             live: Mutex::new(HashMap::new()),
             reverse_gen: Mutex::new(HashMap::new()),
@@ -1018,7 +1023,10 @@ impl Hub {
                     .chars()
                     .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
                     .collect();
-                format!("server-{}", plain.trim_matches('-'))
+                match plain.trim_matches('-') {
+                    "" => "server".to_owned(),
+                    plain => format!("server-{plain}"),
+                }
             },
             str::to_owned,
         );
@@ -1250,6 +1258,7 @@ impl Hub {
             let conn = self.db.conn();
             conn.execute("DELETE FROM net_links WHERE a = ?1 OR b = ?1", [id])?;
             conn.execute("DELETE FROM reverse_links WHERE server = ?1", [id])?;
+            conn.execute("DELETE FROM agent_ports WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM server_addrs WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM server_seen WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM pending_deletes WHERE server = ?1", [id])?;
@@ -1263,8 +1272,10 @@ impl Hub {
             .conn()
             .execute("DELETE FROM servers WHERE id = ?1", [id])?
             == 1;
-        // The panel stops dialing it, if it connected to it.
+        // The panel stops dialing it, if it connected to it, and listening for it on a
+        // port of its own.
         self.forget_reverse(id);
+        self.close_agent_port(id);
         for peer in peers {
             let hub = self.clone();
             tokio::spawn(async move {
@@ -1284,18 +1295,30 @@ impl Hub {
     /// Accepts agents for ever. Each connection gets its own task, so a slow or hostile
     /// peer never holds up the others.
     pub async fn serve_agents(self: Arc<Self>, acceptor: kariz::link::Acceptor) {
+        self.serve_agents_as(acceptor, None).await;
+    }
+
+    /// Like [`Hub::serve_agents`], for `expected`'s agent alone when it is set (an agents
+    /// port of that server's own): another agent there is let go.
+    pub async fn serve_agents_as(
+        self: Arc<Self>,
+        acceptor: kariz::link::Acceptor,
+        expected: Option<String>,
+    ) {
         let link = acceptor.kind().name();
         loop {
             match acceptor.accept().await {
                 Ok(pending) => {
                     let hub = self.clone();
                     let peer = pending.peer();
+                    let expected = expected.clone();
                     tokio::spawn(async move {
                         match pending.establish(Side::Client).await {
                             Ok(session) => {
                                 let ip = peer.ip().to_canonical();
-                                if let Err(e) =
-                                    hub.run_session(Arc::new(session), link, ip, None).await
+                                if let Err(e) = hub
+                                    .run_session(Arc::new(session), link, ip, expected.as_deref())
+                                    .await
                                 {
                                     debug!(%peer, error = %e, "an agent session ended");
                                 }
@@ -1754,6 +1777,7 @@ impl Hub {
                 last_seen: (last_seen > 0).then_some(last_seen),
                 last_error: l.and_then(|l| l.last_error.clone()),
                 reverse: None,
+                agent_port: None,
                 gre: match l.and_then(|l| l.peer_ip) {
                     Some(ip) => gre_via(&links, &names, id, &ip.to_string()),
                     // Never connected, and linked to the panel's server: it was added to
@@ -1797,9 +1821,16 @@ impl Hub {
         };
         let mut reverse: HashMap<String, crate::reverse::Reverse> =
             self.reverse_all()?.into_iter().collect();
+        let own_ports: HashMap<String, u16> = {
+            let conn = self.db.conn();
+            let mut stmt = conn.prepare("SELECT server, port FROM agent_ports")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
         for s in &mut out {
             s.addr = addrs.get(&s.id).cloned();
             s.reverse = reverse.remove(&s.id);
+            s.agent_port = own_ports.get(&s.id).copied();
             // One the panel dials across a GRE link uses it, also while it is offline.
             if s.gre.is_none() {
                 if let Some(r) = &s.reverse {

@@ -276,6 +276,8 @@ export interface ServerInfo {
   gre?: { link: string; network: string; kind?: LinkKind } | null;
   /** Where the panel dials it, for a server the panel connects to (reverse). */
   reverse?: ReverseTarget | null;
+  /** An agents port of its own its agent dials, if it has one. */
+  agent_port?: number | null;
   /** The transport its agent's link uses now (tcpmux or kcp). */
   link?: string | null;
   health: Health | null;
@@ -530,15 +532,17 @@ export const api = {
   loginWithLink: (token: string) => call<{ csrf: string }>("POST", "link", { token }),
   logout: () => call<object>("POST", "logout"),
   servers: () => call<{ servers: ServerInfo[]; agents: boolean }>("GET", "servers"),
-  joinCode: (name: string | undefined, host: string, transport: LinkTransport) =>
-    call<{ code: string; valid_for: number }>("POST", "servers/join-code", { name, host, transport }),
+  /** With `port`, the server gets an agents port of its own (and is listed now, waiting for its agent). */
+  joinCode: (name: string | undefined, host: string, transport: LinkTransport, port?: number) =>
+    call<{ code: string; valid_for: number; id?: string; name?: string; port?: number }>("POST", "servers/join-code", { name, host, transport, port }),
   panelAddresses: () => call<PanelAddresses>("GET", "servers/panel-addresses"),
   joinGre: (name: string | undefined, ip: string, network: string | undefined, transport: LinkTransport, kind: LinkKind = "gre") =>
     call<GreJoin>("POST", "servers/join-gre", { name, ip, network, transport, kind }),
   removeServer: (id: string) => call<object>("POST", "servers/remove", { id }),
   /** With `gre`, a GRE link to the server is made first and the link to the panel goes across it (the answer then says what was made). */
-  reconnectServer: (id: string, host: string, transport: LinkTransport, reverse?: { host: string; port: number }, gre?: NewGreLink) =>
-    call<{ code: string; valid_for: number } & Partial<GreJoin>>("POST", "servers/reconnect", { id, host, transport, reverse, gre }),
+  /** `port`: the agents port its agent dials (the panel's own clears a port of its own; left out: unchanged). */
+  reconnectServer: (id: string, host: string, transport: LinkTransport, reverse?: { host: string; port: number }, gre?: NewGreLink, port?: number) =>
+    call<{ code: string; valid_for: number } & Partial<GreJoin>>("POST", "servers/reconnect", { id, host, transport, reverse, gre, port }),
   /** With `gre`, the panel makes a GRE link to the new server and dials it across that link (`host` is not used). */
   joinReverse: (name: string | undefined, host: string, port: number, transport: LinkTransport, gre?: NewGreLink) =>
     call<{ code: string; valid_for: number; id: string; name: string } & Partial<GreJoin>>("POST", "servers/join-reverse", { name, host, port, transport, gre }),

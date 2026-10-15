@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **An agents port of a server's own.** *Add server* (over the internet) now has *Agents port*.
+  Left empty, nothing changes. With a port, the panel also listens on it and on the next one
+  (TCP and UDP) for that server's agent alone, and the join code sends the agent there: for a
+  server whose network filters the main agents port. The server is listed at once, waiting for
+  its agent; another agent on that port is turned away. *Edit* changes or clears it, removing
+  the server closes it, a backup keeps it, and a port that the panel's page, its agents ports or
+  another server has, or that something else listens on, is refused with the reason. API: `port`
+  in `join-code` and `reconnect`. See [the panel](https://github.com/Erfan-XRay/Kariz/blob/main/docs/panel.md).
+
+### Fixed
+
+- The backup test failed now and then for nothing: it checked that the encrypted file did not
+  contain the two letters `k1`, which random bytes sometimes spelled.
+
 ## 2.6.0-beta.2 - 2026-10-15
 
 A **beta**, like [2.6.0-beta.1](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#260-beta1---2026-10-15):
