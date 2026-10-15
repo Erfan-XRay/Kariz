@@ -92,6 +92,13 @@ For a server that can reach the panel's server **only over GRE** (the agents por
 between them, GRE is not): *Servers*, *Add server*, **Over a GRE link**, and type the new
 server's public IPv4 address. That is all there is to fill in.
 
+**Over a VXLAN link** beside it does the same with a VXLAN link, for when GRE does not pass but
+UDP does: the link's addresses come from the first VXLAN network, or from a new one the panel
+makes (`kariz-vxlan`, UDP 4789, on the first free pool), and then only UDP to that network's
+port has to pass, both ways. The new server needs Kariz 2.6 or newer, which the command installs.
+*The panel connects to it* and a server's *Edit* (*Across a private link*) have the same choice,
+GRE or VXLAN, for a new link.
+
 1. The panel lists the server (it shows *waiting for its agent*), gives the link between the two
    a `/30` of a network (the first one there is; with none, it makes `kariz`, `10.77.0.0/16` or
    the next free pool), and makes **its own end of the GRE link now**, from its public address

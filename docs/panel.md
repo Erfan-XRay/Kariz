@@ -108,6 +108,8 @@ panel within seconds.
 - **Only GRE gets through?** Choose **Over a GRE link** and type the new server's public IPv4
   address: the panel makes its end of a GRE link at once, and the command makes the other end
   before the agent connects across it ([details](networks.md#add-a-server-over-gre)).
+- **GRE is blocked but UDP passes?** Choose **Over a VXLAN link**: the same, with a VXLAN link
+  over UDP (4789 unless the network says otherwise).
 - **The new server cannot reach the panel at all?** Choose **The panel connects to it**: its
   agent listens on a port of its own and the panel dials it ([below](#the-panel-connects-to-the-server-reverse)).
 - **The link's transport is automatic by default.** The panel takes agents over `tcpmux`
@@ -151,17 +153,20 @@ panel that takes no agents. *Reconnect* and *Edit* have the same choice (*Who ma
 connection*), so a server can be switched either way; the address and port can be changed there.
 A backup keeps where the panel dials each such server.
 
-**Across a GRE link.** When only GRE gets through between the two servers, tick **Across a GRE
-link** and type the new server's public IPv4 address instead of an address to dial. As with
+**Across a private link.** When only GRE (or only UDP) gets through between the two servers,
+tick **Across a private link (GRE or VXLAN)**, pick GRE or VXLAN, and type the new server's
+public IPv4 address instead of an address to dial. As with
 *Over a GRE link*, the panel gives the link a `/30` of a private network (it makes `kariz`,
 `10.77.0.0/16`, when there is none) and makes its own end at once; the code carries the other
 end, which the command makes on the new server before its agent starts listening. The panel then
-dials the server's private address on the link, so only GRE (IP protocol 47) has to pass between
-the public addresses. In *Edit* (*The panel connects to the agent*), **Across a GRE link to the
-panel's server** offers the server's end of every link it has with the panel's server, or **A new
-link** (its public IPv4 address and a network), which the panel makes in the same way. A link the
+dials the server's private address on the link, so only GRE (IP protocol 47), or for VXLAN UDP to
+the network's port, has to pass between the public addresses. In *Edit* (*The panel connects to
+the agent*), **Across a private link to the panel's server** offers the server's end of every link it has with the panel's server, or **A new
+link** (GRE or VXLAN, its public IPv4 address and a network), which the panel makes in the same way. A link the
 panel dials a server across cannot be removed until the server is moved off it. New API fields:
-`gre: {ip, network}` in `POST /api/servers/join-reverse` and in `POST /api/servers/reconnect`.
+`gre: {ip, network, kind}` in `POST /api/servers/join-reverse` and in `POST /api/servers/reconnect`,
+and `kind` in `POST /api/servers/join-gre` (`gre` or `vxlan`; without a network, the first one of
+that kind, or a new one).
 
 ### A server that goes offline
 
@@ -214,8 +219,8 @@ servers. Good to know:
    **seal every packet** (`obfs`, see [Transports](transports.md#obfs)); both servers need Kariz
    1.7 or newer for it.
 3. **Connection:** the port the accepting side listens on and its address as the other side
-   reaches it. For `ws`/`wss`, the path. In *direct* mode you can tick **Use a private GRE
-   network** and the tunnel runs over private addresses the panel hands out
+   reaches it. For `ws`/`wss`, the path. In *direct* mode you can tick **Use a private network
+   (GRE or VXLAN)** and the tunnel runs over private addresses the panel hands out
    ([networks.md](networks.md)).
 4. **Ports:** what the entry opens: `443, 8080-8090, 2053=53`, with TCP, UDP or both, and the
    host the exit reaches them at (default `127.0.0.1`).
@@ -252,9 +257,11 @@ tunnel and changes nothing on the servers:
    - **Over IPv6 too**, when both servers have a public IPv6 address: the same transports
      between the two IPv6 addresses, side by side with IPv4 on the same port, so the run takes
      no longer. When one of them has none, the result says which.
-   - **Across the GRE link**, if the two servers have one: `tcp` with mux, `kcp` and `quic`. A
-     filter sees the GRE packets, not what is inside them, so the transports differ there only
-     by their own cost (`ws` and `wss` would only add theirs).
+   - **Across the GRE link and across the VXLAN link**, for each kind the two servers have a
+     link of: `tcp` with mux, `kcp` and `quic`, marked *GRE* or *VXLAN*. A filter sees the GRE or
+     VXLAN packets, not what is inside them, so the transports differ there only by their own
+     cost (`ws` and `wss` would only add theirs). Using such a result puts the tunnel on that
+     link's network.
    - **`wss` with a server name.** Without one, a `wss` test sends no server name (SNI), as a
      tunnel dialing an IP address does. A tunnel's own name (or one typed under *Try WSS with a
      server name*) has `wss` tried once more with it, to show whether a filter judges TLS by its

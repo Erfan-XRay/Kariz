@@ -32,7 +32,7 @@ use tracing::debug;
 use crate::auth::now;
 use crate::config::random_hex;
 use crate::hub::Hub;
-use crate::wire::{BenchListening, BenchMeasured, Request};
+use crate::wire::{BenchListening, BenchMeasured, LinkKind, Request};
 
 /// How long a listener waits for its dialer.
 const LISTEN_WAIT: Duration = Duration::from_secs(5);
@@ -253,13 +253,13 @@ pub struct Candidate {
     pub key: String,
     /// The core transport (`tcpmux`, `kcp`, `ws`, `wss`, `quic`).
     pub transport: String,
-    /// `public`, `ipv6` (the public IPv6 addresses, where both servers have one) or `gre`
-    /// (across the private network link between the two).
+    /// `public`, `ipv6` (the public IPv6 addresses, where both servers have one), `gre` or
+    /// `vxlan` (across a private network link of that kind between the two).
     pub path: String,
     /// The server name a `wss` candidate sends (none: none, as a tunnel dialing an IP does).
     #[serde(default)]
     pub sni: Option<String>,
-    /// The GRE link's network (id), for `gre`.
+    /// The link's network (id), for `gre` and `vxlan`.
     pub network: Option<String>,
     /// `reverse` (the entry listens) or `direct` (the exit listens).
     pub mode: String,
@@ -401,19 +401,26 @@ fn is_v6(host: &str) -> bool {
 ///   `ask.sni`;
 /// * the same over the public IPv6 addresses, when both servers have one (and the address
 ///   a server is known by is not already its IPv6 one);
-/// * across a GRE link, if the two servers have one: one transport over TCP (`tcpmux`) and
-///   the ones over UDP (`kcp`, `quic`). A filter sees the GRE packets, not what is inside
-///   them, so the transports differ there only by their own cost (and `ws` or `wss` would
-///   only add theirs).
+/// * across a GRE link and across a VXLAN link, for each kind the two servers have a link of
+///   (the first one): one transport over TCP (`tcpmux`) and the ones over UDP (`kcp`,
+///   `quic`). A filter sees the GRE or VXLAN packets, not what is inside them, so the
+///   transports differ there only by their own cost (and `ws` or `wss` would only add theirs).
 fn candidates(
     hub: &Hub,
     views: &[crate::hub::ServerView],
     ask: &Ask,
 ) -> Result<(Vec<Candidate>, String)> {
     let links = hub.networks.links(None)?;
-    let link = links
-        .iter()
-        .find(|l| (l.a == ask.entry && l.b == ask.exit) || (l.a == ask.exit && l.b == ask.entry));
+    let between = |kind: LinkKind| {
+        links.iter().find(|l| {
+            l.kind == kind
+                && ((l.a == ask.entry && l.b == ask.exit) || (l.a == ask.exit && l.b == ask.entry))
+        })
+    };
+    let private: Vec<&crate::networks::Link> = [LinkKind::Gre, LinkKind::Vxlan]
+        .into_iter()
+        .filter_map(between)
+        .collect();
     let modes: Vec<&str> = if ask.modes.is_empty() {
         vec!["reverse", "direct"]
     } else {
@@ -500,8 +507,8 @@ fn candidates(
                 }
             }
         }
-        if let Some(l) = link {
-            let private = if &l.a == listener {
+        for l in &private {
+            let end = if &l.a == listener {
                 &l.addr_a
             } else {
                 &l.addr_b
@@ -509,8 +516,8 @@ fn candidates(
             for transport in &gre_transports {
                 add(
                     transport,
-                    "gre",
-                    private.clone(),
+                    l.kind.as_str(),
+                    end.clone(),
                     Some(l.network.clone()),
                     None,
                 );
@@ -1019,6 +1026,58 @@ mod tests {
             error: None,
             ipv6: None,
         }
+    }
+
+    #[test]
+    fn a_gre_and_a_vxlan_link_are_each_a_path_of_their_own() {
+        let hub = Hub::new(
+            crate::db::Db::in_memory().unwrap(),
+            std::env::temp_dir().join("kariz-none"),
+        );
+        let (a, b) = ("aaa".to_owned(), "bbb".to_owned());
+        let ask = Ask {
+            entry: a.clone(),
+            exit: b.clone(),
+            profile: "balanced".into(),
+            port: 0,
+            modes: vec!["direct".into()],
+            sni: None,
+            hosts: HashMap::from([(b.clone(), "192.0.2.2".to_owned())]),
+            hosts6: HashMap::new(),
+        };
+        let paths = |hub: &Hub| {
+            let (c, _) = candidates(hub, &[], &ask).unwrap();
+            c.into_iter()
+                .filter(|c| c.network.is_some())
+                .map(|c| (c.path, c.transport, c.host))
+                .collect::<Vec<_>>()
+        };
+        assert!(paths(&hub).is_empty(), "no link, no private path");
+        let vx = hub
+            .networks
+            .create_network_of("vx", "10.78.0.0/24", LinkKind::Vxlan, 0, &[])
+            .unwrap();
+        hub.networks
+            .create_links(&vx.id, &[(a.clone(), b.clone())], &Default::default())
+            .unwrap();
+        let only_vx = paths(&hub);
+        assert_eq!(only_vx.len(), 3, "tcpmux, kcp and quic");
+        assert!(only_vx
+            .iter()
+            .all(|(p, _, host)| p == "vxlan" && host == "10.78.0.2"));
+        let gre = hub
+            .networks
+            .create_network("g", "10.77.0.0/24", &[])
+            .unwrap();
+        hub.networks
+            .create_links(&gre.id, &[(a.clone(), b.clone())], &Default::default())
+            .unwrap();
+        let both = paths(&hub);
+        assert_eq!(both.len(), 6);
+        assert_eq!(both.iter().filter(|(p, ..)| p == "gre").count(), 3);
+        assert!(both
+            .iter()
+            .any(|(p, t, host)| p == "gre" && t == "kcp" && host == "10.77.0.2"));
     }
 
     #[test]

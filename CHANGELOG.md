@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **An agent over a VXLAN link.** *Add server* now has **Over a VXLAN link** beside **Over a GRE
+  link**, for a server that GRE does not reach the panel's server from but UDP does. The link's
+  addresses come from the first VXLAN network, or the panel makes one (`kariz-vxlan`, UDP 4789,
+  on the first pool free beside the others); its own end comes up at once and the command makes
+  the server's end before the agent connects across it. *The panel connects to it* (*Across a
+  private link*) and a server's *Edit* ask GRE or VXLAN for a new link too. API: `kind` (`gre`
+  or `vxlan`) in `join-gre`, and in the `gre` of `join-reverse` and `reconnect`.
+- **VXLAN in the benchmark.** A benchmark now measures the VXLAN link between two servers too
+  (`tcp` with mux, `kcp` and `quic`), marked *VXLAN*, beside the GRE link when there are both.
+  Before, only the first link of any kind was measured, and called *GRE*. Using such a result
+  puts the tunnel on that link's network.
+
 ## 2.6.0-beta.1 - 2026-10-15
 
 A **beta**: a prerelease that only panels on the *Beta* channel are offered (*Settings,

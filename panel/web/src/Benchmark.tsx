@@ -1,18 +1,18 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { ApiError, api } from "./api";
+import { ApiError, api, isPrivatePath, kindLabel } from "./api";
 import type { Bench, BenchCandidate, ServerInfo } from "./api";
 import { useApp } from "./store";
 import { Icon, useAgo } from "./ui";
 
 /**
- * What using a benchmark result sets: the core transport, the direction, the network of a GRE path, and for a
+ * What using a benchmark result sets: the core transport, the direction, the network of a GRE or VXLAN path, and for a
  * path over the public addresses the address it dialed (an IPv6 one for the IPv6 path).
  */
 export interface BenchChoice {
   transport: string;
   mode: "reverse" | "direct";
   network: string | null;
-  path: "public" | "ipv6" | "gre";
+  path: "public" | "ipv6" | "gre" | "vxlan";
   host: string | null;
   /** The server name a wss result was measured with. */
   sni: string | null;
@@ -21,9 +21,9 @@ export interface BenchChoice {
 export const choiceOf = (c: BenchCandidate): BenchChoice => ({
   transport: c.transport,
   mode: c.mode,
-  network: c.path === "gre" ? c.network : null,
+  network: isPrivatePath(c.path) ? c.network : null,
   path: c.path,
-  host: c.path === "gre" ? null : c.host,
+  host: isPrivatePath(c.path) ? null : c.host,
   sni: c.sni ?? null,
 });
 
@@ -77,12 +77,12 @@ function ScoreRing({ score, size = 64 }: { score: number; size?: number }) {
   );
 }
 
-/** The small marks of a candidate's path: IPv6, GRE, a server name. */
+/** The small marks of a candidate's path: IPv6, GRE or VXLAN, a server name. */
 function PathTags({ c }: { c: BenchCandidate }) {
   return (
     <>
       {c.path === "ipv6" && <span className="tag via">IPv6</span>}
-      {c.path === "gre" && <span className="tag via">GRE</span>}
+      {isPrivatePath(c.path) && <span className="tag via">{kindLabel(c.path === "vxlan" ? "vxlan" : "gre")}</span>}
       {c.sni && (
         <span className="tag via" title={c.sni}>
           SNI
@@ -333,7 +333,7 @@ export function BenchPanel({
                       {(c.state === "probe" || c.state === "speed") && <span className="bench-spin" aria-hidden="true" />}
                       <span className="mono">{benchLabel(c.transport)}</span>
                       {c.path === "ipv6" && <small>v6</small>}
-                      {c.path === "gre" && <small>GRE</small>}
+                      {isPrivatePath(c.path) && <small>{kindLabel(c.path === "vxlan" ? "vxlan" : "gre")}</small>}
                       {c.sni && <small>SNI</small>}
                       <span className="sr-only">{chipTitle(c)}</span>
                     </li>
@@ -609,7 +609,7 @@ export function BenchPanel({
             ))}
           </ul>
           {missing6 && <p className="small muted">{t("bench.ipv6.missing", { name: `⁨${name(missing6)}⁩` })}</p>}
-          {cands.some((c) => c.path === "gre") && <p className="small muted">{t("bench.gre.why")}</p>}
+          {cands.some((c) => isPrivatePath(c.path)) && <p className="small muted">{t("bench.gre.why")}</p>}
           <p className="small muted">{t("bench.snapshot")}</p>
         </div>
       )}

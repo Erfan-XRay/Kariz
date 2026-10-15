@@ -489,7 +489,19 @@ struct JoinGreBody {
     ip: String,
     /// The private network to take the link's addresses from; none: the first, or a new one.
     network: Option<String>,
+    /// `gre` or `vxlan`: without a network, the first one of that kind (or a new one).
+    #[serde(default)]
+    kind: Option<String>,
     transport: Option<String>,
+}
+
+/// A link kind a request asked for: none, `gre` or `vxlan`; anything else is `None` inside
+/// an error.
+fn asked_kind(kind: Option<&str>) -> Result<Option<LinkKind>, ()> {
+    match kind.map(str::trim).filter(|k| !k.is_empty()) {
+        None => Ok(None),
+        Some(k) => LinkKind::parse(k).map(Some).ok_or(()),
+    }
 }
 
 /// *Add server* over a private network: the server is listed, the panel's end of a GRE link
@@ -522,12 +534,16 @@ async fn join_gre(
         .as_deref()
         .map(str::trim)
         .filter(|n| !n.is_empty());
+    let Ok(kind) = asked_kind(body.kind.as_deref()) else {
+        return error(StatusCode::BAD_REQUEST, "bad_input");
+    };
     match state
         .hub
-        .create_gre_join(
+        .create_link_join(
             name,
             body.ip.trim(),
             network,
+            kind,
             transport,
             crate::hub::GreWay::Dial { agent_port: port },
         )
@@ -586,6 +602,9 @@ struct GreBody {
     ip: String,
     /// The private network to take the link's addresses from; none: the first, or a new one.
     network: Option<String>,
+    /// `gre` or `vxlan`: without a network, the first one of that kind (or a new one).
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 impl GreBody {
@@ -690,12 +709,16 @@ async fn join_reverse(
             .as_deref()
             .map(str::trim)
             .filter(|x| !x.is_empty() && *x != "auto");
+        let Ok(kind) = asked_kind(gre.kind.as_deref()) else {
+            return error(StatusCode::BAD_REQUEST, "bad_input");
+        };
         return match state
             .hub
-            .create_gre_join(
+            .create_link_join(
                 name,
                 gre.ip.trim(),
                 gre.network(),
+                kind,
                 transport,
                 crate::hub::GreWay::Reverse { port: body.port },
             )
@@ -803,9 +826,12 @@ async fn reconnect_server(
             .as_deref()
             .map(str::trim)
             .filter(|x| !x.is_empty() && *x != "auto");
+        let Ok(kind) = asked_kind(gre.kind.as_deref()) else {
+            return error(StatusCode::BAD_REQUEST, "bad_input");
+        };
         return match state
             .hub
-            .create_gre_rejoin(&body.id, gre.ip.trim(), gre.network(), transport, way)
+            .create_link_rejoin(&body.id, gre.ip.trim(), gre.network(), kind, transport, way)
             .await
         {
             Ok(made) => {

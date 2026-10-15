@@ -88,7 +88,7 @@ export interface BenchCandidate {
   /** The core transport: tcpmux, kcp, ws, wss or quic. */
   transport: string;
   /** public, ipv6 (the public IPv6 addresses), or gre (across the private network link between the two servers). */
-  path: "public" | "ipv6" | "gre";
+  path: "public" | "ipv6" | "gre" | "vxlan";
   /** The server name a wss candidate sends (none: none, as for an IP address); missing in an older result. */
   sni?: string | null;
   network: string | null;
@@ -167,6 +167,9 @@ export type LinkTransport = "auto" | "tcpmux" | "kcp" | "wss" | "quic";
 /** How a private network's links are made. */
 export type LinkKind = "gre" | "vxlan";
 
+/** Whether a benchmark path goes across a private network link (GRE or VXLAN). */
+export const isPrivatePath = (path: string) => path === "gre" || path === "vxlan";
+
 /** "GRE" or "VXLAN", as a label. */
 export const kindLabel = (kind: LinkKind | undefined) => (kind === "vxlan" ? "VXLAN" : "GRE");
 
@@ -202,6 +205,8 @@ export interface ReverseTarget {
 export interface NewGreLink {
   ip: string;
   network?: string;
+  /** Without a network, the first one of this kind (or a new one). */
+  kind?: LinkKind;
 }
 
 /** What *Add server* over a private network made: the server (waiting for its agent) and its code. */
@@ -528,8 +533,8 @@ export const api = {
   joinCode: (name: string | undefined, host: string, transport: LinkTransport) =>
     call<{ code: string; valid_for: number }>("POST", "servers/join-code", { name, host, transport }),
   panelAddresses: () => call<PanelAddresses>("GET", "servers/panel-addresses"),
-  joinGre: (name: string | undefined, ip: string, network: string | undefined, transport: LinkTransport) =>
-    call<GreJoin>("POST", "servers/join-gre", { name, ip, network, transport }),
+  joinGre: (name: string | undefined, ip: string, network: string | undefined, transport: LinkTransport, kind: LinkKind = "gre") =>
+    call<GreJoin>("POST", "servers/join-gre", { name, ip, network, transport, kind }),
   removeServer: (id: string) => call<object>("POST", "servers/remove", { id }),
   /** With `gre`, a GRE link to the server is made first and the link to the panel goes across it (the answer then says what was made). */
   reconnectServer: (id: string, host: string, transport: LinkTransport, reverse?: { host: string; port: number }, gre?: NewGreLink) =>
