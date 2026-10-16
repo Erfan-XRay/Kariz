@@ -15,7 +15,7 @@ protocol = "udp"                  # or "tcp+udp" for both on one port
 - **A full queue drops, never stalls.** When the tunnel cannot keep up, packets are
   dropped as the network would drop them.
 - **Flows end after `tuning.udp_timeout_secs`** (default 60) without packets.
-  `tuning.udp_max_flows` (default 1024 per rule) limits clients.
+  `tuning.udp_max_flows` (default 4096 per rule) limits clients.
 - **Use mux for UDP.** Without it, every flow needs a whole tunnel connection, and
   `kariz check` warns.
 

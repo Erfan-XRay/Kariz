@@ -341,6 +341,8 @@ export interface PairRequest {
   quic_obfs?: boolean;
   /** The entry side's limit of open connections per client address; left out or 0: none. */
   max_conns_per_ip?: number;
+  /** The entry side's UDP flows (clients) per port; left out: the default (4096). */
+  udp_max_flows?: number;
   /** `v1` or `v2`: the target gets a PROXY header with each user's address on every TCP port; left out: none. */
   proxy_protocol?: string;
   forwards: ForwardSpec[];
@@ -369,6 +371,7 @@ export interface Spec {
   encryption?: string;
   quic_obfs?: boolean;
   max_conns_per_ip?: number;
+  udp_max_flows?: number;
   proxy_protocol?: string;
   forwards: ForwardSpec[];
 }

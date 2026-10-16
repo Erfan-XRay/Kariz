@@ -1161,7 +1161,7 @@ fn pair_error(e: anyhow::Error) -> Response {
     let code = format!("{e:#}");
     match code.as_str() {
         "bad_name" | "same_server" | "bad_mode" | "bad_action" | "bad_encryption"
-        | "encryption_quic" | "bad_tls_host" | "bad_proxy_protocol" => {
+        | "encryption_quic" | "bad_tls_host" | "bad_proxy_protocol" | "bad_udp_flows" => {
             error(StatusCode::BAD_REQUEST, &code)
         }
         "busy" => error(StatusCode::CONFLICT, "busy"),

@@ -597,7 +597,7 @@ where
                 .map_or(true, |t| now.duration_since(t) >= FULL_WARN_INTERVAL);
             if due {
                 table.last_full_warning = Some(now);
-                warn!(%target, max = udp.max_flows, "too many UDP flows, dropping packets from new clients");
+                warn!(%target, max = udp.max_flows, "too many UDP flows (tuning.udp_max_flows), dropping packets from new clients; the ones open go on");
             }
             continue;
         }

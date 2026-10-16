@@ -11,6 +11,7 @@ import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
 import { PerIpLimit, perIpOf } from "./PerIpLimit";
+import { UdpFlows, udpFlowsOf } from "./UdpFlows";
 import { ProxyProtocol, proxyFromSpec, proxyOf } from "./ProxyProtocol";
 import type { ProxyChoice } from "./ProxyProtocol";
 import { GreChoice, linkWithAddress } from "./GreChoice";
@@ -48,6 +49,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   const [encAck, setEncAck] = useState(false);
   const [obfs, setObfs] = useState(false);
   const [perIp, setPerIp] = useState("");
+  const [udpFlows, setUdpFlows] = useState("");
   const [proxy, setProxy] = useState<ProxyChoice>("off");
   // The private GRE network the tunnel runs over (its id), or none: found from the address the
   // tunnel listens on once the networks have come in.
@@ -116,6 +118,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
         setEnc(a.encryption ?? "auto");
         setObfs(!!(a.quic_obfs ?? b.quic_obfs));
         setPerIp(String(a.max_conns_per_ip ?? b.max_conns_per_ip ?? ""));
+        setUdpFlows(String(a.udp_max_flows ?? b.udp_max_flows ?? ""));
         setProxy(proxyFromSpec(a.proxy_protocol ?? b.proxy_protocol));
         // A tunnel that has no encryption already was confirmed when it was made.
         setEncAck((a.encryption ?? "auto") === "none");
@@ -169,6 +172,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     encryption: cipherOf(enc, transport),
     quic_obfs: obfsOf(obfs, transport),
     max_conns_per_ip: perIpOf(perIp).value,
+    udp_max_flows: protocol.includes("udp") ? udpFlowsOf(udpFlows).value : undefined,
     proxy_protocol: proxyOf(proxy, protocol),
     tls_cert: transport === "wss" && tls.mode === "real" && tls.cert ? tls.cert : undefined,
     tls_key: transport === "wss" && tls.mode === "real" && tls.key ? tls.key : undefined,
@@ -214,6 +218,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     if (parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
     if (muxSpec.bad) return `${t(`mux.${muxSpec.bad}`)}: ${t("mux.badValue")}`;
     if (perIpOf(perIp).bad) return t("perip.bad");
+    if (protocol.includes("udp") && udpFlowsOf(udpFlows).bad) return t("udpflows.bad");
     return "";
   };
 
@@ -399,6 +404,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
             </div>
             <div style={{ maxWidth: 520 }}>
               <PerIpLimit id="te-perip" value={perIp} onChange={setPerIp} />
+              <UdpFlows id="te-udpflows" value={udpFlows} onChange={setUdpFlows} protocol={protocol} />
               <ProxyProtocol value={proxy} onChange={setProxy} protocol={protocol} />
             </div>
           </fieldset>

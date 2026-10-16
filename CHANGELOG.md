@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **4096 UDP clients per port by default, up from 1024** (`tuning.udp_max_flows`). A busy tunnel
+  carrying TCP and UDP kept logging *too many UDP flows* and turned new UDP clients away
+  ([#80](https://github.com/Erfan-XRay/Kariz/issues/80)). 1024 dated from when a tunnel connection
+  took only 512 streams; every UDP flow is one stream, and since 2.4 a connection takes 4096. It
+  applies on the entry server, so update that one. The log line now names the setting and says
+  that the clients already connected go on.
+
+### Added
+
+- **UDP clients per port in the panel.** In the wizard and on the edit page of a tunnel that
+  forwards UDP, beside *Connections per user address*. Before, the panel rewrote the config on
+  every edit of the tunnel, so a hand-set `udp_max_flows` was lost; now the panel keeps it. The
+  entry server needs 2.6.0-beta.4 or newer (otherwise the panel says which one to update). Empty:
+  the default.
+
 ## 2.6.0-beta.3 - 2026-10-15
 
 A **beta**, like [2.6.0-beta.2](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#260-beta2---2026-10-15):

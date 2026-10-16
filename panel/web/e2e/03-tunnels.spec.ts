@@ -95,6 +95,33 @@ test("a server is added with a join code and comes online", async ({ page }) => 
   await expect(page.locator(".srv", { hasText: "far-away" })).toContainText(/online/i);
 });
 
+test("the wizard asks for UDP clients per port only when the tunnel forwards UDP", async ({ page }) => {
+  await signIn(page);
+  await goTo(page, "tunnels");
+  await page.locator(".page-band .btn-primary").click();
+  await page.locator("#wz-name").fill("udp-check");
+  await page.locator(".pick-list").nth(0).locator("button").nth(0).click();
+  await page.locator(".pick-list").nth(1).locator("button").nth(1).click();
+  await next(page);
+  await next(page);
+  await page.locator("#wz-port").fill(String(await freePort()));
+  await next(page);
+  await page.locator("#wz-ports").fill("4433");
+  // TCP: nothing about UDP
+  await expect(page.locator("#wz-udpflows")).toHaveCount(0);
+  await page.getByRole("button", { name: "TCP+UDP", exact: true }).click();
+  const flows = page.locator("#wz-udpflows");
+  await expect(flows).toBeVisible();
+  await expect(flows).toHaveAttribute("placeholder", "4096 (default)");
+  await flows.fill("70000");
+  await next(page);
+  await expect(page.getByText(/UDP clients per port: a whole number from 1 to 65536/).first()).toBeVisible();
+  await flows.fill("8192");
+  await page.getByRole("button", { name: "TCP", exact: true }).click();
+  await expect(page.locator("#wz-udpflows")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+});
+
 test.describe("the tunnel", () => {
   test.skip(process.platform === "win32", "the tunnels' status comes over a Unix socket");
 

@@ -152,7 +152,7 @@ Overrides of the profile's values.
 | `handshake_timeout_secs` | | 10 | The tunnel handshake. |
 | `threads` | at least 1 | one per CPU core | Worker threads. |
 | `udp_timeout_secs` | 5-3600 | 60 | A UDP flow ends after this long without packets. |
-| `udp_max_flows` | 1-65536 | 1024 | UDP flows (client addresses) per rule; packets from more clients are dropped. |
+| `udp_max_flows` | 1-65536 | 4096 | UDP flows (client addresses) per rule; packets from more clients are dropped (existing flows go on). Each flow is one stream of a tunnel connection. In the panel: *UDP clients per port* in the wizard and on a tunnel's edit page (2.6.0-beta.4 or newer on the entry server). |
 | `max_conns_per_ip` | 0 or more | 0 (off) | Entry side: user connections and UDP flows one client address may have open, over all rules; more are closed at once. Users on mobile networks often share one address, so keep it well above what one person uses. |
 | `dscp` | a name (`ef`, `af41`, `cs4`, ...) or 0-63 | off | DSCP mark on tunnel sockets and the exit's UDP sockets to targets. Not on QUIC sockets. See [UDP and games](udp-and-games.md#dscp). |
 
