@@ -539,8 +539,9 @@ export const api = {
   joinCode: (name: string | undefined, host: string, transport: LinkTransport, port?: number) =>
     call<{ code: string; valid_for: number; id?: string; name?: string; port?: number }>("POST", "servers/join-code", { name, host, transport, port }),
   panelAddresses: () => call<PanelAddresses>("GET", "servers/panel-addresses"),
-  joinGre: (name: string | undefined, ip: string, network: string | undefined, transport: LinkTransport, kind: LinkKind = "gre") =>
-    call<GreJoin>("POST", "servers/join-gre", { name, ip, network, transport, kind }),
+  /** With `port`, the server's agent dials an agents port of its own across the link. */
+  joinGre: (name: string | undefined, ip: string, network: string | undefined, transport: LinkTransport, kind: LinkKind = "gre", port?: number) =>
+    call<GreJoin>("POST", "servers/join-gre", { name, ip, network, transport, kind, port }),
   removeServer: (id: string) => call<object>("POST", "servers/remove", { id }),
   /** With `gre`, a GRE link to the server is made first and the link to the panel goes across it (the answer then says what was made). */
   /** `port`: the agents port its agent dials (the panel's own clears a port of its own; left out: unchanged). */

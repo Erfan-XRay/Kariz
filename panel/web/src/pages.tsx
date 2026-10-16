@@ -161,8 +161,36 @@ export function MapPage({
       : []),
   ];
 
+  const danger = attention.some((a) => a.tone === "danger");
+
   return (
     <div className="page is-on dash">
+      {/* What needs a hand comes first, above the numbers: an offline server must not wait below the map. */}
+      {attention.length > 0 && (
+        <section className={`card att-top ${danger ? "danger" : "warn"}`} aria-labelledby="att-h">
+          <h2 id="att-h">
+            <Icon name="alert" size={18} />
+            {t("att.title")}
+            <span className="att-count num">{num(attention.length)}</span>
+          </h2>
+          <ul className="att-list">
+            {attention.map((a) => (
+              <li key={a.key} className={a.tone}>
+                <span className="att-icon" aria-hidden="true">
+                  <Icon name={a.icon} size={16} />
+                </span>
+                <span className="att-text">{a.text}</span>
+                {a.action && (
+                  <button className="btn btn-ghost btn-xs" type="button" onClick={a.action[1]}>
+                    {a.action[0]}
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       <div className="stats">
         <div className="card stat-card hero">
           <Stat label={t("m.through")} icon="pulse" tone="water" value={<Odo value={num(rate.value, rate.decimals)} />} unit={rate.unit}>
@@ -359,32 +387,16 @@ export function MapPage({
         </Card>
 
         <div className="dash-side">
-          <Card title={t("att.title")} sub={attention.length ? undefined : t("att.clearText")}>
-            {attention.length === 0 ? (
+          {attention.length === 0 && (
+            <Card title={t("att.title")} sub={t("att.clearText")}>
               <div className="all-clear">
                 <span className="ok-mark" aria-hidden="true">
                   <Icon name="check" size={20} />
                 </span>
                 <span>{t("att.clear")}</span>
               </div>
-            ) : (
-              <ul className="att-list">
-                {attention.map((a) => (
-                  <li key={a.key} className={a.tone}>
-                    <span className="att-icon" aria-hidden="true">
-                      <Icon name={a.icon} size={16} />
-                    </span>
-                    <span className="att-text">{a.text}</span>
-                    {a.action && (
-                      <button className="btn btn-ghost btn-xs" type="button" onClick={a.action[1]}>
-                        {a.action[0]}
-                      </button>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Card>
+            </Card>
+          )}
           <Card
             title={t("m.load")}
             actions={
@@ -511,7 +523,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
     try {
       known.current = new Set(servers.map((s) => s.id));
       if (overLink) {
-        const made = await api.joinGre(name.trim() || undefined, ip.trim(), networkOfKind(networks, netId, linkKind), "auto", linkKind);
+        const made = await api.joinGre(name.trim() || undefined, ip.trim(), networkOfKind(networks, netId, linkKind), "auto", linkKind, ownPort ? +ownPort : undefined);
         setGre(made);
         setCode(made.code);
         setLeft(made.valid_for);
@@ -532,7 +544,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
         setLeft(made.valid_for);
       }
     } catch (e) {
-      if (overLink) setError(e instanceof ApiError ? greJoinError(t, e.code, names) : String(e));
+      if (overLink) setError(e instanceof ApiError ? (agentPortError(t, e.code, names) ?? greJoinError(t, e.code, names)) : String(e));
       else if (way === "reverse" && revGre && !portOk) setError(t("add.rev.err.input"));
       else if (way === "reverse" && revGre) setError(e instanceof ApiError ? greJoinError(t, e.code, names) : String(e));
       else if (way === "reverse") setError(e instanceof ApiError && e.code !== "bad_input" ? greJoinError(t, e.code, names) : t("add.rev.err.input"));
@@ -545,7 +557,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
 
   const mmss = `${String(Math.floor(left / 60)).padStart(2, "0")}:${String(left % 60).padStart(2, "0")}`;
   const mainPort = own?.agent_port ?? null;
-  const port = way === "internet" ? agentPortOf(ownPort, mainPort) : mainPort;
+  const port = way === "internet" || overLink ? agentPortOf(ownPort, mainPort) : mainPort;
   const here = location.hostname.replace(/^\[|\]$/g, "");
   const choices: [string, string][] = [
     ...(own?.v4 ? [[t("add.addr.v4"), own.v4] as [string, string]] : []),
@@ -561,7 +573,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   const ipOk = ipv4Ok(ip);
   const portOk = /^\d+$/.test(rport) && +rport > 0 && +rport < 65535;
   const ready =
-    overLink ? ipOk && panelPublic !== null : way === "reverse" ? (revGre ? ipOk && panelPublic !== null && portOk : reverseOk(rhost, rport)) : !!host.trim() && agentPortOk(ownPort);
+    overLink ? ipOk && panelPublic !== null && agentPortOk(ownPort) : way === "reverse" ? (revGre ? ipOk && panelPublic !== null && portOk : reverseOk(rhost, rport)) : !!host.trim() && agentPortOk(ownPort);
   // The panel needs no agents port of its own when it is the one that connects.
   const blocked = !agentsOn && way !== "reverse";
   const transportField = (help: string) => (
@@ -743,6 +755,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
           {overLink && (
             <>
               <NewGreLinkFields id="add-ip" ip={ip} onIp={setIp} ipLabel={t("add.gre.ip")} error={error} networks={networks} netId={netId} onNet={setNetId} panelPublic={panelPublic} kind={linkKind} />
+              <AgentPortField id="add-port" value={ownPort} onChange={setOwnPort} main={mainPort} />
               <ol className="gre-steps">
                 <li>{t("add.gre.step1", { kind: kindLabel(linkKind) })}</li>
                 <li>{t("add.gre.step2")}</li>
@@ -886,35 +899,40 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                     </button>
                   </div>
                 )}
-                <div className="srv-meters">
-                  <Meter label={t("srv.cpu")} pct={s.online ? (h?.cpu_pct ?? null) : null} />
-                  <Meter label={t("srv.ram")} pct={s.online ? mem : null} />
-                </div>
-                <dl className="srv-facts">
-                  <div>
-                    <dt>
-                      {t("srv.net")}
-                      {s.online && rx ? ` · ${rx.unit}` : ""}
-                    </dt>
-                    <dd className="num" dir="ltr">
-                      {s.online && rx && tx ? (
-                        <>
-                          <span className="down-c">↓ {num(rx.value, rx.decimals)}</span> <span className="up-c">↑ {num(tx.value, tx.decimals)}</span>
-                        </>
-                      ) : (
-                        "—"
-                      )}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>{t("srv.uptime")}</dt>
-                    <dd>{s.online && h?.uptime_secs != null ? uptime(h.uptime_secs) : "—"}</dd>
-                  </div>
-                  <div>
-                    <dt>{t("srv.linkLabel")}</dt>
-                    <dd className="mono">{s.local ? t("srv.localLink") : s.link ?? "—"}</dd>
-                  </div>
-                </dl>
+                {/* An offline server has no numbers to show: its card says when it was last seen and how to bring it back. */}
+                {s.online && (
+                  <>
+                    <div className="srv-meters">
+                      <Meter label={t("srv.cpu")} pct={h?.cpu_pct ?? null} />
+                      <Meter label={t("srv.ram")} pct={mem} />
+                    </div>
+                    <dl className="srv-facts">
+                      <div>
+                        <dt>
+                          {t("srv.net")}
+                          {rx ? ` · ${rx.unit}` : ""}
+                        </dt>
+                        <dd className="num" dir="ltr">
+                          {rx && tx ? (
+                            <>
+                              <span className="down-c">↓ {num(rx.value, rx.decimals)}</span> <span className="up-c">↑ {num(tx.value, tx.decimals)}</span>
+                            </>
+                          ) : (
+                            "—"
+                          )}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{t("srv.uptime")}</dt>
+                        <dd>{h?.uptime_secs != null ? uptime(h.uptime_secs) : "—"}</dd>
+                      </div>
+                      <div>
+                        <dt>{t("srv.linkLabel")}</dt>
+                        <dd className="mono">{s.local ? t("srv.localLink") : s.link ?? "—"}</dd>
+                      </div>
+                    </dl>
+                  </>
+                )}
                 {s.reverse && (
                   <div className="srv-ips">
                     <span className="badge" title={t("srv.viaRev", { addr: hostPort(s.reverse.host, s.reverse.port) })}>

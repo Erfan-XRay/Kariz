@@ -132,7 +132,8 @@ test("with the browser asking for less motion, the page does not animate", async
   const { newLink } = await import("./stack");
   await page.goto(newLink());
   await expect(page.locator("#app .rail")).toBeVisible({ timeout: 30_000 });
-  // the low-power switch is on by itself
-  await expect(page.locator(".sky-actions .square-btn").nth(2)).toHaveAttribute("aria-pressed", "true");
+  // the low-power mode is on by itself (the command palette marks it)
+  await page.keyboard.press("Control+k");
+  await expect(page.locator("#pal-list li", { hasText: "Low-power mode" })).toContainText("✓");
   await context.close();
 });

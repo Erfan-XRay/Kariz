@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ReactNode, RefObject } from "react";
 import { FA_DIGITS } from "./i18n";
@@ -284,10 +284,30 @@ export function Dialog({
   children: ReactNode;
   footer?: ReactNode;
 }) {
-  const { t } = useApp();
+  const { t, low } = useApp();
   const ref = useRef<HTMLDivElement>(null);
+  const backdrop = useRef<HTMLDivElement>(null);
   const [on, setOn] = useState(false);
   useFocusTrap(ref);
+  const lowNow = useRef(low);
+  lowNow.current = low;
+  // However it closes (its own button, a footer button, a finished operation), the parent
+  // just stops drawing it. A still copy is left on the page for a moment to fade out, so a
+  // dialog does not vanish in one frame while it came in with a movement.
+  useLayoutEffect(() => {
+    const node = backdrop.current;
+    return () => {
+      if (!node?.classList.contains("is-on") || lowNow.current || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+      const ghost = node.cloneNode(true) as HTMLElement;
+      ghost.removeAttribute("role");
+      ghost.setAttribute("aria-hidden", "true");
+      ghost.inert = true;
+      ghost.style.pointerEvents = "none";
+      document.body.appendChild(ghost);
+      requestAnimationFrame(() => ghost.classList.remove("is-on"));
+      setTimeout(() => ghost.remove(), 400);
+    };
+  }, []);
   // The parent passes a new function every time it renders (the panel refreshes every 2 s):
   // the latest one is kept here, and the effect runs once. Run on every render, it moved
   // the focus to the first field while a person was typing in another.
@@ -305,7 +325,7 @@ export function Dialog({
   }, []);
   // On the page's body, so no moving parent can clip or shift it.
   return createPortal(
-    <div className={`dialog-backdrop ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label={title} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div ref={backdrop} className={`dialog-backdrop ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label={title} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="dialog" ref={ref}>
         <header>
           <h2>{title}</h2>
@@ -361,6 +381,143 @@ export function Seg<T extends string>({ value, options, onChange }: { value: T; 
           {count !== undefined && <span className="seg-count">{count}</span>}
         </button>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Tabs over one page's parts. The panels stay mounted (a running speed test keeps running on
+ * another tab); the caller hides the ones not chosen. A bar under the chosen tab slides to it.
+ */
+export function Tabs<T extends string>({ id, value, options, onChange, label }: { id: string; value: T; options: [T, string][]; onChange: (v: T) => void; label: string }) {
+  const { lang } = useApp();
+  const list = useRef<HTMLDivElement>(null);
+  const [bar, setBar] = useState<{ x: number; w: number } | null>(null);
+  useLayoutEffect(() => {
+    const box = list.current;
+    if (!box) return;
+    const place = () => {
+      const on = box.querySelector<HTMLElement>('[aria-selected="true"]');
+      if (on) setBar({ x: on.offsetLeft, w: on.offsetWidth });
+    };
+    place();
+    const watch = new ResizeObserver(place);
+    watch.observe(box);
+    return () => watch.disconnect();
+  }, [value, lang]);
+  const move = (step: number) => {
+    const at = options.findIndex(([v]) => v === value);
+    const next = options[(at + step + options.length) % options.length][0];
+    onChange(next);
+    list.current?.querySelector<HTMLElement>(`#${id}-tab-${next}`)?.focus();
+  };
+  return (
+    <div
+      className="tabs"
+      role="tablist"
+      aria-label={label}
+      ref={list}
+      onKeyDown={(e) => {
+        // Arrows follow the reading direction: in Persian the next tab is on the left.
+        const rtl = document.documentElement.dir === "rtl";
+        if (e.key === "ArrowRight") move(rtl ? -1 : 1);
+        else if (e.key === "ArrowLeft") move(rtl ? 1 : -1);
+        else return;
+        e.preventDefault();
+      }}
+    >
+      {options.map(([v, text]) => (
+        <button
+          key={v}
+          id={`${id}-tab-${v}`}
+          type="button"
+          role="tab"
+          aria-selected={value === v}
+          aria-controls={`${id}-panel-${v}`}
+          tabIndex={value === v ? 0 : -1}
+          onClick={() => onChange(v)}
+        >
+          {text}
+        </button>
+      ))}
+      {bar && <span className="tabs-bar" aria-hidden="true" style={{ width: bar.w, transform: `translateX(${bar.x}px)` }} />}
+    </div>
+  );
+}
+
+export interface MenuItem {
+  label: string;
+  icon: string;
+  run: () => void;
+  danger?: boolean;
+  disabled?: boolean;
+}
+
+/** A button that opens a short list of the less used actions. */
+export function Menu({ label, items }: { label: string; items: MenuItem[] }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const entries = () => [...(box.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])];
+  useEffect(() => {
+    if (!open) return;
+    entries()[0]?.focus();
+    const away = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [open]);
+  const close = () => {
+    setOpen(false);
+    button.current?.focus();
+  };
+  return (
+    <div className="menu" ref={box}>
+      <button
+        ref={button}
+        className="icon-square"
+        type="button"
+        aria-label={label}
+        title={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <Icon name="more" size={18} />
+      </button>
+      {open && (
+        <div
+          className="menu-list"
+          role="menu"
+          aria-label={label}
+          onKeyDown={(e) => {
+            const list = entries();
+            const at = list.indexOf(document.activeElement as HTMLElement);
+            if (e.key === "Escape") close();
+            else if (e.key === "ArrowDown") list[(at + 1) % list.length]?.focus();
+            else if (e.key === "ArrowUp") list[(at - 1 + list.length) % list.length]?.focus();
+            else if (e.key === "Tab") setOpen(false);
+            else return;
+            if (e.key !== "Tab") e.preventDefault();
+          }}
+        >
+          {items.map((x) => (
+            <button
+              key={x.label}
+              type="button"
+              role="menuitem"
+              className={x.danger ? "danger" : undefined}
+              disabled={x.disabled}
+              onClick={() => {
+                setOpen(false);
+                x.run();
+              }}
+            >
+              <Icon name={x.icon} size={18} />
+              {x.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

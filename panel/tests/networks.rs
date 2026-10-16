@@ -342,7 +342,10 @@ async fn a_server_added_over_gre_makes_its_end_from_the_code_and_comes_in() {
                 "192.0.2.2",
                 None,
                 None,
-                GreWay::Dial { agent_port: port }
+                GreWay::Dial {
+                    agent_port: port,
+                    own: None
+                }
             )
             .await),
         "no_address:local"
@@ -355,7 +358,16 @@ async fn a_server_added_over_gre_makes_its_end_from_the_code_and_comes_in() {
     ] {
         assert_eq!(
             why(hub
-                .create_gre_join(None, bad, None, None, GreWay::Dial { agent_port: port })
+                .create_gre_join(
+                    None,
+                    bad,
+                    None,
+                    None,
+                    GreWay::Dial {
+                        agent_port: port,
+                        own: None
+                    }
+                )
                 .await),
             code,
             "{bad}"
@@ -369,7 +381,10 @@ async fn a_server_added_over_gre_makes_its_end_from_the_code_and_comes_in() {
             "192.0.2.2",
             None,
             None,
-            GreWay::Dial { agent_port: port },
+            GreWay::Dial {
+                agent_port: port,
+                own: None,
+            },
         )
         .await
         .unwrap();
@@ -414,7 +429,10 @@ async fn a_server_added_over_gre_makes_its_end_from_the_code_and_comes_in() {
                 "192.0.2.2",
                 None,
                 None,
-                GreWay::Dial { agent_port: port }
+                GreWay::Dial {
+                    agent_port: port,
+                    own: None
+                }
             )
             .await),
         format!("address_taken:{}", made.id)
@@ -845,7 +863,10 @@ async fn a_server_added_over_vxlan_gets_a_vxlan_network_and_link() {
                 Some(&gre.id),
                 Some(LinkKind::Vxlan),
                 None,
-                GreWay::Dial { agent_port: port }
+                GreWay::Dial {
+                    agent_port: port,
+                    own: None
+                }
             )
             .await),
         "bad_input"
@@ -858,7 +879,10 @@ async fn a_server_added_over_vxlan_gets_a_vxlan_network_and_link() {
             None,
             Some(LinkKind::Vxlan),
             None,
-            GreWay::Dial { agent_port: port },
+            GreWay::Dial {
+                agent_port: port,
+                own: None,
+            },
         )
         .await
         .unwrap();
@@ -928,4 +952,99 @@ async fn a_server_added_over_vxlan_gets_a_vxlan_network_and_link() {
         "{:?}",
         agent_fake.calls()
     );
+}
+
+/// *Add server* over a GRE link with an agents port of the server's own: the panel listens
+/// on it before any link is made, the code dials it across the link, and a reconnect keeps
+/// it (or clears it, given the panel's port). A port that is taken leaves nothing made.
+#[tokio::test]
+async fn a_server_added_over_gre_dials_an_agents_port_of_its_own() {
+    let root = tempfile::tempdir().unwrap();
+    let local_fake = Arc::new(Fake::default());
+    let hub = Hub::with_options(
+        Db::in_memory().unwrap(),
+        root.path().join("kariz"),
+        Arc::new(Systemd),
+        Duration::from_secs(5),
+        Some(root.path().join("panel")),
+        Some(local_fake.clone()),
+    );
+    std::fs::create_dir_all(root.path().join("panel")).unwrap();
+    let acceptor = kariz::link::Acceptor::bind("127.0.0.1:0", &hub.link_token().unwrap())
+        .await
+        .unwrap();
+    let main = acceptor.local_addr().unwrap().port();
+    tokio::spawn(hub.clone().serve_agents(acceptor));
+    hub.set_agent_listen(kariz_panel::agent_ports::AgentListen {
+        listen: format!("127.0.0.1:{main}"),
+        web_port: 1,
+        cert: root.path().join("none.pem"),
+        key: root.path().join("none.key"),
+    });
+    hub.set_addr(LOCAL, "192.0.2.1").unwrap();
+    let dial = |own| GreWay::Dial {
+        agent_port: main,
+        own,
+    };
+
+    // The port after the panel's agents port is taken (WSS and QUIC use it).
+    let taken = hub
+        .create_gre_join(None, "192.0.2.2", None, None, dial(Some(main + 1)))
+        .await;
+    assert_eq!(format!("{:#}", taken.unwrap_err()), "port_taken:agents");
+    assert_eq!(hub.snapshot().unwrap().len(), 1, "only the panel's server");
+    assert!(hub.networks.links(None).unwrap().is_empty());
+    assert!(!local_fake
+        .calls()
+        .iter()
+        .any(|c| c.contains("remote 192.0.2.2") && !c.contains("kz-probe")));
+
+    // A free port (and the next one).
+    let mut made = None;
+    for _ in 0..20 {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let p = probe.local_addr().unwrap().port();
+        drop(probe);
+        if p == u16::MAX {
+            continue;
+        }
+        if let Ok(m) = hub
+            .create_gre_join(Some("own-port"), "192.0.2.2", None, None, dial(Some(p)))
+            .await
+        {
+            made = Some((m, p));
+            break;
+        }
+    }
+    let (made, own) = made.expect("a free port was found");
+    let code = kariz_panel::join::decode(&made.code).unwrap();
+    assert_eq!(code.p, format!("{}:{own}", made.panel_addr));
+    assert!(code.g.is_some(), "the code carries the link");
+    assert_eq!(hub.agent_port_of(&made.id), Some(own));
+    let view = hub
+        .snapshot()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == made.id)
+        .unwrap();
+    assert_eq!(view.agent_port, Some(own));
+
+    // A reconnect across the link keeps the port it has, or clears it.
+    let again = hub
+        .create_gre_rejoin(&made.id, "192.0.2.2", None, None, dial(None))
+        .await
+        .unwrap();
+    assert_eq!(
+        kariz_panel::join::decode(&again.code).unwrap().p,
+        format!("{}:{own}", made.panel_addr)
+    );
+    let cleared = hub
+        .create_gre_rejoin(&made.id, "192.0.2.2", None, None, dial(Some(main)))
+        .await
+        .unwrap();
+    assert_eq!(
+        kariz_panel::join::decode(&cleared.code).unwrap().p,
+        format!("{}:{main}", made.panel_addr)
+    );
+    assert_eq!(hub.agent_port_of(&made.id), None);
 }
