@@ -264,18 +264,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p kariz
-      - name: build v2.3.0 (the version the report came from)
+      - name: the published static (musl) binaries of v2.5.1 and v2.3.0
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git fetch --depth 1 origin tag v2.3.0
-          git worktree add /tmp/v230 v2.3.0
-          cargo build --release -p kariz --manifest-path /tmp/v230/Cargo.toml
-      - name: soak, this version and v2.3.0 side by side
+          for v in v2.5.1 v2.3.0; do
+            mkdir -p "/tmp/$v"
+            gh release download "$v" --repo "$GITHUB_REPOSITORY" --pattern "kariz-$v-x86_64-linux.tar.gz" --dir "/tmp/$v"
+            tar -xzf "/tmp/$v/kariz-$v-x86_64-linux.tar.gz" -C "/tmp/$v"
+            find "/tmp/$v" -name kariz -type f -exec cp {} "/tmp/$v/kariz-bin" \;
+            file "/tmp/$v/kariz-bin"
+          done
+      - name: soak the published binaries side by side
         run: |
-          bash tests/soak_idle.sh target/release/kariz 12 this > now.txt 2>&1 &
-          bash tests/soak_idle.sh /tmp/v230/target/release/kariz 12 v2.3.0 1000 > old.txt 2>&1 || true
+          bash tests/soak_idle.sh /tmp/v2.5.1/kariz-bin 15 v2.5.1-musl > a.txt 2>&1 &
+          bash tests/soak_idle.sh /tmp/v2.3.0/kariz-bin 15 v2.3.0-musl 1000 > b.txt 2>&1 || true
           wait || true
-          cat now.txt old.txt
+          cat a.txt b.txt
 
   # The panel the way a person uses it: Playwright drives a real browser against a real panel
   # and a real agent (tunnels run as child processes, so no systemd is needed here). It covers
