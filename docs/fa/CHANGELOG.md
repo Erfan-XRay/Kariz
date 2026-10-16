@@ -2,6 +2,16 @@
 
 [English](../CHANGELOG.md) · **فارسی**
 
+## 2.6.1 - 2026-10-16
+
+نسخهٔ پایدار پس از ۲٫۵٫۱، با همهٔ چیزهایی که در چهار بتا بود
+([2.6.0-beta.1](https://github.com/Erfan-XRay/Kariz/blob/main/docs/fa/CHANGELOG.md#260-beta1---2026-10-15)،
+[2.6.0-beta.2](https://github.com/Erfan-XRay/Kariz/blob/main/docs/fa/CHANGELOG.md#260-beta2---2026-10-15)،
+[2.6.0-beta.3](https://github.com/Erfan-XRay/Kariz/blob/main/docs/fa/CHANGELOG.md#260-beta3---2026-10-15) و
+[2.6.0-beta.4](https://github.com/Erfan-XRay/Kariz/blob/main/docs/fa/CHANGELOG.md#260-beta4---2026-10-16))؛ ۲٫۶٫۰ وجود ندارد. شبکه‌های خصوصی حالا می‌توانند **VXLAN** باشند، نه فقط GRE، برای سرورهایی که GRE از آن‌ها رد نمی‌شود ولی UDP رد می‌شود، و agent از روی هر دو نوع لینک اضافه می‌شود. هر سرور می‌تواند **پورت agent اختصاصی** داشته باشد، سرورها را می‌توان **به ترتیب دلخواه چید**، هر تانل به‌طور پیش‌فرض **۴۰۹۶ کاربر UDP برای هر پورت** می‌برد (از پنل هم تنظیم می‌شود)، و پنل آرام‌تر شده است.
+
+اول پنل را به‌روز کنید، بعد agentها را از خود پنل (یا `kariz-manager update` روی هر سرور). هر دو سرورِ یک لینک VXLAN و سرور ورودیِ تانلی که UDP می‌برد به این نسخه نیاز دارند. سروری که روی یکی از بتاهاست روی هر دو کانال ۲٫۶٫۱ را پیشنهاد می‌گیرد؛ جزئیات هر تغییر در بخش‌های بتا، پایین‌تر، است.
+
 ## 2.6.0-beta.4 - 2026-10-16
 
 یک **بتا**، مثل [2.6.0-beta.3](https://github.com/Erfan-XRay/Kariz/blob/main/docs/fa/CHANGELOG.md#260-beta3---2026-10-15): فقط به پنل‌هایی پیشنهاد می‌شود که روی کانال *بتا* هستند؛ `kariz-manager update` و کانال پایدار روی ۲٫۵٫۱ می‌مانند. برای امتحان دستی روی یک سرور: `kariz-manager install --version v2.6.0-beta.4`.
