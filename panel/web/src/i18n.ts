@@ -1042,6 +1042,11 @@ const en: Table = {
   "srv.localLink": "local",
   "att.outdated1": "{n} server runs an older Kariz",
   "m.load": "Server load",
+  "more": "More actions",
+  "td.tabs": "Parts of the tunnel page",
+  "td.tab.overview": "Overview",
+  "td.tab.tools": "Tests",
+  "td.tab.schedule": "Schedule",
 };
 
 const fa: Table = {
@@ -2082,6 +2087,11 @@ const fa: Table = {
   "srv.localLink": "محلی",
   "att.outdated1": "{n} سرور نسخهٔ قدیمی‌تری از کاریز دارد",
   "m.load": "بار سرورها",
+  "more": "کارهای بیشتر",
+  "td.tabs": "بخش‌های صفحهٔ تانل",
+  "td.tab.overview": "نمای کلی",
+  "td.tab.tools": "تست‌ها",
+  "td.tab.schedule": "زمان‌بندی",
 };
 
 export const TABLES: Record<Lang, Table> = { fa, en };

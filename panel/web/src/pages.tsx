@@ -161,8 +161,36 @@ export function MapPage({
       : []),
   ];
 
+  const danger = attention.some((a) => a.tone === "danger");
+
   return (
     <div className="page is-on dash">
+      {/* What needs a hand comes first, above the numbers: an offline server must not wait below the map. */}
+      {attention.length > 0 && (
+        <section className={`card att-top ${danger ? "danger" : "warn"}`} aria-labelledby="att-h">
+          <h2 id="att-h">
+            <Icon name="alert" size={18} />
+            {t("att.title")}
+            <span className="att-count num">{num(attention.length)}</span>
+          </h2>
+          <ul className="att-list">
+            {attention.map((a) => (
+              <li key={a.key} className={a.tone}>
+                <span className="att-icon" aria-hidden="true">
+                  <Icon name={a.icon} size={16} />
+                </span>
+                <span className="att-text">{a.text}</span>
+                {a.action && (
+                  <button className="btn btn-ghost btn-xs" type="button" onClick={a.action[1]}>
+                    {a.action[0]}
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       <div className="stats">
         <div className="card stat-card hero">
           <Stat label={t("m.through")} icon="pulse" tone="water" value={<Odo value={num(rate.value, rate.decimals)} />} unit={rate.unit}>
@@ -359,32 +387,16 @@ export function MapPage({
         </Card>
 
         <div className="dash-side">
-          <Card title={t("att.title")} sub={attention.length ? undefined : t("att.clearText")}>
-            {attention.length === 0 ? (
+          {attention.length === 0 && (
+            <Card title={t("att.title")} sub={t("att.clearText")}>
               <div className="all-clear">
                 <span className="ok-mark" aria-hidden="true">
                   <Icon name="check" size={20} />
                 </span>
                 <span>{t("att.clear")}</span>
               </div>
-            ) : (
-              <ul className="att-list">
-                {attention.map((a) => (
-                  <li key={a.key} className={a.tone}>
-                    <span className="att-icon" aria-hidden="true">
-                      <Icon name={a.icon} size={16} />
-                    </span>
-                    <span className="att-text">{a.text}</span>
-                    {a.action && (
-                      <button className="btn btn-ghost btn-xs" type="button" onClick={a.action[1]}>
-                        {a.action[0]}
-                      </button>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Card>
+            </Card>
+          )}
           <Card
             title={t("m.load")}
             actions={
@@ -886,35 +898,40 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                     </button>
                   </div>
                 )}
-                <div className="srv-meters">
-                  <Meter label={t("srv.cpu")} pct={s.online ? (h?.cpu_pct ?? null) : null} />
-                  <Meter label={t("srv.ram")} pct={s.online ? mem : null} />
-                </div>
-                <dl className="srv-facts">
-                  <div>
-                    <dt>
-                      {t("srv.net")}
-                      {s.online && rx ? ` · ${rx.unit}` : ""}
-                    </dt>
-                    <dd className="num" dir="ltr">
-                      {s.online && rx && tx ? (
-                        <>
-                          <span className="down-c">↓ {num(rx.value, rx.decimals)}</span> <span className="up-c">↑ {num(tx.value, tx.decimals)}</span>
-                        </>
-                      ) : (
-                        "—"
-                      )}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>{t("srv.uptime")}</dt>
-                    <dd>{s.online && h?.uptime_secs != null ? uptime(h.uptime_secs) : "—"}</dd>
-                  </div>
-                  <div>
-                    <dt>{t("srv.linkLabel")}</dt>
-                    <dd className="mono">{s.local ? t("srv.localLink") : s.link ?? "—"}</dd>
-                  </div>
-                </dl>
+                {/* An offline server has no numbers to show: its card says when it was last seen and how to bring it back. */}
+                {s.online && (
+                  <>
+                    <div className="srv-meters">
+                      <Meter label={t("srv.cpu")} pct={h?.cpu_pct ?? null} />
+                      <Meter label={t("srv.ram")} pct={mem} />
+                    </div>
+                    <dl className="srv-facts">
+                      <div>
+                        <dt>
+                          {t("srv.net")}
+                          {rx ? ` · ${rx.unit}` : ""}
+                        </dt>
+                        <dd className="num" dir="ltr">
+                          {rx && tx ? (
+                            <>
+                              <span className="down-c">↓ {num(rx.value, rx.decimals)}</span> <span className="up-c">↑ {num(tx.value, tx.decimals)}</span>
+                            </>
+                          ) : (
+                            "—"
+                          )}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{t("srv.uptime")}</dt>
+                        <dd>{h?.uptime_secs != null ? uptime(h.uptime_secs) : "—"}</dd>
+                      </div>
+                      <div>
+                        <dt>{t("srv.linkLabel")}</dt>
+                        <dd className="mono">{s.local ? t("srv.localLink") : s.link ?? "—"}</dd>
+                      </div>
+                    </dl>
+                  </>
+                )}
                 {s.reverse && (
                   <div className="srv-ips">
                     <span className="badge" title={t("srv.viaRev", { addr: hostPort(s.reverse.host, s.reverse.port) })}>

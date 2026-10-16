@@ -150,7 +150,9 @@ test.describe("the tunnel", () => {
     await closeDialog(page);
     expect(await echoes(front, "after starting again")).toBe(true);
 
-    await head.getByRole("button", { name: "Delete" }).click();
+    // deleting is in the menu of the less used actions
+    await head.getByRole("button", { name: "More actions" }).click();
+    await head.getByRole("menuitem", { name: "Delete" }).click();
     // deleting waits for the tunnel's name to be typed
     await expect(page.locator(".dialog .btn-danger")).toBeDisabled();
     await page.locator("#run-confirm").fill("demo");

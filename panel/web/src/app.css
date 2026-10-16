@@ -359,6 +359,13 @@ button {
 .pill.warn { background: var(--warn-soft); color: var(--warn); }
 .pill.off { color: var(--text-3); }
 .pill.up .dot { animation: breathe 2.4s var(--ease-in-out) infinite; }
+/* a state that just changed rings once in its own colour */
+.pill.is-new { animation: pill-ring 1.1s var(--ease-out); }
+@keyframes pill-ring {
+  0% { box-shadow: 0 0 0 0 currentColor; }
+  100% { box-shadow: 0 0 0 10px transparent; }
+}
+@media (prefers-reduced-motion: reduce) { .pill.is-new { animation: none; } }
 @keyframes breathe { 50% { opacity: 0.35; } }
 
 .badge {
@@ -970,9 +977,9 @@ a.square-btn, a.chip { text-decoration: none; }
 }
 
 .page { display: none; }
-.page.is-on { display: grid; gap: var(--sp-4); animation: page-in var(--dur-long) var(--ease-out); }
+.page.is-on { display: grid; gap: var(--sp-4); animation: page-in var(--dur-short) var(--ease-out); }
 @keyframes page-in {
-  from { opacity: 0; transform: translateY(10px); }
+  from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: none; }
 }
 
