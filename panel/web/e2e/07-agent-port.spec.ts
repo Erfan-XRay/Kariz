@@ -29,3 +29,19 @@ test("a server can be added with an agents port of its own", async ({ page }) =>
   const card = page.locator("li.srv", { hasText: "own-port" });
   await expect(card.getByText(`agents port ${free}`)).toBeVisible();
 });
+
+// Over a GRE or VXLAN link the server's agent can dial a port of its own across the link too.
+test("the agents port can be set for a server added over a GRE or VXLAN link", async ({ page }) => {
+  await signIn(page);
+  await goTo(page, "servers");
+  await page.locator(".page-band .btn-primary").click();
+  const dialog = page.getByRole("dialog");
+  for (const way of [/Over a GRE link/, /Over a VXLAN link/]) {
+    await dialog.locator(".join-way", { hasText: way }).click();
+    const port = dialog.getByLabel("Agents port (optional)");
+    await port.fill("65535");
+    await expect(dialog.getByText(/A port is a number from 1 to 65534/)).toBeVisible();
+    await expect(dialog.getByRole("button", { name: /Make a join code/i })).toBeDisabled();
+    await port.fill("");
+  }
+});

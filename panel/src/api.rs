@@ -508,6 +508,9 @@ struct JoinGreBody {
     #[serde(default)]
     kind: Option<String>,
     transport: Option<String>,
+    /// An agents port of the server's own (as in [`JoinBody`]), dialed across the link.
+    #[serde(default)]
+    port: Option<u16>,
 }
 
 /// A link kind a request asked for: none, `gre` or `vxlan`; anything else is `None` inside
@@ -560,17 +563,24 @@ async fn join_gre(
             network,
             kind,
             transport,
-            crate::hub::GreWay::Dial { agent_port: port },
+            crate::hub::GreWay::Dial {
+                agent_port: port,
+                own: body.port,
+            },
         )
         .await
     {
         Ok(made) => {
+            let on = match body.port.filter(|p| *p != port) {
+                Some(own) => format!(", on an agents port of its own, {own}"),
+                None => String::new(),
+            };
             audit(
                 &state,
                 &format!("session {}", me.id),
                 &ip_of(&peer),
                 &format!(
-                    "added server {} ({}) to join over a private network from {}",
+                    "added server {} ({}) to join over a private network from {}{on}",
                     made.name,
                     made.id,
                     body.ip.trim()
@@ -604,6 +614,7 @@ fn gre_failed(e: &anyhow::Error) -> Response {
     match why.as_str() {
         "bad_input" => error(StatusCode::BAD_REQUEST, "bad_input"),
         "no_such_server" => error(StatusCode::NOT_FOUND, "no_such_server"),
+        "bad_port" => error(StatusCode::BAD_REQUEST, "bad_port"),
         // A code the page explains, or what the panel's own server said.
         _ => error(StatusCode::CONFLICT, &why),
     }
@@ -872,7 +883,10 @@ async fn reconnect_server(
     if let Some(gre) = &body.gre {
         let way = match (&body.reverse, state.agent_port) {
             (Some(r), _) => crate::hub::GreWay::Reverse { port: r.port },
-            (None, Some(agent_port)) => crate::hub::GreWay::Dial { agent_port },
+            (None, Some(agent_port)) => crate::hub::GreWay::Dial {
+                agent_port,
+                own: body.port,
+            },
             (None, None) => return error(StatusCode::CONFLICT, "agents_off"),
         };
         let transport = body
