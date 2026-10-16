@@ -154,9 +154,6 @@ export function Shell({
           <button className="square-btn" type="button" onClick={() => setTheme(theme === "night" ? "dawn" : "night")} aria-label={t("a11y.theme", { theme: theme === "night" ? t("theme.dawn") : t("theme.night") })} title={t("a11y.theme", { theme: theme === "night" ? t("theme.dawn") : t("theme.night") })}>
             <Icon name={theme === "night" ? "sun" : "moon"} />
           </button>
-          <button className="square-btn" type="button" onClick={() => setLow(!low, true)} aria-label={t("pal.low")} aria-pressed={low} title={t("pal.low")}>
-            <Icon name="leaf" />
-          </button>
           <ChannelLink variant="square" />
         </div>
       </header>

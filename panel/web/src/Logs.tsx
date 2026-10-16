@@ -22,7 +22,9 @@ function parse(l: LogLine): Parsed {
   const time = clean.slice(11, 19);
   const body = clean.replace(/^\S+\s+\S+\s+\S+?\[\d+\]:\s*/, "");
   const level = body.match(/\b(ERROR|WARN|INFO|DEBUG|TRACE)\b/)?.[1] ?? "INFO";
-  return { time, level, text: body, server: l.server, role: l.role };
+  // The level has its own badge and the time its own column: the line starts after them.
+  const text = body.replace(/^(\S+\s+)?(ERROR|WARN|INFO|DEBUG|TRACE)\s+/, "");
+  return { time, level, text, server: l.server, role: l.role };
 }
 
 export function LogsPage({ servers }: { servers: ServerInfo[] }) {
