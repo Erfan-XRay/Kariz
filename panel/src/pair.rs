@@ -51,6 +51,10 @@ pub struct PairRequest {
     /// The entry side's `tuning.max_conns_per_ip`; left out or 0: no limit.
     #[serde(default)]
     pub max_conns_per_ip: Option<u32>,
+    /// The entry side's `tuning.udp_max_flows` (UDP flows per rule); left out or 0: the
+    /// default of the entry side's version.
+    #[serde(default)]
+    pub udp_max_flows: Option<u32>,
     /// `v1` or `v2`: every TCP port of the tunnel starts its connections to the target with
     /// a PROXY header naming the user. Left out or `off`: none.
     #[serde(default)]
@@ -99,6 +103,7 @@ impl PairRequest {
             encryption: self.chosen_encryption().map(str::to_owned),
             quic_obfs: self.sealed(),
             max_conns_per_ip: (role == "entry").then(|| self.per_ip_limit()).flatten(),
+            udp_max_flows: (role == "entry").then(|| self.udp_flows()).flatten(),
             // Only the entry side has forward rules; the exit side needs nothing written.
             proxy_protocol: (role == "entry")
                 .then(|| self.proxy_version().map(str::to_owned))
@@ -165,6 +170,11 @@ impl PairRequest {
         self.max_conns_per_ip.filter(|v| *v > 0)
     }
 
+    /// The UDP flow limit to write on the entry side, if one was chosen.
+    fn udp_flows(&self) -> Option<u32> {
+        self.udp_max_flows.filter(|v| *v > 0)
+    }
+
     /// Whether this tunnel uses what came with 2.4: a per-address limit (entry side), or
     /// more than 4096 streams per connection (both sides refused that before).
     fn needs_2_4(&self) -> (bool, bool) {
@@ -194,7 +204,8 @@ impl PairRequest {
             || self.chosen_encryption().is_some()
             || self.sealed()
             || self.needs_2_4().0
-            || self.proxy_version().is_some();
+            || self.proxy_version().is_some()
+            || self.udp_flows().is_some();
         if !anything_new {
             return Ok(());
         }
@@ -235,6 +246,14 @@ impl PairRequest {
         if self.proxy_version().is_some() && !version_at_least(version, (2, 5, 0)) {
             bail!("old_agent_proxy:{id}:{version}");
         }
+        // The panel writes the UDP flow limit from 2.6.0-beta.4 (the core had it before; an
+        // older agent refuses the field). Only the entry side has UDP rules.
+        if id == self.entry
+            && self.udp_flows().is_some()
+            && !release_at_least(version, UDP_FLOWS_SINCE)
+        {
+            bail!("old_agent_udp:{id}:{version}");
+        }
         Ok(())
     }
 
@@ -270,7 +289,26 @@ impl PairRequest {
                 bail!("bad_proxy_protocol");
             }
         }
+        if self.udp_flows().is_some_and(|v| v > 65536) {
+            bail!("bad_udp_flows");
+        }
         Ok(())
+    }
+}
+
+/// The first release whose agent writes `tuning.udp_max_flows` from the panel.
+const UDP_FLOWS_SINCE: &str = "2.6.0-beta.4";
+
+/// Whether `version` is `min` or a later release, prereleases in their order
+/// (`2.6.0-beta.3` is before `2.6.0-beta.4`, which is before `2.6.0`). One that cannot be
+/// read counts as too old.
+fn release_at_least(version: &str, min: &str) -> bool {
+    match (
+        crate::update::Version::parse(version),
+        crate::update::Version::parse(min),
+    ) {
+        (Some(v), Some(m)) => v >= m,
+        _ => false,
     }
 }
 
@@ -1225,6 +1263,7 @@ mod tests {
             encryption: enc.map(str::to_owned),
             quic_obfs: false,
             max_conns_per_ip: None,
+            udp_max_flows: None,
             proxy_protocol: None,
             forwards: Vec::new(),
             rotate: false,
@@ -1284,6 +1323,7 @@ mod tests {
             encryption: None,
             quic_obfs: obfs,
             max_conns_per_ip: None,
+            udp_max_flows: None,
             proxy_protocol: None,
             tls_cert: None,
             tls_key: None,
@@ -1328,6 +1368,7 @@ mod tests {
             encryption: None,
             quic_obfs: false,
             max_conns_per_ip: limit,
+            udp_max_flows: None,
             proxy_protocol: None,
             tls_cert: None,
             tls_key: None,
@@ -1355,6 +1396,71 @@ mod tests {
     }
 
     #[test]
+    fn the_udp_flow_limit_goes_to_the_entry_side_and_needs_the_release_that_writes_it() {
+        let req = |flows: Option<u32>| PairRequest {
+            name: "t".into(),
+            entry: "a".into(),
+            exit: "b".into(),
+            mode: "reverse".into(),
+            transport: "wss".into(),
+            profile: None,
+            listen: "0.0.0.0:3080".into(),
+            dial: "1.2.3.4:3080".into(),
+            pool: None,
+            ws_path: None,
+            ws_host: None,
+            tls_sni: None,
+            mux: None,
+            encryption: None,
+            quic_obfs: false,
+            max_conns_per_ip: None,
+            udp_max_flows: flows,
+            proxy_protocol: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_host: None,
+            forwards: Vec::new(),
+            rotate: false,
+            network: None,
+        };
+        let (entry, exit) = req(Some(8192)).specs(None, None);
+        assert_eq!(
+            (entry.udp_max_flows, exit.udp_max_flows),
+            (Some(8192), None)
+        );
+        // Left out or 0: nothing is written, and any version will do.
+        for none in [None, Some(0)] {
+            let (entry, _) = req(none).specs(None, None);
+            assert_eq!(entry.udp_max_flows, None);
+            assert!(req(none).require_version("a", "2.3.0").is_ok());
+        }
+        // The entry side must know the field: 2.6.0-beta.3 does not, beta.4 and 2.6.0 do.
+        let why = |v: &str| {
+            req(Some(4096))
+                .require_version("a", v)
+                .err()
+                .map(|e| e.to_string())
+        };
+        assert_eq!(
+            why("2.6.0-beta.3").as_deref(),
+            Some("old_agent_udp:a:2.6.0-beta.3")
+        );
+        assert_eq!(why("2.5.1").as_deref(), Some("old_agent_udp:a:2.5.1"));
+        assert_eq!(why("nonsense").as_deref(), Some("old_agent_udp:a:nonsense"));
+        for ok in ["2.6.0-beta.4", "2.6.0-beta.10", "2.6.0", "2.7.1"] {
+            assert_eq!(why(ok), None, "{ok}");
+        }
+        // The exit side writes nothing of it: an old one is fine.
+        assert!(req(Some(4096)).require_version("b", "2.5.1").is_ok());
+        // The core takes 1 to 65536.
+        assert!(req(Some(65536)).validate().is_ok());
+        assert_eq!(
+            req(Some(70000)).validate().unwrap_err().to_string(),
+            "bad_udp_flows"
+        );
+    }
+
+    #[test]
     fn the_proxy_header_goes_to_the_entry_side_and_needs_2_5_on_both() {
         let req = |proxy: Option<&str>| PairRequest {
             name: "t".into(),
@@ -1373,6 +1479,7 @@ mod tests {
             encryption: None,
             quic_obfs: false,
             max_conns_per_ip: None,
+            udp_max_flows: None,
             proxy_protocol: proxy.map(str::to_owned),
             tls_cert: None,
             tls_key: None,
@@ -1432,6 +1539,7 @@ mod tests {
             mux,
             quic_obfs: false,
             max_conns_per_ip: None,
+            udp_max_flows: None,
             proxy_protocol: None,
             tls_cert: None,
             tls_key: None,
@@ -1473,6 +1581,7 @@ mod tests {
             encryption: None,
             quic_obfs: false,
             max_conns_per_ip: None,
+            udp_max_flows: None,
             proxy_protocol: None,
             tls_cert: real
                 .then(|| "/etc/letsencrypt/live/kariz-panel-t-example-com/fullchain.pem".into()),

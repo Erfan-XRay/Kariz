@@ -380,6 +380,7 @@ mod tests {
             encryption: None,
             quic_obfs: false,
             max_conns_per_ip: None,
+            udp_max_flows: None,
             proxy_protocol: None,
             tls_cert: None,
             tls_key: None,

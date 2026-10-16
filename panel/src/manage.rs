@@ -123,9 +123,14 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
         tunnel.insert("tls".into(), Value::Table(tls));
     }
     root.insert("tunnel".into(), Value::Table(tunnel));
+    let mut tuning = Table::new();
     if let Some(limit) = spec.max_conns_per_ip.filter(|v| *v > 0) {
-        let mut tuning = Table::new();
         tuning.insert("max_conns_per_ip".into(), Value::Integer(i64::from(limit)));
+    }
+    if let Some(flows) = spec.udp_max_flows.filter(|v| *v > 0) {
+        tuning.insert("udp_max_flows".into(), Value::Integer(i64::from(flows)));
+    }
+    if !tuning.is_empty() {
         root.insert("tuning".into(), Value::Table(tuning));
     }
     let forwards: Vec<Value> = spec
@@ -372,6 +377,7 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
             .then(|| c.tunnel.encryption.name().to_owned()),
         quic_obfs: c.tunnel.quic.as_ref().is_some_and(|q| q.obfs),
         max_conns_per_ip: c.tuning.max_conns_per_ip.filter(|v| *v > 0),
+        udp_max_flows: c.tuning.udp_max_flows.and_then(|v| u32::try_from(v).ok()),
         // The panel writes the same one on every TCP rule.
         proxy_protocol: c
             .forward
@@ -1344,6 +1350,36 @@ mod tests {
         // A spec without it reads as before: the field is left out of what is sent.
         let json = serde_json::to_string(&get(&d.0, "tcp-sealed").unwrap()).unwrap();
         assert!(!json.contains("quic_obfs"), "{json}");
+    }
+
+    #[test]
+    fn the_udp_flow_limit_is_written_and_read_back_beside_the_per_address_one() {
+        let d = Dir::new();
+        let mut s = spec("busy");
+        s.udp_max_flows = Some(8192);
+        s.max_conns_per_ip = Some(300);
+        put(&d.0, &s).unwrap();
+        let got = get(&d.0, "busy").unwrap();
+        assert_eq!(
+            (got.udp_max_flows, got.max_conns_per_ip),
+            (Some(8192), Some(300))
+        );
+        let text = std::fs::read_to_string(d.0.join("busy.toml")).unwrap();
+        assert!(
+            text.contains("udp_max_flows = 8192") && text.matches("[tuning]").count() == 1,
+            "{text}"
+        );
+        // The core reads it.
+        let config = kariz::config::Config::parse(&text).unwrap();
+        assert_eq!(config.tuning().udp.max_flows, 8192);
+        // Left out: no [tuning] at all, and an older agent is not sent the field.
+        s.udp_max_flows = None;
+        s.max_conns_per_ip = None;
+        put(&d.0, &s).unwrap();
+        let text = std::fs::read_to_string(d.0.join("busy.toml")).unwrap();
+        assert!(!text.contains("[tuning]"), "{text}");
+        let json = serde_json::to_string(&get(&d.0, "busy").unwrap()).unwrap();
+        assert!(!json.contains("udp_max_flows"), "{json}");
     }
 
     #[test]

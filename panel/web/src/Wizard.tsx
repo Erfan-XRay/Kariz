@@ -12,6 +12,7 @@ import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
 import { PerIpLimit, perIpOf } from "./PerIpLimit";
+import { UdpFlows, udpFlowsOf } from "./UdpFlows";
 import { ProxyProtocol, proxyOf } from "./ProxyProtocol";
 import type { ProxyChoice } from "./ProxyProtocol";
 import { BenchPanel, benchLabel, isV6 } from "./Benchmark";
@@ -111,6 +112,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [protocol, setProtocol] = useState("tcp");
   const [target, setTarget] = useState("127.0.0.1");
   const [perIp, setPerIp] = useState("");
+  const [udpFlows, setUdpFlows] = useState("");
   const [proxy, setProxy] = useState<ProxyChoice>("off");
   const [pool, setPool] = useState<number | undefined>();
   const [check, setCheck] = useState<{ entry: CheckReply; exit: CheckReply } | null>(null);
@@ -201,6 +203,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     encryption: cipherOf(enc, transport),
     quic_obfs: obfsOf(obfs, transport),
     max_conns_per_ip: perIpOf(perIp).value,
+    udp_max_flows: protocol.includes("udp") ? udpFlowsOf(udpFlows).value : undefined,
     proxy_protocol: proxyOf(proxy, protocol),
     tls_cert: transport === "wss" && tls.mode === "real" && tls.cert ? tls.cert : undefined,
     tls_key: transport === "wss" && tls.mode === "real" && tls.key ? tls.key : undefined,
@@ -226,6 +229,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     if (s === 1 && muxToSpec(mux).bad) return t(`mux.${muxToSpec(mux).bad}`) + ": " + t("mux.badValue");
     if (s === 3 && parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
     if (s === 3 && perIpOf(perIp).bad) return t("perip.bad");
+    if (s === 3 && protocol.includes("udp") && udpFlowsOf(udpFlows).bad) return t("udpflows.bad");
     return "";
   };
 
@@ -581,6 +585,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                 </div>
                 <div style={{ maxWidth: 520 }}>
                   <PerIpLimit id="wz-perip" value={perIp} onChange={setPerIp} />
+                  <UdpFlows id="wz-udpflows" value={udpFlows} onChange={setUdpFlows} protocol={protocol} />
                   <ProxyProtocol value={proxy} onChange={setProxy} protocol={protocol} />
                 </div>
               </>

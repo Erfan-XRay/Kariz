@@ -680,7 +680,9 @@ impl UdpTuning {
         };
         Self {
             timeout: Duration::from_secs(60),
-            max_flows: 1024,
+            // As many as a connection takes streams (each flow is one); 1024 was from the
+            // time a connection took 512.
+            max_flows: 4096,
             socket_buffer,
             flow_queue,
             session_buffer,
@@ -1687,7 +1689,7 @@ path = \"/x\""
     fn udp_tuning_defaults_and_overrides() {
         let t = Tuning::for_profile(Profile::Balanced);
         assert_eq!(t.udp.timeout, Duration::from_secs(60));
-        assert_eq!(t.udp.max_flows, 1024);
+        assert_eq!(t.udp.max_flows, 4096);
         assert!(Tuning::for_profile(Profile::Gaming).udp.flow_queue < t.udp.flow_queue);
         let c = parse_unchecked(&format!(
             "{}[tuning]\nudp_timeout_secs = 30\nudp_max_flows = 10\n",
