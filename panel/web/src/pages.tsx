@@ -523,7 +523,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
     try {
       known.current = new Set(servers.map((s) => s.id));
       if (overLink) {
-        const made = await api.joinGre(name.trim() || undefined, ip.trim(), networkOfKind(networks, netId, linkKind), "auto", linkKind);
+        const made = await api.joinGre(name.trim() || undefined, ip.trim(), networkOfKind(networks, netId, linkKind), "auto", linkKind, ownPort ? +ownPort : undefined);
         setGre(made);
         setCode(made.code);
         setLeft(made.valid_for);
@@ -544,7 +544,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
         setLeft(made.valid_for);
       }
     } catch (e) {
-      if (overLink) setError(e instanceof ApiError ? greJoinError(t, e.code, names) : String(e));
+      if (overLink) setError(e instanceof ApiError ? (agentPortError(t, e.code, names) ?? greJoinError(t, e.code, names)) : String(e));
       else if (way === "reverse" && revGre && !portOk) setError(t("add.rev.err.input"));
       else if (way === "reverse" && revGre) setError(e instanceof ApiError ? greJoinError(t, e.code, names) : String(e));
       else if (way === "reverse") setError(e instanceof ApiError && e.code !== "bad_input" ? greJoinError(t, e.code, names) : t("add.rev.err.input"));
@@ -557,7 +557,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
 
   const mmss = `${String(Math.floor(left / 60)).padStart(2, "0")}:${String(left % 60).padStart(2, "0")}`;
   const mainPort = own?.agent_port ?? null;
-  const port = way === "internet" ? agentPortOf(ownPort, mainPort) : mainPort;
+  const port = way === "internet" || overLink ? agentPortOf(ownPort, mainPort) : mainPort;
   const here = location.hostname.replace(/^\[|\]$/g, "");
   const choices: [string, string][] = [
     ...(own?.v4 ? [[t("add.addr.v4"), own.v4] as [string, string]] : []),
@@ -573,7 +573,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   const ipOk = ipv4Ok(ip);
   const portOk = /^\d+$/.test(rport) && +rport > 0 && +rport < 65535;
   const ready =
-    overLink ? ipOk && panelPublic !== null : way === "reverse" ? (revGre ? ipOk && panelPublic !== null && portOk : reverseOk(rhost, rport)) : !!host.trim() && agentPortOk(ownPort);
+    overLink ? ipOk && panelPublic !== null && agentPortOk(ownPort) : way === "reverse" ? (revGre ? ipOk && panelPublic !== null && portOk : reverseOk(rhost, rport)) : !!host.trim() && agentPortOk(ownPort);
   // The panel needs no agents port of its own when it is the one that connects.
   const blocked = !agentsOn && way !== "reverse";
   const transportField = (help: string) => (
@@ -755,6 +755,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
           {overLink && (
             <>
               <NewGreLinkFields id="add-ip" ip={ip} onIp={setIp} ipLabel={t("add.gre.ip")} error={error} networks={networks} netId={netId} onNet={setNetId} panelPublic={panelPublic} kind={linkKind} />
+              <AgentPortField id="add-port" value={ownPort} onChange={setOwnPort} main={mainPort} />
               <ol className="gre-steps">
                 <li>{t("add.gre.step1", { kind: kindLabel(linkKind) })}</li>
                 <li>{t("add.gre.step2")}</li>

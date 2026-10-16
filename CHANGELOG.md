@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **An agents port of its own for servers added over GRE or VXLAN.** *Add server* **Over a GRE
+  link** and **Over a VXLAN link** now have *Agents port* too, as over the internet: the panel
+  listens on it (and the next one) for that server's agent alone before the link is made, and the
+  agent dials it across the link. A port that is taken is refused before anything is made. A
+  reconnect over a new link also keeps a port of its own the server has (it used to send the
+  agent to the main port). API: `port` in `join-gre`.
+
 ## 2.6.0-beta.3 - 2026-10-15
 
 A **beta**, like [2.6.0-beta.2](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#260-beta2---2026-10-15):

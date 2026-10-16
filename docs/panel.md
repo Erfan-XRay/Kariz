@@ -113,8 +113,9 @@ panel within seconds.
   and its card shows *agents port 8443*. Another agent on that port is turned away. *Edit*
   changes it (empty: back to the main port); removing the server closes the port. The port and
   the next must be free of the panel's page, its agents ports and other servers' own ports, and
-  nothing else may listen there. A backup keeps it. API: `port` in
-  `POST /api/servers/join-code` and `POST /api/servers/reconnect`.
+  nothing else may listen there. A backup keeps it. **Over a GRE link** and **Over a VXLAN
+  link** have the same field: the agent then dials that port across the link. API: `port` in
+  `POST /api/servers/join-code`, `POST /api/servers/join-gre` and `POST /api/servers/reconnect`.
 - **Only GRE gets through?** Choose **Over a GRE link** and type the new server's public IPv4
   address: the panel makes its end of a GRE link at once, and the command makes the other end
   before the agent connects across it ([details](networks.md#add-a-server-over-gre)).

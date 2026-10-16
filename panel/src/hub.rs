@@ -89,12 +89,20 @@ pub struct GreJoin {
 }
 
 /// How a server that comes in over a GRE link is reached: its agent dials the panel's end
-/// of the link (on the panel's agents port), or the panel dials the agent at the server's
-/// end, on a port the agent listens on (reverse).
+/// of the link (on the panel's agents port, or one of the server's own), or the panel dials
+/// the agent at the server's end, on a port the agent listens on (reverse).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GreWay {
-    Dial { agent_port: u16 },
-    Reverse { port: u16 },
+    /// `agent_port` is the panel's agents port; `own` the agents port the server's agent is
+    /// to dial (as [`Hub::set_agent_port`]: the panel's own clears one it had). None: the
+    /// one it has.
+    Dial {
+        agent_port: u16,
+        own: Option<u16>,
+    },
+    Reverse {
+        port: u16,
+    },
 }
 
 /// The pools a private network made for *Add server* over GRE is tried on, in order (the
@@ -839,11 +847,15 @@ impl Hub {
             .await?;
         let network = self.network_for_join(network, kind)?;
         let before = self.saved_addr(id);
+        let port_before = self.agent_port_of(id);
         let made = self
             .gre_join_code(id, &name, public_ip, &panels, &network, transport, way)
             .await;
         if made.is_err() {
             let _ = self.set_addr(id, before.as_deref().unwrap_or(""));
+            if matches!(way, GreWay::Dial { own: Some(_), .. }) {
+                let _ = self.set_agent_port(id, port_before).await;
+            }
         }
         made
     }
@@ -934,6 +946,14 @@ impl Hub {
         transport: Option<&str>,
         way: GreWay,
     ) -> Result<GreJoin> {
+        // An agents port of its own is listened on first: one that cannot be fails before
+        // any link is made.
+        if let GreWay::Dial {
+            own: Some(want), ..
+        } = way
+        {
+            self.set_agent_port(id, Some(want)).await?;
+        }
         self.set_addr(id, public_ip)?;
         let existing = self
             .networks
@@ -965,7 +985,8 @@ impl Hub {
                 link.addr_b.clone()
             };
             let code = match way {
-                GreWay::Dial { agent_port } => {
+                GreWay::Dial { agent_port, .. } => {
+                    let agent_port = self.agent_port_of(id).unwrap_or(agent_port);
                     let code = self.rejoin_code(
                         id,
                         &format!("{panel_addr}:{agent_port}"),
