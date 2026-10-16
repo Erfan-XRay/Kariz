@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.6.1 - 2026-10-16
+
+The stable release after 2.5.1, with everything of the four betas
+([2.6.0-beta.1](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#260-beta1---2026-10-15),
+[2.6.0-beta.2](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#260-beta2---2026-10-15),
+[2.6.0-beta.3](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#260-beta3---2026-10-15) and
+[2.6.0-beta.4](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#260-beta4---2026-10-16)); there is no 2.6.0. Private networks
+can be **VXLAN**, not only GRE, for servers where GRE does not get through but UDP does, and an
+agent can be added over either link. A server can have **an agents port of its own**, the servers
+can be **arranged in the order you want**, a tunnel takes **4096 UDP clients per port** by
+default (set from the panel), and the panel is calmer.
+
+Update the panel first, then the agents from the panel (or `kariz-manager update` on each
+server). Both servers of a VXLAN link need this version, and so does the entry server of a tunnel
+that carries UDP. A server on one of the betas is offered 2.6.1 on either channel; the details of
+each change are in the beta entries below.
+
 ## 2.6.0-beta.4 - 2026-10-16
 
 A **beta**, like [2.6.0-beta.3](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#260-beta3---2026-10-15):
