@@ -257,31 +257,6 @@ jobs:
       - run: cargo build -p kariz -p kariz-panel
       - run: sudo bash tests/gre_ns.sh target/debug/kariz-panel target/debug/kariz
 
-  # TEMPORARY (issue #73), removed before merge: an idle tunnel's memory over time.
-  soak:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: the published static (musl) binaries of v2.5.1 and v2.3.0
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for v in v2.5.1 v2.3.0; do
-            mkdir -p "/tmp/$v"
-            gh release download "$v" --repo "$GITHUB_REPOSITORY" --pattern "kariz-$v-x86_64-linux.tar.gz" --dir "/tmp/$v"
-            tar -xzf "/tmp/$v/kariz-$v-x86_64-linux.tar.gz" -C "/tmp/$v"
-            find "/tmp/$v" -name kariz -type f -exec cp {} "/tmp/$v/kariz-bin" \;
-            file "/tmp/$v/kariz-bin"
-          done
-      - name: soak the published binaries side by side
-        run: |
-          bash tests/soak_idle.sh /tmp/v2.5.1/kariz-bin 15 v2.5.1-musl > a.txt 2>&1 &
-          bash tests/soak_idle.sh /tmp/v2.3.0/kariz-bin 15 v2.3.0-musl 1000 > b.txt 2>&1 || true
-          wait || true
-          cat a.txt b.txt
-
   # The panel the way a person uses it: Playwright drives a real browser against a real panel
   # and a real agent (tunnels run as child processes, so no systemd is needed here). It covers
   # signing in, adding a server, making, editing, stopping and deleting a tunnel with traffic
