@@ -265,7 +265,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p kariz
-      - run: bash tests/soak_idle.sh target/release/kariz 12
+      - name: build v2.3.0 (the version the report came from)
+        run: |
+          git fetch --depth 1 origin tag v2.3.0
+          git worktree add /tmp/v230 v2.3.0
+          cargo build --release -p kariz --manifest-path /tmp/v230/Cargo.toml
+      - name: soak, this version and v2.3.0 side by side
+        run: |
+          bash tests/soak_idle.sh target/release/kariz 12 this > now.txt 2>&1 &
+          bash tests/soak_idle.sh /tmp/v230/target/release/kariz 12 v2.3.0 1000 > old.txt 2>&1 || true
+          wait || true
+          cat now.txt old.txt
 
   # The panel the way a person uses it: Playwright drives a real browser against a real panel
   # and a real agent (tunnels run as child processes, so no systemd is needed here). It covers
