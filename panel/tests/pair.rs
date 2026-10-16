@@ -167,6 +167,7 @@ async fn a_pair_is_made_edited_stopped_deleted_and_a_failure_leaves_nothing() {
         encryption: None,
         quic_obfs: false,
         max_conns_per_ip: None,
+        udp_max_flows: None,
         proxy_protocol: None,
         forwards: vec![ForwardInfo {
             listen: format!("127.0.0.1:{front}"),
