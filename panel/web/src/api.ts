@@ -548,6 +548,8 @@ export const api = {
   joinReverse: (name: string | undefined, host: string, port: number, transport: LinkTransport, gre?: NewGreLink) =>
     call<{ code: string; valid_for: number; id: string; name: string } & Partial<GreJoin>>("POST", "servers/join-reverse", { name, host, port, transport, gre }),
   renameServer: (id: string, name: string) => call<object>("POST", "servers/rename", { id, name }),
+  /** Every server's id once (the panel's own, `local`, too), in the order every list shows them. */
+  orderServers: (ids: string[]) => call<object>("POST", "servers/order", { ids }),
   schedules: () => call<{ schedules: ScheduleRow[] }>("GET", "schedules"),
   setSchedule: (body: ScheduleBody) => call<object>("POST", "schedules", body),
   deleteSchedule: (kind: string, subject: string) => call<object>("POST", "schedules/delete", { kind, subject }),

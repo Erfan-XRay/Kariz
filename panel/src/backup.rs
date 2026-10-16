@@ -29,6 +29,10 @@ struct Server {
     version: String,
     arch: String,
     host: String,
+    /// Not in backups from before servers were arranged: then they keep the order of the
+    /// list (oldest first).
+    #[serde(default)]
+    position: Option<i64>,
 }
 
 /// A server the panel connects to (reverse): where it dials it.
@@ -60,6 +64,9 @@ struct Payload {
     /// Not in backups from before agents ports of a server's own: then there are none.
     #[serde(default)]
     ports: Vec<PortRow>,
+    /// Where the panel's own server stood among them; none: before them all.
+    #[serde(default)]
+    local_position: Option<i64>,
 }
 
 fn derive(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
@@ -92,7 +99,8 @@ pub fn export(db: &Db, passphrase: &str) -> Result<Vec<u8>> {
     let servers = {
         let conn = db.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, name, key, created, last_seen, version, arch, host FROM servers ORDER BY created, id",
+            "SELECT id, name, key, created, last_seen, version, arch, host, position FROM servers
+             ORDER BY position, created, id",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Server {
@@ -104,6 +112,7 @@ pub fn export(db: &Db, passphrase: &str) -> Result<Vec<u8>> {
                 version: r.get(5)?,
                 arch: r.get(6)?,
                 host: r.get(7)?,
+                position: r.get(8)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -141,11 +150,16 @@ pub fn export(db: &Db, passphrase: &str) -> Result<Vec<u8>> {
         servers,
         reverse,
         ports,
+        local_position: db.meta("local_position")?.and_then(|p| p.parse().ok()),
     };
+    seal(serde_json::to_vec(&payload)?, passphrase)
+}
+
+/// `data` locked with `passphrase`, in the backup file's form.
+fn seal(mut data: Vec<u8>, passphrase: &str) -> Result<Vec<u8>> {
     let salt = random::<16>()?;
     let nonce = random::<12>()?;
     let key = sealing_key(&derive(passphrase, &salt)?)?;
-    let mut data = serde_json::to_vec(&payload)?;
     key.seal_in_place_append_tag(
         Nonce::assume_unique_for_key(nonce),
         Aad::from(&MAGIC[..]),
@@ -191,12 +205,29 @@ pub fn import(db: &Db, passphrase: &str, file: &[u8], replace: bool) -> Result<u
     }
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM servers", [])?;
-    for s in &payload.servers {
+    for (at, s) in payload.servers.iter().enumerate() {
         tx.execute(
-            "INSERT INTO servers (id, name, key, created, last_seen, version, arch, host) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![s.id, s.name, s.key, s.created, s.last_seen, s.version, s.arch, s.host],
+            "INSERT INTO servers (id, name, key, created, last_seen, version, arch, host, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                s.id,
+                s.name,
+                s.key,
+                s.created,
+                s.last_seen,
+                s.version,
+                s.arch,
+                s.host,
+                s.position.unwrap_or(at as i64)
+            ],
         )?;
     }
+    match payload.local_position {
+        Some(p) => tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('local_position', ?1) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            [p.to_string()],
+        )?,
+        None => tx.execute("DELETE FROM meta WHERE key = 'local_position'", [])?,
+    };
     tx.execute("DELETE FROM reverse_links", [])?;
     for r in &payload.reverse {
         tx.execute(
@@ -298,6 +329,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(own, 8443);
+    }
+
+    fn order(db: &Db) -> Vec<String> {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT id FROM servers ORDER BY position, created, id")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    #[test]
+    fn a_backup_keeps_the_order_the_servers_were_arranged_in() {
+        let db = db_with_servers();
+        // istanbul first, then the panel's own, then frankfurt.
+        db.conn()
+            .execute_batch(
+                "UPDATE servers SET position = 2 WHERE id = 'a1';
+                 UPDATE servers SET position = 0 WHERE id = 'b2';",
+            )
+            .unwrap();
+        db.set_meta("local_position", "1").unwrap();
+        let file = export(&db, "a long enough passphrase").unwrap();
+
+        let fresh = Db::in_memory().unwrap();
+        import(&fresh, "a long enough passphrase", &file, false).unwrap();
+        assert_eq!(order(&fresh), ["b2", "a1"]);
+        assert_eq!(fresh.meta("local_position").unwrap().as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn a_backup_from_before_arranging_keeps_its_list_order() {
+        // As an older panel wrote it: no positions, the servers oldest first.
+        let old = serde_json::json!({
+            "format": 1, "created": 1, "panel": "2.5.1", "link_token": "t",
+            "servers": [
+                {"id": "z9", "name": "older", "key": "k1", "created": 50, "last_seen": 0,
+                 "version": "", "arch": "", "host": ""},
+                {"id": "a1", "name": "newer", "key": "k2", "created": 90, "last_seen": 0,
+                 "version": "", "arch": "", "host": ""}
+            ]
+        });
+        let file = seal(old.to_string().into_bytes(), "a long enough passphrase").unwrap();
+        let fresh = Db::in_memory().unwrap();
+        fresh.set_meta("local_position", "5").unwrap();
+        assert_eq!(
+            import(&fresh, "a long enough passphrase", &file, false).unwrap(),
+            2
+        );
+        assert_eq!(order(&fresh), ["z9", "a1"]);
+        // And the panel's own goes back to the top.
+        assert_eq!(fresh.meta("local_position").unwrap(), None);
     }
 
     #[test]

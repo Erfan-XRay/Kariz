@@ -9,7 +9,7 @@
 //! handshake is the first gate; the key is the second, so a leaked token alone opens no
 //! server.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -294,6 +294,12 @@ pub struct Hub {
 }
 
 pub const LOCAL: &str = "local";
+
+/// The position a new server takes: after every other one, the panel's own included.
+const NEXT_POSITION: &str = "(SELECT max(
+     coalesce((SELECT max(position) FROM servers), -1),
+     coalesce((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'local_position'), -1)
+ ) + 1)";
 
 impl Hub {
     pub fn new(db: Db, kariz_dir: PathBuf) -> Arc<Self> {
@@ -1053,7 +1059,10 @@ impl Hub {
         );
         let name = self.unique_name(&wanted)?;
         self.db.conn().execute(
-            "INSERT INTO servers (id, name, key, created, last_seen) VALUES (?1, ?2, ?3, ?4, 0)",
+            &format!(
+                "INSERT INTO servers (id, name, key, created, last_seen, position)
+                 VALUES (?1, ?2, ?3, ?4, 0, {NEXT_POSITION})"
+            ),
             params![id, name, random_hex(32)?, now()],
         )?;
         Ok((id, name))
@@ -1167,6 +1176,52 @@ impl Hub {
         Ok(())
     }
 
+    /// Where the panel's own server stands among the others (before them all until it is
+    /// moved).
+    fn local_position(&self) -> i64 {
+        self.db
+            .meta("local_position")
+            .ok()
+            .flatten()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(-1)
+    }
+
+    /// Puts the servers in the order given: every server once, the panel's own (`LOCAL`)
+    /// included, and nothing else (`bad_order`).
+    pub fn reorder(&self, ids: &[String]) -> Result<()> {
+        let mut conn = self.db.conn();
+        let known: HashSet<String> = conn
+            .prepare("SELECT id FROM servers")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let given: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        if given.len() != ids.len()
+            || ids.len() != known.len() + 1
+            || !given.contains(LOCAL)
+            || !known.iter().all(|id| given.contains(id.as_str()))
+        {
+            bail!("bad_order");
+        }
+        let tx = conn.transaction()?;
+        for (at, id) in ids.iter().enumerate() {
+            if id == LOCAL {
+                tx.execute(
+                    "INSERT INTO meta (key, value) VALUES ('local_position', ?1)
+                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    [at.to_string()],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE servers SET position = ?2 WHERE id = ?1",
+                    params![id, at as i64],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Remembers why a server's link failed, for the Servers page.
     pub(crate) fn note_error(&self, id: &str, kind: &'static str, detail: String) {
         self.live().entry(id.to_owned()).or_default().last_error = Some(LinkError {
@@ -1247,7 +1302,10 @@ impl Hub {
         let key = random_hex(32)?;
         let name = self.unique_name(name)?;
         self.db.conn().execute(
-            "INSERT INTO servers (id, name, key, created, last_seen, version, arch, host) VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7)",
+            &format!(
+                "INSERT INTO servers (id, name, key, created, last_seen, version, arch, host, position)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, {NEXT_POSITION})"
+            ),
             params![id, name, key, now(), hello.version, hello.arch, hello.hostname],
         )?;
         Ok((id, key, name))
@@ -1735,12 +1793,13 @@ impl Hub {
         }
     }
 
-    /// Every server, the panel's own first, for the API.
+    /// Every server, in the order the admin arranged them, for the API.
     pub fn snapshot(&self) -> Result<Vec<ServerView>> {
-        let rows: Vec<(String, String, String, String, String, i64)> = {
+        let rows: Vec<(String, String, String, String, String, i64, i64)> = {
             let conn = self.db.conn();
             let mut stmt = conn.prepare(
-                "SELECT id, name, version, arch, host, last_seen FROM servers ORDER BY created, id",
+                "SELECT id, name, version, arch, host, last_seen, coalesce(position, 0)
+                 FROM servers ORDER BY position, created, id",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok((
@@ -1750,9 +1809,15 @@ impl Hub {
                     r.get(3)?,
                     r.get(4)?,
                     r.get(5)?,
+                    r.get(6)?,
                 ))
             })?;
             rows.collect::<rusqlite::Result<_>>()?
+        };
+        // The panel's own stands before the first server whose position is not before its.
+        let local_at = {
+            let mine = self.local_position();
+            rows.iter().position(|r| r.6 >= mine).unwrap_or(rows.len())
         };
         let links = self.networks.links(None).unwrap_or_default();
         let names: HashMap<String, String> = self
@@ -1822,18 +1887,22 @@ impl Hub {
             }
         };
         let local_name = self.local_name();
-        let mut out = vec![view(
-            LOCAL,
-            local_name,
-            true,
-            crate::version().to_owned(),
-            std::env::consts::ARCH.to_owned(),
-            String::new(),
-            0,
-        )];
-        for (id, name, version, arch, host, last_seen) in rows {
+        let mut out = Vec::with_capacity(rows.len() + 1);
+        for (id, name, version, arch, host, last_seen, _) in rows {
             out.push(view(&id, name, false, version, arch, host, last_seen));
         }
+        out.insert(
+            local_at,
+            view(
+                LOCAL,
+                local_name,
+                true,
+                crate::version().to_owned(),
+                std::env::consts::ARCH.to_owned(),
+                String::new(),
+                0,
+            ),
+        );
         let addrs: HashMap<String, String> = {
             let conn = self.db.conn();
             let mut stmt = conn.prepare("SELECT server, addr FROM server_addrs")?;
@@ -1924,6 +1993,48 @@ mod tests {
         // A new server never takes that name.
         assert_eq!(hub.unique_name("tehran-main").unwrap(), "tehran-main-2");
         assert_eq!(hub.unique_name("frankfurt").unwrap(), "frankfurt");
+    }
+
+    #[test]
+    fn servers_stand_where_they_were_put_and_a_new_one_comes_last() {
+        let hub = Hub::new(
+            Db::in_memory().unwrap(),
+            std::env::temp_dir().join("kariz-none"),
+        );
+        let ids = |hub: &Hub| -> Vec<String> {
+            hub.snapshot().unwrap().into_iter().map(|s| s.id).collect()
+        };
+        let (a, _) = hub.add_waiting(Some("frankfurt"), "192.0.2.1").unwrap();
+        let a = a.as_str();
+        let (b, _) = hub.add_waiting(Some("istanbul"), "192.0.2.2").unwrap();
+        let b = b.as_str();
+        // Before anything is arranged: the panel's own, then the others oldest first.
+        assert_eq!(ids(&hub), [LOCAL, a, b]);
+
+        let order = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        hub.reorder(&order(&[b, LOCAL, a])).unwrap();
+        assert_eq!(ids(&hub), [b, LOCAL, a]);
+
+        // Every server once and nothing else, or nothing changes.
+        for bad in [
+            order(&[b, a]),
+            order(&[b, LOCAL, a, a]),
+            order(&[b, LOCAL, a, "stranger"]),
+            order(&[b, LOCAL, "stranger"]),
+            Vec::new(),
+        ] {
+            assert_eq!(hub.reorder(&bad).unwrap_err().to_string(), "bad_order");
+        }
+        assert_eq!(ids(&hub), [b, LOCAL, a]);
+
+        // A new one comes last, also when the panel's own was put last.
+        let (c, _) = hub.add_waiting(Some("tabriz"), "192.0.2.3").unwrap();
+        let c = c.as_str();
+        assert_eq!(ids(&hub), [b, LOCAL, a, c]);
+        hub.reorder(&order(&[a, b, c, LOCAL])).unwrap();
+        let (d, _) = hub.add_waiting(Some("shiraz"), "192.0.2.4").unwrap();
+        let d = d.as_str();
+        assert_eq!(ids(&hub), [a, b, c, LOCAL, d]);
     }
 
     /// What an update of the panel looks like to it: it starts, and no agent is connected yet.
