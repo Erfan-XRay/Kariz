@@ -494,6 +494,72 @@ async fn the_server_list_needs_a_session_and_names_this_server() {
 }
 
 #[tokio::test]
+async fn the_servers_are_arranged_with_every_id_once_and_the_csrf_value() {
+    let panel = Panel::new();
+    panel
+        .db
+        .conn()
+        .execute(
+            "INSERT INTO servers (id, name, key, created, position) VALUES
+                 ('a1', 'frankfurt', 'k1', 100, 0), ('b2', 'istanbul', 'k2', 200, 1)",
+            [],
+        )
+        .unwrap();
+    let mut b = panel.browser("10.5.5.5");
+    let link = auth::create_link(&panel.db, auth::now()).unwrap();
+    b.call(
+        &panel,
+        "POST",
+        "/api/link",
+        Some(json!({"token": link})),
+        false,
+    )
+    .await;
+    async fn ids(b: &mut Browser, panel: &Panel) -> Vec<String> {
+        let (_, doc, _) = b.call(panel, "GET", "/api/servers", None, false).await;
+        doc["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    assert_eq!(ids(&mut b, &panel).await, ["local", "a1", "b2"]);
+
+    let wanted = json!({"ids": ["b2", "local", "a1"]});
+    let (status, doc, _) = b
+        .call(
+            &panel,
+            "POST",
+            "/api/servers/order",
+            Some(wanted.clone()),
+            false,
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(doc["error"], "csrf");
+
+    for bad in [
+        json!({"ids": ["b2", "a1"]}),
+        json!({"ids": ["b2", "local", "a1", "zz"]}),
+        json!({"ids": ["b2", "local", "b2"]}),
+    ] {
+        let (status, doc, _) = b
+            .call(&panel, "POST", "/api/servers/order", Some(bad), true)
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(doc["error"], "bad_order");
+    }
+    assert_eq!(ids(&mut b, &panel).await, ["local", "a1", "b2"]);
+
+    let (status, _, _) = b
+        .call(&panel, "POST", "/api/servers/order", Some(wanted), true)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ids(&mut b, &panel).await, ["b2", "local", "a1"]);
+}
+
+#[tokio::test]
 async fn a_backup_is_downloaded_locked_and_restored_through_the_api() {
     let panel = Panel::new();
     auth::set_password(&panel.db, "correct horse battery", None).unwrap();

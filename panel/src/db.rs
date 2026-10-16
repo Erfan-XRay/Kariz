@@ -149,6 +149,14 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE networks ADD COLUMN port INTEGER NOT NULL DEFAULT 0;",
     // 15: an agents port of a server's own, which the panel listens on for its agent alone.
     "CREATE TABLE agent_ports (server TEXT PRIMARY KEY, port INTEGER NOT NULL UNIQUE);",
+    // 16: where a server stands in every list, as the admin arranged them. The servers there
+    // are keep the order they had (oldest first); the panel's own stands before them until
+    // it is moved (`local_position` in meta).
+    "ALTER TABLE servers ADD COLUMN position INTEGER;
+     UPDATE servers SET position = (
+         SELECT count(*) FROM servers o
+         WHERE o.created < servers.created OR (o.created = servers.created AND o.id < servers.id)
+     );",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a
@@ -269,6 +277,36 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, MIGRATIONS.len());
+    }
+
+    #[test]
+    fn servers_from_before_arranging_keep_the_order_they_had() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // A panel from before the position column, with three servers on it.
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(15) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO servers (id, name, key, created) VALUES
+                 ('c3', 'third', 'k', 300), ('b2', 'second-b', 'k', 200),
+                 ('a1', 'second-a', 'k', 200), ('z0', 'first', 'k', 100);",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let order: Vec<(String, i64)> = conn
+            .prepare("SELECT id, position FROM servers ORDER BY position")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            order,
+            [("z0", 0), ("a1", 1), ("b2", 2), ("c3", 3)]
+                .map(|(id, p)| (id.to_owned(), p))
+                .to_vec()
+        );
     }
 
     #[test]

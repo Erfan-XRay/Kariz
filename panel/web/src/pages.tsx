@@ -15,6 +15,7 @@ import { ServerFixDialog } from "./ServerFix";
 import { useNetworks } from "./Networks";
 import { NewGreLinkFields, greJoinError, ipv4Ok, networkOfKind } from "./GreLink";
 import { AgentPortField, agentPortError, agentPortOf, agentPortOk } from "./AgentPort";
+import { ArrangeServers, arranged } from "./Arrange";
 import { hostPort, linkPorts, reverseOk, transportLabel } from "./transport";
 import { Card, CodeBlock, CopyValue, Dialog, Empty, Icon, Odo, Seg, Sep, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
 
@@ -822,7 +823,36 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
   const [removing, setRemoving] = useState<ServerInfo | null>(null);
   const [fixing, setFixing] = useState<string | null>(null);
   const [auto, setAuto] = useState<string | null>(null);
+  // The order being arranged, while the page is in its Arrange mode.
+  const [order, setOrder] = useState<string[] | null>(null);
+  const [saving, setSaving] = useState(false);
+  // A saved order is shown until the next reading of the servers has it too.
+  const [saved, setSaved] = useState<string[] | null>(null);
+  const byId = new Map(servers.map((s) => [s.id, s]));
+  const shown = saved ? arranged(saved, servers).map((id) => byId.get(id)!) : servers;
+  useEffect(() => {
+    if (saved && arranged(saved, servers).join() === servers.map((s) => s.id).join()) setSaved(null);
+  }, [servers, saved]);
   const online = servers.filter((s) => s.online).length;
+  const saveOrder = async () => {
+    if (!order) return;
+    const ids = arranged(order, servers);
+    if (ids.join() === servers.map((s) => s.id).join()) {
+      setOrder(null);
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.orderServers(ids);
+      toast(t("arr.saved"), "ok");
+      setSaved(ids);
+      setOrder(null);
+    } catch {
+      toast(t("arr.failed"), "err");
+    }
+    setSaving(false);
+    onChanged();
+  };
   // Added, and its agent has never connected (one added over GRE waits here until its command is run).
   const waiting = (s: ServerInfo) => !s.local && !s.online && !s.last_seen;
   const uptime = (secs: number) => {
@@ -844,13 +874,35 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
           </div>
         </div>
         <div className="grow" />
-        <button className="btn btn-primary btn-sm" type="button" onClick={() => setAdding(true)}>
-          <span className="shine" />
-          <Icon name="plus" size={18} />
-          {t("srv.add")}
-        </button>
+        {order ? (
+          <>
+            <button className="btn btn-ghost btn-sm" type="button" onClick={() => setOrder(null)} disabled={saving}>
+              {t("cancel")}
+            </button>
+            <button className="btn btn-primary btn-sm" type="button" onClick={saveOrder} disabled={saving}>
+              <Icon name="check" size={18} />
+              {t("arr.done")}
+            </button>
+          </>
+        ) : (
+          <>
+            {loaded && servers.length > 1 && (
+              <button className="btn btn-ghost btn-sm" type="button" onClick={() => setOrder(servers.map((s) => s.id))}>
+                <Icon name="arrange" size={18} />
+                {t("arr.start")}
+              </button>
+            )}
+            <button className="btn btn-primary btn-sm" type="button" onClick={() => setAdding(true)}>
+              <span className="shine" />
+              <Icon name="plus" size={18} />
+              {t("srv.add")}
+            </button>
+          </>
+        )}
       </div>
-      {!loaded ? (
+      {order && loaded ? (
+        <ArrangeServers servers={servers} order={order} onOrder={setOrder} />
+      ) : !loaded ? (
         <div className="srv-list">
           {[0, 1, 2].map((i) => (
             <div className="card" key={i}>
@@ -860,7 +912,7 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
         </div>
       ) : (
         <ul className="srv-list">
-          {servers.map((s) => {
+          {shown.map((s) => {
             const h = s.health;
             const mem = h?.mem_total ? ((h.mem_used ?? 0) * 100) / h.mem_total : null;
             const rx = h?.rx_bps != null ? bytesPerSec(h.rx_bps) : null;

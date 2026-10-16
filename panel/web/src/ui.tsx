@@ -126,6 +126,8 @@ const ICONS: Record<string, ReactNode> = {
   ),
   chevron: <path d="m9 6 6 6-6 6" />,
   more: <path d="M6 12h.01M12 12h.01M18 12h.01" strokeWidth="3" />,
+  grip: <path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" strokeWidth="3" />,
+  arrange: <path d="M7 4v16M4 7l3-3 3 3M17 20V4M14 17l3 3 3-3" />,
   cpu: (
     <>
       <rect x="6" y="6" width="12" height="12" rx="2" />

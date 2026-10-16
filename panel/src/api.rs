@@ -44,6 +44,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/servers/remove", post(remove_server))
         .route("/api/servers/reconnect", post(reconnect_server))
         .route("/api/servers/rename", post(rename_server))
+        .route("/api/servers/order", post(order_servers))
         .route("/api/schedules", get(schedules_list).post(schedule_set))
         .route("/api/schedules/delete", post(schedule_delete))
         .route("/api/schedules/run", post(schedule_run))
@@ -1022,6 +1023,37 @@ async fn rename_server(
             "no_such_server" => error(StatusCode::NOT_FOUND, "no_such_server"),
             _ => internal(e),
         },
+    }
+}
+
+#[derive(Deserialize)]
+struct OrderBody {
+    /// Every server's id once, the panel's own (`local`) included, in the order to keep.
+    ids: Vec<String>,
+}
+
+async fn order_servers(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<OrderBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match state.hub.reorder(&body.ids) {
+        Ok(()) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                "arranged the servers",
+            );
+            reply(StatusCode::OK, json!({}))
+        }
+        Err(e) if format!("{e:#}") == "bad_order" => error(StatusCode::BAD_REQUEST, "bad_order"),
+        Err(e) => internal(e),
     }
 }
 

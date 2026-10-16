@@ -1047,6 +1047,17 @@ const en: Table = {
   "td.tab.overview": "Overview",
   "td.tab.tools": "Tests",
   "td.tab.schedule": "Schedule",
+  "arr.start": "Arrange",
+  "arr.done": "Done",
+  "arr.hint": "Drag a server by its handle, or move it with its arrow buttons (Alt+↑ / Alt+↓). This order is used everywhere in the panel: the map, the dashboard and every list.",
+  "arr.drag": "Drag to move",
+  "arr.up": "Move {name} up",
+  "arr.down": "Move {name} down",
+  "arr.upKey": "Move up (Alt+↑)",
+  "arr.downKey": "Move down (Alt+↓)",
+  "arr.moved": "{name} moved to place {n} of {total}",
+  "arr.saved": "The new order is saved.",
+  "arr.failed": "The order could not be saved. Try again.",
 };
 
 const fa: Table = {
@@ -2092,6 +2103,17 @@ const fa: Table = {
   "td.tab.overview": "نمای کلی",
   "td.tab.tools": "تست‌ها",
   "td.tab.schedule": "زمان‌بندی",
+  "arr.start": "چیدمان",
+  "arr.done": "تمام",
+  "arr.hint": "سرورها را از دستگیره بکشید، یا با دکمه‌های بالا و پایین جابه‌جا کنید (⁦Alt+↑ / Alt+↓⁩). این ترتیب همه‌جای پنل به کار می‌رود: نقشه، داشبورد و همهٔ فهرست‌ها.",
+  "arr.drag": "برای جابه‌جایی بکشید",
+  "arr.up": "{name} یک جا بالاتر",
+  "arr.down": "{name} یک جا پایین‌تر",
+  "arr.upKey": "بالاتر (⁦Alt+↑⁩)",
+  "arr.downKey": "پایین‌تر (⁦Alt+↓⁩)",
+  "arr.moved": "{name} به جای {n} از {total} رفت",
+  "arr.saved": "ترتیب تازه ذخیره شد.",
+  "arr.failed": "ترتیب ذخیره نشد. دوباره امتحان کنید.",
 };
 
 export const TABLES: Record<Lang, Table> = { fa, en };
