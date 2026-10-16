@@ -1,18 +1,23 @@
 # Changelog
 
-## Unreleased
+## 2.6.0-beta.4 - 2026-10-16
 
-### Changed
+A **beta**, like [2.6.0-beta.3](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#260-beta3---2026-10-15):
+only panels on the *Beta* channel are offered it; `kariz-manager update` and the stable channel
+stay on 2.5.1. To try it on a server by hand: `kariz-manager install --version v2.6.0-beta.4`.
 
-- **4096 UDP clients per port by default, up from 1024** (`tuning.udp_max_flows`). A busy tunnel
-  carrying TCP and UDP kept logging *too many UDP flows* and turned new UDP clients away
-  ([#80](https://github.com/Erfan-XRay/Kariz/issues/80)). 1024 dated from when a tunnel connection
-  took only 512 streams; every UDP flow is one stream, and since 2.4 a connection takes 4096. It
-  applies on the entry server, so update that one. The log line now names the setting and says
-  that the clients already connected go on.
+A server added over a GRE or VXLAN link can now have an agents port of its own too, you can
+**arrange the servers in the order you want**, and the panel is calmer: tabs on a tunnel's page and
+what needs a hand on top of the dashboard. A tunnel now takes **4096 UDP clients per port** by
+default, set from the panel: update the entry server of a tunnel that carries UDP; the panel and the
+rest need nothing else.
 
 ### Added
 
+- **Servers in the order you choose.** *Arrange* on the Servers page turns the cards into short
+  rows you drag by a handle (mouse or touch) or move with their buttons and Alt+Up/Down. The order
+  is used by every list: the Servers page, the map, the dashboard, the pickers and Telegram.
+  Backups carry it, and old backups still restore. API: `POST /api/servers/order`.
 - **UDP clients per port in the panel.** In the wizard and on the edit page of a tunnel that
   forwards UDP, beside *Connections per user address*. Before, the panel rewrote the config on
   every edit of the tunnel, so a hand-set `udp_max_flows` was lost; now the panel keeps it. The
@@ -24,6 +29,20 @@
   agent dials it across the link. A port that is taken is refused before anything is made. A
   reconnect over a new link also keeps a port of its own the server has (it used to send the
   agent to the main port). API: `port` in `join-gre`.
+
+### Changed
+
+- **4096 UDP clients per port by default, up from 1024** (`tuning.udp_max_flows`). A busy tunnel
+  carrying TCP and UDP kept logging *too many UDP flows* and turned new UDP clients away
+  ([#80](https://github.com/Erfan-XRay/Kariz/issues/80)). 1024 dated from when a tunnel connection
+  took only 512 streams; every UDP flow is one stream, and since 2.4 a connection takes 4096. It
+  applies on the entry server, so update that one. The log line now names the setting and says
+  that the clients already connected go on.
+
+- **A calmer panel.** A tunnel's page is split into Overview, Tests (speed test, benchmark) and
+  Schedule; *New token* and *Delete* moved into a *More actions* menu. The dashboard opens with
+  *Needs attention* when something does. The low-power button left the top bar (it is in Settings
+  and the palette). A page change takes 200 ms instead of 560.
 
 ## 2.6.0-beta.3 - 2026-10-15
 
