@@ -205,9 +205,9 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     max_conns_per_ip: perIpOf(perIp).value,
     udp_max_flows: protocol.includes("udp") ? udpFlowsOf(udpFlows).value : undefined,
     proxy_protocol: proxyOf(proxy, protocol),
-    tls_cert: transport === "wss" && tls.mode === "real" && tls.cert ? tls.cert : undefined,
-    tls_key: transport === "wss" && tls.mode === "real" && tls.key ? tls.key : undefined,
-    tls_host: transport === "wss" && tls.mode === "real" && tls.cert && tls.host ? tls.host : undefined,
+    tls_cert: transport === "wss" && tls.mode !== "self" && tls.cert ? tls.cert : undefined,
+    tls_key: transport === "wss" && tls.mode !== "self" && tls.key ? tls.key : undefined,
+    tls_host: transport === "wss" && tls.mode !== "self" && tls.cert && tls.host ? tls.host.toLowerCase() : undefined,
     forwards: parsed.forwards,
   });
 
@@ -223,7 +223,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
       if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
       if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
       if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
-      if (transport === "wss" && !tlsReady(tls)) return t("tls.needCert");
+      if (transport === "wss" && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
     }
     if (s === 1 && !cipherReady(enc, transport, encAck)) return t("enc.needAck");
     if (s === 1 && muxToSpec(mux).bad) return t(`mux.${muxToSpec(mux).bad}`) + ": " + t("mux.badValue");

@@ -121,6 +121,14 @@ certificate, and sets up the renewal timer. The tunnel then names the files unde
 `/etc/letsencrypt/live/` (`tunnel.tls.cert` / `key`), reloads them when they are renewed, and the
 dialing side checks the certificate against the web's roots (no pin).
 
+**A certificate of your own** works the same way: choose *Your own* and give the paths of its
+full chain and its private key on the listening server (PEM, without a passphrase: absolute
+paths ending in `.pem`, `.crt`, `.cer` or `.key`) and the domain (or IPv4 address) it is for.
+Before the tunnel is changed, the server checks that the files are there and that the key is the
+certificate's. It must be a certificate browsers trust (from acme.sh, your provider, a CA), since
+the dialing side checks it against the web's roots; Kariz does not renew it, but the tunnel reads
+the new files by itself when you do. The listening server needs 2.7.0-beta.1 or newer.
+
 The dialing side checks it against **the name it was issued for**: the panel sets that as its
 `tls.sni`, so it does not matter which address the side dials (a private GRE address, another
 address of the server) or which WebSocket *Host* it sends. A certificate checked against another

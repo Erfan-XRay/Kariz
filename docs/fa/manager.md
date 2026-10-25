@@ -22,10 +22,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/script
 |---|---|
 | **۱** نصب یا به‌روزرسانی کاریز | CPU را تشخیص می‌دهد (x86_64، aarch64 یا armv7)، آخرین نسخه را می‌گیرد، SHA-256 و امضایش را می‌سنجد و `kariz`، `kariz-panel`، unitهای systemd و دستور `kariz-manager` را نصب می‌کند |
 | **۲** وضعیت و آدرس‌ها | آنچه روی این سرور اجرا می‌شود، آدرس‌های سرور و آدرس پنل |
-| **۳** تا **۷** پنل وب | نصب پنل روی این سرور، ساختن لینک ورود، رمز مدیر، عوض کردن دامنه یا IP و گواهی‌اش، حذف پنل |
-| **۸** و **۹** agent | وصل کردن این سرور به یک پنل با کد پیوستن، یا جدا کردنش |
-| **۱۰** لاگ زنده | دنبال کردن لاگ پنل یا agent |
-| **۱۱** حذف کاریز | هرچه نصب کرده را متوقف و پاک می‌کند |
+| **۳** تا **۸** پنل وب | نصب پنل روی این سرور، ساختن لینک ورود، رمز مدیر، عوض کردن دامنه یا IP و گواهی‌اش (از Let's Encrypt، یا فایل‌های گواهی‌ای که خودتان دارید)، عوض کردن پورت پنل، حذف پنل |
+| **۹** و **۱۰** agent | وصل کردن این سرور به یک پنل با کد پیوستن، یا جدا کردنش |
+| **۱۱** لاگ زنده | دنبال کردن لاگ پنل یا agent |
+| **۱۲** حذف کاریز | هرچه نصب کرده را متوقف و پاک می‌کند |
 
 اگر GitHub دانلودهایتان را محدود می‌کند (مثلاً سرورهای زیادی پشت یک آدرس هستند)، پیش از اجرای اسکریپت `GITHUB_TOKEN` را روی یک personal access توکن بگذارید. فقط برای برداشتن همین محدودیت استفاده می‌شود.
 
@@ -40,7 +40,7 @@ kariz-manager install --binary ./kariz        # a binary you built yourself
 
 ۱. روی سروری که پنل را نگه می‌دارد، یک‌خطی را اجرا کنید و **۳** (نصب پنل وب) را بزنید. نشانی پنل و یک لینک ورود یک‌بارمصرف چاپ می‌شود.
 ۲. لینک را در مرورگر باز کنید و وارد شوید. از اینجا به بعد در پنل کار کنید: [کار با پنل](using-the-panel.md).
-۳. روی هر سرور دیگر یک‌خطی را اجرا کنید، **۸** (وصل شدن به یک پنل) را بزنید و کد پیوستنی را که پنل داده بچسبانید (سرورها، افزودن سرور). آن سرور حالا در پنل دیده می‌شود.
+۳. روی هر سرور دیگر یک‌خطی را اجرا کنید، **۹** (وصل شدن به یک پنل) را بزنید و کد پیوستنی را که پنل داده بچسبانید (سرورها، افزودن سرور). آن سرور حالا در پنل دیده می‌شود.
 ۴. در پنل، بین هر دو سرورتان تانل بسازید.
 
 ## دستورها
@@ -58,6 +58,8 @@ kariz-manager panel link [--host H]                 # another one-time login lin
 kariz-manager panel password [--stdin | --random]  # a new admin password (asked twice, hidden)
 kariz-manager panel status | logs                   # the service, its address / follow the log
 kariz-manager panel cert [--domain D | --ip A]      # a new domain or IP address, with its certificate
+kariz-manager panel cert --cert-file F --key-file K # a certificate of your own (asked for in the menu too)
+kariz-manager panel port [N]                        # the port the panel opens on (asked without N)
 kariz-manager panel heal                            # a certificate for this server's new IP address (a timer runs it)
 kariz-manager panel uninstall [--yes]
 

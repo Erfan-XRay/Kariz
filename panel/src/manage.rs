@@ -202,19 +202,33 @@ fn cert_files(dir: &Path, spec: &Spec) -> Option<(PathBuf, PathBuf)> {
     ))
 }
 
-/// Where Let's Encrypt keeps the certificates the manager gets (the only place a spec may
-/// name a certificate from: the agent never reads another file on the panel's say).
-const LIVE: &str = "/etc/letsencrypt/live/";
+/// Where Let's Encrypt keeps the certificates the manager gets.
+pub const LIVE: &str = "/etc/letsencrypt/live/";
 
-/// Whether `path` is a certificate or key file under [`LIVE`].
+/// The endings a certificate or key file of a spec may have: the agent never reads another
+/// kind of file on the panel's say (a password file, a config), only PEM files.
+const CERT_ENDINGS: [&str; 4] = [".pem", ".crt", ".cer", ".key"];
+
+/// Whether `path` can be a certificate or key file a spec names: one the manager got (under
+/// [`LIVE`]) or one of the admin's own, anywhere on the server but the kernel's own trees,
+/// as long as it is an absolute plain path that ends like a PEM file.
 pub fn valid_cert_path(path: &str) -> bool {
-    path.starts_with(LIVE)
-        && path.ends_with(".pem")
+    path.starts_with('/')
+        && CERT_ENDINGS.iter().any(|e| path.ends_with(e))
+        && !["/proc/", "/sys/", "/dev/"]
+            .iter()
+            .any(|p| path.starts_with(p))
         && !path.contains("..")
+        && !path.contains("//")
         && path.len() < 200
         && path
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b))
+}
+
+/// Whether `path` is a file of a certificate the manager got from Let's Encrypt.
+pub fn lets_encrypt_path(path: &str) -> bool {
+    path.starts_with(LIVE) && path.ends_with(".pem") && valid_cert_path(path)
 }
 
 /// The files of a real certificate a spec names, if it names a valid pair.
@@ -232,7 +246,9 @@ fn plain_text(spec: &Spec) -> Result<()> {
     }
     if let (Some(cert), Some(key)) = (&spec.tls_cert, &spec.tls_key) {
         if !valid_cert_path(cert) || !valid_cert_path(key) {
-            bail!("a certificate must be one the manager got (under {LIVE})");
+            bail!(
+                "a certificate and its key are files on the server: absolute paths of letters, digits and - _ . / that end in .pem, .crt, .cer or .key"
+            );
         }
     }
     let optional = [
@@ -336,12 +352,18 @@ pub fn put(dir: &Path, spec: &Spec) -> Result<Option<String>> {
     let (text, _) = build(dir, spec, false)?;
     let path = config_path(dir, &spec.name)?;
     let pin = match cert_files(dir, spec) {
-        // A real certificate: its files must be there; nothing is pinned (the other side
-        // checks the certificate against the web's roots).
+        // A real certificate: its files must be there and go together; nothing is pinned
+        // (the other side checks the certificate against the web's roots).
         Some((cert, key)) if own_cert(spec).is_some() => {
             if !cert.exists() || !key.exists() {
-                bail!("the certificate files are not there: get the certificate again");
+                bail!(
+                    "the certificate files are not there ({} and {}): get the certificate again, or put them there",
+                    cert.display(),
+                    key.display()
+                );
             }
+            kariz::transport::tls::acceptor(&cert, &key)
+                .map_err(|e| anyhow::anyhow!("the certificate cannot be used: {e}"))?;
             None
         }
         Some((cert, key)) => Some(crate::cert::ensure(&cert, &key)?),
@@ -775,7 +797,7 @@ pub async fn issue_cert(host: &str, email: Option<&str>) -> crate::wire::CertRep
             .rev()
             .find_map(|l| l.strip_prefix(key))
             .map(|p| p.trim().to_owned())
-            .filter(|p| valid_cert_path(p))
+            .filter(|p| lets_encrypt_path(p))
     };
     match (ok, found("cert="), found("key=")) {
         (true, Some(cert), Some(key)) => crate::wire::CertReply {
@@ -1247,16 +1269,30 @@ mod tests {
     }
 
     #[test]
-    fn only_certificates_the_manager_got_can_be_named() {
+    fn only_pem_files_can_be_named_as_a_certificate() {
         let live = "/etc/letsencrypt/live/kariz-panel-tun-example-com/";
         assert!(valid_cert_path(&format!("{live}fullchain.pem")));
         assert!(valid_cert_path(&format!("{live}privkey.pem")));
+        assert!(lets_encrypt_path(&format!("{live}fullchain.pem")));
+        // The admin's own, wherever they keep them.
+        for own in [
+            "/etc/ssl/kariz/tun.crt",
+            "/etc/ssl/private/tun.key",
+            "/root/.acme.sh/tun.example.com_ecc/fullchain.cer",
+        ] {
+            assert!(valid_cert_path(own), "{own}");
+            assert!(!lets_encrypt_path(own), "{own}");
+        }
         for bad in [
             "/etc/passwd",
+            "/etc/shadow",
             "/etc/letsencrypt/live/../../shadow.pem",
             "/etc/letsencrypt/live/x/key.txt",
             "/etc/letsencrypt/live/x y/key.pem",
             "/etc/kariz/main.toml",
+            "/proc/self/environ.pem",
+            "/dev/stdin.key",
+            "//etc/x.pem",
             "relative.pem",
         ] {
             assert!(!valid_cert_path(bad), "{bad}");
@@ -1296,13 +1332,42 @@ mod tests {
         let err = put(&d.0, &s).unwrap_err();
         assert!(format!("{err:#}").contains("certificate files"), "{err:#}");
         assert!(!d.0.join("real.crt").exists() && !d.0.join("real.toml").exists());
-        // A cert and key go together, and only from the manager's directory.
+        // A cert and key go together, and only PEM files.
         let mut half = s.clone();
         half.tls_key = None;
         assert!(build(&d.0, &half, true).is_err());
         let mut other = s.clone();
         other.tls_cert = Some("/etc/passwd".into());
         assert!(build(&d.0, &other, true).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wss_side_can_use_a_certificate_of_the_admins_own() {
+        let d = Dir::new();
+        let own = d.0.join("own");
+        std::fs::create_dir_all(&own).unwrap();
+        let path = |f: &str| own.join(f).to_string_lossy().into_owned();
+        crate::cert::ensure(&own.join("a.crt"), &own.join("a.key")).unwrap();
+        crate::cert::ensure(&own.join("b.crt"), &own.join("b.key")).unwrap();
+        let mut s = spec("own");
+        s.transport = "wss".into();
+        s.tls_cert = Some(path("a.crt"));
+        s.tls_key = Some(path("a.key"));
+        // Used as it is: nothing is pinned and no certificate is made beside the config.
+        assert_eq!(put(&d.0, &s).unwrap(), None);
+        let text = std::fs::read_to_string(d.0.join("own.toml")).unwrap();
+        assert!(text.contains("a.crt") && text.contains("a.key"), "{text}");
+        assert!(!d.0.join("own.crt").exists());
+        let back = get(&d.0, "own").unwrap();
+        assert_eq!(back.tls_cert.as_deref(), Some(path("a.crt").as_str()));
+        // A key that is not the certificate's is refused before anything is written.
+        let mut wrong = s.clone();
+        wrong.name = "wrong".into();
+        wrong.tls_key = Some(path("b.key"));
+        let err = put(&d.0, &wrong).unwrap_err();
+        assert!(format!("{err:#}").contains("cannot be used"), "{err:#}");
+        assert!(!d.0.join("wrong.toml").exists());
     }
 
     #[test]
