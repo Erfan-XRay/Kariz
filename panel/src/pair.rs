@@ -759,11 +759,55 @@ async fn undo(hub: &Hub, servers: &[&str], name: &str) -> bool {
     all
 }
 
+/// The first version whose agent puts back the config an edit replaced (`TunnelRevert`),
+/// which an edit that moves a tunnel to another server needs: such an edit gives both sides
+/// a new token, and only the agent can put the old one back if the edit does not work.
+pub const MOVE_SINCE: (u32, u32, u32) = (2, 7, 0);
+
+/// The servers the tunnel is on now that an edit takes it off (not its entry or exit any
+/// more), and whether the edit moves it at all (another server, or the two swap roles).
+fn moves(old: &[(String, TunnelInfo)], req: &PairRequest) -> (Vec<(String, TunnelInfo)>, bool) {
+    let left: Vec<(String, TunnelInfo)> = old
+        .iter()
+        .filter(|(server, _)| server != &req.entry && server != &req.exit)
+        .cloned()
+        .collect();
+    let same = |server: &str, role: &str| old.iter().any(|(s, t)| s == server && t.role == role);
+    let moved = !left.is_empty() || !same(&req.entry, "entry") || !same(&req.exit, "exit");
+    (left, moved)
+}
+
 /// Starts editing a tunnel: both sides get the new settings, and if they do not connect
 /// again the old ones are put back.
+///
+/// The request may name another entry or exit server than the tunnel has (or swap the
+/// two): the tunnel is set up on its new servers, and only once both sides are connected
+/// is it removed from a server it left (one that is offline removes it when it connects).
+/// If it does not connect, the servers it was on are put back exactly and the new ones
+/// lose it, so the tunnel is never left without a working pair. Errors besides the
+/// request's own: `offline:SERVER` (a new side must be connected),
+/// `old_agent_move:SERVER:VERSION`.
 pub fn edit(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
     req.validate()?;
     req.require_new_enough(hub)?;
+    let old = place(hub, &req.name)?.sides;
+    let (_, moved) = moves(&old, &req);
+    if moved {
+        for server in [&req.entry, &req.exit] {
+            if !hub.is_online(server) {
+                bail!("offline:{server}");
+            }
+            let version = hub
+                .snapshot()?
+                .into_iter()
+                .find(|s| &s.id == server)
+                .map(|s| s.version)
+                .unwrap_or_default();
+            if server != crate::hub::LOCAL && !version_at_least(&version, MOVE_SINCE) {
+                bail!("old_agent_move:{server}:{version}");
+            }
+        }
+    }
     let id = hub.ops.begin("edit", &req.name)?;
     let hub = hub.clone();
     let op = id.clone();
@@ -794,10 +838,16 @@ async fn run_edit(
         ops.end(op, false, Some(e.clone()));
         e
     };
-    // What is there now, to put back.
+    // What is there now, to put back. A server the tunnel is not on yet has nothing to put
+    // back: if the edit does not work, the tunnel is removed from it again.
     ops.run(op, "look");
+    let old = place(hub, &req.name).map(|p| p.sides).unwrap_or_default();
+    let (left, moved) = moves(&old, req);
     let mut before = Vec::new();
     for server in [&req.entry, &req.exit] {
+        if moved && !old.iter().any(|(s, _)| s == server) {
+            continue;
+        }
         match hub
             .ask_as::<Spec>(
                 server,
@@ -821,7 +871,9 @@ async fn run_edit(
     };
     let req = resolved.as_ref().unwrap_or(req);
 
-    let token = if req.rotate {
+    // A new server has no token, and the panel never sees the one the others have: a move
+    // gives both sides a new one.
+    let token = if req.rotate || moved {
         match random_hex(24) {
             Ok(t) => Some(t),
             Err(e) => return Err((step_fail(ops, format!("{e:#}")), true)),
@@ -865,7 +917,7 @@ async fn run_edit(
                 ops.end(op, true, None);
             }
             Err(e) => {
-                let undone = restore(hub, &before, &changed, token.is_some()).await;
+                let undone = restore(hub, &req.name, &before, &changed, token.is_some()).await;
                 return Err((step_fail(ops, e), undone));
             }
         }
@@ -876,35 +928,86 @@ async fn run_edit(
         match ctl(hub, server, &req.name, "restart").await {
             Ok(()) => ops.end(op, true, None),
             Err(e) => {
-                let undone = restore(hub, &before, &changed, token.is_some()).await;
+                let undone = restore(hub, &req.name, &before, &changed, token.is_some()).await;
                 return Err((step_fail(ops, e), undone));
             }
         }
     }
     ops.run(op, "connect");
-    match wait_connected(hub, req, hub.connect_wait).await {
-        Ok(()) => {
+    if let Err(e) = wait_connected(hub, req, hub.connect_wait).await {
+        let undone = restore(hub, &req.name, &before, &changed, token.is_some()).await;
+        return Err((step_fail(ops, e), undone));
+    }
+    ops.end(op, true, None);
+
+    // The new pair works: the servers the tunnel left lose it. One that cannot be asked now
+    // removes it when it connects again, and it is gone from the lists at once. Nothing
+    // here fails the edit: the tunnel already runs where it was asked to.
+    for (server, info) in left {
+        let name = hub
+            .snapshot()
+            .ok()
+            .and_then(|all| all.into_iter().find(|s| s.id == server))
+            .map_or_else(|| server.clone(), |s| s.name);
+        ops.run(op, &format!("drop_{}:{name}", info.role));
+        let gone = hub.is_online(&server) && remove(hub, &server, &req.name).await.is_ok();
+        if gone {
             ops.end(op, true, None);
-            Ok(())
-        }
-        Err(e) => {
-            let undone = restore(hub, &before, &changed, token.is_some()).await;
-            Err((step_fail(ops, e), undone))
+        } else {
+            let _ = hub.queue_delete(&server, &req.name);
+            ops.end(op, true, Some("queued".into()));
+            ops.left_out(op, &server);
         }
     }
+    Ok(())
 }
 
-/// Puts the earlier settings back and restarts. A new token cannot be put back (the panel
-/// never keeps tokens), so a failed rotation is reported as not undone.
-async fn restore(hub: &Hub, before: &[(String, Spec)], changed: &[&str], rotated: bool) -> bool {
-    let mut all = !rotated;
-    for (server, spec) in before {
-        if changed.contains(&server.as_str()) {
-            all &= put(hub, server, spec.clone()).await.is_ok();
-            all &= ctl(hub, server, &spec.name, "restart").await.is_ok();
+/// Puts the earlier settings back on every server the edit wrote, and restarts. An agent
+/// since [`MOVE_SINCE`] puts its old config back itself, token and all; an older one is
+/// given the old settings, which keep the new token (the panel never keeps tokens), so a
+/// failed rotation there is reported as not undone. A server the tunnel was not on before
+/// loses it again.
+async fn restore(
+    hub: &Hub,
+    name: &str,
+    before: &[(String, Spec)],
+    changed: &[&str],
+    rotated: bool,
+) -> bool {
+    let mut all = true;
+    for server in changed {
+        let Some((_, spec)) = before.iter().find(|(s, _)| s == server) else {
+            all &= remove(hub, server, name).await.is_ok();
+            continue;
+        };
+        let exact = hub.agent_since(server, MOVE_SINCE)
+            && expect_ack(
+                hub,
+                server,
+                &Request::TunnelRevert {
+                    name: name.to_owned(),
+                },
+            )
+            .await
+            .is_ok();
+        if !exact {
+            all &= !rotated && put(hub, server, spec.clone()).await.is_ok();
         }
+        all &= ctl(hub, server, name, "restart").await.is_ok();
     }
     all
+}
+
+async fn expect_ack(hub: &Hub, server: &str, request: &Request) -> Result<(), String> {
+    let r: Ack = hub
+        .ask_as(server, request)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    if r.ok {
+        Ok(())
+    } else {
+        Err(fail_text(&r))
+    }
 }
 
 /// Starts, stops or restarts both sides, in the order that never leaves a dialer without
@@ -1231,6 +1334,72 @@ pub async fn speedtest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_edit_that_names_other_servers_or_swaps_them_is_a_move() {
+        let side = |server: &str, role: &str| {
+            (
+                server.to_owned(),
+                TunnelInfo {
+                    name: "t".into(),
+                    role: role.into(),
+                    mode: "reverse".into(),
+                    transport: "tcpmux".into(),
+                    profile: "balanced".into(),
+                    encryption: String::new(),
+                    listen: None,
+                    remote: None,
+                    forwards: Vec::new(),
+                    active: Some(true),
+                    status: None,
+                    error: None,
+                },
+            )
+        };
+        let to = |entry: &str, exit: &str| PairRequest {
+            name: "t".into(),
+            entry: entry.into(),
+            exit: exit.into(),
+            mode: "reverse".into(),
+            transport: "tcpmux".into(),
+            profile: None,
+            listen: "0.0.0.0:3080".into(),
+            dial: "1.2.3.4:3080".into(),
+            pool: None,
+            ws_path: None,
+            ws_host: None,
+            tls_sni: None,
+            mux: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_host: None,
+            encryption: None,
+            quic_obfs: false,
+            max_conns_per_ip: None,
+            udp_max_flows: None,
+            proxy_protocol: None,
+            forwards: Vec::new(),
+            rotate: false,
+            network: None,
+        };
+        let now = [side("a", "entry"), side("b", "exit")];
+        let (left, moved) = moves(&now, &to("a", "b"));
+        assert!(left.is_empty() && !moved, "the same servers");
+        let (left, moved) = moves(&now, &to("a", "c"));
+        assert!(moved);
+        assert_eq!(left.len(), 1);
+        assert_eq!((left[0].0.as_str(), left[0].1.role.as_str()), ("b", "exit"));
+        let (left, moved) = moves(&now, &to("b", "a"));
+        assert!(
+            left.is_empty() && moved,
+            "a swap leaves no server, but is a move"
+        );
+        let (left, moved) = moves(&now, &to("c", "d"));
+        assert!(moved && left.len() == 2, "both sides move");
+        // a tunnel the panel sees on one side only (the other is not known now)
+        let (left, moved) = moves(&now[..1], &to("a", "b"));
+        assert!(left.is_empty() && moved);
+    }
 
     #[test]
     fn versions_are_compared_by_their_numbers() {

@@ -1073,6 +1073,10 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
 .mux-fields .btn { justify-self: start; }
 .text.is-bad { border-color: var(--danger); }
 .tunnel-edit { display: grid; gap: var(--sp-5); max-width: 980px; }
+.te-servers { display: grid; grid-template-columns: 1fr 1fr auto; gap: var(--sp-4); align-items: start; }
+.te-servers .select { width: 100%; }
+.te-swap { margin-top: 26px; }
+@media (max-width: 720px) { .te-servers { grid-template-columns: 1fr; } .te-swap { margin-top: 0; justify-self: start; } }
 .edit-head { display: flex; align-items: center; gap: var(--sp-4); }
 .edit-sec { display: grid; gap: var(--sp-5); border: 1px solid var(--line); margin: 0; min-width: 0; }
 .edit-sec > legend { font-weight: 600; font-size: var(--fs-md, 16px); padding: 0 var(--sp-2); float: none; width: auto; }

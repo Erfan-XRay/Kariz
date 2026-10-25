@@ -430,6 +430,10 @@ impl Agent {
                 let dir = self.config().kariz_dir;
                 ack(manage::delete(&dir, &*self.services, &name).await)
             }
+            Request::TunnelRevert { name } => {
+                let dir = self.config().kariz_dir;
+                ack(manage::revert(&dir, &name))
+            }
             Request::TunnelCtl { name, action } => ack(self.services.ctl(name, action).await),
             Request::Ports => to_json(
                 &tokio::task::spawn_blocking(manage::ports)

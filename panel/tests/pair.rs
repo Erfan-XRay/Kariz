@@ -272,3 +272,151 @@ async fn a_pair_is_made_edited_stopped_deleted_and_a_failure_leaves_nothing() {
     assert!(files(&local_dir).is_empty(), "{:?}", files(&local_dir));
     assert!(files(&agent_dir).is_empty(), "{:?}", files(&agent_dir));
 }
+
+/// An agent of its own in `dir`, joined to the hub: its server id once it is connected.
+async fn join_agent(
+    hub: &Arc<Hub>,
+    addr: &str,
+    root: &Path,
+    name: &str,
+    binary: &Path,
+) -> (String, PathBuf) {
+    let dir = root.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let before: Vec<String> = hub.snapshot().unwrap().into_iter().map(|s| s.id).collect();
+    let code = hub.create_join(Some(name), addr).unwrap();
+    let file = root.join(format!("{name}.toml"));
+    let mut config = agent::enroll_from_code(&code, &file).unwrap();
+    config.kariz_dir = dir.clone();
+    config.save(&file).unwrap();
+    let agent = Agent::with_services(&file, config, Arc::new(Processes::new(&dir, binary)));
+    tokio::spawn(agent.run());
+    for _ in 0..100 {
+        if let Some(s) = hub
+            .snapshot()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.online && !before.contains(&s.id))
+        {
+            return (s.id, dir);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("{name} did not join");
+}
+
+/// A tunnel's exit moves to another server: set up there first, taken off the server it
+/// left once the new pair is connected, and the traffic goes on. A move whose new pair does
+/// not connect changes nothing: the panel's side gets its old config back (token and all),
+/// the server it was to move to loses it, and the old pair carries traffic again.
+#[tokio::test]
+async fn a_tunnel_moves_to_another_server_and_a_move_that_fails_changes_nothing() {
+    let Some(binary) = kariz_binary() else {
+        eprintln!("skipped: build the kariz program first (cargo build -p kariz)");
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    let local_dir = root.path().join("local");
+    std::fs::create_dir_all(&local_dir).unwrap();
+    let hub = Hub::with_options(
+        Db::in_memory().unwrap(),
+        local_dir.clone(),
+        Arc::new(Processes::new(&local_dir, &binary)),
+        Duration::from_secs(8),
+        None,
+        None,
+    );
+    tokio::spawn(hub.clone().run_local());
+    let acceptor = kariz::link::Acceptor::bind("127.0.0.1:0", &hub.link_token().unwrap())
+        .await
+        .unwrap();
+    let addr = acceptor.local_addr().unwrap().to_string();
+    tokio::spawn(hub.clone().serve_agents(acceptor));
+    let (a, a_dir) = join_agent(&hub, &addr, root.path(), "a", &binary).await;
+    let (b, b_dir) = join_agent(&hub, &addr, root.path(), "b", &binary).await;
+
+    let target = echo_server().await;
+    let (listen, front) = (free_port(), free_port());
+    // reverse: the panel's server (entry) listens, the exit dials it
+    let request = |exit: &str, dial_port: u16| PairRequest {
+        name: "moving".into(),
+        entry: LOCAL.into(),
+        exit: exit.into(),
+        mode: "reverse".into(),
+        transport: "tcpmux".into(),
+        profile: None,
+        listen: format!("127.0.0.1:{listen}"),
+        dial: format!("127.0.0.1:{dial_port}"),
+        pool: None,
+        ws_path: None,
+        ws_host: None,
+        tls_sni: None,
+        mux: None,
+        tls_cert: None,
+        tls_key: None,
+        tls_host: None,
+        encryption: None,
+        quic_obfs: false,
+        max_conns_per_ip: None,
+        udp_max_flows: None,
+        proxy_protocol: None,
+        forwards: vec![ForwardInfo {
+            listen: format!("127.0.0.1:{front}"),
+            target: format!("127.0.0.1:{target}"),
+            protocol: "tcp".into(),
+        }],
+        rotate: false,
+        network: None,
+    };
+    let op = pair::create(&hub, request(&a, listen)).unwrap();
+    assert_eq!(finished(&hub, &op).await.state, "done");
+    assert!(through(front, b"on a").await);
+    // the panel knows both sides before the move
+    for _ in 0..60 {
+        let sides = hub
+            .snapshot()
+            .unwrap()
+            .iter()
+            .filter(|s| s.tunnels.iter().any(|t| t.info.name == "moving"))
+            .count();
+        if sides == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // ---- the exit moves from a to b ----
+    let op = pair::edit(&hub, request(&b, listen)).unwrap();
+    let done = finished(&hub, &op).await;
+    assert_eq!(done.state, "done", "{done:?}");
+    assert!(
+        done.steps.iter().any(|s| s.id.starts_with("drop_exit:")),
+        "{:?}",
+        done.steps
+    );
+    assert!(done.offline.is_empty());
+    assert!(b_dir.join("moving.toml").exists());
+    assert!(!a_dir.join("moving.toml").exists(), "a lost it");
+    assert!(through(front, b"on b").await);
+    for _ in 0..60 {
+        let on_a = hub
+            .snapshot()
+            .unwrap()
+            .iter()
+            .any(|s| s.id == a && s.tunnels.iter().any(|t| t.info.name == "moving"));
+        if !on_a {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // ---- a move back to a that cannot connect (its exit dials a closed port) ----
+    let op = pair::edit(&hub, request(&a, free_port())).unwrap();
+    let done = finished(&hub, &op).await;
+    assert_eq!(done.state, "failed", "{done:?}");
+    assert_eq!(done.undone, Some(true), "{done:?}");
+    assert!(!a_dir.join("moving.toml").exists(), "a lost it again");
+    assert!(b_dir.join("moving.toml").exists(), "b was never touched");
+    // b still has the token the panel's side had before: the pair works again
+    assert!(through(front, b"back on b").await);
+}

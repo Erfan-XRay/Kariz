@@ -1222,6 +1222,8 @@ fn pair_error(e: anyhow::Error) -> Response {
         // `old_agent:`, and the ones that name what needs the newer version
         // (`old_agent_enc:`, `old_agent_limits:`, ...): the page says which server to update.
         _ if code.starts_with("old_agent") => error(StatusCode::CONFLICT, &code),
+        // A server a tunnel is to move to must be connected: the page says which.
+        _ if code.starts_with("offline:") => error(StatusCode::CONFLICT, &code),
         _ => internal(e),
     }
 }

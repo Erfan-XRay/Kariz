@@ -33,6 +33,9 @@ pub enum Request {
     TunnelGet { name: String },
     /// Stop it, remove its config.
     TunnelDelete { name: String },
+    /// Put back the config the last `TunnelPut` replaced (an edit that is undone). Since
+    /// 2.7.0.
+    TunnelRevert { name: String },
     /// `start`, `stop`, `restart`, `enable` or `disable` the tunnel's service.
     TunnelCtl { name: String, action: String },
     /// The listening ports of this server and who owns them.
