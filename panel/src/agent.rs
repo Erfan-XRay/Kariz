@@ -441,6 +441,9 @@ impl Agent {
             Request::NetSync { links } => ack(self.net.sync(links).await),
             Request::NetPing { name } => to_json(&self.net.ping(&name).await),
             Request::NetStatus => to_json(&self.net.status().await),
+            Request::NetPmtu { remote } => to_json(&crate::wire::PmtuReply {
+                mtu: self.net.path_mtu(&remote).await,
+            }),
             Request::BenchListen {
                 token,
                 transport,

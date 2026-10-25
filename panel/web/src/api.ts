@@ -448,6 +448,17 @@ export interface Link {
   ifname: string;
   kind: LinkKind;
   port: number;
+  /** 0: the most a 1500-byte path allows. `mtu_how`: `measured`, `set` (by hand) or empty. */
+  mtu: number;
+  mtu_how: "" | "measured" | "set";
+}
+
+/** A link's MTU after a change: `path` is what was measured; `later` get it when they connect. */
+export interface MtuSet {
+  mtu: number;
+  how: Link["mtu_how"];
+  path: number | null;
+  later: string[];
 }
 
 /** A deleted link or network: gone from the panel; `later` remove its interfaces when they can. */
@@ -602,6 +613,8 @@ export const api = {
   createLinks: (network: string, servers: string[], hub?: string) => call<{ op: string }>("POST", "networks/links", { network, servers, hub }),
   /** `force`: delete a link that an offline server's agent reaches the panel through. */
   deleteLink: (id: string, force = false) => call<NetDeleted>("POST", "networks/links/delete", { id, force }),
+  /** `measure`: measure the path again; else `mtu` (0: the default). */
+  setLinkMtu: (id: string, choice: { measure: true } | { mtu: number }) => call<MtuSet>("POST", "networks/links/mtu", { id, ...choice }),
   setAddress: (id: string, addr: string) => call<object>("POST", "servers/address", { id, addr }),
   update: () => call<UpdateStatus>("GET", "update"),
   checkUpdate: () => call<UpdateStatus>("POST", "update/check", {}),

@@ -77,6 +77,9 @@ pub enum Request {
     NetPing { name: String },
     /// Whether GRE can be made here, and the state of this server's links.
     NetStatus,
+    /// The path MTU to `remote` (another server's public address), measured with pings
+    /// that may not be fragmented. Since 2.7.0.
+    NetPmtu { remote: String },
     /// Listen for one benchmark test session ([`kariz::bench`]) over `transport` with the
     /// tunnel `profile`, on `port` of every IPv4 address, or of the address `bind` (this
     /// server's IPv6 address: a listener of its own beside the IPv4 one on the same port)
@@ -213,6 +216,14 @@ pub struct NetStatus {
     pub vxlan_reason: Option<String>,
     #[serde(default)]
     pub links: Vec<NetIface>,
+}
+
+/// The answer to [`Request::NetPmtu`]: the largest packet that got through whole, or none
+/// when not even 1280 bytes did (ICMP filtered on the way, most likely).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PmtuReply {
+    #[serde(default)]
+    pub mtu: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

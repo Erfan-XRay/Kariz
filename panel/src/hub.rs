@@ -698,7 +698,8 @@ impl Hub {
             (if at_server { server_end } else { panel_end }) == addr
         })?;
         let (mine, panels) = (self.addr_of(server)?, self.addr_of(LOCAL)?);
-        Some(crate::netops::spec_for(&link, server, &mine, &panels))
+        let mtu = self.mtu_of(&link, server);
+        Some(crate::netops::spec_for(&link, server, &mine, &panels, mtu))
     }
 
     /// A code that makes the agent that spends it server `id` again: it dials `panel` (with
@@ -979,12 +980,14 @@ impl Hub {
                 .remove(0),
         };
         let result: Result<GreJoin> = async {
-            let ours = crate::netops::spec_for(&link, LOCAL, panels, public_ip);
+            let ours =
+                crate::netops::spec_for(&link, LOCAL, panels, public_ip, self.mtu_of(&link, LOCAL));
             let ack: Ack = self.ask_as(LOCAL, &Request::NetUp { net: ours }).await?;
             if !ack.ok {
                 bail!("{}", ack.error.unwrap_or_else(|| "failed".into()));
             }
-            let theirs = crate::netops::spec_for(&link, id, public_ip, panels);
+            let theirs =
+                crate::netops::spec_for(&link, id, public_ip, panels, self.mtu_of(&link, id));
             let panel_addr = if link.a == LOCAL {
                 link.addr_a.clone()
             } else {

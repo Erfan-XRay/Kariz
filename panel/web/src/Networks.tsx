@@ -228,6 +228,96 @@ function AddLinks({ network, servers, onClose }: { network: Network; servers: Se
   );
 }
 
+/** The bytes a link of this kind adds to every packet (GRE with its key, or VXLAN). */
+function overhead(l: Link): number {
+  return l.kind === "vxlan" ? 50 : 28;
+}
+
+/** The MTU a link's interfaces have: its own, or the most a 1500-byte path allows. */
+export function linkMtu(l: Link): number {
+  return l.mtu > 0 ? l.mtu : 1500 - overhead(l);
+}
+
+/** A link's MTU: measured again, set by hand, or back to the default. */
+function MtuDialog({ link, servers, onClose, onDone }: { link: Link; servers: ServerInfo[]; onClose: () => void; onDone: () => void }) {
+  const { t, num, toast } = useApp();
+  const names = new Map(servers.map((s) => [s.id, s.name]));
+  const name = (id: string) => names.get(id) ?? id;
+  const [now, setNow] = useState({ mtu: linkMtu(link), how: link.mtu_how });
+  const [own, setOwn] = useState(String(linkMtu(link)));
+  const [busy, setBusy] = useState<"" | "measure" | "save">("");
+  const [path, setPath] = useState<number | null>(null);
+  const [error, setError] = useState("");
+  const most = 1500 - overhead(link);
+  const ownNum = Number(own.trim());
+  const ownOk = /^\d{3,4}$/.test(own.trim()) && ownNum >= 576 && ownNum <= most;
+  const apply = async (choice: { measure: true } | { mtu: number }) => {
+    setBusy("measure" in choice ? "measure" : "save");
+    setError("");
+    try {
+      const r = await api.setLinkMtu(link.id, choice);
+      setNow({ mtu: r.mtu, how: r.how });
+      setOwn(String(r.mtu));
+      setPath(r.path);
+      toast(r.later.length ? t("net.mtuLater", { mtu: num(r.mtu), servers: r.later.map(name).join(", ") }) : t("net.mtuSaved", { mtu: num(r.mtu) }), "ok");
+      onDone();
+    } catch (e) {
+      setError(e instanceof ApiError ? describeError(t, e.code, names) : String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <Dialog
+      title={t("net.mtuTitle", { a: name(link.a), b: name(link.b) })}
+      onClose={busy ? () => {} : onClose}
+      footer={
+        <button className="btn btn-ghost btn-sm" type="button" disabled={!!busy} onClick={onClose}>
+          {t("wz.close")}
+        </button>
+      }
+    >
+      <p className="muted small" style={{ marginTop: 0 }}>
+        {t("net.mtuText", { bytes: num(overhead(link)) })}
+      </p>
+      <p className="mtu-now">
+        <b dir="ltr">{t("net.mtuNow", { mtu: num(now.mtu) })}</b>
+        {now.how && <span className="tag">{t(`net.mtuHow.${now.how}`)}</span>}
+      </p>
+      <div className="mtu-acts">
+        <button className="btn btn-ghost btn-sm" type="button" disabled={!!busy} onClick={() => void apply({ measure: true })}>
+          <Icon name="refresh" size={16} />
+          {busy === "measure" ? t("net.mtuMeasuring") : t("net.mtuMeasure")}
+        </button>
+        {(now.how || now.mtu !== most) && (
+          <button className="btn btn-quiet btn-sm" type="button" disabled={!!busy} onClick={() => void apply({ mtu: 0 })}>
+            {t("net.mtuDefault", { mtu: num(most) })}
+          </button>
+        )}
+      </div>
+      {path !== null && <p className="ok small">{t("net.mtuPath", { path: num(path), mtu: num(now.mtu) })}</p>}
+      <div className="field">
+        <label htmlFor="mtu-own">{t("net.mtuOwn")}</label>
+        <div className="mtu-own">
+          <input className="text mono" id="mtu-own" dir="ltr" inputMode="numeric" value={own} onChange={(e) => setOwn(e.target.value)} />
+          <button className="btn btn-primary btn-sm" type="button" disabled={!!busy || !ownOk || ownNum === now.mtu} onClick={() => void apply({ mtu: ownNum })}>
+            {t("net.mtuSave")}
+          </button>
+        </div>
+        <span className="help" dir="ltr">
+          576 – {most}
+        </span>
+      </div>
+      {error && (
+        <div className="banner warn del-why" role="alert">
+          <Icon name="info" size={18} />
+          <span>{error}</span>
+        </div>
+      )}
+    </Dialog>
+  );
+}
+
 /** What a delete takes: one link, or a network with every link in it. */
 type Doomed = { link: Link } | { network: Network; links: Link[] };
 
@@ -389,6 +479,7 @@ export function NetworksPage({ servers, onChanged, onOpenTunnel }: { servers: Se
   const { networks, links, reload } = useNetworks();
   const [dialog, setDialog] = useState<"new" | { add: Network } | null>(null);
   const [doomed, setDoomed] = useState<Doomed | null>(null);
+  const [fitting, setFitting] = useState<Link | null>(null);
   const names = new Map(servers.map((s) => [s.id, s.name]));
   const name = (id: string) => names.get(id) ?? id;
 
@@ -466,6 +557,7 @@ export function NetworksPage({ servers, onChanged, onOpenTunnel }: { servers: Se
                     <th>{t("t.route")}</th>
                     <th>{t("net.addrs")}</th>
                     <th className="hide-sm">{t("net.key")}</th>
+                    <th>{t("net.mtu")}</th>
                     <th />
                   </tr>
                 </thead>
@@ -480,6 +572,15 @@ export function NetworksPage({ servers, onChanged, onOpenTunnel }: { servers: Se
                       </td>
                       <td className="mono hide-sm" dir="ltr">
                         {l.kind === "vxlan" ? `VNI ${l.gre_key}` : l.gre_key} · {l.ifname}
+                      </td>
+                      <td>
+                        <button className="mtu-btn" type="button" aria-label={t("net.mtuTitle", { a: name(l.a), b: name(l.b) })} onClick={() => setFitting(l)}>
+                          <span className="mono" dir="ltr">
+                            {num(linkMtu(l))}
+                          </span>
+                          {l.mtu_how && <span className="muted small">{t(`net.mtuHow.${l.mtu_how}`)}</span>}
+                          <Icon name="edit" size={14} />
+                        </button>
                       </td>
                       <td>
                         <button className="btn btn-ghost btn-sm" type="button" onClick={() => setDoomed({ link: l })}>
@@ -510,6 +611,7 @@ export function NetworksPage({ servers, onChanged, onOpenTunnel }: { servers: Se
         </span>
       </div>
 
+      {fitting && <MtuDialog link={fitting} servers={servers} onClose={() => setFitting(null)} onDone={reload} />}
       {doomed && (
         <DeleteNet
           what={doomed}

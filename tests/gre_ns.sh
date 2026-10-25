@@ -51,7 +51,7 @@ key = $5
 address = "$6"
 peer = "$7"
 prefix = 30
-mtu = 1476
+mtu = ${MTU:-1472}
 EOF
 }
 
@@ -67,8 +67,29 @@ echo "link one: the private addresses answer"
 
 # the interface has the address, the GRE key and the MTU that were asked for
 ip -n kza -d link show kz-one | grep -q 'gre remote 192.0.2.2 local 192.0.2.1'
-ip -n kza -d link show kz-one | grep -q 'mtu 1476'
+ip -n kza -d link show kz-one | grep -q 'mtu 1472'
 ip -n kza -d addr show kz-one | grep -q '10.77.0.1/30'
+
+# a new MTU is set in place: the interface stays the same one (its index does not change)
+index() { ip -n kza -o link show kz-one | cut -d: -f1; }
+before=$(index)
+MTU=1372 spec kz-one a 192.0.2.1 192.0.2.2 1 10.77.0.1 10.77.0.2
+ip netns exec kza "$BIN" net up "$WORK/kz-one-a.toml" --state "$WORK/a-state.toml"
+ip -n kza -d link show kz-one | grep -q 'mtu 1372'
+test "$(index)" = "$before"
+spec kz-one a 192.0.2.1 192.0.2.2 1 10.77.0.1 10.77.0.2
+ip netns exec kza "$BIN" net up "$WORK/kz-one-a.toml" --state "$WORK/a-state.toml"
+test "$(index)" = "$before"
+echo "link one: its MTU changes in place"
+
+# the path MTU between the servers is measured, and a smaller path is found
+test "$(ip netns exec kza "$BIN" net pmtu 192.0.2.2)" = 1500
+ip -n kza link set va mtu 1400
+ip -n kzb link set vb mtu 1400
+test "$(ip netns exec kza "$BIN" net pmtu 192.0.2.2)" = 1400
+ip -n kza link set va mtu 1500
+ip -n kzb link set vb mtu 1500
+echo "the path MTU is measured: 1500, and 1400 on a smaller path"
 
 # link two between the same pair of public addresses: its own key and its own /30
 spec kz-two a 192.0.2.1 192.0.2.2 2 10.77.0.5 10.77.0.6

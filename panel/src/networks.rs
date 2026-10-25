@@ -136,6 +136,11 @@ pub struct Link {
     /// Its network's kind and port.
     pub kind: LinkKind,
     pub port: u16,
+    /// The MTU its interfaces get: 0 for the most a 1500-byte path allows
+    /// ([`crate::net::max_mtu`]). `mtu_how` says where a value came from: `measured`
+    /// (the path MTU between its servers, when it was made or asked for) or `set` (by hand).
+    pub mtu: u32,
+    pub mtu_how: String,
 }
 
 /// Which servers a link joins, and how a set of servers is joined.
@@ -282,7 +287,7 @@ impl Networks {
         let conn = self.db.conn();
         let mut stmt = conn.prepare(
             "SELECT l.id, l.network, l.a, l.b, l.subnet, l.addr_a, l.addr_b, l.gre_key, l.ifname,
-                    l.created, n.kind, n.port
+                    l.created, n.kind, n.port, l.mtu, l.mtu_how
              FROM net_links l JOIN networks n ON n.id = l.network
              WHERE (?1 IS NULL OR l.network = ?1) ORDER BY l.created, l.id",
         )?;
@@ -300,6 +305,8 @@ impl Networks {
                 created: r.get(9)?,
                 kind: kind_of(&r.get::<_, String>(10)?),
                 port: r.get(11)?,
+                mtu: r.get(12)?,
+                mtu_how: r.get(13)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -416,6 +423,8 @@ impl Networks {
                 created: now(),
                 kind,
                 port,
+                mtu: 0,
+                mtu_how: String::new(),
             };
             tx.execute(
                 "INSERT INTO net_links (id, network, a, b, subnet, addr_a, addr_b, gre_key, ifname, created)
@@ -456,6 +465,15 @@ impl Networks {
         tx.execute("DELETE FROM net_links WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Sets a link's MTU (0: the default of its kind) and where it came from. False when
+    /// there is no such link.
+    pub fn set_mtu(&self, id: &str, mtu: u32, how: &str) -> Result<bool> {
+        Ok(self.db.conn().execute(
+            "UPDATE net_links SET mtu = ?2, mtu_how = ?3 WHERE id = ?1",
+            params![id, mtu, how],
+        )? > 0)
     }
 
     /// The interfaces of deleted links that `server` still has to remove.

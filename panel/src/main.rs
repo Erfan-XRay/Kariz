@@ -165,6 +165,8 @@ enum NetCommand {
     },
     /// Whether GRE can be made here.
     Status,
+    /// The path MTU to another server's public address (pings that may not be fragmented).
+    Pmtu { remote: String },
 }
 
 fn main() -> Result<()> {
@@ -439,6 +441,10 @@ fn net_command(command: NetCommand) -> Result<()> {
             NetCommand::Status => {
                 println!("{}", serde_json::to_string(&Net::new(None).status().await)?);
             }
+            NetCommand::Pmtu { remote } => match Net::new(None).path_mtu(&remote).await {
+                Some(mtu) => println!("{mtu}"),
+                None => anyhow::bail!("the path MTU to {remote} could not be measured"),
+            },
         }
         Ok(())
     })

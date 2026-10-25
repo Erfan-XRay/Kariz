@@ -17,11 +17,38 @@ use serde::{Deserialize, Serialize};
 use crate::manage::Fut;
 use crate::wire::{LinkKind, NetIface, NetSpec, NetStatus, PingReply};
 
-/// GRE adds 24 bytes to every packet on a 1500-byte path.
-pub const DEFAULT_MTU: u32 = 1476;
+/// The path most servers have between them, and what the largest MTUs are taken from.
+pub const PATH_MTU: u32 = 1500;
+
+/// GRE adds 28 bytes to every packet over IPv4: the outer IPv4 header (20) and the GRE
+/// header with its key (8; every link has a key).
+pub const DEFAULT_MTU: u32 = 1472;
+
+/// What agents before 2.7.0 gave a GRE link: 4 bytes too many for a keyed GRE header (issue
+/// #92). The panel keeps telling those agents this value, so that they do not make their
+/// links again for nothing; a newer agent changes the MTU of a link in place.
+pub const OLD_GRE_MTU: u32 = 1476;
 
 /// VXLAN adds 50 (outer IPv4, UDP, VXLAN and the inner Ethernet header).
 pub const VXLAN_MTU: u32 = 1450;
+
+/// The smallest MTU a link may have.
+pub const MIN_MTU: u32 = 576;
+
+/// The bytes a link of this kind adds to every packet.
+pub fn overhead(kind: LinkKind) -> u32 {
+    match kind {
+        LinkKind::Gre => PATH_MTU - DEFAULT_MTU,
+        LinkKind::Vxlan => PATH_MTU - VXLAN_MTU,
+    }
+}
+
+/// The MTU for a link of this kind over a path of `path` bytes (what [`Net::path_mtu`]
+/// measured), within the limits a link may have.
+pub fn mtu_for_path(kind: LinkKind, path: u32) -> u32 {
+    path.saturating_sub(overhead(kind))
+        .clamp(MIN_MTU, max_mtu(kind))
+}
 
 /// The UDP port VXLAN uses unless a network says otherwise (IANA's).
 pub const VXLAN_PORT: u16 = 4789;
@@ -95,8 +122,14 @@ pub fn validate(spec: &NetSpec) -> Result<(Ipv4Addr, Ipv4Addr, Ipv4Addr, Ipv4Add
         }
     }
     let most = max_mtu(spec.kind);
-    if !(576..=most).contains(&spec.mtu) {
-        bail!("mtu must be between 576 and {most}");
+    // An older panel still sends a GRE link 1476 (see OLD_GRE_MTU): taken as it was.
+    let most = if spec.kind == LinkKind::Gre {
+        most.max(OLD_GRE_MTU)
+    } else {
+        most
+    };
+    if !(MIN_MTU..=most).contains(&spec.mtu) {
+        bail!("mtu must be between {MIN_MTU} and {most}");
     }
     let mask = u32::MAX << (32 - u32::from(spec.prefix));
     if u32::from(address) & mask != u32::from(peer) & mask || address == peer {
@@ -288,9 +321,39 @@ impl Net {
         Ok(())
     }
 
+    /// Makes `spec`, which the server had as `old`. When only the MTU changed and the
+    /// interface is there, the MTU is set in place: making the link again would cut the
+    /// traffic of every tunnel over it for a moment.
+    async fn make(&self, old: Option<&NetSpec>, spec: &NetSpec) -> Result<()> {
+        let only_mtu = old.is_some_and(|o| {
+            o.mtu != spec.mtu
+                && NetSpec {
+                    mtu: spec.mtu,
+                    ..o.clone()
+                } == *spec
+        });
+        if only_mtu && self.exists(&spec.name) {
+            validate(spec)?;
+            let s = |x: &str| x.to_owned();
+            return self
+                .ip(vec![
+                    s("link"),
+                    s("set"),
+                    spec.name.clone(),
+                    s("mtu"),
+                    spec.mtu.to_string(),
+                    s("up"),
+                ])
+                .await
+                .map(|_| ());
+        }
+        self.apply(spec).await
+    }
+
     pub async fn up(&self, spec: NetSpec) -> Result<()> {
         let _guard = self.lock.lock().await;
-        self.apply(&spec).await?;
+        let had = self.load().link.into_iter().find(|l| l.name == spec.name);
+        self.make(had.as_ref(), &spec).await?;
         let mut state = self.load();
         state.link.retain(|l| l.name != spec.name);
         state.link.push(spec);
@@ -344,11 +407,11 @@ impl Net {
         }
         let mut failed = Vec::new();
         for spec in &wanted {
-            let same = state.link.iter().any(|l| l == spec);
-            if same && self.exists(&spec.name) {
+            let had = state.link.iter().find(|l| l.name == spec.name);
+            if had == Some(spec) && self.exists(&spec.name) {
                 continue;
             }
-            if let Err(e) = self.apply(spec).await {
+            if let Err(e) = self.make(had, spec).await {
                 failed.push(format!("{}: {e:#}", spec.name));
             }
         }
@@ -409,6 +472,54 @@ impl Net {
             Ok((false, _)) => fail("no answer across the link".into()),
             Err(e) => fail(format!("{e:#}")),
         }
+    }
+
+    /// Whether a `size`-byte packet reaches `ip` whole: two pings of that size that may not
+    /// be fragmented, and one answer is enough (one may be lost for another reason).
+    async fn fits(&self, ip: IpAddr, size: u32) -> bool {
+        // The ICMP payload: the packet less its IP header and the 8-byte ICMP header.
+        let header = if ip.is_ipv6() { 48 } else { 28 };
+        let args = [
+            "-c".to_owned(),
+            "2".to_owned(),
+            "-i".to_owned(),
+            "0.2".to_owned(),
+            "-W".to_owned(),
+            "1".to_owned(),
+            "-M".to_owned(),
+            "do".to_owned(),
+            "-s".to_owned(),
+            (size - header).to_string(),
+            ip.to_string(),
+        ];
+        matches!(self.exec.run("ping", args.to_vec()).await, Ok((true, _)))
+    }
+
+    /// The path MTU to `remote`, another server's public address: the largest packet that
+    /// gets there whole, found from 1500 bytes down by halving. None when not even 1280
+    /// bytes get through (ICMP is filtered on the way, most likely): then nothing is known,
+    /// and the link keeps the MTU of a 1500-byte path.
+    pub async fn path_mtu(&self, remote: &str) -> Option<u32> {
+        let ip: IpAddr = remote.parse().ok()?;
+        if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+            return None;
+        }
+        if self.fits(ip, PATH_MTU).await {
+            return Some(PATH_MTU);
+        }
+        let (mut fits, mut too_big) = (1280, PATH_MTU);
+        if !self.fits(ip, fits).await {
+            return None;
+        }
+        while too_big - fits > 1 {
+            let mid = (fits + too_big) / 2;
+            if self.fits(ip, mid).await {
+                fits = mid;
+            } else {
+                too_big = mid;
+            }
+        }
+        Some(fits)
     }
 
     /// Makes a throwaway interface with `args` (`ip` arguments that add `name`) and removes
@@ -514,7 +625,7 @@ mod tests {
             address: "10.77.0.1".into(),
             peer: "10.77.0.2".into(),
             prefix: 30,
-            mtu: 1476,
+            mtu: DEFAULT_MTU,
             kind: LinkKind::Gre,
             port: 0,
         }
@@ -565,7 +676,7 @@ mod tests {
             vec![
                 "tunnel add kz-a1b2c mode gre local 203.0.113.5 remote 198.51.100.7 key 4242 ttl 64",
                 "addr add 10.77.0.1/30 dev kz-a1b2c",
-                "link set kz-a1b2c mtu 1476 up",
+                "link set kz-a1b2c mtu 1472 up",
             ]
         );
     }
@@ -648,6 +759,9 @@ mod tests {
         assert!(bad(&|s| s.local = "::1".into()));
         assert!(bad(&|s| s.key = 0));
         assert!(bad(&|s| s.mtu = 1500), "GRE needs room for its header");
+        // what an older panel still sends (4 bytes too many) is taken; one more is not
+        assert!(!bad(&|s| s.mtu = OLD_GRE_MTU));
+        assert!(bad(&|s| s.mtu = OLD_GRE_MTU + 1));
         assert!(bad(&|s| s.mtu = 100));
         assert!(bad(&|s| s.prefix = 24));
         assert!(
@@ -827,6 +941,106 @@ mod tests {
         assert!(calls(&fake)
             .iter()
             .any(|c| c.starts_with("ip tunnel add kz-a1b2c mode gre")));
+    }
+
+    #[tokio::test]
+    async fn a_new_mtu_is_set_in_place_and_anything_else_makes_the_link_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let sys = dir.path().join("sys");
+        std::fs::create_dir_all(sys.join("kz-a1b2c")).unwrap();
+        let fake = Arc::new(Fake::default());
+        let net = Net::with_exec(Some(dir.path().join("net.toml")), fake.clone()).with_sys(sys);
+        net.up(spec()).await.unwrap();
+        let smaller = NetSpec {
+            mtu: 1372,
+            ..spec()
+        };
+        // up: only the MTU changes, so the interface stays (and so do the tunnels over it)
+        let before = calls(&fake).len();
+        net.up(smaller.clone()).await.unwrap();
+        assert_eq!(
+            calls(&fake)[before..],
+            ["ip link set kz-a1b2c mtu 1372 up".to_owned()]
+        );
+        assert_eq!(net.load().link, vec![smaller.clone()]);
+        // sync (an agent that reconnects, or an update from 1476): the same
+        let before = calls(&fake).len();
+        net.sync(vec![spec()]).await.unwrap();
+        assert_eq!(
+            calls(&fake)[before..],
+            ["ip link set kz-a1b2c mtu 1472 up".to_owned()]
+        );
+        // another remote is another link: it is made again
+        let before = calls(&fake).len();
+        net.up(NetSpec {
+            remote: "198.51.100.8".into(),
+            ..spec()
+        })
+        .await
+        .unwrap();
+        assert!(calls(&fake)[before..]
+            .iter()
+            .any(|c| c.starts_with("ip tunnel add")));
+    }
+
+    /// A path that lets packets of up to `mtu` bytes through (none: ICMP is dropped).
+    struct Path {
+        mtu: Option<u32>,
+        pings: Mutex<u32>,
+    }
+
+    impl Exec for Path {
+        fn run(&self, program: &str, args: Vec<String>) -> Fut<Result<(bool, String)>> {
+            assert_eq!(program, "ping");
+            *self.pings.lock().unwrap() += 1;
+            let at = args.iter().position(|a| a == "-s").unwrap();
+            assert!(args.contains(&"do".to_owned()), "never fragmented");
+            let header = if args.last().unwrap().contains(':') {
+                48
+            } else {
+                28
+            };
+            let size = args[at + 1].parse::<u32>().unwrap() + header;
+            let ok = self.mtu.is_some_and(|m| size <= m);
+            Box::pin(async move { Ok((ok, String::new())) })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_path_mtu_is_found_by_halving_and_unknown_when_icmp_is_dropped() {
+        for (path, remote, found) in [
+            (Some(1500), "198.51.100.7", Some(1500)),
+            (Some(1400), "198.51.100.7", Some(1400)),
+            (Some(1372), "2001:db8::7", Some(1372)),
+            (Some(1280), "198.51.100.7", Some(1280)),
+            (Some(1000), "198.51.100.7", None),
+            (None, "198.51.100.7", None),
+        ] {
+            let fake = Arc::new(Path {
+                mtu: path,
+                pings: Mutex::new(0),
+            });
+            let net = Net::with_exec(None, fake.clone());
+            assert_eq!(net.path_mtu(remote).await, found, "{path:?}");
+            assert!(*fake.pings.lock().unwrap() <= 10, "a short search");
+        }
+        // only another server's unicast address is pinged
+        let fake = Arc::new(Path {
+            mtu: Some(1500),
+            pings: Mutex::new(0),
+        });
+        let net = Net::with_exec(None, fake.clone());
+        for bad in [
+            "127.0.0.1",
+            "0.0.0.0",
+            "::1",
+            "ff02::1",
+            "-c",
+            "host.example",
+        ] {
+            assert_eq!(net.path_mtu(bad).await, None, "{bad}");
+        }
+        assert_eq!(*fake.pings.lock().unwrap(), 0);
     }
 
     #[tokio::test]

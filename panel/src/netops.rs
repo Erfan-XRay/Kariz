@@ -13,7 +13,7 @@ use anyhow::{anyhow, bail, Result};
 
 use crate::hub::Hub;
 use crate::networks::{mesh, Link};
-use crate::wire::{Ack, LinkKind, NetSpec, NetStatus, PingReply, Request};
+use crate::wire::{Ack, LinkKind, NetSpec, NetStatus, PingReply, PmtuReply, Request};
 
 /// The first version whose agent makes VXLAN links. An older one refuses the spec (it does
 /// not know its fields), so the panel says so before it tries.
@@ -22,6 +22,30 @@ pub const VXLAN_SINCE: (u32, u32, u32) = (2, 6, 0);
 /// How long a server is waited for while the interfaces of deleted links are removed from
 /// it. Deleting never waits on a server for longer: one that does not answer is asked again.
 pub const DOWN_WAIT: Duration = Duration::from_secs(5);
+
+/// The first version whose agent changes a link's MTU in place (an older one makes the link
+/// again, which cuts the tunnels over it for a moment) and measures the path MTU to another
+/// server ([`Request::NetPmtu`]).
+pub const MTU_SINCE: (u32, u32, u32) = (2, 7, 0);
+
+/// How long the path MTU between two servers may take to measure (a search of about ten
+/// pings each way, at the same time).
+const PMTU_WAIT: Duration = Duration::from_secs(25);
+
+/// The MTU of a server's end of `link`: the one it was given (measured, or set by hand), or
+/// the most a 1500-byte path allows. An agent older than [`MTU_SINCE`] (`new_agent` false)
+/// keeps the 1476 it made a GRE link with until the link is given a value of its own:
+/// telling it 1472 would only make it make the link again.
+pub fn link_mtu(link: &Link, new_agent: bool) -> u32 {
+    let most = crate::net::max_mtu(link.kind);
+    if link.mtu > 0 {
+        link.mtu.clamp(crate::net::MIN_MTU, most)
+    } else if link.kind == LinkKind::Gre && !new_agent {
+        crate::net::OLD_GRE_MTU
+    } else {
+        most
+    }
+}
 
 /// Whether `text` is an address a server can be reached at: IPv4, unicast.
 pub fn valid_addr(text: &str) -> bool {
@@ -32,7 +56,7 @@ pub fn valid_addr(text: &str) -> bool {
 
 /// One end of a link, as the server that owns it is told: `mine` is the address of this
 /// end, `theirs` the other's.
-pub(crate) fn spec_for(link: &Link, server: &str, local: &str, remote: &str) -> NetSpec {
+pub(crate) fn spec_for(link: &Link, server: &str, local: &str, remote: &str, mtu: u32) -> NetSpec {
     let first = link.a == server;
     NetSpec {
         name: link.ifname.clone(),
@@ -42,7 +66,7 @@ pub(crate) fn spec_for(link: &Link, server: &str, local: &str, remote: &str) -> 
         address: if first { &link.addr_a } else { &link.addr_b }.clone(),
         peer: if first { &link.addr_b } else { &link.addr_a }.clone(),
         prefix: 30,
-        mtu: crate::net::max_mtu(link.kind),
+        mtu,
         kind: link.kind,
         port: link.port,
     }
@@ -61,6 +85,32 @@ pub fn tunnel_endpoint(link: &Link, acceptor: &str, listen: &str) -> String {
 }
 
 impl Hub {
+    /// Whether `server`'s agent is `since` or newer. The panel's own always is, and so is
+    /// a server whose agent has not said its version yet (one that is joining now runs the
+    /// release that was just installed).
+    pub fn agent_since(&self, server: &str, since: (u32, u32, u32)) -> bool {
+        if server == crate::hub::LOCAL {
+            return true;
+        }
+        let version = self.version_of(server);
+        version.is_empty() || crate::pair::version_at_least(&version, since)
+    }
+
+    /// The version `server`'s agent said it runs last (empty: not yet).
+    fn version_of(&self, server: &str) -> String {
+        self.db
+            .conn()
+            .query_row("SELECT version FROM servers WHERE id = ?1", [server], |r| {
+                r.get(0)
+            })
+            .unwrap_or_default()
+    }
+
+    /// The MTU `server`'s end of `link` gets ([`link_mtu`]).
+    pub fn mtu_of(&self, link: &Link, server: &str) -> u32 {
+        link_mtu(link, self.agent_since(server, MTU_SINCE))
+    }
+
     /// The specs of every link of `server`. An agent removes the links that are not in the
     /// list it is sent, so the list is never partial: if the public address of either end of
     /// a link is not known, no list is made (and the agent keeps the links it has).
@@ -74,7 +124,13 @@ impl Hub {
             let (Some(local), Some(remote)) = (self.addr_of(server), self.addr_of(other)) else {
                 bail!("no_address:{}", link.ifname);
             };
-            out.push(spec_for(&link, server, &local, &remote));
+            out.push(spec_for(
+                &link,
+                server,
+                &local,
+                &remote,
+                self.mtu_of(&link, server),
+            ));
         }
         Ok(out)
     }
@@ -217,7 +273,7 @@ async fn bring_up(hub: &Hub, link: &Link) -> Result<(), String> {
             hub,
             server,
             Request::NetUp {
-                net: spec_for(link, server, &local, &remote),
+                net: spec_for(link, server, &local, &remote, hub.mtu_of(link, server)),
             },
         )
         .await?;
@@ -239,6 +295,142 @@ async fn bring_up(hub: &Hub, link: &Link) -> Result<(), String> {
             LinkKind::Vxlan => format!("vxlan_blocked:{}", link.port),
         })
     }
+}
+
+/// The path MTU between a link's two servers: measured from each end at the same time (a
+/// path can differ by direction), the smaller one. None when neither end could tell (both
+/// older than [`MTU_SINCE`] or offline, or ICMP filtered on the way).
+async fn path_mtu(hub: &Hub, link: &Link) -> Option<u32> {
+    let (x, y) = tokio::join!(
+        path_mtu_from(hub, &link.a, &link.b),
+        path_mtu_from(hub, &link.b, &link.a)
+    );
+    match (x, y) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (one, None) | (None, one) => one,
+    }
+}
+
+async fn path_mtu_from(hub: &Hub, from: &str, to: &str) -> Option<u32> {
+    if !hub.is_online(from) || !hub.agent_since(from, MTU_SINCE) {
+        return None;
+    }
+    let remote = hub.addr_of(to)?;
+    hub.ask_as_within::<PmtuReply>(from, &Request::NetPmtu { remote }, PMTU_WAIT)
+        .await
+        .ok()?
+        .mtu
+}
+
+/// Gives both ends of `link` its MTU now (in place). Returns the servers that get it when
+/// they connect (offline, or no answer).
+async fn push_mtu(hub: &Hub, link: &Link) -> Vec<String> {
+    let mut later = Vec::new();
+    for server in [&link.a, &link.b] {
+        let other = if &link.a == server { &link.b } else { &link.a };
+        let told = match (hub.addr_of(server), hub.addr_of(other)) {
+            (Some(local), Some(remote)) if hub.is_online(server) => {
+                let net = spec_for(link, server, &local, &remote, hub.mtu_of(link, server));
+                expect_ack(hub, server, Request::NetUp { net })
+                    .await
+                    .is_ok()
+            }
+            _ => false,
+        };
+        if !told {
+            later.push(server.clone());
+        }
+    }
+    later
+}
+
+/// A link just made: its path MTU is measured, and when the path is smaller than 1500 bytes
+/// the link's MTU is lowered to fit it (issue #92: a link larger than its path loses or
+/// fragments every full-size packet). Nothing here can fail the link: without an answer the
+/// link keeps the MTU of a 1500-byte path.
+async fn fit_mtu(hub: &Hub, link: Link) -> Link {
+    let Some(path) = path_mtu(hub, &link).await else {
+        return link;
+    };
+    let mtu = crate::net::mtu_for_path(link.kind, path);
+    if mtu >= crate::net::max_mtu(link.kind)
+        || hub.networks.set_mtu(&link.id, mtu, "measured").is_err()
+    {
+        return link;
+    }
+    let link = Link {
+        mtu,
+        mtu_how: "measured".into(),
+        ..link
+    };
+    push_mtu(hub, &link).await;
+    link
+}
+
+/// What a link's MTU is to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MtuChoice {
+    /// Measure the path between its servers again, and fit the link to it.
+    Measure,
+    /// A value of the admin's.
+    Set(u32),
+    /// The most a 1500-byte path allows.
+    Default,
+}
+
+/// A link's MTU after [`set_link_mtu`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MtuSet {
+    pub mtu: u32,
+    pub how: String,
+    /// The path MTU that was measured.
+    pub path: Option<u32>,
+    /// The servers that get the new MTU when they connect.
+    pub later: Vec<String>,
+}
+
+/// Changes a link's MTU, on both servers at once and in place (no traffic is cut). Errors:
+/// `no_such_link`, `old_agent_mtu:SERVER:VERSION` (an older agent would make the link
+/// again), `bad_mtu`, `mtu_unknown` (the path could not be measured: ICMP is filtered, or
+/// both servers are offline).
+pub async fn set_link_mtu(hub: &Hub, id: &str, choice: MtuChoice) -> Result<MtuSet> {
+    let Some(link) = hub.networks.links(None)?.into_iter().find(|l| l.id == id) else {
+        bail!("no_such_link");
+    };
+    for server in [&link.a, &link.b] {
+        if !hub.agent_since(server, MTU_SINCE) {
+            bail!("old_agent_mtu:{server}:{}", hub.version_of(server));
+        }
+    }
+    let most = crate::net::max_mtu(link.kind);
+    let (mtu, how, path) = match choice {
+        MtuChoice::Measure => {
+            let path = path_mtu(hub, &link)
+                .await
+                .ok_or_else(|| anyhow!("mtu_unknown"))?;
+            (
+                crate::net::mtu_for_path(link.kind, path),
+                "measured",
+                Some(path),
+            )
+        }
+        MtuChoice::Set(m) if (crate::net::MIN_MTU..=most).contains(&m) => (m, "set", None),
+        MtuChoice::Set(_) => bail!("bad_mtu"),
+        MtuChoice::Default => (0, "", None),
+    };
+    hub.networks.set_mtu(&link.id, mtu, how)?;
+    let link = Link {
+        mtu,
+        mtu_how: how.into(),
+        ..link
+    };
+    let later = push_mtu(hub, &link).await;
+    Ok(MtuSet {
+        mtu: link_mtu(&link, true),
+        how: how.into(),
+        path,
+        later,
+    })
 }
 
 /// Whether `server` can make links of `kind`: connected, with an agent new enough, and a
@@ -328,6 +520,10 @@ pub async fn ensure_link(
         let _ = tear_down(hub, &link).await;
         return Err(step_fail(e));
     }
+    ops.end(op, true, None);
+
+    ops.run(op, "net_mtu");
+    let link = fit_mtu(hub, link).await;
     ops.end(op, true, None);
     Ok((link, true))
 }
@@ -456,6 +652,8 @@ mod tests {
             created: 0,
             kind: LinkKind::Gre,
             port: 0,
+            mtu: 0,
+            mtu_how: String::new(),
         }
     }
 
@@ -507,8 +705,9 @@ mod tests {
 
     #[test]
     fn each_end_of_a_link_gets_its_own_side_of_the_addresses() {
-        let a = spec_for(&link(), "aaa", "192.0.2.1", "192.0.2.2");
-        let b = spec_for(&link(), "bbb", "192.0.2.2", "192.0.2.1");
+        let mtu = link_mtu(&link(), true);
+        let a = spec_for(&link(), "aaa", "192.0.2.1", "192.0.2.2", mtu);
+        let b = spec_for(&link(), "bbb", "192.0.2.2", "192.0.2.1", mtu);
         assert_eq!(
             (a.address.as_str(), a.peer.as_str()),
             ("10.77.0.1", "10.77.0.2")
@@ -519,7 +718,45 @@ mod tests {
         );
         assert_eq!((a.name.as_str(), a.key, a.prefix), ("kz-12345", 1, 30));
         assert!(crate::net::validate(&a).is_ok() && crate::net::validate(&b).is_ok());
-        assert_eq!((a.kind, a.port, a.mtu), (LinkKind::Gre, 0, 1476));
+        assert_eq!((a.kind, a.port, a.mtu), (LinkKind::Gre, 0, 1472));
+    }
+
+    #[test]
+    fn a_links_mtu_fits_its_header_its_path_and_the_agent_that_has_it() {
+        // GRE with a key adds 28 bytes, VXLAN 50 (issue #92: 1476 was 4 bytes too many)
+        assert_eq!(link_mtu(&link(), true), 1472);
+        let vx = Link {
+            kind: LinkKind::Vxlan,
+            ..link()
+        };
+        assert_eq!(link_mtu(&vx, true), 1450);
+        // an agent before 2.7.0 keeps the 1476 it made the link with (it cannot change an
+        // MTU in place), until the link has a value of its own
+        assert_eq!(link_mtu(&link(), false), 1476);
+        assert_eq!(link_mtu(&vx, false), 1450);
+        let measured = Link {
+            mtu: 1372,
+            mtu_how: "measured".into(),
+            ..link()
+        };
+        assert_eq!(
+            (link_mtu(&measured, true), link_mtu(&measured, false)),
+            (1372, 1372)
+        );
+        // a path of 1400 bytes (the issue's) fits a GRE link of 1372 and a VXLAN one of 1350
+        assert_eq!(crate::net::mtu_for_path(LinkKind::Gre, 1400), 1372);
+        assert_eq!(crate::net::mtu_for_path(LinkKind::Vxlan, 1400), 1350);
+        assert_eq!(crate::net::mtu_for_path(LinkKind::Gre, 1500), 1472);
+        assert_eq!(
+            crate::net::mtu_for_path(LinkKind::Gre, 9000),
+            1472,
+            "never above 1500's"
+        );
+        assert_eq!(
+            crate::net::mtu_for_path(LinkKind::Gre, 300),
+            576,
+            "never below 576"
+        );
     }
 
     #[test]
@@ -530,7 +767,7 @@ mod tests {
             gre_key: 9,
             ..link()
         };
-        let a = spec_for(&l, "aaa", "192.0.2.1", "192.0.2.2");
+        let a = spec_for(&l, "aaa", "192.0.2.1", "192.0.2.2", link_mtu(&l, true));
         assert_eq!(
             (a.kind, a.port, a.key, a.mtu),
             (LinkKind::Vxlan, 8472, 9, 1450)

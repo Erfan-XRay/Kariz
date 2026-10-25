@@ -1273,3 +1273,79 @@ async fn a_server_that_does_not_answer_does_not_hold_up_a_delete() {
     .await;
     assert!(deleted(&local_fake, mark_l, &link.ifname));
 }
+
+/// A link's MTU: measured when the link is made (the fake path passes 1500 bytes, so it
+/// keeps 1472), then set by hand, measured again, and put back, each time on both servers
+/// at once.
+#[tokio::test]
+async fn a_links_mtu_is_changed_in_place_on_both_servers() {
+    use kariz_panel::netops::MtuChoice;
+    let root = tempfile::tempdir().unwrap();
+    let (hub, remote, local_fake, agent_fake) = two_servers(root.path()).await;
+    let net = hub
+        .networks
+        .create_network("main", "10.77.0.0/24", &[])
+        .unwrap();
+    let op =
+        netops::create_links(&hub, &net.id, vec![LOCAL.to_owned(), remote.clone()], None).unwrap();
+    let done = finished(&hub, &op).await;
+    assert_eq!(done.state, "done");
+    assert!(
+        done.steps.iter().any(|s| s.id == "net_mtu"),
+        "{:?}",
+        done.steps
+    );
+    let link = hub.networks.links(None).unwrap().remove(0);
+    assert_eq!(
+        (link.mtu, link.mtu_how.as_str()),
+        (0, ""),
+        "a full path keeps the default"
+    );
+    // the path was measured with pings that may not be fragmented, from both ends
+    for fake in [&local_fake, &agent_fake] {
+        assert!(fake
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("ping") && c.contains("-M do")));
+    }
+    let mtu_line = |m: u32| format!("ip link set {} mtu {m} up", link.ifname);
+
+    let marks = (local_fake.calls().len(), agent_fake.calls().len());
+    let set = netops::set_link_mtu(&hub, &link.id, MtuChoice::Set(1372))
+        .await
+        .unwrap();
+    assert_eq!(
+        (set.mtu, set.how.as_str(), set.later.len()),
+        (1372, "set", 0)
+    );
+    for (fake, from) in [(&local_fake, marks.0), (&agent_fake, marks.1)] {
+        // (in place on a real kernel: net.rs and tests/gre_ns.sh check that; here the
+        // interface is not in /sys, so the agent makes it)
+        assert!(fake.calls()[from..].contains(&mtu_line(1372)));
+    }
+    assert_eq!(
+        hub.net_specs(&remote).unwrap()[0].mtu,
+        1372,
+        "and kept for a reconnect"
+    );
+
+    let measured = netops::set_link_mtu(&hub, &link.id, MtuChoice::Measure)
+        .await
+        .unwrap();
+    assert_eq!((measured.mtu, measured.path), (1472, Some(1500)));
+    assert_eq!(measured.how, "measured");
+    let back = netops::set_link_mtu(&hub, &link.id, MtuChoice::Default)
+        .await
+        .unwrap();
+    assert_eq!((back.mtu, back.how.as_str()), (1472, ""));
+    for bad in [1473, 575] {
+        let e = netops::set_link_mtu(&hub, &link.id, MtuChoice::Set(bad))
+            .await
+            .unwrap_err();
+        assert_eq!(e.to_string(), "bad_mtu");
+    }
+    let e = netops::set_link_mtu(&hub, "nope", MtuChoice::Default)
+        .await
+        .unwrap_err();
+    assert_eq!(e.to_string(), "no_such_link");
+}

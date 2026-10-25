@@ -81,6 +81,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/networks/delete", post(network_delete))
         .route("/api/networks/links", post(links_create))
         .route("/api/networks/links/delete", post(link_delete))
+        .route("/api/networks/links/mtu", post(link_mtu))
         .route("/api/servers/address", post(server_address))
         .route("/api/update", get(update_status))
         .route("/api/update/check", post(update_check))
@@ -1834,12 +1835,11 @@ fn net_error(e: anyhow::Error) -> Response {
     let code = text.split(':').next().unwrap_or_default();
     match code {
         "bad_name" | "bad_cidr" | "not_private" | "too_small" | "overlaps_route"
-        | "overlaps_network" | "bad_input" | "same_server" | "bad_port" => {
+        | "overlaps_network" | "bad_input" | "same_server" | "bad_port" | "bad_mtu" => {
             error(StatusCode::BAD_REQUEST, &text)
         }
-        "name_taken" | "in_use" | "agent_uses" | "pool_full" | "busy" => {
-            error(StatusCode::CONFLICT, &text)
-        }
+        "name_taken" | "in_use" | "agent_uses" | "pool_full" | "busy" | "old_agent_mtu"
+        | "mtu_unknown" => error(StatusCode::CONFLICT, &text),
         "no_such_network" | "no_such_link" | "no_such_server" => {
             error(StatusCode::NOT_FOUND, &text)
         }
@@ -2028,6 +2028,54 @@ async fn link_delete(
                 },
             );
             reply(StatusCode::OK, json!({ "later": later }))
+        }
+        Err(e) => net_error(e),
+    }
+}
+
+/// A link's MTU: `measure` the path between its servers again, or `mtu` (0: the default).
+#[derive(Deserialize)]
+struct MtuBody {
+    id: String,
+    #[serde(default)]
+    mtu: Option<u32>,
+    #[serde(default)]
+    measure: bool,
+}
+
+async fn link_mtu(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<MtuBody>,
+) -> Response {
+    use crate::netops::MtuChoice;
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let choice = match (body.measure, body.mtu) {
+        (true, _) => MtuChoice::Measure,
+        (false, None | Some(0)) => MtuChoice::Default,
+        (false, Some(m)) => MtuChoice::Set(m),
+    };
+    match crate::netops::set_link_mtu(&state.hub, &body.id, choice).await {
+        Ok(set) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!(
+                    "set a network link's MTU to {} ({})",
+                    set.mtu,
+                    if set.how.is_empty() {
+                        "default"
+                    } else {
+                        &set.how
+                    }
+                ),
+            );
+            reply(StatusCode::OK, json!(set))
         }
         Err(e) => net_error(e),
     }

@@ -166,6 +166,10 @@ const MIGRATIONS: &[&str] = &[
          subnet TEXT NOT NULL,
          PRIMARY KEY (server, ifname)
      );",
+    // 18: a link's MTU, when it is not the most a 1500-byte path allows (0): the path MTU
+    // between its servers was measured smaller, or the admin set it.
+    "ALTER TABLE net_links ADD COLUMN mtu INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE net_links ADD COLUMN mtu_how TEXT NOT NULL DEFAULT '';",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a
