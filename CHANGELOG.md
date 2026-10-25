@@ -1,5 +1,75 @@
 # Changelog
 
+## 2.7.0-beta.1 - 2026-10-25
+
+A **beta**: only panels on the *Beta* channel are offered it; `kariz-manager update` and the stable
+channel stay on 2.6.1. To try it on a server by hand: `kariz-manager install --version v2.7.0-beta.1`.
+
+Private network links can run **over IPv6** (GRE as `ip6gre`, and VXLAN), a link's **MTU fits its
+header and the path between its servers** ([#92](https://github.com/Erfan-XRay/Kariz/issues/92)),
+**deleting a link or a network always works** whatever state its servers are in, and a tunnel can be
+**moved to other servers** from its edit page.
+
+Update the panel first, then the agents from the panel. Links over IPv6, changing a link's MTU and
+moving a tunnel need 2.7 on the servers involved; everything that worked before keeps working with
+2.6 agents.
+
+### Added
+
+- **GRE and VXLAN over IPv6.** A network, or one link of it, runs between the servers' IPv6
+  addresses instead of their IPv4 ones (*Runs over*: IPv4 or IPv6, in *New network* and *Add
+  links*). GRE becomes `ip6gre`, made with `encaplimit none` (the 8-byte option many networks drop
+  is left out); VXLAN gets IPv6 ends. The link keeps a private IPv4 `/30`, so tunnels, an agent's
+  link to the panel and the benchmark work across it unchanged. Each server's IPv6 address is the
+  public one its agent reports, or one set under *Server addresses*. *Move to IPv6* / *Move to
+  IPv4* on a link makes it again the other way and tests it; if nothing passes it is put back.
+  *Add server* over a link takes an IPv6 address too. The agent says whether its kernel can make
+  `ip6gre` and VXLAN over IPv6. [Private networks](docs/networks.md#over-ipv6).
+- **The path MTU is measured.** When a link is made, both servers measure the path between them
+  (pings that may not be fragmented) and a path smaller than 1500 bytes gets a link MTU that fits
+  it. A link's MTU can be measured again, set by hand or put back from the *MTU* column; it changes
+  on both servers in place, without cutting the tunnels over it. `kariz-panel net pmtu ADDRESS`
+  measures a path by hand. [MTU](docs/networks.md#mtu).
+- **Move a tunnel to other servers.** The edit page has the entry and the exit server to pick, and
+  *Swap*. The tunnel is set up and tested on its new servers first, then taken off the ones it
+  left (an offline one removes it when it connects again); if the new pair does not connect,
+  nothing changes. A side on a server that is offline can be moved away this way. A move gives both
+  sides a new token.
+- **Delete a network with its links** in one go, from its card.
+- **Panel port from the manager:** `kariz-manager panel port [N]` and menu item 7 (*Panel port*)
+  change the port the panel opens on; the agents' port stays, so connected servers need nothing.
+  Port 80, the agents' ports and ports something else listens on are refused, and the panel goes
+  back to its old port if it does not start. A new panel asks for its port at install (Enter:
+  random). ([#95](https://github.com/Erfan-XRay/Kariz/issues/95))
+- **A certificate of your own from the menu:** the installer and `panel cert` offer *with a
+  certificate I have already* and ask for the full-chain and key paths; the key is checked against
+  the certificate, and the old certificate stays if the panel does not start with the new one.
+  ([#95](https://github.com/Erfan-XRay/Kariz/issues/95))
+- **A wss certificate of your own:** in the wizard and on a tunnel's edit page, *Certificate* has a
+  third choice, *Your own*: the full-chain and key paths on the listening server and the domain it
+  is for. The server checks that the key is the certificate's before the tunnel is changed; the
+  listening server needs this version.
+
+### Changed
+
+- **GRE links get an MTU of 1472, not 1476:** GRE with a key adds 28 bytes, not 24
+  ([#92](https://github.com/Erfan-XRay/Kariz/issues/92)). A 2.7 agent changes its links' MTU in
+  place; an older agent keeps 1476 until it is updated, so its links are not made again for this.
+- **Deleting never fails or waits because of a server.** A link or a network goes from the panel at
+  once; each server is asked to remove the interface, all at the same time and for at most five
+  seconds. A server that is offline or does not answer is asked again when it connects (before its
+  links are synced) and every five minutes; until then no new link takes that interface's name or
+  addresses. The panel asks before every delete and says which servers remove the interface now
+  and which later. A link that an offline server's agent reaches the panel through can be deleted
+  anyway. Before, the panel said *deleted* even when a server had kept the interface, and one link
+  whose other end had no known address held up the removal of all the others.
+- **Removing a server** tells it to remove its private network interfaces first (when it is
+  connected); the servers at the other ends remove theirs.
+- **A failed edit that made a new token** is now undone exactly on 2.7 agents (the agent puts its
+  old config back, token and all); before, the old settings came back with the new token.
+- In the manager's menu, the items after 6 moved down by one (remove panel 8, agent 9 and 10, logs
+  11, uninstall 12).
+
 ## 2.6.1 - 2026-10-16
 
 The stable release after 2.5.1, with everything of the four betas
