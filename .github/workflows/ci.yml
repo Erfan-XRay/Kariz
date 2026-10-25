@@ -103,6 +103,8 @@ jobs:
       - run: shellcheck scripts/*.sh
       - name: The panel follows a new IP address of its server
         run: shellcheck -x tests/heal.sh && bash tests/heal.sh
+      - name: The panel's port and a certificate of your own
+        run: shellcheck -x tests/panel_port.sh && bash tests/panel_port.sh
       - run: cargo build --release --locked -p kariz -p kariz-panel
       - name: Install with the manager
         run: |

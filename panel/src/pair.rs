@@ -170,6 +170,17 @@ impl PairRequest {
         self.max_conns_per_ip.filter(|v| *v > 0)
     }
 
+    /// Whether the listening side of a wss tunnel serves a certificate of the admin's own
+    /// (files that are not from the manager's Let's Encrypt), which agents take from
+    /// [`OWN_CERT_SINCE`].
+    fn own_cert(&self) -> bool {
+        self.transport == "wss"
+            && self
+                .tls_cert
+                .as_deref()
+                .is_some_and(|p| !crate::manage::lets_encrypt_path(p))
+    }
+
     /// The UDP flow limit to write on the entry side, if one was chosen.
     fn udp_flows(&self) -> Option<u32> {
         self.udp_max_flows.filter(|v| *v > 0)
@@ -205,7 +216,8 @@ impl PairRequest {
             || self.sealed()
             || self.needs_2_4().0
             || self.proxy_version().is_some()
-            || self.udp_flows().is_some();
+            || self.udp_flows().is_some()
+            || self.own_cert();
         if !anything_new {
             return Ok(());
         }
@@ -254,6 +266,14 @@ impl PairRequest {
         {
             bail!("old_agent_udp:{id}:{version}");
         }
+        // A certificate of the admin's own came with 2.7.0-beta.1: an older agent takes only
+        // the manager's Let's Encrypt files. Only the listening side reads them.
+        if id == self.acceptor_first()[0]
+            && self.own_cert()
+            && !release_at_least(version, OWN_CERT_SINCE)
+        {
+            bail!("old_agent_cert:{id}:{version}");
+        }
         Ok(())
     }
 
@@ -298,6 +318,10 @@ impl PairRequest {
 
 /// The first release whose agent writes `tuning.udp_max_flows` from the panel.
 const UDP_FLOWS_SINCE: &str = "2.6.0-beta.4";
+
+/// The first release whose agent takes a wss certificate of the admin's own (any PEM files
+/// on the server, not only the manager's Let's Encrypt ones).
+const OWN_CERT_SINCE: &str = "2.7.0-beta.1";
 
 /// Whether `version` is `min` or a later release, prereleases in their order
 /// (`2.6.0-beta.3` is before `2.6.0-beta.4`, which is before `2.6.0`). One that cannot be
@@ -1452,6 +1476,23 @@ mod tests {
         }
         // The exit side writes nothing of it: an old one is fine.
         assert!(req(Some(4096)).require_version("b", "2.5.1").is_ok());
+        // A wss certificate of the admin's own needs 2.7.0-beta.1 on the listening side
+        // (reverse: the entry, "a"); the manager's Let's Encrypt files do not.
+        let with_cert = |cert: &str| {
+            let mut r = req(None);
+            r.tls_cert = Some(cert.into());
+            r.tls_key = Some(cert.replace(".crt", ".key").replace("fullchain", "privkey"));
+            r
+        };
+        let own = with_cert("/etc/ssl/kariz/tun.crt");
+        assert_eq!(
+            own.require_version("a", "2.6.1").unwrap_err().to_string(),
+            "old_agent_cert:a:2.6.1"
+        );
+        assert!(own.require_version("a", "2.7.0-beta.1").is_ok());
+        assert!(own.require_version("b", "2.6.1").is_ok());
+        let le = with_cert("/etc/letsencrypt/live/kariz-panel-t-example-com/fullchain.pem");
+        assert!(le.require_version("a", "2.6.1").is_ok());
         // The core takes 1 to 65536.
         assert!(req(Some(65536)).validate().is_ok());
         assert_eq!(

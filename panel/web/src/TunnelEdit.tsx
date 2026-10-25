@@ -7,7 +7,7 @@ import { useApp } from "./store";
 import { Icon, Seg } from "./ui";
 import { Checklist, opError, useOp } from "./ops";
 import { MuxFields, MuxToggle, muxFromSpec, muxSpecOf, muxToSpec } from "./MuxFields";
-import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
+import { TlsChoice, emptyTls, isLetsEncrypt, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
 import { PerIpLimit, perIpOf } from "./PerIpLimit";
@@ -122,7 +122,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
         setProxy(proxyFromSpec(a.proxy_protocol ?? b.proxy_protocol));
         // A tunnel that has no encryption already was confirmed when it was made.
         setEncAck((a.encryption ?? "auto") === "none");
-        setTls(real ? { mode: "real", host: dia.tls_sni || hostOf(dia.remote), email: "", ...real } : emptyTls());
+        setTls(real ? { mode: isLetsEncrypt(real.cert) ? "real" : "own", host: dia.tls_sni || hostOf(dia.remote), email: "", ...real } : emptyTls());
         setInitial("");
       })
       .catch(() => {
@@ -174,9 +174,9 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     max_conns_per_ip: perIpOf(perIp).value,
     udp_max_flows: protocol.includes("udp") ? udpFlowsOf(udpFlows).value : undefined,
     proxy_protocol: proxyOf(proxy, protocol),
-    tls_cert: transport === "wss" && tls.mode === "real" && tls.cert ? tls.cert : undefined,
-    tls_key: transport === "wss" && tls.mode === "real" && tls.key ? tls.key : undefined,
-    tls_host: transport === "wss" && tls.mode === "real" && tls.cert && tls.host ? tls.host : undefined,
+    tls_cert: transport === "wss" && tls.mode !== "self" && tls.cert ? tls.cert : undefined,
+    tls_key: transport === "wss" && tls.mode !== "self" && tls.key ? tls.key : undefined,
+    tls_host: transport === "wss" && tls.mode !== "self" && tls.cert && tls.host ? tls.host.toLowerCase() : undefined,
     rotate: rotate ? true : undefined,
     forwards: parsed.forwards,
   });
@@ -213,7 +213,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
     if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
     if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
-    if (transport === "wss" && !tlsReady(tls)) return t("tls.needCert");
+    if (transport === "wss" && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
     if (!cipherReady(enc, transport, encAck)) return t("enc.needAck");
     if (parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
     if (muxSpec.bad) return `${t(`mux.${muxSpec.bad}`)}: ${t("mux.badValue")}`;

@@ -104,7 +104,7 @@ def main():
     # what it does), without Enter.
     s.expect(MENU)
     s.key("9")
-    s.expect("Disconnect from the panel")
+    s.expect("Paste a panel's join code")
 
     # 2 and Enter: the status screen, and "press any key" before the menu comes back.
     s.key("2")
@@ -112,11 +112,11 @@ def main():
     s.expect("Press any key to continue")
     s.key(" ")
 
-    # Ctrl+C inside a screen (10 is the logs, which asks which log first): straight back to
+    # Ctrl+C inside a screen (11 is the logs, which asks which log first): straight back to
     # the menu, no key in between.
     s.expect(MENU)
     s.key("1")
-    s.key("0")
+    s.key("1")
     s.key("\r")
     s.expect("Which log?")
     s.ctrl_c()
