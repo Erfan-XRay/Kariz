@@ -1185,6 +1185,9 @@ async fn remove_server(
         Ok(s) => s,
         Err(r) => return r,
     };
+    // Its private network interfaces go first, while it can still be asked; one that is
+    // offline keeps them (the page says how to remove them there).
+    let cleared = body.id == crate::hub::LOCAL || state.hub.clear_net(&body.id).await;
     match state.hub.remove(&body.id) {
         Ok(true) => {
             audit(
@@ -1193,7 +1196,7 @@ async fn remove_server(
                 &ip_of(&peer),
                 &format!("removed server {}", body.id),
             );
-            reply(StatusCode::OK, json!({}))
+            reply(StatusCode::OK, json!({ "net_left": !cleared }))
         }
         Ok(false) => error(StatusCode::NOT_FOUND, "no_such_server"),
         Err(e) => internal(e),
@@ -1919,32 +1922,53 @@ async fn network_create(
     }
 }
 
+/// A network or a link to delete.
 #[derive(Deserialize)]
-struct IdBody {
+struct NetDeleteBody {
     id: String,
+    /// A network: its links go too (without it, a network with links is `in_use`).
+    #[serde(default)]
+    links: bool,
+    /// Delete a link that an offline server's agent reaches the panel through.
+    #[serde(default)]
+    force: bool,
 }
 
+/// Deleting is done in the panel at once; `later` lists the servers that remove the
+/// interfaces when they can (offline, or no answer yet).
 async fn network_delete(
     State(state): State<AppState>,
     peer: Peer,
     headers: HeaderMap,
-    Json(body): Json<IdBody>,
+    Json(body): Json<NetDeleteBody>,
 ) -> Response {
     let me = match authenticate(&state, &headers, true) {
         Ok(s) => s,
         Err(r) => return r,
     };
-    match state.hub.networks.delete_network(&body.id) {
-        Ok(true) => {
+    let done = if body.links {
+        crate::netops::delete_network(&state.hub, &body.id, body.force).await
+    } else {
+        match state.hub.networks.delete_network(&body.id) {
+            Ok(true) => Ok(Vec::new()),
+            Ok(false) => Err(anyhow::anyhow!("no_such_network")),
+            Err(e) => Err(e),
+        }
+    };
+    match done {
+        Ok(later) => {
             audit(
                 &state,
                 &format!("session {}", me.id),
                 &ip_of(&peer),
-                "deleted a network",
+                if body.links {
+                    "deleted a network and its links"
+                } else {
+                    "deleted a network"
+                },
             );
-            reply(StatusCode::OK, json!({}))
+            reply(StatusCode::OK, json!({ "later": later }))
         }
-        Ok(false) => error(StatusCode::NOT_FOUND, "no_such_network"),
         Err(e) => net_error(e),
     }
 }
@@ -1985,21 +2009,25 @@ async fn link_delete(
     State(state): State<AppState>,
     peer: Peer,
     headers: HeaderMap,
-    Json(body): Json<IdBody>,
+    Json(body): Json<NetDeleteBody>,
 ) -> Response {
     let me = match authenticate(&state, &headers, true) {
         Ok(s) => s,
         Err(r) => return r,
     };
-    match crate::netops::delete_link(&state.hub, &body.id).await {
-        Ok(()) => {
+    match crate::netops::delete_link(&state.hub, &body.id, body.force).await {
+        Ok(later) => {
             audit(
                 &state,
                 &format!("session {}", me.id),
                 &ip_of(&peer),
-                "deleted a network link",
+                if body.force {
+                    "deleted a network link (forced)"
+                } else {
+                    "deleted a network link"
+                },
             );
-            reply(StatusCode::OK, json!({}))
+            reply(StatusCode::OK, json!({ "later": later }))
         }
         Err(e) => net_error(e),
     }

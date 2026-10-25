@@ -35,9 +35,13 @@ test("a network is made as GRE or as VXLAN on a port of its own", async ({ page 
   const plain = page.locator(".net-card", { hasText: "plain" });
   await expect(plain.locator(".tag", { hasText: /^GRE$/ })).toBeVisible();
 
-  // Neither has links, so both can go again.
+  // Neither has links, so both can go again: the dialog says only the pool is freed.
   for (const card of [vx, plain]) {
     await card.getByRole("button", { name: "Delete" }).click();
+    const confirm = page.getByRole("dialog");
+    await expect(confirm.getByText("It has no links: only its address pool is freed.")).toBeVisible();
+    await confirm.getByRole("button", { name: "Delete" }).click();
+    await expect(confirm).toHaveCount(0);
     await expect(card).toHaveCount(0);
   }
 });

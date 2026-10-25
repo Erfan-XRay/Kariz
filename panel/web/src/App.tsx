@@ -257,7 +257,7 @@ export function App() {
               onChanged={changed}
             />
           )}
-          {route.page === "networks" && <NetworksPage servers={servers} onChanged={changed} />}
+          {route.page === "networks" && <NetworksPage servers={servers} onChanged={changed} onOpenTunnel={(name) => navigate({ page: "tunnels", tunnel: name })} />}
           {route.page === "logs" && <LogsPage servers={servers} />}
           {route.page === "settings" && (
             <SettingsPage

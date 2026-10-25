@@ -157,6 +157,15 @@ const MIGRATIONS: &[&str] = &[
          SELECT count(*) FROM servers o
          WHERE o.created < servers.created OR (o.created = servers.created AND o.id < servers.id)
      );",
+    // 17: the interface of a deleted link, on a server that has not removed it yet (it was
+    // offline, or did not answer in time). The panel asks again until the server says it is
+    // gone; until then no new link takes the name or the subnet.
+    "CREATE TABLE pending_net_downs (
+         server TEXT NOT NULL,
+         ifname TEXT NOT NULL,
+         subnet TEXT NOT NULL,
+         PRIMARY KEY (server, ifname)
+     );",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

@@ -450,6 +450,11 @@ export interface Link {
   port: number;
 }
 
+/** A deleted link or network: gone from the panel; `later` remove its interfaces when they can. */
+export interface NetDeleted {
+  later: string[];
+}
+
 export interface UpdateStatus {
   current: string;
   configured: boolean;
@@ -542,7 +547,8 @@ export const api = {
   /** With `port`, the server's agent dials an agents port of its own across the link. */
   joinGre: (name: string | undefined, ip: string, network: string | undefined, transport: LinkTransport, kind: LinkKind = "gre", port?: number) =>
     call<GreJoin>("POST", "servers/join-gre", { name, ip, network, transport, kind, port }),
-  removeServer: (id: string) => call<object>("POST", "servers/remove", { id }),
+  /** `net_left`: the server was offline, so the private network interfaces the panel made there stay on it. */
+  removeServer: (id: string) => call<{ net_left?: boolean }>("POST", "servers/remove", { id }),
   /** With `gre`, a GRE link to the server is made first and the link to the panel goes across it (the answer then says what was made). */
   /** `port`: the agents port its agent dials (the panel's own clears a port of its own; left out: unchanged). */
   reconnectServer: (id: string, host: string, transport: LinkTransport, reverse?: { host: string; port: number }, gre?: NewGreLink, port?: number) =>
@@ -591,9 +597,11 @@ export const api = {
   networks: () => call<{ networks: Network[]; links: Link[] }>("GET", "networks"),
   createNetwork: (name: string, cidr: string, kind: LinkKind = "gre", port?: number) =>
     call<Network>("POST", "networks", { name, cidr, kind, ...(kind === "vxlan" && port ? { port } : {}) }),
-  deleteNetwork: (id: string) => call<object>("POST", "networks/delete", { id }),
+  /** With `links`, the network's links go too. `later`: the servers that remove the interfaces when they can (offline, or no answer yet). */
+  deleteNetwork: (id: string, links = false, force = false) => call<NetDeleted>("POST", "networks/delete", { id, links, force }),
   createLinks: (network: string, servers: string[], hub?: string) => call<{ op: string }>("POST", "networks/links", { network, servers, hub }),
-  deleteLink: (id: string) => call<object>("POST", "networks/links/delete", { id }),
+  /** `force`: delete a link that an offline server's agent reaches the panel through. */
+  deleteLink: (id: string, force = false) => call<NetDeleted>("POST", "networks/links/delete", { id, force }),
   setAddress: (id: string, addr: string) => call<object>("POST", "servers/address", { id, addr }),
   update: () => call<UpdateStatus>("GET", "update"),
   checkUpdate: () => call<UpdateStatus>("POST", "update/check", {}),

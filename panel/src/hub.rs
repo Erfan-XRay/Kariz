@@ -1035,7 +1035,7 @@ impl Hub {
         }
         .await;
         if result.is_err() && made_here {
-            crate::netops::tear_down(self, &link).await;
+            let _ = crate::netops::tear_down(self, &link).await;
         }
         result
     }
@@ -1320,22 +1320,55 @@ impl Hub {
     }
 
     /// Removes a server: its row, and its link if it has one. False if there is none.
+    /// Before a server leaves the panel: tells it to remove every private network interface
+    /// the panel made there (an empty list of links). False when it has some and could not
+    /// be told (offline, or no answer within [`DOWN_WAIT`]): they stay on that server until
+    /// its agent is removed there.
+    ///
+    /// [`DOWN_WAIT`]: crate::netops::DOWN_WAIT
+    pub async fn clear_net(&self, id: &str) -> bool {
+        let has = self
+            .networks
+            .links(None)
+            .map_or(true, |all| all.iter().any(|l| l.a == id || l.b == id))
+            || !self
+                .networks
+                .pending_downs(id)
+                .unwrap_or_default()
+                .is_empty();
+        if !has {
+            return true;
+        }
+        if !self.is_online(id) {
+            return false;
+        }
+        let told = self
+            .ask_as_within::<Ack>(
+                id,
+                &Request::NetSync { links: Vec::new() },
+                crate::netops::DOWN_WAIT,
+            )
+            .await;
+        matches!(told, Ok(a) if a.ok)
+    }
+
     pub fn remove(self: &Arc<Self>, id: &str) -> Result<bool> {
         if id == LOCAL {
             return Ok(false);
         }
-        // Its private network links go with it; the servers on their other ends are
-        // told at once.
-        let peers: Vec<String> = self
-            .networks
-            .links(None)?
-            .into_iter()
-            .filter(|l| l.a == id || l.b == id)
-            .map(|l| if l.a == id { l.b } else { l.a })
-            .collect();
+        // Its private network links go with it. The servers on their other ends remove
+        // their side at once, or when they connect (see `net_flush`); the server itself
+        // is never asked again ([`Hub::clear_net`] asked it before, if it could).
+        let mut peers = Vec::new();
+        for l in self.networks.links(None)? {
+            if l.a == id || l.b == id {
+                self.networks.delete_link(&l.id)?;
+                peers.push(if l.a == id { l.b } else { l.a });
+            }
+        }
+        self.networks.forget_downs(id)?;
         {
             let conn = self.db.conn();
-            conn.execute("DELETE FROM net_links WHERE a = ?1 OR b = ?1", [id])?;
             conn.execute("DELETE FROM reverse_links WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM agent_ports WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM server_addrs WHERE server = ?1", [id])?;
@@ -1355,10 +1388,12 @@ impl Hub {
         // port of its own.
         self.forget_reverse(id);
         self.close_agent_port(id);
+        peers.sort();
+        peers.dedup();
         for peer in peers {
             let hub = self.clone();
             tokio::spawn(async move {
-                let _ = hub.net_sync(&peer).await;
+                let _ = hub.net_flush(&peer).await;
             });
         }
         if let Some(live) = self.live().remove(id) {
@@ -1454,6 +1489,11 @@ impl Hub {
         }
         self.history.event("server_up", &id, "");
         self.apply_pending_deletes(&id).await;
+        // The interfaces of links deleted while it was away go first, so that no old
+        // interface is still there when the links it keeps are made.
+        if let Err(e) = self.net_flush(&id).await {
+            warn!(server = %id, error = %format!("{e:#}"), "deleted links' interfaces could not be removed yet");
+        }
         // The server is told its private network links (they may have changed while it
         // was away).
         if let Err(e) = self.net_sync(&id).await {
@@ -1756,6 +1796,9 @@ impl Hub {
     /// The panel's own server, sampled here (no link).
     pub async fn run_local(self: Arc<Self>) {
         self.local.restore_net().await;
+        if let Err(e) = self.net_flush(LOCAL).await {
+            warn!(error = %format!("{e:#}"), "deleted links' interfaces could not be removed yet");
+        }
         if let Err(e) = self.net_sync(LOCAL).await {
             warn!(error = %e, "the private network links could not be synced");
         }
@@ -1765,6 +1808,11 @@ impl Hub {
             // Old history goes about once an hour.
             if round % 1800 == 0 {
                 let _ = self.history.prune();
+            }
+            // Interfaces of deleted links that a server did not remove when it was asked
+            // (it did not answer in time): asked again every five minutes.
+            if round % 150 == 149 {
+                self.net_flush_all();
             }
             // A look for a newer release: a minute after the start, then every day. It
             // only looks; installing is always the user's button.
@@ -2094,9 +2142,20 @@ mod tests {
     /// not let the link be deleted under it.
     #[tokio::test]
     async fn a_server_that_joined_through_a_gre_link_is_known_by_it_and_its_link_is_kept() {
-        let hub = Hub::new(
+        /// The panel's own `ip` and `ping`: every call works, and nothing runs.
+        struct Quiet;
+        impl crate::net::Exec for Quiet {
+            fn run(&self, _: &str, _: Vec<String>) -> crate::manage::Fut<Result<(bool, String)>> {
+                Box::pin(async { Ok((true, String::new())) })
+            }
+        }
+        let hub = Hub::with_options(
             Db::in_memory().unwrap(),
             std::env::temp_dir().join("kariz-none"),
+            Arc::new(Systemd),
+            crate::pair::CONNECT_WAIT,
+            None,
+            Some(Arc::new(Quiet)),
         );
         let net = hub
             .networks
@@ -2168,11 +2227,32 @@ mod tests {
         assert_eq!(s.ip4, None, "a GRE address is not a public address");
 
         // The link stays while that agent runs through it.
-        let refused = crate::netops::delete_link(&hub, &link.id)
+        let refused = crate::netops::delete_link(&hub, &link.id, false)
             .await
             .unwrap_err();
         assert_eq!(refused.to_string(), "agent_uses:far");
         assert_eq!(hub.networks.links(None).unwrap().len(), 1);
+        // Forcing it changes nothing while that server is connected...
+        let refused = crate::netops::delete_link(&hub, &link.id, true)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.to_string(), "agent_uses:far");
+        // ...but a server that is gone never leaves the link stuck: it goes, the panel's own
+        // end at once, and "far" removes its end when it comes back.
+        hub.live().get_mut("far").unwrap().online = false;
+        let later = crate::netops::delete_link(&hub, &link.id, true)
+            .await
+            .unwrap();
+        assert_eq!(later, vec!["far".to_owned()]);
+        assert!(hub.networks.links(None).unwrap().is_empty());
+        assert_eq!(
+            hub.networks.pending_downs("far").unwrap(),
+            vec![link.ifname.clone()]
+        );
+        assert!(hub.networks.pending_downs(LOCAL).unwrap().is_empty());
+        // A server removed from the panel is never asked again.
+        assert!(hub.remove("far").unwrap());
+        assert!(hub.networks.servers_with_downs().unwrap().is_empty());
     }
 
     #[test]

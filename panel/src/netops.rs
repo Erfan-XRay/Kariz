@@ -7,8 +7,9 @@
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 
 use crate::hub::Hub;
 use crate::networks::{mesh, Link};
@@ -17,6 +18,10 @@ use crate::wire::{Ack, LinkKind, NetSpec, NetStatus, PingReply, Request};
 /// The first version whose agent makes VXLAN links. An older one refuses the spec (it does
 /// not know its fields), so the panel says so before it tries.
 pub const VXLAN_SINCE: (u32, u32, u32) = (2, 6, 0);
+
+/// How long a server is waited for while the interfaces of deleted links are removed from
+/// it. Deleting never waits on a server for longer: one that does not answer is asked again.
+pub const DOWN_WAIT: Duration = Duration::from_secs(5);
 
 /// Whether `text` is an address a server can be reached at: IPv4, unicast.
 pub fn valid_addr(text: &str) -> bool {
@@ -112,6 +117,54 @@ impl Hub {
         }
     }
 
+    /// Removes from `server` the interfaces of its deleted links ([`Networks::pending_downs`]),
+    /// one `NetDown` each: they need no address, so a link whose other end is unknown does
+    /// not hold them up. Each one the server removed is forgotten; the others stay for the
+    /// next try. Gives up after [`DOWN_WAIT`] (a server that does not answer is tried again
+    /// later). Ok when none is left.
+    ///
+    /// [`Networks::pending_downs`]: crate::networks::Networks::pending_downs
+    pub async fn net_flush(&self, server: &str) -> Result<()> {
+        let names = self.networks.pending_downs(server)?;
+        if names.is_empty() {
+            return Ok(());
+        }
+        if !self.is_online(server) {
+            bail!("offline");
+        }
+        let work = async {
+            for name in names {
+                let ack: Ack = self
+                    .ask_as_within(server, &Request::NetDown { name: name.clone() }, DOWN_WAIT)
+                    .await?;
+                if !ack.ok {
+                    bail!(ack.error.unwrap_or_else(|| "failed".into()));
+                }
+                self.networks.down_done(server, &name)?;
+            }
+            Ok(())
+        };
+        tokio::time::timeout(DOWN_WAIT, work)
+            .await
+            .map_err(|_| anyhow!("no answer"))?
+    }
+
+    /// Tries again, in the background, on every connected server that still has interfaces
+    /// of deleted links.
+    pub fn net_flush_all(self: &Arc<Self>) {
+        for server in self.networks.servers_with_downs().unwrap_or_default() {
+            if !self.is_online(&server) {
+                continue;
+            }
+            let hub = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = hub.net_flush(&server).await {
+                    tracing::info!(server = %server, error = %format!("{e:#}"), "deleted links' interfaces are still there");
+                }
+            });
+        }
+    }
+
     /// Tells a server its whole list of links (an agent that just connected, a change).
     pub async fn net_sync(&self, server: &str) -> Result<()> {
         let links = self.net_specs(server)?;
@@ -136,13 +189,21 @@ async fn expect_ack(hub: &Hub, server: &str, request: Request) -> Result<(), Str
     }
 }
 
-/// Removes a link's interface from both ends (a server that is offline is put right when
-/// it connects) and its row.
-pub async fn tear_down(hub: &Hub, link: &Link) {
-    hub.networks.delete_link(&link.id).ok();
-    for server in [&link.a, &link.b] {
-        let _ = hub.net_sync(server).await;
+/// Removes a link: its row at once, then its interface on both servers, asked at the same
+/// time. Returns the servers that have not removed it yet (offline, no answer within
+/// [`DOWN_WAIT`], or an error): the panel asks them again when they connect and every few
+/// minutes, so the interface goes in the end whatever happened here.
+pub async fn tear_down(hub: &Hub, link: &Link) -> Result<Vec<String>> {
+    hub.networks.delete_link(&link.id)?;
+    let (a, b) = tokio::join!(hub.net_flush(&link.a), hub.net_flush(&link.b));
+    let mut left = Vec::new();
+    for (server, done) in [(&link.a, a), (&link.b, b)] {
+        if let Err(e) = done {
+            tracing::info!(server = %server, link = %link.ifname, error = %format!("{e:#}"), "a deleted link's interface is removed later");
+            left.push(server.clone());
+        }
     }
+    Ok(left)
 }
 
 /// Makes a link's interface on both servers and tests the path across it.
@@ -264,7 +325,7 @@ pub async fn ensure_link(
 
     ops.run(op, "net_up");
     if let Err(e) = bring_up(hub, &link).await {
-        tear_down(hub, &link).await;
+        let _ = tear_down(hub, &link).await;
         return Err(step_fail(e));
     }
     ops.end(op, true, None);
@@ -298,12 +359,13 @@ pub fn create_links(
     Ok(id)
 }
 
-/// Removes a link. A tunnel that listens on or dials one of its addresses keeps it in use.
-pub async fn delete_link(hub: &Hub, id: &str) -> Result<()> {
-    let Some(link) = hub.networks.links(None)?.into_iter().find(|l| l.id == id) else {
-        bail!("no_such_link");
-    };
-    for server in hub.snapshot()? {
+/// Whether `link` may go. A tunnel that listens on or dials one of its addresses keeps it in
+/// use (`in_use:TUNNEL`). So does a server whose agent reaches the panel through it, or that
+/// the panel dials across it (`agent_uses:SERVER`): the panel would lose the only way it has
+/// to ask that server anything. `force` lets the link go anyway when that server is offline
+/// (it may be gone for good, and the admin must never be left unable to delete).
+fn may_go(hub: &Hub, link: &Link, views: &[crate::hub::ServerView], force: bool) -> Result<()> {
+    for server in views {
         for t in &server.tunnels {
             let uses = |addr: &Option<String>| {
                 addr.as_deref().is_some_and(|a| {
@@ -315,20 +377,65 @@ pub async fn delete_link(hub: &Hub, id: &str) -> Result<()> {
                 bail!("in_use:{}", t.info.name);
             }
         }
-        // A server whose agent reaches the panel through this link (or that the panel
-        // dials across it) would lose it, and with it the only way the panel has to ask that
-        // server anything.
-        if server.gre.as_ref().is_some_and(|g| g.link == link.id)
+        let reached = server.gre.as_ref().is_some_and(|g| g.link == link.id)
             || server
                 .reverse
                 .as_ref()
-                .is_some_and(|r| r.host == link.addr_a || r.host == link.addr_b)
-        {
+                .is_some_and(|r| r.host == link.addr_a || r.host == link.addr_b);
+        if reached && !(force && !hub.is_online(&server.id)) {
             bail!("agent_uses:{}", server.id);
         }
     }
-    tear_down(hub, &link).await;
     Ok(())
+}
+
+/// Removes a link (see [`may_go`] for what keeps one). Returns the servers that remove its
+/// interface later ([`tear_down`]).
+pub async fn delete_link(hub: &Hub, id: &str, force: bool) -> Result<Vec<String>> {
+    let Some(link) = hub.networks.links(None)?.into_iter().find(|l| l.id == id) else {
+        bail!("no_such_link");
+    };
+    may_go(hub, &link, &hub.snapshot()?, force)?;
+    tear_down(hub, &link).await
+}
+
+/// Removes a network and every link in it, all or nothing: if one link may not go, none
+/// does. The interfaces are removed from every server at the same time; the servers that
+/// remove them later come back, once each.
+pub async fn delete_network(hub: &Arc<Hub>, id: &str, force: bool) -> Result<Vec<String>> {
+    if !hub.networks.networks()?.iter().any(|n| n.id == id) {
+        bail!("no_such_network");
+    }
+    let links = hub.networks.links(Some(id))?;
+    let views = hub.snapshot()?;
+    for link in &links {
+        may_go(hub, link, &views, force)?;
+    }
+    let mut servers = Vec::new();
+    for link in &links {
+        hub.networks.delete_link(&link.id)?;
+        servers.extend([link.a.clone(), link.b.clone()]);
+    }
+    hub.networks.delete_network(id)?;
+    servers.sort();
+    servers.dedup();
+    let mut set = tokio::task::JoinSet::new();
+    for server in servers {
+        let hub = hub.clone();
+        set.spawn(async move {
+            let done = hub.net_flush(&server).await;
+            (server, done)
+        });
+    }
+    let mut left = Vec::new();
+    while let Some(Ok((server, done))) = set.join_next().await {
+        if let Err(e) = done {
+            tracing::info!(server = %server, error = %format!("{e:#}"), "a deleted network's interfaces are removed later");
+            left.push(server);
+        }
+    }
+    left.sort();
+    Ok(left)
 }
 
 #[cfg(test)]

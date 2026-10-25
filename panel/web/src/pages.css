@@ -939,6 +939,11 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
 .net-card .usage { display: grid; gap: 6px; margin-bottom: var(--sp-4); font-size: var(--fs-xs); color: var(--text-3); }
 .net-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-4); }
 .net-honest { margin: 0; max-width: 760px; }
+.del-ends { list-style: none; margin: var(--sp-3) 0; padding: 0; display: grid; gap: var(--sp-2); }
+.del-ends li { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.del-ends .nm { font-weight: 600; }
+.del-why { margin-top: var(--sp-3); }
+.del-why .btn { margin-inline-start: var(--sp-1); }
 
 /* ------------------------------------------------------------------ the wizard */
 

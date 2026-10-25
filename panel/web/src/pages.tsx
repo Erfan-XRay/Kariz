@@ -1070,8 +1070,8 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                   const gone = removing;
                   setRemoving(null);
                   try {
-                    await api.removeServer(gone.id);
-                    toast(t("srv.removed", { name: gone.name }), "ok");
+                    const r = await api.removeServer(gone.id);
+                    toast(t(r.net_left ? "srv.removedNetLeft" : "srv.removed", { name: gone.name }), r.net_left ? "info" : "ok");
                   } catch {
                     toast(t("bak.failed"), "err");
                   }

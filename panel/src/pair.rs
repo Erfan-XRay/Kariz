@@ -596,7 +596,7 @@ pub fn create(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
             Ok(()) => hub.ops.finish(&op, None, None),
             Err((error, undone)) => {
                 if let Some(link) = made_link {
-                    crate::netops::tear_down(&hub, &link).await;
+                    let _ = crate::netops::tear_down(&hub, &link).await;
                 }
                 hub.ops.finish(&op, Some(error), Some(undone));
             }
@@ -774,7 +774,7 @@ pub fn edit(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
             Ok(()) => hub.ops.finish(&op, None, None),
             Err((error, undone)) => {
                 if let Some(link) = made_link {
-                    crate::netops::tear_down(&hub, &link).await;
+                    let _ = crate::netops::tear_down(&hub, &link).await;
                 }
                 hub.ops.finish(&op, Some(error), Some(undone));
             }

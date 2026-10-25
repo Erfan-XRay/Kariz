@@ -21,6 +21,8 @@ struct Fake {
     ping_fails: AtomicBool,
     /// The kernel refuses VXLAN interfaces.
     fail_vxlan: AtomicBool,
+    /// `ip link del` of a link does not come back while this is set (a server that hangs).
+    hang_del: Arc<AtomicBool>,
 }
 
 impl Fake {
@@ -42,7 +44,20 @@ impl Exec for Fake {
         } else {
             String::new()
         };
-        Box::pin(async move { Ok((ok, out)) })
+        let hang = (program == "ip"
+            && args.len() == 3
+            && args[0] == "link"
+            && args[1] == "del"
+            && !args[2].starts_with("kz-probe"))
+        .then(|| self.hang_del.clone());
+        Box::pin(async move {
+            if let Some(hang) = hang {
+                while hang.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+            Ok((ok, out))
+        })
     }
 }
 
@@ -265,7 +280,7 @@ async fn links_are_made_on_both_servers_reused_undone_and_protected() {
     // ---- removing a link takes its interface down on both servers ----
     let (fake_a, fake_b) = (&local_fake, &agent_fake);
     let before = (fake_a.calls().len(), fake_b.calls().len());
-    netops::delete_link(&hub, &link.id).await.unwrap();
+    netops::delete_link(&hub, &link.id, false).await.unwrap();
     assert!(hub.networks.links(None).unwrap().is_empty());
     // both servers were told the new (empty) list and took the interface down
     for _ in 0..50 {
@@ -593,7 +608,9 @@ async fn a_reverse_server_is_reached_across_a_gre_link() {
     assert_eq!(
         format!(
             "{:#}",
-            netops::delete_link(&hub, &link.id).await.unwrap_err()
+            netops::delete_link(&hub, &link.id, false)
+                .await
+                .unwrap_err()
         ),
         format!("agent_uses:{}", made.id)
     );
@@ -1047,4 +1064,212 @@ async fn a_server_added_over_gre_dials_an_agents_port_of_its_own() {
         format!("{}:{main}", made.panel_addr)
     );
     assert_eq!(hub.agent_port_of(&made.id), None);
+}
+
+/// Waits for `what` to be true, or fails the test after ten seconds.
+async fn until(what: &str, mut ok: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+fn online(hub: &Hub, id: &str) -> bool {
+    hub.snapshot()
+        .unwrap()
+        .iter()
+        .any(|s| s.id == id && s.online)
+}
+
+/// Whether `fake` was asked to remove `ifname` after its first `from` calls.
+fn deleted(fake: &Fake, from: usize, ifname: &str) -> bool {
+    fake.calls()[from..]
+        .iter()
+        .any(|c| c == &format!("ip link del {ifname}"))
+}
+
+/// Deleting never fails or waits because of a server: a link or a whole network goes from
+/// the panel at once whatever state its servers are in, and the interface goes from a
+/// server that was offline as soon as it connects again.
+#[tokio::test]
+async fn a_link_and_a_network_are_deleted_while_a_server_is_offline_and_it_cleans_up_on_return() {
+    let root = tempfile::tempdir().unwrap();
+    let (local_fake, agent_fake) = (Arc::new(Fake::default()), Arc::new(Fake::default()));
+    let hub = Hub::with_options(
+        Db::in_memory().unwrap(),
+        root.path().join("kariz"),
+        Arc::new(Systemd),
+        Duration::from_secs(5),
+        Some(root.path().join("panel")),
+        Some(local_fake.clone()),
+    );
+    std::fs::create_dir_all(root.path().join("panel")).unwrap();
+    let acceptor = kariz::link::Acceptor::bind("127.0.0.1:0", &hub.link_token().unwrap())
+        .await
+        .unwrap();
+    let addr = acceptor.local_addr().unwrap().to_string();
+    tokio::spawn(hub.clone().serve_agents(acceptor));
+    let code = hub.create_join(Some("far-away"), &addr).unwrap();
+    let agent_file = root.path().join("agent").join("agent.toml");
+    std::fs::create_dir_all(agent_file.parent().unwrap()).unwrap();
+    let config = agent::enroll_from_code(&code, &agent_file).unwrap();
+    config.save(&agent_file).unwrap();
+    let agent = Agent::with_exec(&agent_file, config, Arc::new(Systemd), agent_fake.clone());
+    let running = tokio::spawn(agent.run());
+    let mut remote = String::new();
+    until("the agent to join", || {
+        if let Some(s) = hub
+            .snapshot()
+            .unwrap()
+            .into_iter()
+            .find(|s| !s.local && s.online)
+        {
+            remote = s.id;
+        }
+        !remote.is_empty()
+    })
+    .await;
+    hub.set_addr(LOCAL, "192.0.2.1").unwrap();
+    hub.set_addr(&remote, "192.0.2.2").unwrap();
+    let both = vec![LOCAL.to_owned(), remote.clone()];
+    let one = hub
+        .networks
+        .create_network("one", "10.77.0.0/24", &[])
+        .unwrap();
+    let two = hub
+        .networks
+        .create_network("two", "10.78.0.0/24", &[])
+        .unwrap();
+    for net in [&one, &two] {
+        let op = netops::create_links(&hub, &net.id, both.clone(), None).unwrap();
+        assert_eq!(finished(&hub, &op).await.state, "done");
+    }
+    let first = hub.networks.links(Some(&one.id)).unwrap().remove(0);
+    let second = hub.networks.links(Some(&two.id)).unwrap().remove(0);
+
+    // ---- the agent goes away ----
+    running.abort();
+    until("the server to show offline", || !online(&hub, &remote)).await;
+
+    // A link: gone from the panel at once, and from the panel's own server; the other
+    // server is named as the one that removes it later.
+    let (mark_l, mark_a) = (local_fake.calls().len(), agent_fake.calls().len());
+    let started = std::time::Instant::now();
+    let later = netops::delete_link(&hub, &first.id, false).await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "no waiting on an offline server"
+    );
+    assert_eq!(later, vec![remote.clone()]);
+    assert_eq!(hub.networks.links(None).unwrap().len(), 1);
+    assert!(deleted(&local_fake, mark_l, &first.ifname));
+    assert_eq!(
+        hub.networks.pending_downs(&remote).unwrap(),
+        vec![first.ifname.clone()]
+    );
+    assert!(hub.networks.pending_downs(LOCAL).unwrap().is_empty());
+
+    // A network that has links is refused unless its links are to go too...
+    assert!(hub.networks.delete_network(&two.id).is_err());
+    // ...and with them it goes at once, the same way.
+    let later = netops::delete_network(&hub, &two.id, false).await.unwrap();
+    assert_eq!(later, vec![remote.clone()]);
+    assert!(hub.networks.links(None).unwrap().is_empty());
+    assert!(!hub
+        .networks
+        .networks()
+        .unwrap()
+        .iter()
+        .any(|n| n.id == two.id));
+    assert!(deleted(&local_fake, mark_l, &second.ifname));
+    let mut waiting = vec![first.ifname.clone(), second.ifname.clone()];
+    waiting.sort();
+    assert_eq!(hub.networks.pending_downs(&remote).unwrap(), waiting);
+    assert!(
+        matches!(netops::delete_network(&hub, &two.id, false).await, Err(e) if e.to_string() == "no_such_network")
+    );
+
+    // ---- it comes back: both interfaces go before anything else ----
+    assert!(
+        !deleted(&agent_fake, mark_a, &first.ifname),
+        "an offline server is not reached"
+    );
+    let back = Agent::with_exec(
+        &agent_file,
+        agent::AgentConfig::load(&agent_file).unwrap(),
+        Arc::new(Systemd),
+        agent_fake.clone(),
+    );
+    let running = tokio::spawn(back.run());
+    until("the interfaces to be removed on return", || {
+        hub.networks.servers_with_downs().unwrap().is_empty()
+    })
+    .await;
+    assert!(deleted(&agent_fake, mark_a, &first.ifname));
+    assert!(deleted(&agent_fake, mark_a, &second.ifname));
+    // and it no longer keeps them to make again after a reboot
+    let kept = std::fs::read_to_string(agent_file.with_file_name("net.toml")).unwrap_or_default();
+    assert!(
+        !kept.contains(&first.ifname) && !kept.contains(&second.ifname),
+        "{kept}"
+    );
+    running.abort();
+}
+
+/// A server that is connected but does not answer holds nothing up either: the delete comes
+/// back within a few seconds, and the interface is removed when the server answers again.
+/// A server that leaves the panel takes its interfaces down first.
+#[tokio::test]
+async fn a_server_that_does_not_answer_does_not_hold_up_a_delete() {
+    let root = tempfile::tempdir().unwrap();
+    let (hub, remote, local_fake, agent_fake) = two_servers(root.path()).await;
+    let net = hub
+        .networks
+        .create_network("main", "10.77.0.0/24", &[])
+        .unwrap();
+    let both = vec![LOCAL.to_owned(), remote.clone()];
+    let op = netops::create_links(&hub, &net.id, both.clone(), None).unwrap();
+    assert_eq!(finished(&hub, &op).await.state, "done");
+    let link = hub.networks.links(None).unwrap().remove(0);
+
+    agent_fake.hang_del.store(true, Ordering::SeqCst);
+    let mark = local_fake.calls().len();
+    let started = std::time::Instant::now();
+    let later = netops::delete_link(&hub, &link.id, false).await.unwrap();
+    let took = started.elapsed();
+    assert!(
+        took < netops::DOWN_WAIT + Duration::from_secs(2),
+        "it took {took:?}"
+    );
+    assert_eq!(later, vec![remote.clone()]);
+    assert!(hub.networks.links(None).unwrap().is_empty());
+    assert!(deleted(&local_fake, mark, &link.ifname));
+    assert_eq!(
+        hub.networks.pending_downs(&remote).unwrap(),
+        vec![link.ifname.clone()]
+    );
+
+    // the server answers again: the next try removes it
+    agent_fake.hang_del.store(false, Ordering::SeqCst);
+    hub.net_flush(&remote).await.unwrap();
+    assert!(hub.networks.servers_with_downs().unwrap().is_empty());
+
+    // a server removed from the panel is told to take its interfaces down first
+    let op = netops::create_links(&hub, &net.id, both, None).unwrap();
+    assert_eq!(finished(&hub, &op).await.state, "done");
+    let link = hub.networks.links(None).unwrap().remove(0);
+    let (mark_l, mark_a) = (local_fake.calls().len(), agent_fake.calls().len());
+    assert!(hub.clear_net(&remote).await);
+    assert!(deleted(&agent_fake, mark_a, &link.ifname));
+    assert!(hub.remove(&remote).unwrap());
+    assert!(hub.networks.links(None).unwrap().is_empty());
+    // the panel's own end is asked to go too, and nobody waits for the removed server
+    until("the panel's end to go", || {
+        hub.networks.servers_with_downs().unwrap().is_empty()
+    })
+    .await;
+    assert!(deleted(&local_fake, mark_l, &link.ifname));
 }

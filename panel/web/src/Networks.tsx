@@ -228,6 +228,98 @@ function AddLinks({ network, servers, onClose }: { network: Network; servers: Se
   );
 }
 
+/** What a delete takes: one link, or a network with every link in it. */
+type Doomed = { link: Link } | { network: Network; links: Link[] };
+
+/**
+ * Deleting a link or a network. The panel deletes it at once whatever state the servers are
+ * in; the dialog says beforehand which servers remove the interface now and which when they
+ * connect. A link that something still runs through is named with a way out: the tunnel to
+ * open, or (for an agent whose server is offline, and may be gone for good) delete anyway.
+ */
+function DeleteNet({ what, servers, onClose, onDone, onOpenTunnel }: { what: Doomed; servers: ServerInfo[]; onClose: () => void; onDone: () => void; onOpenTunnel: (name: string) => void }) {
+  const { t, toast } = useApp();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const names = new Map(servers.map((s) => [s.id, s.name]));
+  const name = (id: string) => names.get(id) ?? id;
+  const online = (id: string) => !!servers.find((s) => s.id === id)?.online;
+  const links = "link" in what ? [what.link] : what.links;
+  const ends = [...new Set(links.flatMap((l) => [l.a, l.b]))];
+  const [code, arg = ""] = error.split(":");
+  const canForce = code === "agent_uses" && !online(arg);
+  const go = async (force: boolean) => {
+    setBusy(true);
+    setError("");
+    try {
+      const r = "link" in what ? await api.deleteLink(what.link.id, force) : await api.deleteNetwork(what.network.id, true, force);
+      toast(r.later.length ? t("net.delLater", { servers: r.later.map(name).join(", ") }) : t("net.delDone"), "ok");
+      onDone();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.code : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog
+      title={"link" in what ? t("net.delLinkTitle", { a: name(what.link.a), b: name(what.link.b) }) : t("net.delNetTitle", { name: what.network.name })}
+      onClose={busy ? () => {} : onClose}
+      footer={
+        <>
+          <button className="btn btn-ghost btn-sm" type="button" disabled={busy} onClick={onClose}>
+            {t("cancel")}
+          </button>
+          {canForce ? (
+            <button className="btn btn-danger solid btn-sm" type="button" disabled={busy} onClick={() => void go(true)}>
+              {t("net.force")}
+            </button>
+          ) : (
+            <button className="btn btn-danger solid btn-sm" type="button" disabled={busy || code === "in_use" || code === "agent_uses"} onClick={() => void go(false)}>
+              {t("tun.delete")}
+            </button>
+          )}
+        </>
+      }
+    >
+      <p className="small" style={{ marginTop: 0 }}>
+        {"link" in what
+          ? t("net.delLinkText", { ifname: what.link.ifname })
+          : links.length
+            ? t("net.delNetText", { n: links.length })
+            : t("net.delNetEmpty")}
+      </p>
+      {ends.length > 0 && (
+        <ul className="del-ends">
+          {ends.map((id) => (
+            <li key={id}>
+              <span className={`dot ${online(id) ? "up" : "off"}`} aria-hidden="true" />
+              <span className="nm">{name(id)}</span>
+              <span className="muted small">{online(id) ? t("net.delNow") : t("net.delOnReturn")}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && (
+        <div className="banner warn del-why" role="alert">
+          <Icon name="info" size={18} />
+          <span>
+            {canForce ? t("net.forceText", { server: name(arg) }) : describeError(t, error, names)}
+            {code === "in_use" && arg && (
+              <>
+                {" "}
+                <button className="btn btn-ghost btn-sm" type="button" onClick={() => onOpenTunnel(arg)}>
+                  {t("net.openTunnel", { name: arg })}
+                </button>
+              </>
+            )}
+          </span>
+        </div>
+      )}
+    </Dialog>
+  );
+}
+
 /** A server's address for the others, with a way to set it. */
 function AddressRow({ server, onSaved }: { server: ServerInfo; onSaved: () => void }) {
   const { t, toast } = useApp();
@@ -292,22 +384,13 @@ function AddressRow({ server, onSaved }: { server: ServerInfo; onSaved: () => vo
   );
 }
 
-export function NetworksPage({ servers, onChanged }: { servers: ServerInfo[]; onChanged: () => void }) {
-  const { t, num, toast } = useApp();
+export function NetworksPage({ servers, onChanged, onOpenTunnel }: { servers: ServerInfo[]; onChanged: () => void; onOpenTunnel: (name: string) => void }) {
+  const { t, num } = useApp();
   const { networks, links, reload } = useNetworks();
   const [dialog, setDialog] = useState<"new" | { add: Network } | null>(null);
+  const [doomed, setDoomed] = useState<Doomed | null>(null);
   const names = new Map(servers.map((s) => [s.id, s.name]));
   const name = (id: string) => names.get(id) ?? id;
-
-  const remove = async (fn: () => Promise<object>) => {
-    try {
-      await fn();
-      reload();
-      onChanged();
-    } catch (e) {
-      toast(e instanceof ApiError ? describeError(t, e.code, names) : String(e));
-    }
-  };
 
   return (
     <div className="page is-on">
@@ -399,7 +482,7 @@ export function NetworksPage({ servers, onChanged }: { servers: ServerInfo[]; on
                         {l.kind === "vxlan" ? `VNI ${l.gre_key}` : l.gre_key} · {l.ifname}
                       </td>
                       <td>
-                        <button className="btn btn-ghost btn-sm" type="button" onClick={() => void remove(() => api.deleteLink(l.id))}>
+                        <button className="btn btn-ghost btn-sm" type="button" onClick={() => setDoomed({ link: l })}>
                           {t("tun.delete")}
                         </button>
                       </td>
@@ -413,11 +496,9 @@ export function NetworksPage({ servers, onChanged }: { servers: ServerInfo[]; on
                 <Icon name="plus" size={18} />
                 {t("net.add")}
               </button>
-              {mine.length === 0 && (
-                <button className="btn btn-ghost btn-sm" type="button" onClick={() => void remove(() => api.deleteNetwork(n.id))}>
-                  {t("tun.delete")}
-                </button>
-              )}
+              <button className="btn btn-ghost btn-sm" type="button" onClick={() => setDoomed({ network: n, links: mine })}>
+                {mine.length ? t("net.delNet", { n: num(mine.length) }) : t("tun.delete")}
+              </button>
             </div>
           </Card>
         );
@@ -429,6 +510,19 @@ export function NetworksPage({ servers, onChanged }: { servers: ServerInfo[]; on
         </span>
       </div>
 
+      {doomed && (
+        <DeleteNet
+          what={doomed}
+          servers={servers}
+          onOpenTunnel={onOpenTunnel}
+          onClose={() => setDoomed(null)}
+          onDone={() => {
+            setDoomed(null);
+            reload();
+            onChanged();
+          }}
+        />
+      )}
       {dialog === "new" && (
         <NewNetwork
           servers={servers}

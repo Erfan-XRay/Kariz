@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 
 use anyhow::{anyhow, bail, Result};
-use rusqlite::{params, TransactionBehavior};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 
 use crate::auth::now;
@@ -333,6 +333,21 @@ impl Networks {
                 .map(|c| c.net)
                 .collect()
         };
+        // An interface that a server has not removed yet keeps its name and its subnet: a
+        // new link with either would clash with it (or be removed with it).
+        let mut gone_names: HashSet<String> = HashSet::new();
+        {
+            let mut stmt = tx.prepare("SELECT ifname, subnet FROM pending_net_downs")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (ifname, subnet) = row?;
+                gone_names.insert(ifname);
+                if let Ok(c) = Cidr::parse(&subnet) {
+                    used.insert(c.net);
+                }
+            }
+        }
         let mut made = Vec::new();
         for (x, y) in pairs {
             if x == y {
@@ -371,7 +386,19 @@ impl Networks {
             let gre_key = (1u32..=VNI_MAX)
                 .find(|k| !taken.contains(k))
                 .ok_or_else(|| anyhow!("pool_full"))?;
-            let id = random_hex(6)?;
+            let mut id = random_hex(6)?;
+            for _ in 0..32 {
+                let ifname = format!("kz-{}", &id[..5]);
+                let in_use: bool = tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM net_links WHERE ifname = ?1)",
+                    [&ifname],
+                    |r| r.get(0),
+                )?;
+                if !in_use && !gone_names.contains(&ifname) {
+                    break;
+                }
+                id = random_hex(6)?;
+            }
             let link = Link {
                 ifname: format!("kz-{}", &id[..5]),
                 id,
@@ -404,12 +431,66 @@ impl Networks {
         Ok(made)
     }
 
+    /// Removes a link's row and remembers, for both of its servers, that its interface is to
+    /// go ([`Self::pending_downs`]) until the server says it is gone ([`Self::down_done`]).
+    /// One transaction: a link is never forgotten without its clean-up.
     pub fn delete_link(&self, id: &str) -> Result<bool> {
-        Ok(self
-            .db
+        let mut conn = self.db.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<(String, String, String, String)> = tx
+            .query_row(
+                "SELECT a, b, ifname, subnet FROM net_links WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((a, b, ifname, subnet)) = row else {
+            return Ok(false);
+        };
+        for server in [&a, &b] {
+            tx.execute(
+                "INSERT OR REPLACE INTO pending_net_downs (server, ifname, subnet) VALUES (?1, ?2, ?3)",
+                params![server, ifname, subnet],
+            )?;
+        }
+        tx.execute("DELETE FROM net_links WHERE id = ?1", [id])?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// The interfaces of deleted links that `server` still has to remove.
+    pub fn pending_downs(&self, server: &str) -> Result<Vec<String>> {
+        let conn = self.db.conn();
+        let mut stmt =
+            conn.prepare("SELECT ifname FROM pending_net_downs WHERE server = ?1 ORDER BY ifname")?;
+        let rows = stmt.query_map([server], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// `server` removed `ifname` (or never had it).
+    pub fn down_done(&self, server: &str, ifname: &str) -> Result<()> {
+        self.db.conn().execute(
+            "DELETE FROM pending_net_downs WHERE server = ?1 AND ifname = ?2",
+            params![server, ifname],
+        )?;
+        Ok(())
+    }
+
+    /// The servers with interfaces still to remove.
+    pub fn servers_with_downs(&self) -> Result<Vec<String>> {
+        let conn = self.db.conn();
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT server FROM pending_net_downs ORDER BY server")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// A server that left the panel is never asked again.
+    pub fn forget_downs(&self, server: &str) -> Result<()> {
+        self.db
             .conn()
-            .execute("DELETE FROM net_links WHERE id = ?1", [id])?
-            > 0)
+            .execute("DELETE FROM pending_net_downs WHERE server = ?1", [server])?;
+        Ok(())
     }
 
     /// A network with links in it cannot be deleted: its addresses are in use.
@@ -595,8 +676,11 @@ mod tests {
             (1, 2, 3)
         );
         assert_ne!(first[0].subnet, second[0].subnet);
-        // freeing the first key lets the next link take it again
+        // freeing the first key lets the next link take it again (its subnet once both
+        // servers removed the old interface)
         n.delete_link(&first[0].id).unwrap();
+        n.down_done("a", &first[0].ifname).unwrap();
+        n.down_done("b", &first[0].ifname).unwrap();
         let again = n.create_links(&net.id, &pair, &Routes::new()).unwrap();
         assert_eq!(again[0].gre_key, 1);
         assert_eq!(
@@ -781,5 +865,44 @@ mod tests {
         assert!(n.delete_link(&l[0].id).unwrap());
         assert!(!n.delete_link(&l[0].id).unwrap());
         assert!(n.delete_network(&net.id).unwrap());
+    }
+
+    #[test]
+    fn a_deleted_links_interface_is_remembered_and_its_name_and_subnet_wait_for_it() {
+        let n = nets();
+        let net = n.create_network("main", "10.77.0.0/24", &[]).unwrap();
+        let pair = [("a".to_owned(), "b".to_owned())];
+        let make = || {
+            n.create_links(&net.id, &pair, &Routes::new())
+                .unwrap()
+                .remove(0)
+        };
+        let old = make();
+        assert_eq!(old.subnet, "10.77.0.0/30");
+        assert!(n.delete_link(&old.id).unwrap());
+        // both servers have it to remove, and nothing else
+        for s in ["a", "b"] {
+            assert_eq!(n.pending_downs(s).unwrap(), vec![old.ifname.clone()]);
+        }
+        assert!(n.pending_downs("c").unwrap().is_empty());
+        assert_eq!(n.servers_with_downs().unwrap(), vec!["a", "b"]);
+
+        // a new link does not take the name or the subnet of an interface that may still
+        // be up on one of them
+        let new = make();
+        assert_eq!(new.subnet, "10.77.0.4/30");
+        assert_ne!(new.ifname, old.ifname);
+        n.down_done("a", &old.ifname).unwrap();
+        assert_eq!(make().subnet, "10.77.0.8/30", "b has not removed it yet");
+        // once both servers removed it, its subnet is free again
+        n.down_done("b", &old.ifname).unwrap();
+        assert!(n.servers_with_downs().unwrap().is_empty());
+        assert_eq!(make().subnet, "10.77.0.0/30");
+
+        // a server that leaves is never waited for
+        let gone = make();
+        n.delete_link(&gone.id).unwrap();
+        n.forget_downs("a").unwrap();
+        assert_eq!(n.servers_with_downs().unwrap(), vec!["b"]);
     }
 }
