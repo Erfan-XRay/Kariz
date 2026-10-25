@@ -9,10 +9,32 @@ type T = (k: string, v?: Record<string, string | number>) => string;
 /** Whether `ip` is an IPv4 address written out in full. */
 export const ipv4Ok = (ip: string): boolean => /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(ip.trim()) && ip.trim().split(".").every((p) => +p <= 255);
 
+/** Whether `ip` is an IPv6 address a server can be reached at (not link-local, loopback, multicast or IPv4-mapped). */
+export function ipv6Ok(ip: string): boolean {
+  const a = ip.trim().toLowerCase();
+  if (!a.includes(":") || !/^[0-9a-f:.]+$/.test(a)) return false;
+  try {
+    const host = new URL(`http://[${a}]/`).hostname;
+    return !(/^\[fe[89ab]/.test(host) || host === "[::1]" || host === "[::]" || host.startsWith("[ff") || host.startsWith("[::ffff:"));
+  } catch {
+    return false;
+  }
+}
+
+/** Whether `ip` can be the far end of a link: an IPv4 address, or an IPv6 one (a link over IPv6). */
+export const linkIpOk = (ip: string): boolean => ipv4Ok(ip) || ipv6Ok(ip);
+
+/** The panel server's end of a link to `ip`: its IPv6 address for an IPv6 one, else its IPv4 one (`undefined` while it loads, `null` when it is not known). */
+export function panelEnd(own: { gre_local?: string | null; gre_local6?: string | null } | null, ip: string): string | null | undefined {
+  if (!own) return undefined;
+  return (ipv6Ok(ip) ? own.gre_local6 : own.gre_local) ?? null;
+}
+
 /** The text of an error from making a GRE link for a server's link to the panel (*Add server* or *Edit*). */
 export function greJoinError(t: T, code: string, names: Map<string, string>): string {
   const [what, who = ""] = code.split(":");
   if (what === "no_address") return t("add.gre.err.noPanelAddr");
+  if (what === "no_address6") return t("add.gre.err.noPanelAddr6");
   if (what === "same_address") return t("add.gre.err.same");
   if (what === "address_taken") return t("add.gre.err.taken", { name: names.get(who) ?? who });
   if (what === "bad_input") return t("add.gre.err.ip");
@@ -76,8 +98,13 @@ export function NewGreLinkFields({
       )}
       <div className="field">
         <label htmlFor={id}>{ipLabel}</label>
-        <input className="text mono" id={id} dir="ltr" inputMode="decimal" placeholder="198.51.100.7" value={ip} onChange={(e) => onIp(e.target.value.trim())} />
+        <input className="text mono" id={id} dir="ltr" inputMode="text" placeholder="198.51.100.7" value={ip} onChange={(e) => onIp(e.target.value.trim())} />
         <span className="help">{t("add.gre.ipHelp", { kind: kindLabel(kind) })}</span>
+        {ipv6Ok(ip) && (
+          <span className="help">
+            <span className="tag">IPv6</span> {t("add.gre.over6")}
+          </span>
+        )}
         <span className="err" role="alert">
           {error}
         </span>
@@ -89,7 +116,7 @@ export function NewGreLinkFields({
             {panelPublic}
           </code>
         ) : panelPublic === null ? (
-          <span className="err small">{t("add.gre.err.noPanelAddr")}</span>
+          <span className="err small">{t(ipv6Ok(ip) ? "add.gre.err.noPanelAddr6" : "add.gre.err.noPanelAddr")}</span>
         ) : (
           <span className="muted small">…</span>
         )}

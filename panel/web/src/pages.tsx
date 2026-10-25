@@ -13,7 +13,7 @@ import { TelegramSection } from "./Telegram";
 import { AutoRestartDialog } from "./AutoRestart";
 import { ServerFixDialog } from "./ServerFix";
 import { useNetworks } from "./Networks";
-import { NewGreLinkFields, greJoinError, ipv4Ok, networkOfKind } from "./GreLink";
+import { NewGreLinkFields, greJoinError, linkIpOk, networkOfKind, panelEnd } from "./GreLink";
 import { AgentPortField, agentPortError, agentPortOf, agentPortOk } from "./AgentPort";
 import { ArrangeServers, arranged } from "./Arrange";
 import { hostPort, linkPorts, reverseOk, transportLabel } from "./transport";
@@ -569,9 +569,10 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   const greHost = (own?.gre ?? []).some((g) => g.addr === host.trim());
   const portText = (x: LinkTransport) => (port == null ? "?" : String(x === "wss" || x === "quic" ? port + 1 : port));
   const openList = port == null ? "" : linkPorts(port, transport);
-  // The panel server's public address, the panel's end of the GRE link (unknown: it has to be set first).
-  const panelPublic = own ? (own.gre_local ?? null) : undefined;
-  const ipOk = ipv4Ok(ip);
+  // The panel server's public address, the panel's end of the GRE link (unknown: it has to be set first);
+  // its IPv6 one for a link over IPv6.
+  const panelPublic = panelEnd(own, ip);
+  const ipOk = linkIpOk(ip);
   const portOk = /^\d+$/.test(rport) && +rport > 0 && +rport < 65535;
   const ready =
     overLink ? ipOk && panelPublic !== null && agentPortOk(ownPort) : way === "reverse" ? (revGre ? ipOk && panelPublic !== null && portOk : reverseOk(rhost, rport)) : !!host.trim() && agentPortOk(ownPort);

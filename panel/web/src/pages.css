@@ -943,6 +943,7 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
 .del-ends li { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 .del-ends .nm { font-weight: 600; }
 .del-why { margin-top: var(--sp-3); }
+.addr-fam { margin-inline-start: var(--sp-4); }
 .del-why .btn { margin-inline-start: var(--sp-1); }
 .mtu-btn { display: inline-flex; align-items: center; gap: var(--sp-1); padding: 2px var(--sp-2); border: var(--hairline) solid transparent; border-radius: var(--r-2); background: none; color: inherit; font: inherit; cursor: pointer; }
 .mtu-btn:hover, .mtu-btn:focus-visible { border-color: var(--line-strong); }

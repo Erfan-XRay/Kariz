@@ -65,3 +65,28 @@ test("a server can be added over a VXLAN link as well as a GRE one", async ({ pa
   await dialog.getByRole("button", { name: "VXLAN", exact: true }).click();
   await expect(dialog.getByText(/a new VXLAN network, kariz-vxlan/)).toBeVisible();
 });
+
+// A network over IPv6: chosen in the dialog, shown on its card, and its servers' IPv6
+// addresses can be set on the same page.
+test("a network runs over IPv6 when asked", async ({ page }) => {
+  await signIn(page);
+  await goTo(page, "networks");
+  await page.getByRole("button", { name: "New network" }).first().click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("button", { name: "IPv4", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await dialog.getByRole("button", { name: "IPv6", exact: true }).click();
+  await expect(dialog.getByText(/GRE becomes ip6gre/)).toBeVisible();
+  await dialog.getByLabel("Name").fill("six");
+  await dialog.getByRole("button", { name: "Make the network" }).click();
+  await expect(dialog).toHaveCount(0);
+  const six = page.locator(".net-card", { hasText: "six" });
+  await expect(six.getByText("GRE · IPv6")).toBeVisible();
+  // the IPv6 address of a server is asked for once a network uses IPv6
+  const own = page.getByLabel(/^IPv6 address of /).first();
+  await own.fill("2001:db8::5");
+  await page.locator(".addr-row", { has: own }).getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText("This address was set for the server.").last()).toBeVisible();
+  await six.getByRole("button", { name: "Delete" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  await expect(six).toHaveCount(0);
+});

@@ -494,16 +494,19 @@ async fn panel_addresses(State(state): State<AppState>, headers: HeaderMap) -> R
     // The panel server's public address as private network links use it (one that was set
     // for it, else its own).
     let gre_local = state.hub.addr_of(crate::hub::LOCAL);
+    // ...and its IPv6 one, for a link over IPv6.
+    let gre_local6 = state.hub.addr6_of(crate::hub::LOCAL);
     reply(
         StatusCode::OK,
-        json!({ "v4": v4, "v6": v6, "agent_port": state.agent_port, "gre": gre, "gre_local": gre_local }),
+        json!({ "v4": v4, "v6": v6, "agent_port": state.agent_port, "gre": gre, "gre_local": gre_local, "gre_local6": gre_local6 }),
     )
 }
 
 #[derive(Deserialize)]
 struct JoinGreBody {
     name: Option<String>,
-    /// The new server's public IPv4 address: the other end of the GRE link.
+    /// The new server's public IPv4 address, or its IPv6 one for a link over IPv6: the other
+    /// end of the link.
     ip: String,
     /// The private network to take the link's addresses from; none: the first, or a new one.
     network: Option<String>,

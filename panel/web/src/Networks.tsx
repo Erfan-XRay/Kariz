@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { ApiError, api, kindLabel } from "./api";
 import type { Link, LinkKind, Network, ServerInfo } from "./api";
 import { Checklist, describeError, useOp } from "./ops";
@@ -8,9 +8,35 @@ import { Card, Dialog, Empty, Icon, Seg } from "./ui";
 /** VXLAN's usual UDP port. */
 const VXLAN_PORT = 4789;
 
-/** A network's kind as a short tag: `GRE`, or `VXLAN · UDP 4789`. */
-export function kindTag(n: { kind?: LinkKind; port?: number }): string {
-  return n.kind === "vxlan" ? `VXLAN · UDP ${n.port || VXLAN_PORT}` : "GRE";
+/** A network's kind as a short tag: `GRE`, `VXLAN · UDP 4789`, and `· IPv6` for one over IPv6. */
+export function kindTag(n: { kind?: LinkKind; port?: number; ipv6?: boolean }): string {
+  return (n.kind === "vxlan" ? `VXLAN · UDP ${n.port || VXLAN_PORT}` : "GRE") + (n.ipv6 ? " · IPv6" : "");
+}
+
+/** The IPv6 address a server's end of a link over IPv6 is made with, if the panel knows one. */
+export const addr6Of = (s: ServerInfo): string | null => s.addr6 ?? s.addr6_default ?? null;
+
+/** Whether a server can be an end of a link of this family (it has an address of it). */
+const hasAddr = (s: ServerInfo, ipv6: boolean): boolean => (ipv6 ? !!addr6Of(s) : !!(s.addr ?? s.addr_default)?.includes("."));
+
+/** Between the servers' IPv4 or IPv6 addresses: the choice, with what it means. */
+function FamilyField({ value, onChange, servers }: { value: boolean; onChange: (v: boolean) => void; servers: ServerInfo[] }) {
+  const { t, num } = useApp();
+  const with6 = servers.filter((s) => !!addr6Of(s)).length;
+  return (
+    <div className="field">
+      <span className="label">{t("net.family")}</span>
+      <Seg<"4" | "6">
+        value={value ? "6" : "4"}
+        options={[
+          ["4", "IPv4"],
+          ["6", "IPv6"],
+        ]}
+        onChange={(v) => onChange(v === "6")}
+      />
+      <span className="help">{value ? t("net.family.v6", { n: num(with6), of: num(servers.length) }) : t("net.family.v4")}</span>
+    </div>
+  );
 }
 
 /** The networks and links of the panel, kept fresh while the page is open. */
@@ -65,6 +91,7 @@ function NewNetwork({ onClose, servers }: { onClose: () => void; servers: Server
   const [cidr, setCidr] = useState<string>(POOLS.find(free) ?? POOLS[0]);
   const [kind, setKind] = useState<LinkKind>("gre");
   const [port, setPort] = useState(String(VXLAN_PORT));
+  const [ipv6, setIpv6] = useState(false);
   const [error, setError] = useState("");
   const names = new Map(servers.map((s) => [s.id, s.name]));
   const portNum = Number(port.trim());
@@ -72,7 +99,7 @@ function NewNetwork({ onClose, servers }: { onClose: () => void; servers: Server
   const make = async () => {
     setError("");
     try {
-      await api.createNetwork(name.trim(), cidr.trim(), kind, kind === "vxlan" ? portNum : undefined);
+      await api.createNetwork(name.trim(), cidr.trim(), kind, kind === "vxlan" ? portNum : undefined, ipv6);
       onClose();
     } catch (e) {
       setError(e instanceof ApiError ? describeError(t, e.code, names) : String(e));
@@ -106,6 +133,7 @@ function NewNetwork({ onClose, servers }: { onClose: () => void; servers: Server
         />
         <span className="help">{t(kind === "vxlan" ? "net.kind.vxlan" : "net.kind.gre")}</span>
       </div>
+      <FamilyField value={ipv6} onChange={setIpv6} servers={servers} />
       {kind === "vxlan" && (
         <div className="field">
           <label htmlFor="nn-port">{t("net.port")}</label>
@@ -143,8 +171,9 @@ function NewNetwork({ onClose, servers }: { onClose: () => void; servers: Server
 
 function AddLinks({ network, servers, onClose }: { network: Network; servers: ServerInfo[]; onClose: () => void }) {
   const { t } = useApp();
-  const online = servers.filter((s) => s.online);
-  const [picked, setPicked] = useState<string[]>(online.slice(0, 2).map((s) => s.id));
+  const [ipv6, setIpv6] = useState(!!network.ipv6);
+  const usable = (s: ServerInfo) => s.online && hasAddr(s, ipv6);
+  const [picked, setPicked] = useState<string[]>(servers.filter(usable).slice(0, 2).map((s) => s.id));
   const [hub, setHub] = useState("");
   const [id, setId] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -154,7 +183,7 @@ function AddLinks({ network, servers, onClose }: { network: Network; servers: Se
   const go = async () => {
     setError("");
     try {
-      setId((await api.createLinks(network.id, picked, hub && picked.includes(hub) ? hub : undefined)).op);
+      setId((await api.createLinks(network.id, picked, hub && picked.includes(hub) ? hub : undefined, ipv6 === !!network.ipv6 ? undefined : ipv6)).op);
     } catch (e) {
       setError(e instanceof ApiError ? describeError(t, e.code, names) : String(e));
     }
@@ -184,13 +213,22 @@ function AddLinks({ network, servers, onClose }: { network: Network; servers: Se
     >
       {!id && (
         <>
-          <p className="muted small">{t("net.linksText", { kind: kindLabel(network.kind) })}</p>
+          <p className="muted small">{t("net.linksText", { kind: kindLabel(network.kind) + (ipv6 ? " · IPv6" : "") })}</p>
+          <FamilyField
+            value={ipv6}
+            servers={servers}
+            onChange={(v) => {
+              setIpv6(v);
+              // a server without an address of that family cannot be an end
+              setPicked((now) => now.filter((id) => hasAddr(servers.find((s) => s.id === id)!, v)));
+            }}
+          />
           <div className="pick-list" role="group" aria-label={t("m.servers")}>
             {servers.map((s) => (
-              <label key={s.id} className="pick" aria-disabled={!s.online} style={{ gridTemplateColumns: "auto 1fr auto" }}>
+              <label key={s.id} className="pick" aria-disabled={!usable(s)} style={{ gridTemplateColumns: "auto 1fr auto" }}>
                 <input
                   type="checkbox"
-                  disabled={!s.online}
+                  disabled={!usable(s)}
                   checked={picked.includes(s.id)}
                   onChange={(e) => setPicked(e.target.checked ? [...picked, s.id] : picked.filter((x) => x !== s.id))}
                 />
@@ -198,7 +236,7 @@ function AddLinks({ network, servers, onClose }: { network: Network; servers: Se
                   <span className="nm">{s.name}</span>
                   <br />
                   <span className="mt mono" dir="ltr">
-                    {s.addr ?? s.addr_default ?? t("net.noAddr")}
+                    {ipv6 ? (addr6Of(s) ?? t("net.noAddr6")) : (s.addr ?? s.addr_default ?? t("net.noAddr"))}
                   </span>
                 </span>
                 <span />
@@ -230,7 +268,7 @@ function AddLinks({ network, servers, onClose }: { network: Network; servers: Se
 
 /** The bytes a link of this kind adds to every packet (GRE with its key, or VXLAN). */
 function overhead(l: Link): number {
-  return l.kind === "vxlan" ? 50 : 28;
+  return (l.kind === "vxlan" ? 50 : 28) + (l.ipv6 ? 20 : 0);
 }
 
 /** The MTU a link's interfaces have: its own, or the most a 1500-byte path allows. */
@@ -314,6 +352,74 @@ function MtuDialog({ link, servers, onClose, onDone }: { link: Link; servers: Se
           <span>{error}</span>
         </div>
       )}
+    </Dialog>
+  );
+}
+
+/** Moves a link between its servers' IPv4 and IPv6 addresses, as steps to follow. */
+function FamilyDialog({ link, servers, onClose }: { link: Link; servers: ServerInfo[]; onClose: () => void }) {
+  const { t } = useApp();
+  const [id, setId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const op = useOp(id);
+  const names = new Map(servers.map((s) => [s.id, s.name]));
+  const name = (x: string) => names.get(x) ?? x;
+  const to6 = !link.ipv6;
+  const ends = [link.a, link.b].map((x) => servers.find((s) => s.id === x)).filter((s): s is ServerInfo => !!s);
+  const missing = ends.filter((s) => !hasAddr(s, to6));
+  const running = !!id && (!op || op.state === "running");
+  const go = async () => {
+    setError("");
+    try {
+      setId((await api.setLinkFamily(link.id, to6)).op);
+    } catch (e) {
+      setError(e instanceof ApiError ? describeError(t, e.code, names) : String(e));
+    }
+  };
+  return (
+    <Dialog
+      title={t(to6 ? "net.to6Title" : "net.to4Title", { a: name(link.a), b: name(link.b) })}
+      onClose={running ? () => {} : onClose}
+      footer={
+        <>
+          <button className="btn btn-ghost btn-sm" type="button" disabled={running} onClick={onClose}>
+            {op?.state === "done" ? t("wz.close") : t("cancel")}
+          </button>
+          {!id && (
+            <button className="btn btn-primary btn-sm" type="button" disabled={missing.length > 0} onClick={() => void go()}>
+              {t(to6 ? "net.to6" : "net.to4")}
+            </button>
+          )}
+          {op?.state === "failed" && (
+            <button className="btn btn-primary btn-sm" type="button" onClick={() => setId(null)}>
+              {t("wz.retry")}
+            </button>
+          )}
+        </>
+      }
+    >
+      {!id && (
+        <>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            {t(to6 ? "net.to6Text" : "net.to4Text")}
+          </p>
+          <ul className="del-ends">
+            {ends.map((s) => (
+              <li key={s.id}>
+                <span className="nm">{s.name}</span>
+                <span className="mono small" dir="ltr">
+                  {to6 ? (addr6Of(s) ?? t("net.noAddr6")) : (s.addr ?? s.addr_default ?? t("net.noAddr"))}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {missing.length > 0 && <p className="err small">{t(to6 ? "net.to6Missing" : "net.to4Missing", { servers: missing.map((s) => s.name).join(", ") })}</p>}
+        </>
+      )}
+      {error && <p className="err small">{error}</p>}
+      <Checklist op={op} />
+      {op?.state === "done" && <p className="ok small">{t(to6 ? "net.to6Done" : "net.to4Done")}</p>}
+      {op?.state === "failed" && <p className="err small">{t("net.familyFailed", { why: describeError(t, op.error ?? "", names) })}</p>}
     </Dialog>
   );
 }
@@ -410,19 +516,20 @@ function DeleteNet({ what, servers, onClose, onDone, onOpenTunnel }: { what: Doo
   );
 }
 
-/** A server's address for the others, with a way to set it. */
-function AddressRow({ server, onSaved }: { server: ServerInfo; onSaved: () => void }) {
+/** A server's address for the others (for links over IPv4, or with `v6` over IPv6), with a way to set it. */
+function AddressRow({ server, onSaved, v6 = false }: { server: ServerInfo; onSaved: () => void; v6?: boolean }) {
   const { t, toast } = useApp();
   // What is used now: the address that was set, else the one the server is known by.
-  const known = server.addr_default ?? "";
-  const [value, setValue] = useState(server.addr ?? known ?? (server.local ? location.hostname : ""));
+  const set = (v6 ? server.addr6 : server.addr) ?? null;
+  const known = (v6 ? server.addr6_default : server.addr_default) ?? "";
+  const [value, setValue] = useState(set ?? known ?? (server.local && !v6 ? location.hostname : ""));
   const [busy, setBusy] = useState(false);
-  const changed = value.trim() !== (server.addr ?? "");
-  const choices = [server.ip4, server.ip6].filter((a): a is string => !!a);
+  const changed = value.trim() !== (set ?? "");
+  const choices = (v6 ? [server.ip6] : [server.ip4, server.ip6]).filter((a): a is string => !!a);
   const save = async () => {
     setBusy(true);
     try {
-      await api.setAddress(server.id, value.trim());
+      await api.setAddress(server.id, value.trim(), v6);
       toast(t("net.addrSaved"));
       onSaved();
     } catch {
@@ -433,9 +540,16 @@ function AddressRow({ server, onSaved }: { server: ServerInfo; onSaved: () => vo
   };
   return (
     <li className="addr-row">
-      <span className="nm">{server.name}</span>
+      <span className="nm">{v6 ? <span className="tag addr-fam">IPv6</span> : server.name}</span>
       <div className="addr-edit">
-        <input className="text mono" dir="ltr" aria-label={t("net.addrOf", { name: server.name })} placeholder="203.0.113.5" value={value} onChange={(e) => setValue(e.target.value)} />
+        <input
+          className="text mono"
+          dir="ltr"
+          aria-label={t(v6 ? "net.addr6Of" : "net.addrOf", { name: server.name })}
+          placeholder={v6 ? "2001:db8::5" : "203.0.113.5"}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+        />
         {choices.length > 0 && (
           <span className="addr-chips">
             {choices.map((a) => (
@@ -445,13 +559,13 @@ function AddressRow({ server, onSaved }: { server: ServerInfo; onSaved: () => vo
             ))}
           </span>
         )}
-        <span className="help">{server.addr ? t("net.addrSet") : known ? t("net.addrDefault", { addr: known }) : t("net.noAddr")}</span>
+        <span className="help">{set ? t("net.addrSet") : known ? t(v6 ? "net.addr6Default" : "net.addrDefault", { addr: known }) : t(v6 ? "net.noAddr6" : "net.noAddr")}</span>
       </div>
       <span className="addr-btns">
         <button className="btn btn-ghost btn-sm" type="button" disabled={busy || !value.trim() || !changed} onClick={() => void save()}>
           {t("net.addrSave")}
         </button>
-        {server.addr && (
+        {set && (
           <button
             className="btn btn-quiet btn-sm"
             type="button"
@@ -460,7 +574,7 @@ function AddressRow({ server, onSaved }: { server: ServerInfo; onSaved: () => vo
               setValue(known);
               setBusy(true);
               api
-                .setAddress(server.id, "")
+                .setAddress(server.id, "", v6)
                 .then(onSaved)
                 .catch(() => toast(t("net.addrBad")))
                 .finally(() => setBusy(false));
@@ -480,6 +594,9 @@ export function NetworksPage({ servers, onChanged, onOpenTunnel }: { servers: Se
   const [dialog, setDialog] = useState<"new" | { add: Network } | null>(null);
   const [doomed, setDoomed] = useState<Doomed | null>(null);
   const [fitting, setFitting] = useState<Link | null>(null);
+  const [moving, setMoving] = useState<Link | null>(null);
+  // The IPv6 addresses are shown once a network or a link uses IPv6, or a server has one.
+  const show6 = networks.some((n) => n.ipv6) || links.some((l) => l.ipv6) || servers.some((s) => !!addr6Of(s));
   const names = new Map(servers.map((s) => [s.id, s.name]));
   const name = (id: string) => names.get(id) ?? id;
 
@@ -507,7 +624,11 @@ export function NetworksPage({ servers, onChanged, onOpenTunnel }: { servers: Se
       <Card title={t("net.addresses")} sub={t("net.addressesHint")}>
         <ul className="addr-list">
           {servers.map((s) => (
-            <AddressRow key={`${s.id}-${s.addr ?? ""}`} server={s} onSaved={onChanged} />
+            <Fragment key={s.id}>
+              <AddressRow key={`${s.id}-${s.addr ?? ""}`} server={s} onSaved={onChanged} />
+              {/* its IPv6 address, for links over IPv6, right under it */}
+              {show6 && <AddressRow key={`${s.id}-6-${s.addr6 ?? ""}`} server={s} onSaved={onChanged} v6 />}
+            </Fragment>
           ))}
         </ul>
       </Card>
@@ -566,6 +687,12 @@ export function NetworksPage({ servers, onChanged, onOpenTunnel }: { servers: Se
                     <tr key={l.id}>
                       <td>
                         {name(l.a)} <span className="muted">↔</span> {name(l.b)}
+                        {l.ipv6 !== !!n.ipv6 && (
+                          <>
+                            {" "}
+                            <span className="tag">{l.ipv6 ? "IPv6" : "IPv4"}</span>
+                          </>
+                        )}
                       </td>
                       <td className="mono" dir="ltr">
                         {l.addr_a} · {l.addr_b}
@@ -582,7 +709,10 @@ export function NetworksPage({ servers, onChanged, onOpenTunnel }: { servers: Se
                           <Icon name="edit" size={14} />
                         </button>
                       </td>
-                      <td>
+                      <td className="link-acts">
+                        <button className="btn btn-ghost btn-sm" type="button" onClick={() => setMoving(l)}>
+                          {t(l.ipv6 ? "net.to4" : "net.to6")}
+                        </button>
                         <button className="btn btn-ghost btn-sm" type="button" onClick={() => setDoomed({ link: l })}>
                           {t("tun.delete")}
                         </button>
@@ -612,6 +742,17 @@ export function NetworksPage({ servers, onChanged, onOpenTunnel }: { servers: Se
       </div>
 
       {fitting && <MtuDialog link={fitting} servers={servers} onClose={() => setFitting(null)} onDone={reload} />}
+      {moving && (
+        <FamilyDialog
+          link={moving}
+          servers={servers}
+          onClose={() => {
+            setMoving(null);
+            reload();
+            onChanged();
+          }}
+        />
+      )}
       {doomed && (
         <DeleteNet
           what={doomed}
