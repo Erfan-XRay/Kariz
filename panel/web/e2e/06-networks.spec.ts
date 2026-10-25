@@ -82,10 +82,11 @@ test("a network runs over IPv6 when asked", async ({ page }) => {
   const six = page.locator(".net-card", { hasText: "six" });
   await expect(six.getByText("GRE · IPv6")).toBeVisible();
   // the IPv6 address of a server is asked for once a network uses IPv6
-  const own = page.getByLabel(/^IPv6 address of /).first();
-  await own.fill("2001:db8::5");
-  await page.locator(".addr-row", { has: own }).getByRole("button", { name: "Save" }).click();
-  await expect(page.getByText("This address was set for the server.").last()).toBeVisible();
+  // (the first server's IPv6 row: with an agent joined there is one per server)
+  const row6 = page.locator(".addr-row").filter({ has: page.getByLabel(/^IPv6 address of /) }).first();
+  await row6.getByLabel(/^IPv6 address of /).fill("2001:db8::5");
+  await row6.getByRole("button", { name: "Save" }).click();
+  await expect(row6.getByText("This address was set for the server.")).toBeVisible();
   await six.getByRole("button", { name: "Delete" }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
   await expect(six).toHaveCount(0);
