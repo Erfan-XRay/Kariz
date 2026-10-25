@@ -82,6 +82,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/networks/links", post(links_create))
         .route("/api/networks/links/delete", post(link_delete))
         .route("/api/networks/links/mtu", post(link_mtu))
+        .route("/api/networks/links/family", post(link_family))
         .route("/api/servers/address", post(server_address))
         .route("/api/update", get(update_status))
         .route("/api/update/check", post(update_check))
@@ -1873,6 +1874,9 @@ struct NetworkBody {
     /// VXLAN's UDP port; left out or 0: 4789.
     #[serde(default)]
     port: Option<u16>,
+    /// Its links run between the servers' IPv6 addresses.
+    #[serde(default)]
+    ipv6: bool,
 }
 
 async fn network_create(
@@ -1898,11 +1902,12 @@ async fn network_create(
     let Some(kind) = LinkKind::parse(body.kind.as_deref().unwrap_or("gre")) else {
         return error(StatusCode::BAD_REQUEST, "bad_kind");
     };
-    match state.hub.networks.create_network_of(
+    match state.hub.networks.create_network_with(
         &body.name,
         &body.cidr,
         kind,
         body.port.unwrap_or(0),
+        body.ipv6,
         &named,
     ) {
         Ok(n) => {
@@ -1979,6 +1984,10 @@ struct LinksBody {
     servers: Vec<String>,
     /// Hub and spoke: this server is linked to each of the others (a full mesh without it).
     hub: Option<String>,
+    /// Between the servers' IPv6 addresses (true) or IPv4 ones (false); left out: as the
+    /// network's links are.
+    #[serde(default)]
+    ipv6: Option<bool>,
 }
 
 async fn links_create(
@@ -1991,7 +2000,13 @@ async fn links_create(
         Ok(s) => s,
         Err(r) => return r,
     };
-    match crate::netops::create_links(&state.hub, &body.network, body.servers, body.hub) {
+    match crate::netops::create_links_as(
+        &state.hub,
+        &body.network,
+        body.servers,
+        body.hub,
+        body.ipv6,
+    ) {
         Ok(op) => {
             audit(
                 &state,
@@ -2085,6 +2100,43 @@ async fn link_mtu(
 struct AddressBody {
     id: String,
     addr: String,
+    /// The IPv6 address for links over IPv6 (else the address of IPv4 links).
+    #[serde(default)]
+    v6: bool,
+}
+
+/// A link to move between its servers' IPv4 and IPv6 addresses.
+#[derive(Deserialize)]
+struct FamilyBody {
+    id: String,
+    ipv6: bool,
+}
+
+async fn link_family(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<FamilyBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match crate::netops::set_link_family(&state.hub, &body.id, body.ipv6) {
+        Ok(op) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!(
+                    "moved a network link to {}",
+                    if body.ipv6 { "IPv6" } else { "IPv4" }
+                ),
+            );
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => net_error(e),
+    }
 }
 
 /// The address other servers reach a server at (private networks need both ends' addresses).
@@ -2098,13 +2150,22 @@ async fn server_address(
         Ok(s) => s,
         Err(r) => return r,
     };
-    match state.hub.set_addr(&body.id, &body.addr) {
+    let set = if body.v6 {
+        state.hub.set_addr6(&body.id, &body.addr)
+    } else {
+        state.hub.set_addr(&body.id, &body.addr)
+    };
+    match set {
         Ok(()) => {
             audit(
                 &state,
                 &format!("session {}", me.id),
                 &ip_of(&peer),
-                &format!("set the address of server {}", body.id),
+                &format!(
+                    "set the {}address of server {}",
+                    if body.v6 { "IPv6 " } else { "" },
+                    body.id
+                ),
             );
             // Links that were waiting for this address can be made now.
             let hub = state.hub.clone();

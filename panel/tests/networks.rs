@@ -1349,3 +1349,107 @@ async fn a_links_mtu_is_changed_in_place_on_both_servers() {
         .unwrap_err();
     assert_eq!(e.to_string(), "no_such_link");
 }
+
+/// GRE over IPv6: a network whose links run between the servers' IPv6 addresses makes
+/// `ip6gre` links (with no encapsulation limit, and an MTU 20 bytes smaller) that keep IPv4
+/// /30s of their own; one link can be made the other way, and moved between IPv4 and IPv6
+/// later; a server without an IPv6 address is named before anything is made.
+#[tokio::test]
+async fn links_run_over_ipv6_and_move_between_ipv4_and_ipv6() {
+    use kariz_panel::wire::LinkKind;
+    let root = tempfile::tempdir().unwrap();
+    let (hub, remote, local_fake, agent_fake) = two_servers(root.path()).await;
+    let both = vec![LOCAL.to_owned(), remote.clone()];
+    let six = hub
+        .networks
+        .create_network_with("six", "10.77.0.0/24", LinkKind::Gre, 0, true, &[])
+        .unwrap();
+    assert!(six.ipv6);
+
+    // no IPv6 address for the far server yet: said, nothing made
+    hub.set_addr6(LOCAL, "2001:db8:1::5").unwrap();
+    let op = netops::create_links(&hub, &six.id, both.clone(), None).unwrap();
+    let done = finished(&hub, &op).await;
+    assert_eq!(done.state, "failed");
+    assert_eq!(done.error.unwrap(), format!("no_address6:{remote}"));
+    assert!(hub.networks.links(None).unwrap().is_empty());
+    assert!(
+        hub.set_addr6(&remote, "fe80::1").is_err(),
+        "not a link-local one"
+    );
+    assert!(hub.set_addr6(&remote, "198.51.100.7").is_err());
+    hub.set_addr6(&remote, "2001:DB8:2:0::7").unwrap();
+    assert_eq!(
+        hub.addr6_of(&remote).as_deref(),
+        Some("2001:db8:2::7"),
+        "one spelling"
+    );
+
+    let op = netops::create_links(&hub, &six.id, both.clone(), None).unwrap();
+    let done = finished(&hub, &op).await;
+    assert_eq!(done.state, "done", "{done:?}");
+    let link = hub.networks.links(None).unwrap().remove(0);
+    assert!(link.ipv6);
+    assert_eq!(
+        link.subnet, "10.77.0.0/30",
+        "the link's own addresses are IPv4"
+    );
+    let made = |fake: &Fake, local: &str, remote: &str| {
+        let want = format!(
+            "ip link add {} type ip6gre local {local} remote {remote} key {} hoplimit 64 encaplimit none",
+            link.ifname, link.gre_key
+        );
+        fake.calls().contains(&want)
+    };
+    assert!(made(&local_fake, "2001:db8:1::5", "2001:db8:2::7"));
+    assert!(made(&agent_fake, "2001:db8:2::7", "2001:db8:1::5"));
+    assert!(local_fake
+        .calls()
+        .contains(&format!("ip link set {} mtu 1452 up", link.ifname)));
+    // the agent's list says so after a reconnect too
+    let spec = hub.net_specs(&remote).unwrap().remove(0);
+    assert_eq!((spec.local.as_str(), spec.mtu), ("2001:db8:2::7", 1452));
+    // the path MTU was measured over IPv6
+    assert!(local_fake
+        .calls()
+        .iter()
+        .any(|c| c.starts_with("ping") && c.contains("-M do") && c.ends_with("2001:db8:2::7")));
+
+    // ---- moved to IPv4, and back ----
+    let op = netops::set_link_family(&hub, &link.id, false).unwrap();
+    let done = finished(&hub, &op).await;
+    assert_eq!(done.state, "done", "{done:?}");
+    let moved = hub.networks.links(None).unwrap().remove(0);
+    assert!(!moved.ipv6);
+    assert_eq!(
+        (moved.addr_a.as_str(), moved.ifname.as_str()),
+        (link.addr_a.as_str(), link.ifname.as_str())
+    );
+    assert!(local_fake.calls().iter().any(|c| c
+        == &format!(
+            "ip tunnel add {} mode gre local 192.0.2.1 remote 192.0.2.2 key {} ttl 64",
+            link.ifname, link.gre_key
+        )));
+    assert_eq!(hub.net_specs(&remote).unwrap()[0].local, "192.0.2.2");
+
+    // a path that does not pass over IPv6: the link is put back on IPv4 and says why
+    agent_fake.ping_fails.store(true, Ordering::SeqCst);
+    local_fake.ping_fails.store(true, Ordering::SeqCst);
+    let op = netops::set_link_family(&hub, &link.id, true).unwrap();
+    let done = finished(&hub, &op).await;
+    assert_eq!(done.state, "failed");
+    assert_eq!(done.error.as_deref(), Some("gre6_blocked"));
+    assert!(!hub.networks.links(None).unwrap()[0].ipv6, "back on IPv4");
+    agent_fake.ping_fails.store(false, Ordering::SeqCst);
+    local_fake.ping_fails.store(false, Ordering::SeqCst);
+
+    // ---- an IPv4 network with one link over IPv6 ----
+    let four = hub
+        .networks
+        .create_network("four", "10.78.0.0/24", &[])
+        .unwrap();
+    assert!(!four.ipv6);
+    let op = netops::create_links_as(&hub, &four.id, both, None, Some(true)).unwrap();
+    assert_eq!(finished(&hub, &op).await.state, "done");
+    assert!(hub.networks.links(Some(&four.id)).unwrap()[0].ipv6);
+}

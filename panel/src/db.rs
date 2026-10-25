@@ -170,6 +170,16 @@ const MIGRATIONS: &[&str] = &[
     // between its servers was measured smaller, or the admin set it.
     "ALTER TABLE net_links ADD COLUMN mtu INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE net_links ADD COLUMN mtu_how TEXT NOT NULL DEFAULT '';",
+    // 19: links between the servers' IPv6 addresses: a network's links are made that way
+    // (unless one is made otherwise), and each server's IPv6 address for them, the one the
+    // admin chose (`chosen`) or the one it was last known by.
+    "ALTER TABLE networks ADD COLUMN ipv6 INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE net_links ADD COLUMN ipv6 INTEGER NOT NULL DEFAULT 0;
+     CREATE TABLE server_addr6 (
+         server TEXT PRIMARY KEY,
+         addr TEXT NOT NULL,
+         chosen INTEGER NOT NULL DEFAULT 0
+     );",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

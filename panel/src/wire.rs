@@ -214,6 +214,16 @@ pub struct NetStatus {
     pub vxlan: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vxlan_reason: Option<String>,
+    /// The same between IPv6 addresses (`ip6gre`, and VXLAN over IPv6). An agent before
+    /// 2.7.0 does not say, which reads as no.
+    #[serde(default)]
+    pub gre6: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gre6_reason: Option<String>,
+    #[serde(default)]
+    pub vxlan6: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vxlan6_reason: Option<String>,
     #[serde(default)]
     pub links: Vec<NetIface>,
 }

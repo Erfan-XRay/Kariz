@@ -2,6 +2,10 @@
 //! `kz-` interface of a link, address it, take it down, test the path across it, and keep
 //! the list so the interfaces come back after a reboot.
 //!
+//! A link runs between the servers' public IPv4 addresses, or between their IPv6 ones
+//! (`ip6gre`, or VXLAN over IPv6). Either way the link's own addresses are a private IPv4
+//! /30, so what runs across it (tunnels, an agent's link to the panel) is the same.
+//!
 //! A request carries **data**, never a command: every field is parsed and range-checked
 //! first, the programs that run (`ip`, `ping`) get fixed arguments with the checked values,
 //! and only interfaces whose names start with `kz-` are ever touched.
@@ -32,22 +36,36 @@ pub const OLD_GRE_MTU: u32 = 1476;
 /// VXLAN adds 50 (outer IPv4, UDP, VXLAN and the inner Ethernet header).
 pub const VXLAN_MTU: u32 = 1450;
 
+/// An IPv6 header is 20 bytes larger than an IPv4 one. (`ip6gre` is made without the
+/// 8-byte encapsulation limit option, which many networks drop.)
+pub const IPV6_EXTRA: u32 = 20;
+
 /// The smallest MTU a link may have.
 pub const MIN_MTU: u32 = 576;
 
-/// The bytes a link of this kind adds to every packet.
-pub fn overhead(kind: LinkKind) -> u32 {
-    match kind {
+/// The bytes a link of this kind adds to every packet, over IPv4 or (`v6`) IPv6.
+pub fn overhead(kind: LinkKind, v6: bool) -> u32 {
+    let v4 = match kind {
         LinkKind::Gre => PATH_MTU - DEFAULT_MTU,
         LinkKind::Vxlan => PATH_MTU - VXLAN_MTU,
+    };
+    if v6 {
+        v4 + IPV6_EXTRA
+    } else {
+        v4
     }
+}
+
+/// The largest MTU a link of this kind may have: what a 1500-byte path allows.
+pub fn max_mtu(kind: LinkKind, v6: bool) -> u32 {
+    PATH_MTU - overhead(kind, v6)
 }
 
 /// The MTU for a link of this kind over a path of `path` bytes (what [`Net::path_mtu`]
 /// measured), within the limits a link may have.
-pub fn mtu_for_path(kind: LinkKind, path: u32) -> u32 {
-    path.saturating_sub(overhead(kind))
-        .clamp(MIN_MTU, max_mtu(kind))
+pub fn mtu_for_path(kind: LinkKind, v6: bool, path: u32) -> u32 {
+    path.saturating_sub(overhead(kind, v6))
+        .clamp(MIN_MTU, max_mtu(kind, v6))
 }
 
 /// The UDP port VXLAN uses unless a network says otherwise (IANA's).
@@ -55,14 +73,6 @@ pub const VXLAN_PORT: u16 = 4789;
 
 /// The largest VNI a link may take: the very last one (2^24 - 1) is the probe's.
 pub const VNI_MAX: u32 = (1 << 24) - 2;
-
-/// The largest MTU a link of this kind may have.
-pub fn max_mtu(kind: LinkKind) -> u32 {
-    match kind {
-        LinkKind::Gre => DEFAULT_MTU,
-        LinkKind::Vxlan => VXLAN_MTU,
-    }
-}
 
 /// `kz-` and one to eight small letters or digits.
 pub fn valid_ifname(name: &str) -> bool {
@@ -74,28 +84,55 @@ pub fn valid_ifname(name: &str) -> bool {
     })
 }
 
-/// Checks every field of a link request; the parsed addresses come back.
-pub fn validate(spec: &NetSpec) -> Result<(Ipv4Addr, Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
+/// Whether `a` can be a server's public address: unicast, and for IPv6 not a link-local
+/// one (it means nothing without the interface it is on) or an IPv4 one in IPv6 clothes.
+pub fn server_addr(a: IpAddr) -> bool {
+    match a {
+        IpAddr::V4(v4) => {
+            !(v4.is_unspecified() || v4.is_loopback() || v4.is_multicast() || v4.is_broadcast())
+        }
+        IpAddr::V6(v6) => {
+            !(v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || v6.to_ipv4_mapped().is_some())
+        }
+    }
+}
+
+/// Whether a link runs between the servers' IPv6 addresses.
+pub fn is_v6(spec: &NetSpec) -> bool {
+    spec.local.parse::<IpAddr>().is_ok_and(|a| a.is_ipv6())
+}
+
+/// Checks every field of a link request; the parsed addresses come back: the two public
+/// ones (both IPv4, or both IPv6) and the link's own two.
+pub fn validate(spec: &NetSpec) -> Result<(IpAddr, IpAddr, Ipv4Addr, Ipv4Addr)> {
     if !valid_ifname(&spec.name) {
         bail!("the interface name must be kz- and up to eight small letters or digits");
     }
-    let ip = |s: &str, what: &str| -> Result<Ipv4Addr> {
+    let public = |s: &str, what: &str| -> Result<IpAddr> {
         s.parse::<IpAddr>()
             .ok()
-            .and_then(|a| match a {
-                IpAddr::V4(v4) => Some(v4),
-                IpAddr::V6(_) => None,
-            })
+            .with_context(|| format!("{what} is not an IP address"))
+    };
+    let private = |s: &str, what: &str| -> Result<Ipv4Addr> {
+        s.parse::<Ipv4Addr>()
+            .ok()
             .with_context(|| format!("{what} is not an IPv4 address"))
     };
-    let local = ip(&spec.local, "local")?;
-    let remote = ip(&spec.remote, "remote")?;
-    let address = ip(&spec.address, "address")?;
-    let peer = ip(&spec.peer, "peer")?;
+    let local = public(&spec.local, "local")?;
+    let remote = public(&spec.remote, "remote")?;
+    let address = private(&spec.address, "address")?;
+    let peer = private(&spec.peer, "peer")?;
     for (a, what) in [(local, "local"), (remote, "remote")] {
-        if a.is_unspecified() || a.is_loopback() || a.is_multicast() || a.is_broadcast() {
+        if !server_addr(a) {
             bail!("{what} must be a unicast address of a server");
         }
+    }
+    if local.is_ipv6() != remote.is_ipv6() {
+        bail!("local and remote must both be IPv4 or both be IPv6");
     }
     if local == remote {
         bail!("local and remote are the same address");
@@ -121,9 +158,10 @@ pub fn validate(spec: &NetSpec) -> Result<(Ipv4Addr, Ipv4Addr, Ipv4Addr, Ipv4Add
             }
         }
     }
-    let most = max_mtu(spec.kind);
+    let v6 = local.is_ipv6();
+    let most = max_mtu(spec.kind, v6);
     // An older panel still sends a GRE link 1476 (see OLD_GRE_MTU): taken as it was.
-    let most = if spec.kind == LinkKind::Gre {
+    let most = if spec.kind == LinkKind::Gre && !v6 {
         most.max(OLD_GRE_MTU)
     } else {
         most
@@ -151,8 +189,8 @@ pub fn validate(spec: &NetSpec) -> Result<(Ipv4Addr, Ipv4Addr, Ipv4Addr, Ipv4Add
 pub fn commands(spec: &NetSpec) -> Result<Vec<Vec<String>>> {
     let (local, remote, address, _) = validate(spec)?;
     let s = |x: &str| x.to_owned();
-    let make = match spec.kind {
-        LinkKind::Gre => vec![
+    let make = match (spec.kind, local.is_ipv6()) {
+        (LinkKind::Gre, false) => vec![
             s("tunnel"),
             s("add"),
             spec.name.clone(),
@@ -167,8 +205,29 @@ pub fn commands(spec: &NetSpec) -> Result<Vec<Vec<String>>> {
             s("ttl"),
             s("64"),
         ],
-        // One peer: the kernel sends every frame to `remote`, so nothing is flooded.
-        LinkKind::Vxlan => vec![
+        // GRE over IPv6, with an IPv4 packet inside like the IPv4 link. Without `encaplimit
+        // none` the kernel puts an 8-byte destination option in every packet, which many
+        // providers drop: the link would be made and nothing would cross it.
+        (LinkKind::Gre, true) => vec![
+            s("link"),
+            s("add"),
+            spec.name.clone(),
+            s("type"),
+            s("ip6gre"),
+            s("local"),
+            local.to_string(),
+            s("remote"),
+            remote.to_string(),
+            s("key"),
+            spec.key.to_string(),
+            s("hoplimit"),
+            s("64"),
+            s("encaplimit"),
+            s("none"),
+        ],
+        // One peer: the kernel sends every frame to `remote`, so nothing is flooded. The
+        // same over IPv6.
+        (LinkKind::Vxlan, _) => vec![
             s("link"),
             s("add"),
             spec.name.clone(),
@@ -206,7 +265,7 @@ pub fn commands(spec: &NetSpec) -> Result<Vec<Vec<String>>> {
     ])
 }
 
-/// The average round trip in `ping`'s summary line (`rtt min/avg/max/mdev = 0.4/0.6/...`).
+// The average round trip in `ping`'s summary line (`rtt min/avg/max/mdev = 0.4/0.6/...`).
 pub fn parse_ping(output: &str) -> Option<f64> {
     let line = output.lines().find(|l| l.contains("min/avg/max"))?;
     line.split('=')
@@ -582,6 +641,46 @@ impl Net {
                 ],
             )
             .await;
+        // The same over IPv6 (documentation addresses: nothing is ever sent to them). A
+        // kernel without IPv6, or without `ip6_gre`, says no here.
+        let (gre6, gre6_reason) = self
+            .probe(
+                "kz-probe6",
+                &[
+                    "link",
+                    "add",
+                    "kz-probe6",
+                    "type",
+                    "ip6gre",
+                    "local",
+                    "2001:db8::1",
+                    "remote",
+                    "2001:db8::2",
+                    "encaplimit",
+                    "none",
+                ],
+            )
+            .await;
+        let (vxlan6, vxlan6_reason) = self
+            .probe(
+                "kz-probev6",
+                &[
+                    "link",
+                    "add",
+                    "kz-probev6",
+                    "type",
+                    "vxlan",
+                    "id",
+                    "16777215",
+                    "local",
+                    "2001:db8::1",
+                    "remote",
+                    "2001:db8::2",
+                    "dstport",
+                    "4790",
+                ],
+            )
+            .await;
         let links = self
             .load()
             .link
@@ -605,6 +704,10 @@ impl Net {
             reason,
             vxlan,
             vxlan_reason,
+            gre6,
+            gre6_reason,
+            vxlan6,
+            vxlan6_reason,
             links,
         }
     }
@@ -703,6 +806,71 @@ mod tests {
         assert!(commands(&other).unwrap()[0]
             .join(" ")
             .contains("dstport 8472"));
+    }
+
+    fn gre6() -> NetSpec {
+        NetSpec {
+            local: "2001:db8:1::5".into(),
+            remote: "2001:db8:2::7".into(),
+            mtu: max_mtu(LinkKind::Gre, true),
+            ..spec()
+        }
+    }
+
+    #[test]
+    fn a_link_over_ipv6_is_ip6gre_without_the_encapsulation_limit() {
+        let lines: Vec<String> = commands(&gre6())
+            .unwrap()
+            .iter()
+            .map(|c| c.join(" "))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "link add kz-a1b2c type ip6gre local 2001:db8:1::5 remote 2001:db8:2::7 key 4242 hoplimit 64 encaplimit none",
+                "addr add 10.77.0.1/30 dev kz-a1b2c",
+                "link set kz-a1b2c mtu 1452 up",
+            ],
+            "the link's own addresses stay IPv4"
+        );
+        assert!(is_v6(&gre6()) && !is_v6(&spec()));
+        // VXLAN over IPv6 is the same interface with IPv6 ends
+        let vx6 = NetSpec {
+            local: "2001:db8:1::5".into(),
+            remote: "2001:db8:2::7".into(),
+            mtu: max_mtu(LinkKind::Vxlan, true),
+            ..vxlan()
+        };
+        assert_eq!(
+            commands(&vx6).unwrap()[0].join(" "),
+            "link add kz-a1b2c type vxlan id 7 local 2001:db8:1::5 remote 2001:db8:2::7 dstport 4789 ttl 64"
+        );
+        assert_eq!(vx6.mtu, 1430);
+    }
+
+    #[test]
+    fn a_link_over_ipv6_is_checked_for_its_own_limits() {
+        let bad = |f: &dyn Fn(&mut NetSpec)| {
+            let mut s = gre6();
+            f(&mut s);
+            validate(&s).is_err()
+        };
+        assert!(!bad(&|_| ()));
+        // 20 bytes more header than over IPv4, and no old allowance
+        assert!(bad(&|s| s.mtu = 1453));
+        assert!(bad(&|s| s.mtu = OLD_GRE_MTU));
+        // both ends the same family
+        assert!(bad(&|s| s.remote = "198.51.100.7".into()));
+        // a server's address, not a link-local, loopback, multicast or IPv4-mapped one
+        for addr in ["fe80::1", "::1", "::", "ff02::1", "::ffff:198.51.100.7"] {
+            assert!(bad(&|s| s.remote = addr.into()), "{addr}");
+        }
+        assert!(bad(&|s| s.remote = s.local.clone()));
+        // the link's own addresses are IPv4 /30s over IPv6 too
+        assert!(bad(&|s| s.address = "fd00::1".into()));
+        assert_eq!(overhead(LinkKind::Gre, true), 48);
+        assert_eq!(overhead(LinkKind::Vxlan, true), 70);
+        assert_eq!(mtu_for_path(LinkKind::Gre, true, 1400), 1352);
     }
 
     #[test]
@@ -1096,7 +1264,7 @@ mod tests {
         assert!(c
             .iter()
             .any(|l| l.starts_with("ip link add kz-probev type vxlan id 16777215")));
-        assert_eq!(c.last().unwrap(), "ip link del kz-probev");
+        assert!(c.contains(&"ip link del kz-probev".to_owned()));
         let no = Net::with_exec(
             None,
             Arc::new(Fake {
@@ -1107,5 +1275,37 @@ mod tests {
         .status()
         .await;
         assert!(no.gre && !no.vxlan && no.vxlan_reason.is_some());
+        assert!(!no.vxlan6 && no.gre6, "VXLAN over IPv6 needs VXLAN");
+    }
+
+    #[tokio::test]
+    async fn status_says_whether_links_over_ipv6_can_be_made() {
+        let fake = Arc::new(Fake::default());
+        let ok = Net::with_exec(None, fake.clone()).status().await;
+        assert!(ok.gre6 && ok.vxlan6);
+        let c = calls(&fake);
+        assert!(c.iter().any(|l| l
+            == "ip link add kz-probe6 type ip6gre local 2001:db8::1 remote 2001:db8::2 encaplimit none"));
+        assert!(c
+            .iter()
+            .any(|l| l.starts_with("ip link add kz-probev6 type vxlan")
+                && l.contains("local 2001:db8::1")));
+        for probe in ["kz-probe6", "kz-probev6"] {
+            assert!(
+                c.contains(&format!("ip link del {probe}")),
+                "{probe} is removed"
+            );
+        }
+        // a kernel without ip6_gre (or without IPv6): no, with why, and IPv4 GRE still yes
+        let no = Net::with_exec(
+            None,
+            Arc::new(Fake {
+                fail_on: Some("type ip6gre"),
+                ..Fake::default()
+            }),
+        )
+        .status()
+        .await;
+        assert!(no.gre && !no.gre6 && no.gre6_reason.is_some() && no.vxlan6);
     }
 }

@@ -111,6 +111,9 @@ pub struct Network {
     /// How its links are made, and for VXLAN the UDP port (0 for GRE).
     pub kind: LinkKind,
     pub port: u16,
+    /// Its links run between the servers' IPv6 addresses (unless a link was made
+    /// otherwise): `ip6gre`, or VXLAN over IPv6.
+    pub ipv6: bool,
     pub created: i64,
     /// Links that take a /30 of it now, and how many it can hold at most.
     pub links: u32,
@@ -141,6 +144,8 @@ pub struct Link {
     /// (the path MTU between its servers, when it was made or asked for) or `set` (by hand).
     pub mtu: u32,
     pub mtu_how: String,
+    /// It runs between its servers' IPv6 addresses, not their IPv4 ones.
+    pub ipv6: bool,
 }
 
 /// Which servers a link joins, and how a set of servers is joined.
@@ -207,6 +212,20 @@ impl Networks {
         port: u16,
         routes: &[(String, Vec<String>)],
     ) -> Result<Network> {
+        self.create_network_with(name, cidr, kind, port, false, routes)
+    }
+
+    /// [`Self::create_network_of`], with links between the servers' IPv6 addresses when
+    /// `ipv6` (the private addresses are IPv4 either way).
+    pub fn create_network_with(
+        &self,
+        name: &str,
+        cidr: &str,
+        kind: LinkKind,
+        port: u16,
+        ipv6: bool,
+        routes: &[(String, Vec<String>)],
+    ) -> Result<Network> {
         if !valid_name(name) {
             bail!("bad_name");
         }
@@ -241,8 +260,8 @@ impl Networks {
         }
         let id = random_hex(6)?;
         tx.execute(
-            "INSERT INTO networks (id, name, cidr, created, kind, port) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, name, pool.to_string(), now(), kind.as_str(), port],
+            "INSERT INTO networks (id, name, cidr, created, kind, port, ipv6) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, name, pool.to_string(), now(), kind.as_str(), port, ipv6],
         )?;
         tx.commit()?;
         drop(conn);
@@ -264,7 +283,7 @@ impl Networks {
         let conn = self.db.conn();
         let mut stmt = conn.prepare(
             "SELECT n.id, n.name, n.cidr, n.created, (SELECT COUNT(*) FROM net_links l WHERE l.network = n.id),
-                    n.kind, n.port
+                    n.kind, n.port, n.ipv6
              FROM networks n ORDER BY n.created, n.id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -278,6 +297,7 @@ impl Networks {
                 links: r.get(4)?,
                 kind: kind_of(&r.get::<_, String>(5)?),
                 port: r.get(6)?,
+                ipv6: r.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -287,7 +307,7 @@ impl Networks {
         let conn = self.db.conn();
         let mut stmt = conn.prepare(
             "SELECT l.id, l.network, l.a, l.b, l.subnet, l.addr_a, l.addr_b, l.gre_key, l.ifname,
-                    l.created, n.kind, n.port, l.mtu, l.mtu_how
+                    l.created, n.kind, n.port, l.mtu, l.mtu_how, l.ipv6
              FROM net_links l JOIN networks n ON n.id = l.network
              WHERE (?1 IS NULL OR l.network = ?1) ORDER BY l.created, l.id",
         )?;
@@ -307,6 +327,7 @@ impl Networks {
                 port: r.get(11)?,
                 mtu: r.get(12)?,
                 mtu_how: r.get(13)?,
+                ipv6: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -322,15 +343,28 @@ impl Networks {
         pairs: &[(String, String)],
         routes: &Routes,
     ) -> Result<Vec<Link>> {
+        self.create_links_as(network, pairs, routes, None)
+    }
+
+    /// [`Self::create_links`], over IPv6 or IPv4 as `ipv6` says (none: as the network's
+    /// links are).
+    pub fn create_links_as(
+        &self,
+        network: &str,
+        pairs: &[(String, String)],
+        routes: &Routes,
+        ipv6: Option<bool>,
+    ) -> Result<Vec<Link>> {
         let mut conn = self.db.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (cidr, kind, port): (String, String, u16) = tx
+        let (cidr, kind, port, net_v6): (String, String, u16, bool) = tx
             .query_row(
-                "SELECT cidr, kind, port FROM networks WHERE id = ?1",
+                "SELECT cidr, kind, port, ipv6 FROM networks WHERE id = ?1",
                 [network],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .map_err(|_| anyhow!("no_such_network"))?;
+        let ipv6 = ipv6.unwrap_or(net_v6);
         let kind = kind_of(&kind);
         let pool = Cidr::parse(&cidr)?;
         let mut used: HashSet<u32> = {
@@ -425,13 +459,14 @@ impl Networks {
                 port,
                 mtu: 0,
                 mtu_how: String::new(),
+                ipv6,
             };
             tx.execute(
-                "INSERT INTO net_links (id, network, a, b, subnet, addr_a, addr_b, gre_key, ifname, created)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO net_links (id, network, a, b, subnet, addr_a, addr_b, gre_key, ifname, created, ipv6)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     link.id, link.network, link.a, link.b, link.subnet, link.addr_a, link.addr_b,
-                    link.gre_key, link.ifname, link.created
+                    link.gre_key, link.ifname, link.created, link.ipv6
                 ],
             )?;
             made.push(link);
@@ -465,6 +500,15 @@ impl Networks {
         tx.execute("DELETE FROM net_links WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Moves a link between the servers' IPv4 and IPv6 addresses. Its MTU goes back to the
+    /// default (the path is another one). False when there is no such link.
+    pub fn set_ipv6(&self, id: &str, ipv6: bool) -> Result<bool> {
+        Ok(self.db.conn().execute(
+            "UPDATE net_links SET ipv6 = ?2, mtu = 0, mtu_how = '' WHERE id = ?1",
+            params![id, ipv6],
+        )? > 0)
     }
 
     /// Sets a link's MTU (0: the default of its kind) and where it came from. False when

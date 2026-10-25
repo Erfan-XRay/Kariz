@@ -28,6 +28,10 @@ pub const DOWN_WAIT: Duration = Duration::from_secs(5);
 /// server ([`Request::NetPmtu`]).
 pub const MTU_SINCE: (u32, u32, u32) = (2, 7, 0);
 
+/// The first version whose agent makes links between IPv6 addresses (an older one refuses
+/// the spec: its addresses are not IPv4).
+pub const IPV6_SINCE: (u32, u32, u32) = (2, 7, 0);
+
 /// How long the path MTU between two servers may take to measure (a search of about ten
 /// pings each way, at the same time).
 const PMTU_WAIT: Duration = Duration::from_secs(25);
@@ -37,10 +41,10 @@ const PMTU_WAIT: Duration = Duration::from_secs(25);
 /// keeps the 1476 it made a GRE link with until the link is given a value of its own:
 /// telling it 1472 would only make it make the link again.
 pub fn link_mtu(link: &Link, new_agent: bool) -> u32 {
-    let most = crate::net::max_mtu(link.kind);
+    let most = crate::net::max_mtu(link.kind, link.ipv6);
     if link.mtu > 0 {
         link.mtu.clamp(crate::net::MIN_MTU, most)
-    } else if link.kind == LinkKind::Gre && !new_agent {
+    } else if link.kind == LinkKind::Gre && !link.ipv6 && !new_agent {
         crate::net::OLD_GRE_MTU
     } else {
         most
@@ -52,6 +56,20 @@ pub fn valid_addr(text: &str) -> bool {
     text.parse::<Ipv4Addr>().is_ok_and(|a| {
         !(a.is_unspecified() || a.is_loopback() || a.is_multicast() || a.is_broadcast())
     })
+}
+
+/// Whether `text` is an IPv6 address a server can be reached at: global unicast (not
+/// link-local, loopback or an IPv4 one in IPv6 clothes).
+pub fn valid_addr6(text: &str) -> bool {
+    text.parse::<std::net::Ipv6Addr>()
+        .is_ok_and(|a| crate::net::server_addr(std::net::IpAddr::V6(a)))
+}
+
+/// An address as it parses (one spelling for one IPv6 address), else as it was given.
+pub fn normal_addr(text: &str) -> String {
+    let text = text.trim();
+    text.parse::<std::net::IpAddr>()
+        .map_or_else(|_| text.to_owned(), |a| a.to_string())
 }
 
 /// One end of a link, as the server that owns it is told: `mine` is the address of this
@@ -96,8 +114,19 @@ impl Hub {
         version.is_empty() || crate::pair::version_at_least(&version, since)
     }
 
+    /// The address `server`'s end of `link` is made with: its IPv6 one for a link over
+    /// IPv6, else its IPv4 one ([`Hub::addr_of`], when that is IPv4).
+    pub fn end_addr(&self, link: &Link, server: &str) -> Option<String> {
+        if link.ipv6 {
+            self.addr6_of(server)
+        } else {
+            self.addr_of(server)
+                .filter(|a| a.parse::<std::net::Ipv4Addr>().is_ok())
+        }
+    }
+
     /// The version `server`'s agent said it runs last (empty: not yet).
-    fn version_of(&self, server: &str) -> String {
+    pub(crate) fn version_of(&self, server: &str) -> String {
         self.db
             .conn()
             .query_row("SELECT version FROM servers WHERE id = ?1", [server], |r| {
@@ -121,7 +150,9 @@ impl Hub {
                 continue;
             }
             let other = if link.a == server { &link.b } else { &link.a };
-            let (Some(local), Some(remote)) = (self.addr_of(server), self.addr_of(other)) else {
+            let (Some(local), Some(remote)) =
+                (self.end_addr(&link, server), self.end_addr(&link, other))
+            else {
                 bail!("no_address:{}", link.ifname);
             };
             out.push(spec_for(
@@ -266,8 +297,14 @@ pub async fn tear_down(hub: &Hub, link: &Link) -> Result<Vec<String>> {
 async fn bring_up(hub: &Hub, link: &Link) -> Result<(), String> {
     for server in [&link.a, &link.b] {
         let other = if &link.a == server { &link.b } else { &link.a };
-        let (Some(local), Some(remote)) = (hub.addr_of(server), hub.addr_of(other)) else {
-            return Err(format!("no_address:{server}"));
+        let (Some(local), Some(remote)) = (hub.end_addr(link, server), hub.end_addr(link, other))
+        else {
+            let missing = if hub.end_addr(link, server).is_none() {
+                server
+            } else {
+                other
+            };
+            return Err(format!("{}:{missing}", no_address(link.ipv6)));
         };
         expect_ack(
             hub,
@@ -290,9 +327,11 @@ async fn bring_up(hub: &Hub, link: &Link) -> Result<(), String> {
     if reply.ok {
         Ok(())
     } else {
-        Err(match link.kind {
-            LinkKind::Gre => "gre_blocked".to_owned(),
-            LinkKind::Vxlan => format!("vxlan_blocked:{}", link.port),
+        Err(match (link.kind, link.ipv6) {
+            (LinkKind::Gre, false) => "gre_blocked".to_owned(),
+            (LinkKind::Gre, true) => "gre6_blocked".to_owned(),
+            (LinkKind::Vxlan, false) => format!("vxlan_blocked:{}", link.port),
+            (LinkKind::Vxlan, true) => format!("vxlan6_blocked:{}", link.port),
         })
     }
 }
@@ -302,8 +341,8 @@ async fn bring_up(hub: &Hub, link: &Link) -> Result<(), String> {
 /// older than [`MTU_SINCE`] or offline, or ICMP filtered on the way).
 async fn path_mtu(hub: &Hub, link: &Link) -> Option<u32> {
     let (x, y) = tokio::join!(
-        path_mtu_from(hub, &link.a, &link.b),
-        path_mtu_from(hub, &link.b, &link.a)
+        path_mtu_from(hub, link, &link.a, &link.b),
+        path_mtu_from(hub, link, &link.b, &link.a)
     );
     match (x, y) {
         (Some(x), Some(y)) => Some(x.min(y)),
@@ -311,11 +350,11 @@ async fn path_mtu(hub: &Hub, link: &Link) -> Option<u32> {
     }
 }
 
-async fn path_mtu_from(hub: &Hub, from: &str, to: &str) -> Option<u32> {
+async fn path_mtu_from(hub: &Hub, link: &Link, from: &str, to: &str) -> Option<u32> {
     if !hub.is_online(from) || !hub.agent_since(from, MTU_SINCE) {
         return None;
     }
-    let remote = hub.addr_of(to)?;
+    let remote = hub.end_addr(link, to)?;
     hub.ask_as_within::<PmtuReply>(from, &Request::NetPmtu { remote }, PMTU_WAIT)
         .await
         .ok()?
@@ -328,7 +367,7 @@ async fn push_mtu(hub: &Hub, link: &Link) -> Vec<String> {
     let mut later = Vec::new();
     for server in [&link.a, &link.b] {
         let other = if &link.a == server { &link.b } else { &link.a };
-        let told = match (hub.addr_of(server), hub.addr_of(other)) {
+        let told = match (hub.end_addr(link, server), hub.end_addr(link, other)) {
             (Some(local), Some(remote)) if hub.is_online(server) => {
                 let net = spec_for(link, server, &local, &remote, hub.mtu_of(link, server));
                 expect_ack(hub, server, Request::NetUp { net })
@@ -352,8 +391,8 @@ async fn fit_mtu(hub: &Hub, link: Link) -> Link {
     let Some(path) = path_mtu(hub, &link).await else {
         return link;
     };
-    let mtu = crate::net::mtu_for_path(link.kind, path);
-    if mtu >= crate::net::max_mtu(link.kind)
+    let mtu = crate::net::mtu_for_path(link.kind, link.ipv6, path);
+    if mtu >= crate::net::max_mtu(link.kind, link.ipv6)
         || hub.networks.set_mtu(&link.id, mtu, "measured").is_err()
     {
         return link;
@@ -402,14 +441,14 @@ pub async fn set_link_mtu(hub: &Hub, id: &str, choice: MtuChoice) -> Result<MtuS
             bail!("old_agent_mtu:{server}:{}", hub.version_of(server));
         }
     }
-    let most = crate::net::max_mtu(link.kind);
+    let most = crate::net::max_mtu(link.kind, link.ipv6);
     let (mtu, how, path) = match choice {
         MtuChoice::Measure => {
             let path = path_mtu(hub, &link)
                 .await
                 .ok_or_else(|| anyhow!("mtu_unknown"))?;
             (
-                crate::net::mtu_for_path(link.kind, path),
+                crate::net::mtu_for_path(link.kind, link.ipv6, path),
                 "measured",
                 Some(path),
             )
@@ -433,10 +472,24 @@ pub async fn set_link_mtu(hub: &Hub, id: &str, choice: MtuChoice) -> Result<MtuS
     })
 }
 
-/// Whether `server` can make links of `kind`: connected, with an agent new enough, and a
-/// kernel that allows it. Errors: `offline:ID`, `old_agent_vxlan:ID:VERSION`, `no_gre:ID`,
-/// `no_vxlan:ID`.
-pub async fn check_kind(hub: &Hub, server: &str, kind: LinkKind) -> Result<(), String> {
+/// The error for a server whose address is not known: `no_address`, or for a link over
+/// IPv6 `no_address6`.
+fn no_address(v6: bool) -> &'static str {
+    if v6 {
+        "no_address6"
+    } else {
+        "no_address"
+    }
+}
+
+/// Whether `server` can make links of `kind` (between IPv6 addresses when `v6`):
+/// connected, with an agent new enough, and a kernel that allows it. Errors: `offline:ID`,
+/// `old_agent_vxlan:ID:VERSION`, `old_agent_v6:ID:VERSION`, `no_gre:ID`, `no_vxlan:ID`,
+/// `no_gre6:ID`, `no_vxlan6:ID`.
+pub async fn check_kind(hub: &Hub, server: &str, kind: LinkKind, v6: bool) -> Result<(), String> {
+    if v6 && !hub.agent_since(server, IPV6_SINCE) {
+        return Err(format!("old_agent_v6:{server}:{}", hub.version_of(server)));
+    }
     if kind == LinkKind::Vxlan {
         let version = hub
             .snapshot()
@@ -452,21 +505,34 @@ pub async fn check_kind(hub: &Hub, server: &str, kind: LinkKind) -> Result<(), S
         .ask_as(server, &Request::NetStatus)
         .await
         .map_err(|_| format!("offline:{server}"))?;
-    match kind {
-        LinkKind::Gre if !status.gre => Err(format!("no_gre:{server}")),
-        LinkKind::Vxlan if !status.vxlan => Err(format!("no_vxlan:{server}")),
+    match (kind, v6) {
+        (LinkKind::Gre, false) if !status.gre => Err(format!("no_gre:{server}")),
+        (LinkKind::Vxlan, false) if !status.vxlan => Err(format!("no_vxlan:{server}")),
+        (LinkKind::Gre, true) if !status.gre6 => Err(format!("no_gre6:{server}")),
+        (LinkKind::Vxlan, true) if !status.vxlan6 => Err(format!("no_vxlan6:{server}")),
         _ => Ok(()),
     }
 }
 
-/// Checks that each server is connected, knows its public address, and can make links of
-/// `kind`.
-async fn check_servers(hub: &Hub, servers: &[&str], kind: LinkKind) -> Result<(), String> {
+/// Checks that each server is connected, knows its public address (its IPv6 one when
+/// `v6`), and can make links of `kind`.
+async fn check_servers(
+    hub: &Hub,
+    servers: &[&str],
+    kind: LinkKind,
+    v6: bool,
+) -> Result<(), String> {
     for server in servers {
-        if hub.addr_of(server).is_none() {
-            return Err(format!("no_address:{server}"));
+        let known = if v6 {
+            hub.addr6_of(server).is_some()
+        } else {
+            hub.addr_of(server)
+                .is_some_and(|a| a.parse::<Ipv4Addr>().is_ok())
+        };
+        if !known {
+            return Err(format!("{}:{server}", no_address(v6)));
         }
-        check_kind(hub, server, kind).await?;
+        check_kind(hub, server, kind, v6).await?;
     }
     Ok(())
 }
@@ -480,6 +546,19 @@ pub async fn ensure_link(
     x: &str,
     y: &str,
 ) -> Result<(Link, bool), String> {
+    ensure_link_as(hub, op, network, x, y, None).await
+}
+
+/// [`ensure_link`], over IPv6 or IPv4 as `ipv6` says (none: as the network's links are).
+/// A link that is there already is taken whichever way it runs.
+pub async fn ensure_link_as(
+    hub: &Hub,
+    op: &str,
+    network: &str,
+    x: &str,
+    y: &str,
+    ipv6: Option<bool>,
+) -> Result<(Link, bool), String> {
     let (a, b) = if x < y { (x, y) } else { (y, x) };
     if let Ok(existing) = hub.networks.links(Some(network)) {
         if let Some(link) = existing.into_iter().find(|l| l.a == a && l.b == b) {
@@ -491,28 +570,30 @@ pub async fn ensure_link(
         ops.end(op, false, Some(e.clone()));
         e
     };
-    let kind = hub
+    let (kind, net_v6) = hub
         .networks
         .networks()
         .ok()
         .and_then(|all| all.into_iter().find(|n| n.id == network))
-        .map(|n| n.kind)
+        .map(|n| (n.kind, n.ipv6))
         .unwrap_or_default();
+    let v6 = ipv6.unwrap_or(net_v6);
     ops.run(op, "net_check");
-    if let Err(e) = check_servers(hub, &[a, b], kind).await {
+    if let Err(e) = check_servers(hub, &[a, b], kind, v6).await {
         return Err(step_fail(e));
     }
     ops.end(op, true, None);
 
     ops.run(op, "net_alloc");
-    let link =
-        match hub
-            .networks
-            .create_links(network, &[(a.to_owned(), b.to_owned())], &hub.routes())
-        {
-            Ok(mut made) => made.remove(0),
-            Err(e) => return Err(step_fail(format!("{e:#}"))),
-        };
+    let link = match hub.networks.create_links_as(
+        network,
+        &[(a.to_owned(), b.to_owned())],
+        &hub.routes(),
+        Some(v6),
+    ) {
+        Ok(mut made) => made.remove(0),
+        Err(e) => return Err(step_fail(format!("{e:#}"))),
+    };
     ops.end(op, true, None);
 
     ops.run(op, "net_up");
@@ -536,6 +617,17 @@ pub fn create_links(
     servers: Vec<String>,
     hub_server: Option<String>,
 ) -> Result<String> {
+    create_links_as(hub, network, servers, hub_server, None)
+}
+
+/// [`create_links`], over IPv6 or IPv4 as `ipv6` says (none: as the network's links are).
+pub fn create_links_as(
+    hub: &Arc<Hub>,
+    network: &str,
+    servers: Vec<String>,
+    hub_server: Option<String>,
+    ipv6: Option<bool>,
+) -> Result<String> {
     if servers.len() < 2 || hub_server.as_ref().is_some_and(|h| !servers.contains(h)) {
         bail!("bad_input");
     }
@@ -545,7 +637,7 @@ pub fn create_links(
     tokio::spawn(async move {
         let mut error = None;
         for (a, b) in mesh(&servers, hub_server.as_deref()) {
-            if let Err(e) = ensure_link(&hub, &op, &network, &a, &b).await {
+            if let Err(e) = ensure_link_as(&hub, &op, &network, &a, &b, ipv6).await {
                 error = Some(e);
                 break;
             }
@@ -553,6 +645,66 @@ pub fn create_links(
         hub.ops.finish(&op, error, None);
     });
     Ok(id)
+}
+
+/// Moves a link between its servers' IPv4 and IPv6 addresses, as an operation the browser
+/// follows: both servers are checked first (connected, an address of that family, a kernel
+/// and an agent that can), then the link is made again the other way on both and tested;
+/// if the path does not pass, the link is put back as it was. Its private addresses stay,
+/// so the tunnels over it need nothing (they lose their connections for a moment).
+pub fn set_link_family(hub: &Arc<Hub>, id: &str, ipv6: bool) -> Result<String> {
+    let Some(link) = hub.networks.links(None)?.into_iter().find(|l| l.id == id) else {
+        bail!("no_such_link");
+    };
+    let op = hub.ops.begin("network", &link.network)?;
+    let hub = hub.clone();
+    let id = op.clone();
+    tokio::spawn(async move {
+        let error = switch_family(&hub, &id, link, ipv6).await.err();
+        hub.ops.finish(&id, error, None);
+    });
+    Ok(op)
+}
+
+async fn switch_family(hub: &Hub, op: &str, link: Link, ipv6: bool) -> Result<(), String> {
+    let ops = &hub.ops;
+    let step_fail = |e: String| {
+        ops.end(op, false, Some(e.clone()));
+        e
+    };
+    ops.run(op, "net_check");
+    if link.ipv6 == ipv6 {
+        ops.end(op, true, None);
+        return Ok(());
+    }
+    if let Err(e) = check_servers(hub, &[&link.a, &link.b], link.kind, ipv6).await {
+        return Err(step_fail(e));
+    }
+    ops.end(op, true, None);
+
+    ops.run(op, "net_up");
+    let moved = Link {
+        ipv6,
+        mtu: 0,
+        mtu_how: String::new(),
+        ..link.clone()
+    };
+    if let Err(e) = hub.networks.set_ipv6(&link.id, ipv6) {
+        return Err(step_fail(format!("{e:#}")));
+    }
+    if let Err(e) = bring_up(hub, &moved).await {
+        // Back the way it was, MTU and all: it worked that way.
+        let _ = hub.networks.set_ipv6(&link.id, link.ipv6);
+        let _ = hub.networks.set_mtu(&link.id, link.mtu, &link.mtu_how);
+        let _ = bring_up(hub, &link).await;
+        return Err(step_fail(e));
+    }
+    ops.end(op, true, None);
+
+    ops.run(op, "net_mtu");
+    fit_mtu(hub, moved).await;
+    ops.end(op, true, None);
+    Ok(())
 }
 
 /// Whether `link` may go. A tunnel that listens on or dials one of its addresses keeps it in
@@ -654,6 +806,7 @@ mod tests {
             port: 0,
             mtu: 0,
             mtu_how: String::new(),
+            ipv6: false,
         }
     }
 
@@ -744,16 +897,16 @@ mod tests {
             (1372, 1372)
         );
         // a path of 1400 bytes (the issue's) fits a GRE link of 1372 and a VXLAN one of 1350
-        assert_eq!(crate::net::mtu_for_path(LinkKind::Gre, 1400), 1372);
-        assert_eq!(crate::net::mtu_for_path(LinkKind::Vxlan, 1400), 1350);
-        assert_eq!(crate::net::mtu_for_path(LinkKind::Gre, 1500), 1472);
+        assert_eq!(crate::net::mtu_for_path(LinkKind::Gre, false, 1400), 1372);
+        assert_eq!(crate::net::mtu_for_path(LinkKind::Vxlan, false, 1400), 1350);
+        assert_eq!(crate::net::mtu_for_path(LinkKind::Gre, false, 1500), 1472);
         assert_eq!(
-            crate::net::mtu_for_path(LinkKind::Gre, 9000),
+            crate::net::mtu_for_path(LinkKind::Gre, false, 9000),
             1472,
             "never above 1500's"
         );
         assert_eq!(
-            crate::net::mtu_for_path(LinkKind::Gre, 300),
+            crate::net::mtu_for_path(LinkKind::Gre, false, 300),
             576,
             "never below 576"
         );

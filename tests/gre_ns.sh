@@ -3,7 +3,8 @@
 # 192.0.2.1 and 192.0.2.2. `kariz-panel net` (what an agent does when the panel asks) makes
 # a GRE link between them; the private addresses must ping across it, a second link between
 # the same pair needs its own key, a filtered GRE path makes the ping fail, and `net down`
-# removes the interface. Then the same for VXLAN links (UDP, a VNI each, a port per network).
+# removes the interface. Then the same for VXLAN links (UDP, a VNI each, a port per network),
+# and for links between IPv6 addresses (ip6gre, VXLAN over IPv6).
 # Needs root (CI runs it with sudo) and the ip_gre module; VXLAN is skipped without its module.
 set -euo pipefail
 
@@ -253,6 +254,72 @@ else
         fi
     done
     echo "the VXLAN test passed"
+fi
+
+# ---- over IPv6 ----
+# The same servers with IPv6 addresses: an ip6gre link (and a VXLAN one) between them keeps
+# an IPv4 /30 of its own. A full-size packet that may not be fragmented crosses it, which
+# also shows the link has no 8-byte encapsulation limit option eating into its MTU.
+ip -n kza addr add 2001:db8::1/64 dev va nodad
+ip -n kzb addr add 2001:db8::2/64 dev vb nodad
+s6() { # name side local remote key address peer mtu [kind port]
+    cat >"$WORK/$1-$2.toml" <<EOF
+name = "$1"
+local = "$3"
+remote = "$4"
+key = $5
+address = "$6"
+peer = "$7"
+prefix = 30
+mtu = $8
+EOF
+    if [[ -n "${9:-}" ]]; then
+        printf 'kind = "%s"\nport = %s\n' "$9" "${10}" >>"$WORK/$1-$2.toml"
+    fi
+}
+if ! ip netns exec kza "$BIN" net status | grep -q '"gre6":true'; then
+    echo "::warning::this kernel cannot make ip6gre interfaces; the IPv6 test was skipped"
+else
+    s6 kz-six a 2001:db8::1 2001:db8::2 1 10.80.0.1 10.80.0.2 1452
+    s6 kz-six b 2001:db8::2 2001:db8::1 1 10.80.0.2 10.80.0.1 1452
+    ip netns exec kza "$BIN" net up "$WORK/kz-six-a.toml" --state "$WORK/a-state.toml"
+    ip netns exec kzb "$BIN" net up "$WORK/kz-six-b.toml" --state "$WORK/b-state.toml"
+    ip netns exec kza "$BIN" net ping kz-six --state "$WORK/a-state.toml"
+    ip -n kza -d link show kz-six | grep -q 'ip6gre'
+    ip -n kza -d link show kz-six | grep -q 'mtu 1452'
+    # 1452 bytes: 1424 of ICMP payload, 28 of IPv4 and ICMP headers
+    ip netns exec kza ping -c 2 -W 2 -M 'do' -s 1424 10.80.0.2 >/dev/null
+    echo "ip6gre: the private addresses answer, full-size packets cross whole"
+    test "$(ip netns exec kza "$BIN" net pmtu 2001:db8::2)" = 1500
+    echo "the path MTU is measured over IPv6"
+
+    if command -v ip6tables >/dev/null; then
+        ip netns exec kzb ip6tables -A INPUT -p gre -j DROP
+        if ip netns exec kza "$BIN" net ping kz-six --state "$WORK/a-state.toml" >/dev/null; then
+            echo "the ping passed with GRE over IPv6 filtered" >&2
+            exit 1
+        fi
+        ip netns exec kzb ip6tables -D INPUT -p gre -j DROP
+        ip netns exec kza "$BIN" net ping kz-six --state "$WORK/a-state.toml" >/dev/null
+        echo "ip6gre: a filtered path fails the test"
+    fi
+
+    if ip netns exec kza "$BIN" net status | grep -q '"vxlan6":true'; then
+        s6 kz-vsix a 2001:db8::1 2001:db8::2 9 10.80.0.5 10.80.0.6 1430 vxlan 4789
+        s6 kz-vsix b 2001:db8::2 2001:db8::1 9 10.80.0.6 10.80.0.5 1430 vxlan 4789
+        ip netns exec kza "$BIN" net up "$WORK/kz-vsix-a.toml" --state "$WORK/a-state.toml"
+        ip netns exec kzb "$BIN" net up "$WORK/kz-vsix-b.toml" --state "$WORK/b-state.toml"
+        ip netns exec kza "$BIN" net ping kz-vsix --state "$WORK/a-state.toml"
+        ip netns exec kza ping -c 2 -W 2 -M 'do' -s 1402 10.80.0.6 >/dev/null
+        echo "vxlan over IPv6: the private addresses answer, full-size packets cross whole"
+        ip netns exec kza "$BIN" net down kz-vsix
+    fi
+    ip netns exec kza "$BIN" net down kz-six
+    if ip -n kza link show kz-six >/dev/null 2>&1; then
+        echo "kz-six is still there" >&2
+        exit 1
+    fi
+    echo "the IPv6 test passed"
 fi
 
 # down removes the interface

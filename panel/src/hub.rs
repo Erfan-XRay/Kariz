@@ -141,6 +141,10 @@ pub struct ServerView {
     /// The address it is known by (its public IPv4, else IPv6): what private networks use
     /// while none was set.
     pub addr_default: Option<String>,
+    /// The same for links over IPv6: the IPv6 address that was set, and the one used while
+    /// none was (its public IPv6, or the last one it was known by).
+    pub addr6: Option<String>,
+    pub addr6_default: Option<String>,
     pub seen_secs: Option<u64>,
     /// The transport its agent's link uses now (`tcpmux`, `kcp`, `wss` or `quic`); none for the panel's
     /// own server and for one that is offline.
@@ -540,6 +544,81 @@ impl Hub {
         Ok(())
     }
 
+    /// The IPv6 address other servers reach `server` at, for a link over IPv6: the one that
+    /// was set, else its public IPv6 address (what its agent reports, or where its link comes
+    /// from), else the one it was last known by. `None` while the panel knows none.
+    pub fn addr6_of(&self, server: &str) -> Option<String> {
+        if let Some(chosen) = self.addr6_row(server, true) {
+            return Some(chosen);
+        }
+        let live = {
+            let live = self.live();
+            live.get(server)
+                .and_then(|l| addresses(l.health.as_ref(), l.peer_ip).1)
+        };
+        match live.filter(|a| collect::public_ip6(a)) {
+            Some(addr) => {
+                let _ = self.db.conn().execute(
+                    "INSERT INTO server_addr6 (server, addr, chosen) VALUES (?1, ?2, 0)
+                     ON CONFLICT (server) DO UPDATE SET addr = excluded.addr
+                     WHERE chosen = 0 AND addr != excluded.addr",
+                    params![server, addr],
+                );
+                Some(addr)
+            }
+            None => self.addr6_row(server, false),
+        }
+    }
+
+    /// The IPv6 address kept for `server`: the one the admin set (`chosen`), or the one it
+    /// was last known by.
+    fn addr6_row(&self, server: &str, chosen: bool) -> Option<String> {
+        self.db
+            .conn()
+            .query_row(
+                "SELECT addr FROM server_addr6 WHERE server = ?1 AND chosen = ?2",
+                params![server, chosen],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// Sets (or with an empty address, clears) the IPv6 address other servers reach
+    /// `server` at over IPv6 links. A server that is not known is refused.
+    pub fn set_addr6(&self, server: &str, addr: &str) -> Result<()> {
+        if server != LOCAL
+            && self
+                .db
+                .conn()
+                .query_row("SELECT 1 FROM servers WHERE id = ?1", [server], |_| Ok(()))
+                .optional()?
+                .is_none()
+        {
+            bail!("no_such_server");
+        }
+        let addr = addr.trim();
+        if addr.is_empty() {
+            self.db.conn().execute(
+                "DELETE FROM server_addr6 WHERE server = ?1 AND chosen = 1",
+                [server],
+            )?;
+            return Ok(());
+        }
+        if !crate::netops::valid_addr6(addr) {
+            bail!("bad_input");
+        }
+        // Written as the address parses, so that one address has one spelling.
+        let addr = addr.parse::<std::net::Ipv6Addr>()?.to_string();
+        self.db.conn().execute(
+            "INSERT INTO server_addr6 (server, addr, chosen) VALUES (?1, ?2, 1)
+             ON CONFLICT (server) DO UPDATE SET addr = excluded.addr, chosen = 1",
+            params![server, addr],
+        )?;
+        Ok(())
+    }
+
     /// What the panel's own server is called: the name chosen at install (`kariz-manager panel
     /// install`, or `kariz-panel init --name`), else its host name.
     pub fn local_name(&self) -> String {
@@ -783,6 +862,7 @@ impl Hub {
         if name.is_some_and(|n| !join::valid_name(n)) {
             bail!("bad_input");
         }
+        let public_ip = &crate::netops::normal_addr(public_ip);
         let kind = self.join_kind(network, kind)?;
         let panels = self
             .gre_ready(None, public_ip, transport, way, kind)
@@ -836,6 +916,11 @@ impl Hub {
         let Some(name) = name.filter(|_| id != LOCAL) else {
             bail!("no_such_server");
         };
+        let public_ip = &crate::netops::normal_addr(public_ip);
+        let v6 = crate::netops::valid_addr6(public_ip);
+        if v6 && !self.agent_since(id, crate::netops::IPV6_SINCE) {
+            bail!("old_agent_v6:{id}:{}", self.version_of(id));
+        }
         let kind = self.join_kind(network, kind)?;
         // The server's own agent makes its end: an agent older than VXLAN would refuse it.
         if kind == LinkKind::Vxlan {
@@ -854,12 +939,14 @@ impl Hub {
             .await?;
         let network = self.network_for_join(network, kind)?;
         let before = self.saved_addr(id);
+        let before6 = self.addr6_row(id, true);
         let port_before = self.agent_port_of(id);
         let made = self
             .gre_join_code(id, &name, public_ip, &panels, &network, transport, way)
             .await;
         if made.is_err() {
             let _ = self.set_addr(id, before.as_deref().unwrap_or(""));
+            let _ = self.set_addr6(id, before6.as_deref().unwrap_or(""));
             if matches!(way, GreWay::Dial { own: Some(_), .. }) {
                 let _ = self.set_agent_port(id, port_before).await;
             }
@@ -878,16 +965,22 @@ impl Hub {
         way: GreWay,
         kind: LinkKind,
     ) -> Result<String> {
+        // An IPv6 address makes the link over IPv6, between it and the panel's own.
+        let v6 = crate::netops::valid_addr6(public_ip);
         if transport.is_some_and(|x| !join::valid_transport(x))
-            || !crate::netops::valid_addr(public_ip)
+            || !(crate::netops::valid_addr(public_ip) || v6)
             || matches!(way, GreWay::Reverse { port } if port == 0 || port == u16::MAX)
         {
             bail!("bad_input");
         }
-        let panels = self
-            .addr_of(LOCAL)
-            .filter(|a| a.parse::<std::net::Ipv4Addr>().is_ok())
-            .ok_or_else(|| anyhow!("no_address:{LOCAL}"))?;
+        let panels = if v6 {
+            self.addr6_of(LOCAL)
+                .ok_or_else(|| anyhow!("no_address6:{LOCAL}"))?
+        } else {
+            self.addr_of(LOCAL)
+                .filter(|a| a.parse::<std::net::Ipv4Addr>().is_ok())
+                .ok_or_else(|| anyhow!("no_address:{LOCAL}"))?
+        };
         if panels == public_ip {
             bail!("same_address");
         }
@@ -901,12 +994,19 @@ impl Hub {
         if let Some(other) = known
             .iter()
             .filter(|s| Some(s.as_str()) != server)
-            .find(|s| self.addr_of(s).as_deref() == Some(public_ip))
+            .find(|s| {
+                let theirs = if v6 {
+                    self.addr6_of(s)
+                } else {
+                    self.addr_of(s)
+                };
+                theirs.as_deref() == Some(public_ip)
+            })
         {
             bail!("address_taken:{other}");
         }
-        if kind == LinkKind::Vxlan {
-            crate::netops::check_kind(self, LOCAL, kind)
+        if kind == LinkKind::Vxlan || v6 {
+            crate::netops::check_kind(self, LOCAL, kind, v6)
                 .await
                 .map_err(|e| anyhow!(e))?;
             return Ok(panels);
@@ -961,7 +1061,12 @@ impl Hub {
         {
             self.set_agent_port(id, Some(want)).await?;
         }
-        self.set_addr(id, public_ip)?;
+        let v6 = crate::netops::valid_addr6(public_ip);
+        if v6 {
+            self.set_addr6(id, public_ip)?;
+        } else {
+            self.set_addr(id, public_ip)?;
+        }
         let existing = self
             .networks
             .links(Some(network))?
@@ -969,13 +1074,24 @@ impl Hub {
             .find(|l| (l.a == LOCAL && l.b == id) || (l.b == LOCAL && l.a == id));
         let made_here = existing.is_none();
         let link = match existing {
+            // The link there is moved to the family of the address given.
+            Some(l) if l.ipv6 != v6 => {
+                self.networks.set_ipv6(&l.id, v6)?;
+                crate::networks::Link {
+                    ipv6: v6,
+                    mtu: 0,
+                    mtu_how: String::new(),
+                    ..l
+                }
+            }
             Some(l) => l,
             None => self
                 .networks
-                .create_links(
+                .create_links_as(
                     network,
                     &[(LOCAL.to_owned(), id.to_owned())],
                     &self.routes(),
+                    Some(v6),
                 )?
                 .remove(0),
         };
@@ -1375,6 +1491,7 @@ impl Hub {
             conn.execute("DELETE FROM reverse_links WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM agent_ports WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM server_addrs WHERE server = ?1", [id])?;
+            conn.execute("DELETE FROM server_addr6 WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM server_seen WHERE server = ?1", [id])?;
             conn.execute("DELETE FROM pending_deletes WHERE server = ?1", [id])?;
             conn.execute(
@@ -1906,6 +2023,8 @@ impl Hub {
                     .map_or(host, |l| l.hostname.clone()),
                 addr: None,
                 addr_default: ip4.clone().or_else(|| ip6.clone()),
+                addr6: None,
+                addr6_default: None,
                 seen_secs: l.and_then(|l| l.seen).map(|s| s.elapsed().as_secs()),
                 link: l
                     .filter(|l| l.online)
@@ -1968,8 +2087,21 @@ impl Hub {
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
+        let addrs6: HashMap<String, (String, bool)> = {
+            let conn = self.db.conn();
+            let mut stmt = conn.prepare("SELECT server, addr, chosen FROM server_addr6")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
         for s in &mut out {
             s.addr = addrs.get(&s.id).cloned();
+            let kept6 = addrs6.get(&s.id);
+            s.addr6 = kept6.filter(|(_, chosen)| *chosen).map(|(a, _)| a.clone());
+            s.addr6_default = s
+                .ip6
+                .clone()
+                .filter(|a| collect::public_ip6(a))
+                .or_else(|| kept6.filter(|(_, chosen)| !*chosen).map(|(a, _)| a.clone()));
             s.reverse = reverse.remove(&s.id);
             s.agent_port = own_ports.get(&s.id).copied();
             // One the panel dials across a GRE link uses it, also while it is offline.
