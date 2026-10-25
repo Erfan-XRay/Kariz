@@ -32,10 +32,10 @@ script) the menu and the questions are numbered and read as lines.
 |---|---|
 | **1** Install or update Kariz | finds your CPU (x86_64, aarch64 or armv7), downloads the latest release, checks its SHA-256 and its signature, and installs `kariz`, `kariz-panel`, the systemd units and the `kariz-manager` command |
 | **2** Status and addresses | what runs on this server, its addresses and the panel's address |
-| **3** to **7** Web panel | install the panel here, make a login link, set the admin password, change the domain or IP and its certificate, remove the panel |
-| **8**, **9** Agent | connect this server to a panel with a join code, or disconnect it |
-| **10** Live logs | follow the panel's or the agent's log |
-| **11** Uninstall Kariz | stops and removes what it installed |
+| **3** to **8** Web panel | install the panel here, make a login link, set the admin password, change the domain or IP and its certificate (Let's Encrypt, or the files of one you have), change the panel's port, remove the panel |
+| **9**, **10** Agent | connect this server to a panel with a join code, or disconnect it |
+| **11** Live logs | follow the panel's or the agent's log |
+| **12** Uninstall Kariz | stops and removes what it installed |
 
 If GitHub limits your downloads (many servers behind one address), set `GITHUB_TOKEN` to any
 personal access token before running the script: it is used only to lift that limit.
@@ -53,7 +53,7 @@ kariz-manager install --binary ./kariz        # a binary you built yourself
    prints the panel's address and a one-time login link.
 2. Open the link in a browser and sign in. From here on, work in the panel:
    [Using the panel](using-the-panel.md).
-3. On every other server: run the one-liner and choose **8** (Connect to a panel), and paste the join
+3. On every other server: run the one-liner and choose **9** (Connect to a panel), and paste the join
    code the panel gave you (Servers, Add server). That server now shows up in the panel.
 4. Make tunnels in the panel, between any two of its servers.
 
@@ -72,6 +72,8 @@ kariz-manager panel link [--host H]                 # another one-time login lin
 kariz-manager panel password [--stdin | --random]  # a new admin password (asked twice, hidden)
 kariz-manager panel status | logs                   # the service, its address / follow the log
 kariz-manager panel cert [--domain D | --ip A]      # a new domain or IP address, with its certificate
+kariz-manager panel cert --cert-file F --key-file K # a certificate of your own (asked for in the menu too)
+kariz-manager panel port [N]                        # the port the panel opens on (asked without N)
 kariz-manager panel heal                            # a certificate for this server's new IP address (a timer runs it)
 kariz-manager panel uninstall [--yes]
 

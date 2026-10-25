@@ -31,7 +31,10 @@ then writes the settings, makes the database, starts the service `kariz-panel`, 
 - **The sign-in link** works once, for 60 minutes. Open it in the browser: it signs you in
   and disappears from the address bar. Make another any time with
   `kariz-manager panel link`.
-- **The ports** are random (above 20000). `--port N` chooses the panel's. Open both the
+- **The ports** are random (above 20000). The installer asks for the panel's (Enter keeps a
+  random one), and `--port N` gives it; `kariz-manager panel port` (menu item 7, *Panel port*)
+  changes it later. Only the address you open changes: the servers connected to the panel use
+  the agents' port, which stays as it is. Open both the
   panel's port (for you) and the agents' port (for your other servers: TCP and UDP, and TCP and UDP on the next port
   for `wss` and `quic`) in the firewall.
 
@@ -43,7 +46,7 @@ case, UPPER CASE, digits, symbols); or choose the one-time sign-in link only. Ch
 ## The certificate
 
 The panel is served only over a certificate the browser trusts, from Let's Encrypt. The installer
-asks which of two you want:
+asks which of two you want (or uses a certificate you have, below):
 
 - **A domain name** that points at this server (an A record). The certificate lasts 90 days.
 - **The server's own public IP address**, if you have no domain. Let's Encrypt issues these for
@@ -82,8 +85,11 @@ domain. Add `--email you@example.com` to be told before a certificate expires.
   free the port yourself. Open port 80 in the firewall.
 - **certbot 5.4 or later** does this (IP address certificates need it). If the system has none
   that new, the manager installs one for itself in `/opt/kariz-certbot` with pip.
-- **A certificate of your own:** `kariz-manager panel cert --cert-file F --key-file K` (Kariz does
-  not renew it).
+- **A certificate of your own:** choose *with a certificate I have already* when the installer
+  or `panel cert` asks, and give the paths of its full chain and its key (PEM, not in `/tmp`); or
+  `kariz-manager panel cert --cert-file F --key-file K`. The manager checks that the key is the
+  certificate's, and if the panel does not start with it, the panel keeps the one it had. Kariz
+  does not renew it: after you do, send the panel a SIGHUP (`systemctl kill -s HUP kariz-panel`).
 
 ## Connect another server
 

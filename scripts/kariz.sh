@@ -12,6 +12,8 @@
 #   kariz-manager panel install [--domain D | --ip ADDRESS] | link | password | status | logs | uninstall
 #   kariz-manager panel cert [--domain D | --ip ADDRESS]   change the domain or address of the panel
 #                                        (a new IP address is followed by itself: panel heal)
+#   kariz-manager panel cert --cert-file F --key-file K    a certificate of your own instead
+#   kariz-manager panel port [N]         the port the panel opens on
 #   kariz-manager --agent CODE [--yes]   connect this server to a panel (its join code); a
 #                                        server that is connected already is switched to it
 #   kariz-manager agent status | logs | remove
@@ -1090,6 +1092,16 @@ panel_install() {
     fi
     [[ -z "$name" ]] || valid_server_name "$name" ||
         die "The name is letters, digits, - _ . and at most 40 characters."
+    # The port the panel opens on: asked (Enter keeps a random one), or given with --port.
+    if [[ -z "$port" ]] && ((!yes)) && [[ ! -f "$PANEL_CONF" ]] && have_terminal; then
+        ask_panel_port port ""
+    fi
+    if [[ -n "$port" && ! -f "$PANEL_CONF" ]]; then
+        local problem
+        problem=$(panel_port_problem "$port")
+        [[ -z "$problem" ]] || die "Not port $port: $problem."
+        port=$((10#$port))
+    fi
     local init_args=(-c "$PANEL_CONF" --data-dir "$PANEL_DATA")
     [[ -z "$name" ]] || init_args+=(--name "$name")
     if [[ -n "$port" ]]; then
@@ -1101,16 +1113,21 @@ panel_install() {
     # the browser trusts); one that is already set up keeps what it has.
     if [[ ! -f "$PANEL_CONF" ]]; then
         if [[ -n "$cert" ]]; then
+            check_own_cert "$cert" "$key"
             init_args+=(--cert-file "$(own_file "$cert")" --key-file "$(own_file "$key")")
         else
             choose_identity "$domain" "$ip" "$yes" || die "Cancelled."
-            if [[ -z "$email" ]] && ((!yes)); then
-                ask email "Email for expiry notices (optional, Enter to skip)" ""
-            fi
-            get_cert "$CERT_IDENTITY" "$CERT_KIND" "$email" "$yes"
-            init_args+=(--cert-file "$CERT_LIVE/fullchain.pem" --key-file "$CERT_LIVE/privkey.pem")
-            printf '%s
+            if [[ "$CERT_KIND" == own ]]; then
+                init_args+=(--cert-file "$CERT_FILE" --key-file "$KEY_FILE")
+            else
+                if [[ -z "$email" ]] && ((!yes)); then
+                    ask email "Email for expiry notices (optional, Enter to skip)" ""
+                fi
+                get_cert "$CERT_IDENTITY" "$CERT_KIND" "$email" "$yes"
+                init_args+=(--cert-file "$CERT_LIVE/fullchain.pem" --key-file "$CERT_LIVE/privkey.pem")
+                printf '%s
 ' "$CERT_IDENTITY" >"$PANEL_DOMAIN"
+            fi
         fi
     fi
     local out fingerprint
@@ -1230,6 +1247,142 @@ panel_set_cert() {
     fi
     install -m 0600 "$tmp" "$PANEL_CONF"
     rm -f "$tmp"
+}
+
+# Stops with what is wrong with a certificate of your own: $1 the certificate chain (PEM), $2
+# its key. Both must be files, and the key the one of the certificate; an expired one is only
+# warned about.
+check_own_cert() {
+    local cert=$1 key=$2 a b
+    [[ -f "$cert" ]] || die "No such file: $cert"
+    [[ -f "$key" ]] || die "No such file: $key"
+    command -v openssl >/dev/null || return 0
+    a=$(openssl x509 -noout -pubkey -in "$cert" 2>/dev/null) ||
+        die "$cert is not a certificate in PEM (it starts with -----BEGIN CERTIFICATE-----)."
+    b=$(openssl pkey -pubout -in "$key" 2>/dev/null) ||
+        die "$key is not a private key in PEM (or it has a passphrase, which the panel cannot use)."
+    [[ "$a" == "$b" ]] || die "$key is not the key of $cert."
+    openssl x509 -noout -checkend 0 -in "$cert" >/dev/null 2>&1 ||
+        warn "$cert has expired: browsers will warn until you put a new one in its place."
+}
+
+# Asks for the files of a certificate of your own; sets CERT_FILE and KEY_FILE to them.
+ask_own_cert() {
+    CERT_FILE="" KEY_FILE=""
+    info "Kariz does not renew a certificate of your own: after you do, run kariz-manager panel cert again."
+    ask CERT_FILE "Certificate file (the full chain, PEM, like /etc/ssl/panel/fullchain.pem)"
+    ask KEY_FILE "Its private key file (PEM, like /etc/ssl/panel/privkey.pem)"
+    check_own_cert "$CERT_FILE" "$KEY_FILE"
+    CERT_FILE=$(own_file "$CERT_FILE")
+    KEY_FILE=$(own_file "$KEY_FILE")
+}
+
+# Makes the panel use a certificate of your own ($1 the chain, $2 the key), and goes back to
+# the one it had when the panel does not start with it.
+use_own_cert() {
+    local cert key old_cert old_key old_domain=""
+    check_own_cert "$1" "$2"
+    cert=$(own_file "$1")
+    key=$(own_file "$2")
+    old_cert=$(panel_setting cert_file)
+    old_key=$(panel_setting key_file)
+    [[ ! -s "$PANEL_DOMAIN" ]] || old_domain=$(head -n 1 "$PANEL_DOMAIN")
+    panel_set_cert "$cert" "$key"
+    rm -f "$PANEL_DOMAIN"
+    systemctl restart kariz-panel
+    sleep 2
+    if ! systemctl is-active --quiet kariz-panel; then
+        if [[ -n "$old_cert" ]]; then panel_set_cert "$old_cert" "$old_key"; else panel_set_cert; fi
+        [[ -z "$old_domain" ]] || printf '%s\n' "$old_domain" >"$PANEL_DOMAIN"
+        systemctl restart kariz-panel
+        die "The panel did not start with that certificate, so it keeps the one it had: journalctl -u kariz-panel -n 50"
+    fi
+    ok "The panel uses your certificate now. Kariz does not renew it: send the panel a SIGHUP after you do (systemctl kill -s HUP kariz-panel)."
+}
+
+# Whether $1 is a TCP port number.
+valid_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
+
+# What is wrong with $1 as the panel's port, or nothing: not a port, port 80 (Let's Encrypt
+# needs it), one of the agents' ports, or a port something else on this server listens on.
+panel_port_problem() {
+    local port=$1 agent="" users
+    if ! valid_port "$port"; then
+        echo "a port is a number from 1 to 65535"
+        return 0
+    fi
+    port=$((10#$port))
+    if ((port == 80)); then
+        echo "Let's Encrypt needs port 80 to give and renew certificates"
+        return 0
+    fi
+    if [[ -f "$PANEL_CONF" ]]; then
+        agent=$(panel_setting agent_listen)
+        agent=${agent##*:}
+    fi
+    if [[ -n "$agent" ]] && ((port == agent || port == agent + 1)); then
+        echo "the servers connected to the panel use $agent and $((agent + 1))"
+        return 0
+    fi
+    users=$(port_users "$port" | awk '$1 != "kariz-panel.service" { print $2 }' | sort -u | paste -sd, -)
+    [[ -z "$users" ]] || echo "$users listens on it already"
+}
+
+# Asks the panel's port until it will do, into the variable named $1. $2: the default; with
+# none, Enter leaves the variable empty (a random port).
+ask_panel_port() {
+    local _var=$1 _def=$2 _reply _problem
+    while true; do
+        if [[ -n "$_def" ]]; then
+            ask _reply "Port for the panel" "$_def"
+        else
+            ask _reply "Port for the panel (Enter: a random one from 20000 to 59999)" ""
+        fi
+        [[ -n "$_reply" ]] || break
+        [[ "$_reply" != "$_def" ]] || break
+        _problem=$(panel_port_problem "$_reply")
+        [[ -n "$_problem" ]] || break
+        warn "Not port $_reply: $_problem."
+    done
+    printf -v "$_var" '%s' "$_reply"
+}
+
+# `panel port [N]`: the port the panel opens on in the browser (asked, or N). The agents' ports
+# stay as they are, so the servers connected to the panel need nothing.
+panel_port() {
+    need_root
+    need_systemd
+    [[ -f "$PANEL_CONF" ]] || die "The panel is not installed: kariz-manager panel install"
+    local listen old port=${1:-} problem tmp
+    listen=$(panel_setting listen)
+    old=${listen##*:}
+    if [[ -z "$port" ]]; then
+        info "The panel opens on port $old now. The servers connected to it use the agents' port, which stays as it is."
+        ask_panel_port port "$old"
+    fi
+    valid_port "$port" && ((10#$port == old)) && {
+        info "The panel stays on port $old."
+        return 0
+    }
+    problem=$(panel_port_problem "$port")
+    [[ -z "$problem" ]] || die "Not port $port: $problem."
+    port=$((10#$port))
+    tmp=$(mktemp)
+    sed "s/^listen = \".*\"/listen = \"${listen%:*}:$port\"/" "$PANEL_CONF" >"$tmp"
+    install -m 0600 "$tmp" "$PANEL_CONF"
+    rm -f "$tmp"
+    systemctl restart kariz-panel
+    sleep 2
+    if ! systemctl is-active --quiet kariz-panel; then
+        tmp=$(mktemp)
+        sed "s/^listen = \".*\"/listen = \"$listen\"/" "$PANEL_CONF" >"$tmp"
+        install -m 0600 "$tmp" "$PANEL_CONF"
+        rm -f "$tmp"
+        systemctl restart kariz-panel
+        die "The panel did not start on port $port, so it stays on $old: journalctl -u kariz-panel -n 50"
+    fi
+    ok "The panel opens on port $port now (TCP: let it through a firewall if there is one; $old is not needed any more)."
+    panel_show "$(panel_host "")"
 }
 
 # Whether the certbot at $1 is new enough.
@@ -1414,10 +1567,13 @@ choose_identity() {
         local pick
         choose pick "How will you open the panel?" "$first" \
             "domain|I have a domain name that points at this server" \
-            "ip|only this server's IP address (a 6-day certificate, renewed by itself)"
+            "ip|only this server's IP address (a 6-day certificate, renewed by itself)" \
+            "own|with a certificate I have already (its files are on this server)"
         CERT_KIND=$pick
     fi
-    if [[ "$CERT_KIND" == domain ]]; then
+    if [[ "$CERT_KIND" == own ]]; then
+        ask_own_cert
+    elif [[ "$CERT_KIND" == domain ]]; then
         [[ -n "$CERT_IDENTITY" ]] || ask CERT_IDENTITY "Domain name (like panel.example.com)"
         [[ "$CERT_IDENTITY" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]] ||
             die "That is not a domain name: $CERT_IDENTITY"
@@ -1461,16 +1617,17 @@ panel_cert() {
     done
     if [[ -n "$cert$key" ]]; then
         # A certificate of your own (not renewed by Kariz).
-        [[ -f "$cert" && -f "$key" ]] || die "--cert-file and --key-file go together, and both must be files."
-        panel_set_cert "$(own_file "$cert")" "$(own_file "$key")"
-        rm -f "$PANEL_DOMAIN"
-        systemctl restart kariz-panel
-        ok "The panel uses your certificate now. Kariz does not renew it: send the panel a SIGHUP after you do (systemctl kill -s HUP kariz-panel)."
+        [[ -n "$cert" && -n "$key" ]] || die "--cert-file and --key-file go together."
+        use_own_cert "$cert" "$key"
         return 0
     fi
     local first=domain
     [[ -n "$domain$ip" ]] || cert_situation first
     choose_identity "$domain" "$ip" "$yes" "$first" || return 0
+    if [[ "$CERT_KIND" == own ]]; then
+        use_own_cert "$CERT_FILE" "$KEY_FILE"
+        return 0
+    fi
     if [[ -z "$email" ]] && ((!yes)); then
         ask email "Email for expiry notices (optional, Enter to skip)" ""
     fi
@@ -1486,7 +1643,10 @@ cert_situation() {
     local _first=domain old new resolved mine
     old=$(panel_identity)
     if [[ -z "$old" ]]; then
-        [[ -z "$(panel_setting cert_file)" ]] || info "The panel uses a certificate of your own ($(panel_setting cert_file))."
+        if [[ -n "$(panel_setting cert_file)" ]]; then
+            _first=own
+            info "The panel uses a certificate of your own ($(panel_setting cert_file))."
+        fi
     elif public_ip4 "$old"; then
         _first=ip
         if new=$(panel_new_ip); then
@@ -1627,6 +1787,7 @@ cmd_panel() {
             ;;
         logs) journalctl -u kariz-panel -n 100 -f ;;
         cert) panel_cert "$@" ;;
+        port) panel_port "$@" ;;
         cert-hook) cert_hook "$@" ;;
         heal) panel_heal ;;
         heal-setup)
@@ -1634,7 +1795,7 @@ cmd_panel() {
             ensure_heal_timer
             ;;
         uninstall) panel_uninstall "$@" ;;
-        *) die "panel: install [--port N] [--domain D | --ip A] [--name NAME] | name [NAME] | link | password [--stdin | --random] | cert [--domain D | --ip A] | heal | status | logs | uninstall [--yes]" ;;
+        *) die "panel: install [--port N] [--domain D | --ip A] [--name NAME] | name [NAME] | link | password [--stdin | --random] | cert [--domain D | --ip A] | port [N] | heal | status | logs | uninstall [--yes]" ;;
     esac
 }
 
@@ -1821,16 +1982,17 @@ MENU_ROWS=(
     "panel|3|Install the web panel here|The panel: servers, tunnels and charts in a browser, over HTTPS."
     "link|4|Login link|A one-time login link for the panel (works once, for 60 minutes)."
     "password|5|Admin password|Set a new admin password for the panel."
-    "cert|6|New IP, domain or certificate|The server's IP or domain changed, or a new certificate: get one from Let's Encrypt."
-    "premove|7|Remove the web panel|Stop and remove the panel. Asks first."
+    "cert|6|New IP, domain or certificate|The server's IP or domain changed, or a new certificate: Let's Encrypt or your own files."
+    "port|7|Panel port|The port the panel opens on in the browser. Connected servers need nothing."
+    "premove|8|Remove the web panel|Stop and remove the panel. Asks first."
     ""
     "#AGENT"
-    "agent|8|Connect to a panel|Paste a panel's join code: this server then shows up in that panel."
-    "aremove|9|Remove the agent|Disconnect from the panel; its tunnels keep running. Asks first."
+    "agent|9|Connect to a panel|Paste a panel's join code: this server then shows up in that panel."
+    "aremove|10|Remove the agent|Disconnect from the panel; its tunnels keep running. Asks first."
     ""
     "#SYSTEM"
-    "logs|10|Live logs|Follow the panel's or the agent's log. Ctrl+C comes back here."
-    "uninstall|11|Uninstall Kariz|Remove what Kariz installed on this server. Asks first."
+    "logs|11|Live logs|Follow the panel's or the agent's log. Ctrl+C comes back here."
+    "uninstall|12|Uninstall Kariz|Remove what Kariz installed on this server. Asks first."
     "exit|0|Exit|Close the menu. Run kariz-manager to open it again."
 )
 # The items whose number is drawn in red.
@@ -2270,6 +2432,7 @@ menu() {
             link) run_screen cmd_panel link ;;
             password) run_screen cmd_panel password ;;
             cert) run_screen cmd_panel cert ;;
+            port) run_screen cmd_panel port ;;
             premove) run_screen cmd_panel uninstall ;;
             agent) run_screen screen_agent ;;
             aremove) run_screen screen_agent_remove ;;
@@ -2300,6 +2463,7 @@ usage() {
   panel heal                                   a certificate for this server's new IP address,
                                                if it changed (a timer runs this every 10 minutes)
   panel cert --cert-file F --key-file K        use a certificate of your own instead
+  panel port [N]                               the port the panel opens on (asked without N)
   panel link | password [--stdin] | status | logs | uninstall [--yes]
   --agent CODE [--version V] [--yes]           connect this server to a panel (an agent that is
                                                here already is replaced by the new one)
