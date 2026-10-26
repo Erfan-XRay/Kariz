@@ -157,6 +157,40 @@ test.describe("the tunnel", () => {
     front = newFront;
   });
 
+  test("shows its usage, and its server's with a quota", async ({ page }) => {
+    await signIn(page);
+    await goTo(page, "tunnels");
+    // Both sides run on this one machine, over the loopback, which no provider counts: the
+    // numbers stay near zero here, so this checks the page and the panel's answers.
+    await expect(page.locator(".tunnels th", { hasText: "This month" })).toBeVisible();
+    await page.locator(".tunnels tr", { hasText: "demo" }).click();
+    await page.getByRole("tab", { name: "Usage" }).click();
+    const usage = page.locator("#td-panel-usage .usage");
+    await expect(usage.locator(".us-amount")).toHaveCount(4);
+    await expect(usage.locator(".us-amount").first()).toContainText("Today");
+    // days picked on the calendar: today alone
+    await usage.getByRole("button", { name: "Pick days…" }).click();
+    await page.locator(".dialog .cal-day.today").click();
+    await page.locator(".dialog").getByRole("button", { name: "Show" }).click();
+    await expect(page.locator(".dialog")).toHaveCount(0);
+    await expect(usage.locator(".us-range-head")).toBeVisible();
+
+    // A server's usage: its network card counts (the CI machine's), and a quota is set.
+    await goTo(page, "servers");
+    await page.locator(".srv").first().getByRole("button", { name: "Usage" }).click();
+    const dialog = page.locator(".dialog.wide");
+    await expect(dialog.getByRole("button", { name: "Network card" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Set a quota" }).click();
+    await page.locator("#q-amount").fill("1");
+    await page.locator(".dialog:not(.wide)").getByRole("button", { name: "Save" }).click();
+    await expect(dialog.locator(".us-quota")).toBeVisible({ timeout: 10_000 });
+    await expect(dialog.locator(".us-quota-head")).toContainText(/ 1(.0+)? TB/);
+    // and removed again
+    await dialog.getByRole("button", { name: "Edit quota" }).click();
+    await page.locator(".dialog:not(.wide)").getByRole("button", { name: "Remove quota" }).click();
+    await expect(dialog.locator(".us-quota")).toHaveCount(0, { timeout: 10_000 });
+  });
+
   test("is stopped, started again and deleted, from its page", async ({ page }) => {
     await signIn(page);
     await goTo(page, "tunnels");

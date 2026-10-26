@@ -320,7 +320,11 @@ export function Dialog({
   closing.current = onClose;
   useEffect(() => {
     const id = requestAnimationFrame(() => setOn(true));
-    const key = (e: KeyboardEvent) => e.key === "Escape" && closing.current();
+    // Escape closes the dialog on top only: one opened from another leaves its parent open.
+    const key = (e: KeyboardEvent) => {
+      const open = document.querySelectorAll(".dialog-backdrop[role=dialog]");
+      if (e.key === "Escape" && open[open.length - 1] === backdrop.current) closing.current();
+    };
     addEventListener("keydown", key);
     ref.current?.querySelector<HTMLElement>("input, button:not(.x-btn)")?.focus();
     return () => {

@@ -167,3 +167,45 @@ first, about 5 seconds after the start):
 
 The web panel shows this on each tunnel's page and in *Needs attention*, and the Telegram
 bot tells when three probes in a row fail ([Telegram](telegram.md)).
+
+### `wire`: what the network really carried
+
+From 2.7.0-beta.2. `totals` counts the users' bytes; `wire` counts everything this side's
+sockets put on the network and took from it: the users' bytes on every leg, the tunnel's
+encryption and framing, handshakes and pings, TCP's retransmissions, KCP's resends and FEC
+parity, and the IP, TCP and UDP headers. It is what the panel's
+[usage](using-the-panel.md#usage) is made from.
+
+```json
+"wire": {
+  "exact": true,
+  "user":   { "sent": { "bytes": 2219041832, "packets": 1520342, "headers": 79057784, "resend": 312904 },
+              "received": { "bytes": 141327210, "packets": 790311, "headers": 41096172, "resend": 0 } },
+  "link":   { "sent": { "...": 0 }, "received": { "...": 0 } },
+  "target": { "sent": { "...": 0 }, "received": { "...": 0 } },
+  "local":  { "sent": { "...": 0 }, "received": { "...": 0 } },
+  "tests": 0
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `user`, `link`, `target` | the three legs: users and the entry side; the two sides of the tunnel; the exit side and the targets. Each has `sent` and `received` |
+| `local` | sockets over the loopback (a target or a user on the same server). Their bytes reach no network card, so the panel leaves them out |
+| `bytes` | everything at the IP level, since the side started: payload, `headers` and `resend` |
+| `packets` | TCP segments (as the kernel counts them, with retransmissions and bare ACKs) or UDP datagrams |
+| `headers` | IP (20 bytes, 40 over IPv6) plus TCP (20, and 12 more for the timestamps Linux puts in every segment) or UDP (8) for each packet |
+| `resend` | of `bytes`, what was sent again: TCP retransmissions, KCP resends, FEC parity |
+| `tests` | bytes of speed tests, which are in the link's bytes too |
+| `exact` | `false` where TCP could not be read from the kernel (not Linux, or a kernel older than 4.19, without the retransmitted bytes) |
+
+How it is counted: every TCP socket (users, the link, targets) is read with `TCP_INFO`, the
+kernel's own counters (bytes sent with retransmissions, bytes received, segments each way), when
+the status is asked for and once more just before the socket closes. UDP is counted packet by
+packet where it is sent and received: the forwarded ports, KCP's socket, and a socket below QUIC
+(below the seal of `quic.obfs`, so the 28 bytes it adds are in). Nothing runs in the background.
+
+Not in here, because the daemon cannot see them: the link layer's header (14 bytes a packet on
+Ethernet) and a GRE or VXLAN link's own header. The panel adds both from what the server's agent
+reports and from the links it made. The handful of packets a TCP connection exchanges after it
+is closed (the last FIN and ACK) are not counted either.

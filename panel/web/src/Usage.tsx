@@ -391,7 +391,7 @@ function DayPicker({ settings, from, to, onPick, onClose }: { settings: UsageSet
             </span>
           </button>
         </div>
-        <div className="cal-grid" role="grid">
+        <div className="cal-grid">
           {names.map((n, i) => (
             <span key={`h${i}`} className="cal-wd" aria-hidden="true">
               {n}

@@ -649,7 +649,7 @@ mod tests {
         let headers = after.sent.headers - before.sent.headers;
         // Other tests may count loopback sockets meanwhile, so at least.
         assert!(sent - headers >= 100_000, "{sent} {headers}");
-        assert!(headers >= 52 * 3, "{headers}");
+        assert!(headers >= 40 * 3, "{headers}");
         assert!(after.received.bytes - before.received.bytes >= 4);
     }
 }

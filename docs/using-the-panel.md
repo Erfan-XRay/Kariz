@@ -77,6 +77,48 @@ step failed and why. You cannot end with half a tunnel.
 - **Logs:** pick a tunnel and read both sides interleaved by time. Filter by level or text.
 - **Events:** a server going offline, a tunnel losing its connection, and coming back.
 
+### Usage
+
+How much each tunnel and server has used, the way a provider counts it: on the network, with
+everything that goes with the users' bytes.
+
+- **A tunnel's Usage tab:** today, this week, this month and in total (since it was first
+  counted), download and upload, and what it used on each of its two servers. The chart shows
+  today by the hour, 7 or 30 days, this month by the day, this year by the month, or days you
+  pick on a calendar (*Pick days…*: one day, or a first and a last). *Breakdown* splits it into:
+  - **Users' data:** the users' bytes, counted on every leg they cross. A byte a user downloads
+    crosses the entry server twice (in from the exit, out to the user), so on the entry server it
+    counts twice: that is what its provider sees. A target on the same server (Xray on
+    `127.0.0.1`) is reached over the loopback, which no provider counts, so that leg is left out.
+  - **Tunnel overhead:** what the tunnel adds on its link: encryption, framing, handshakes,
+    keepalives, health probes, UDP copies.
+  - **Resends and FEC:** what was sent again (TCP retransmissions, KCP resends) and FEC parity.
+    Large on a lossy line.
+  - **Packet headers:** IP, TCP and UDP headers, the Ethernet header, and a GRE or VXLAN link's
+    own header when the tunnel goes over one.
+- **A server's card** shows this month's usage and, if it has one, its quota. **Usage** on the
+  card opens its chart: the network card's totals (what the provider bills: the real cards, not
+  GRE/VXLAN links, bridges or docker counted twice), how much of the month its tunnels were, and
+  *Its tunnels* to chart those alone.
+- **Monthly quota:** many providers give a server a volume a month (2 TB, say). Set it on the
+  server's Usage: the volume, what counts (download and upload, upload only as Hetzner bills, or
+  download only), the day of the month it renews on, and the share to warn at (80% by default).
+  The card shows how much is used; at the warning and when it is used up, the log says so and
+  [Telegram](telegram.md) tells you, once each period.
+- **Reset usage** (a tunnel's tab, or a server's Usage, optionally with its tunnels) deletes what
+  was counted and starts again from now. Deleting a tunnel deletes its usage; removing a server
+  deletes its own and its tunnel sides'.
+- **Calendar and time zone** are in *Settings → Usage*: Solar Hijri (the default) or Gregorian,
+  and where a day starts (Tehran by default). Months, weeks (from Saturday in the Solar Hijri
+  calendar, from Monday in the Gregorian) and quota periods follow them.
+
+The panel keeps 15-minute sums for 90 days and daily sums for good, a few hundred kilobytes a
+tunnel a year. Every reading is compared with the last one kept, so restarting the panel, a
+tunnel or a server loses nothing and counts nothing twice; only what a tunnel moved in the
+moments before it crashed while the panel could not see it is lost. Exact counts need Kariz
+2.7.0-beta.2 on the servers; a tunnel on an older one shows the users' bytes alone, marked as an
+estimate. How it is counted: [Status](status.md#wire-what-the-network-really-carried).
+
 ## 5. Change, stop, test, delete
 
 Open the tunnel, then:
