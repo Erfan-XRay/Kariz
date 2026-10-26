@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 2.7.0-beta.2 - 2026-10-26
+
+A **beta**, like [2.7.0-beta.1](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#270-beta1---2026-10-25):
+only panels on the *Beta* channel are offered it; `kariz-manager update` and the stable channel
+stay on 2.6.1. To try it on a server by hand: `kariz-manager install --version v2.7.0-beta.2`.
+
+The panel now shows **how much every tunnel and server has used**, the way a provider counts it:
+on the network, with headers, resends and the tunnel's own overhead, split from the users' data, on
+charts by hour, day or month in the Solar Hijri or Gregorian calendar. A server can have a **monthly
+quota** that warns in the log and on Telegram. Update the panel first, then the servers from the
+panel: exact counts need this version on the servers too.
 
 ### Added
 
