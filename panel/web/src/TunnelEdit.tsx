@@ -18,6 +18,7 @@ import { GreChoice, linkWithAddress } from "./GreChoice";
 import { useNetworks } from "./Networks";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, splitTransport } from "./transport";
 import { PROFILES, addressesOf, hostOf, parsePorts, portOf } from "./Wizard";
+import { Choice, More, noteOf, pairOf } from "./Choice";
 import { benchLabel, isV6 } from "./Benchmark";
 import type { BenchChoice } from "./Benchmark";
 
@@ -303,22 +304,32 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   };
 
   const names = new Map(servers.map((x) => [x.id, x.name]));
-  const choose = (list: readonly string[], value: string, set: (v: string) => void, text: (v: string) => [string, string]) => (
-    <div className="tiles" role="radiogroup">
-      {list.map((x) => {
-        const [title, hint] = text(x);
-        return (
-          <button key={x} type="button" role="radio" aria-checked={value === x} className="tile" onClick={() => set(x)}>
-            <span className="t1">{title}</span>
-            <span className="t2">{hint}</span>
-            <span className="tick">
-              <Icon name="check" size={14} />
-            </span>
-          </button>
-        );
-      })}
-    </div>
+  const locked = running || op?.state === "done";
+  // The folded card: what is set in it (or what it holds), and whether the error is about one of its fields.
+  const udpPorts = protocol.includes("udp");
+  const moreNote = noteOf(
+    [
+      transport !== "quic" && enc !== "auto" && t(`enc.${enc}`),
+      transport === "quic" && obfs && "obfs",
+      MUX_OPTIONAL.includes(transport) && !muxOn && pairOf("mux", t("mux.off")),
+      !!muxSpec.spec && t("mux.title"),
+      isWs && wsPath !== "/" && pairOf(t("wz.wsPath"), wsPath),
+      isWs && wsHost && pairOf("Host", wsHost),
+      transport === "wss" && tls.mode === "self" && sni && pairOf("SNI", sni),
+      transport === "tcp" && !muxOn && pool !== undefined && pairOf(t("wz.pool"), pool),
+      perIp && pairOf(t("perip.title"), perIp),
+      udpPorts && udpFlows && pairOf(t("udpflows.title"), udpFlows),
+      !!proxyOf(proxy, protocol) && pairOf(t("proxy.short"), proxy),
+      rotate && t("te.rotateOn"),
+    ],
+    [t("enc.title"), "mux", t("perip.title"), protocol !== "udp" && t("proxy.short"), t("te.token")],
   );
+  const moreBad =
+    !cipherReady(enc, transport, encAck) ||
+    !!muxSpec.bad ||
+    !!perIpOf(perIp).bad ||
+    (udpPorts && !!udpFlowsOf(udpFlows).bad) ||
+    (isWs && !wsPath.startsWith("/"));
 
   return (
     <div className="page is-on tunnel-edit">
@@ -360,7 +371,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
         </section>
       ) : (
         <>
-          <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>
+          <fieldset className="card edit-sec" disabled={locked}>
             <legend>{t("te.servers")}</legend>
             <p className="muted small">{t("te.serversLead")}</p>
             <div className="te-servers">
@@ -411,27 +422,16 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
             {certMoved && wasAcceptor !== acceptor && <p className="help warn-text">{t("te.certMoved", { server: serverName(acceptor) })}</p>}
           </fieldset>
 
-          <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>
+          <fieldset className="card edit-sec" disabled={locked}>
             <legend>{t("te.how")}</legend>
-            <div className="field">
-              <span className="label">{t("wz.q2")}</span>
-              <Seg value={mode} options={[["reverse", t("wz.mode.reverse")], ["direct", t("wz.mode.direct")]]} onChange={setMode} />
-              <span className="help">{t(`wz.mode.${mode}.d`)}</span>
-            </div>
-            <div className="field">
-              <span className="label">{t("wz.transport")}</span>
-              {choose(TRANSPORTS, transport, setTransport, (x) => [x, t(`wz.tr.${x}`)])}
+            <Choice label={t("wz.modeLabel")} value={mode} options={[["reverse", t("wz.mode.reverse")], ["direct", t("wz.mode.direct")]]} onChange={setMode} hint={t(`wz.mode.${mode}.d`)} />
+            <Choice label={t("wz.transport")} mono value={transport} options={TRANSPORTS.map((x) => [x, x])} onChange={setTransport} hint={t(`wz.tr.${transport}`)}>
               {joinTransport(transport, muxOn).core !== tunnel.transport && <span className="help warn-text">{t("te.transportChange")}</span>}
-            </div>
-            <div className="field">
-              <span className="label">{t("wz.profile")}</span>
-              {choose(PROFILES, profile, setProfile, (x) => [t(`wz.pf.${x}`), t(`wz.pf.${x}.d`)])}
-            </div>
-            <EncryptionChoice value={enc} onChange={setEnc} transport={transport} ack={encAck} onAck={setEncAck} />
-            {transport === "quic" && <QuicObfs value={obfs} onChange={setObfs} />}
+            </Choice>
+            <Choice label={t("wz.profile")} value={profile} options={PROFILES.map((x) => [x, t(`wz.pf.${x}`)])} onChange={setProfile} hint={t(`wz.pf.${profile}.d`)} />
           </fieldset>
 
-          <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>
+          <fieldset className="card edit-sec" disabled={locked}>
             <legend>{t("te.where")}</legend>
             <p className="muted small">{t("wz.lead3", { acceptor: serverName(acceptor), dialer: serverName(dialer) })}</p>
             <GreChoice value={netId} onChange={chooseNetwork} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} />
@@ -441,6 +441,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                 <label htmlFor="te-port">{t("wz.port", { server: serverName(acceptor) })}</label>
                 <input className="text mono" id="te-port" dir="ltr" inputMode="numeric" value={listenPort} onChange={(e) => setListenPort(e.target.value.trim())} />
                 {transport === "auto" && <span className="help">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</span>}
+                {(transport === "quic" || transport === "kcp") && <span className="help">{t("wz.portUdp")}</span>}
               </div>
               <div className="field" hidden={!!netId}>
                 <label htmlFor="te-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>
@@ -456,53 +457,14 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                 )}
                 {mode === "direct" && <span className="help">{t("wz.directHelp", { server: serverName(acceptor), port: listenPort })}</span>}
               </div>
-              {isWs && (
-                <div className="field">
-                  <label htmlFor="te-ws">{t("wz.wsPath")}</label>
-                  <input className="text mono" id="te-ws" dir="ltr" value={wsPath} onChange={(e) => setWsPath(e.target.value.trim())} />
-                </div>
-              )}
-              {isWs && (
-                <div className="field">
-                  <label htmlFor="te-wshost">{t("wz.wsHost")}</label>
-                  <input className="text mono" id="te-wshost" dir="ltr" value={wsHost} placeholder="cdn.example.com" onChange={(e) => setWsHost(e.target.value.trim())} />
-                  <span className="help">{t("wz.wsHostHelp")}</span>
-                </div>
-              )}
-              {transport === "wss" && (
-                <div style={{ gridColumn: "1 / -1" }}>
-                  <TlsChoice value={tls} onChange={setTls} server={acceptor} serverName={serverName(acceptor)} onHost={(h) => setDialHost(h)} />
-                </div>
-              )}
-              {transport === "wss" && tls.mode === "self" && (
-                <div className="field">
-                  <label htmlFor="te-sni">{t("wz.sni")}</label>
-                  <input className="text mono" id="te-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
-                  <span className="help">{t("wz.sniHelp")}</span>
-                </div>
-              )}
-              {transport === "tcp" && !muxOn && (
-                <div className="field">
-                  <label htmlFor="te-pool">{t("wz.pool")}</label>
-                  <input
-                    className="text mono"
-                    id="te-pool"
-                    dir="ltr"
-                    inputMode="numeric"
-                    value={pool ?? ""}
-                    placeholder="8"
-                    onChange={(e) => setPool(/^\d{1,3}$/.test(e.target.value.trim()) ? +e.target.value.trim() : undefined)}
-                  />
-                  <span className="help">{t("wz.poolHelp")}</span>
-                </div>
-              )}
             </div>
+            {transport === "wss" && <TlsChoice value={tls} onChange={setTls} server={acceptor} serverName={serverName(acceptor)} onHost={(h) => setDialHost(h)} />}
           </fieldset>
 
-          <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>
+          <fieldset className="card edit-sec" disabled={locked}>
             <legend>{t("te.ports")}</legend>
             <p className="muted small">{t("wz.lead4")}</p>
-            <div className="field" style={{ maxWidth: 520 }}>
+            <div className="field wz-narrow">
               <label htmlFor="te-ports">{t("wz.ports")}</label>
               <input className="text mono" id="te-ports" dir="ltr" value={ports} placeholder="443, 8080-8090" onChange={(e) => setPorts(e.target.value)} />
               <span className="help">{t("wz.portsHelp")}</span>
@@ -517,35 +479,89 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
               {parsed.forwards.length > 40 && <span className="pchip">+{parsed.forwards.length - 40}</span>}
               {parsed.bad && <span className="pchip bad">{parsed.bad}</span>}
             </div>
-            <div className="grid-2" style={{ maxWidth: 520 }}>
+            <div className="grid-2 wz-narrow">
               <div className="field">
                 <span className="label">{t("wz.protocol")}</span>
-                <Seg value={protocol} options={[["tcp", "TCP"], ["udp", "UDP"], ["tcp+udp", "TCP+UDP"]]} onChange={setProtocol} />
+                <Seg value={protocol} options={[["tcp", "TCP"], ["udp", "UDP"], ["tcp+udp", "TCP+UDP"]]} onChange={setProtocol} label={t("wz.protocol")} />
               </div>
               <div className="field">
                 <label htmlFor="te-target">{t("wz.targetHost")}</label>
                 <input className="text mono" id="te-target" dir="ltr" value={target} onChange={(e) => setTarget(e.target.value.trim())} />
               </div>
             </div>
-            <div style={{ maxWidth: 520 }}>
-              <PerIpLimit id="te-perip" value={perIp} onChange={setPerIp} />
-              <UdpFlows id="te-udpflows" value={udpFlows} onChange={setUdpFlows} protocol={protocol} />
-              <ProxyProtocol value={proxy} onChange={setProxy} protocol={protocol} />
-            </div>
           </fieldset>
 
-          <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>
-            <legend>{t("mux.title")}</legend>
-            <MuxToggle transport={transport} value={muxOn} onChange={setMuxOn} />
-            {(muxOn || !MUX_OPTIONAL.includes(transport)) && <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />}
-          </fieldset>
-
-          <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>
-            <legend>{t("te.security")}</legend>
-            <label className="check">
-              <input type="checkbox" checked={rotate || moved} disabled={moved} onChange={(e) => setRotate(e.target.checked)} /> {t("wz.rotate")}
-            </label>
-            {moved && <span className="help">{t("te.moveToken")}</span>}
+          {/* What most tunnels never change, folded into one card. */}
+          <fieldset className="card edit-sec edit-more" disabled={locked}>
+            <legend className="sr-only">{t("more.title")}</legend>
+            <More title={t("more.title")} note={moreNote} show={!!error && moreBad}>
+              <div className="more-group">
+                <h4 className="more-h">{t("te.how")}</h4>
+                <EncryptionChoice value={enc} onChange={setEnc} transport={transport} ack={encAck} onAck={setEncAck} />
+                {transport === "quic" && <QuicObfs value={obfs} onChange={setObfs} />}
+                <MuxToggle transport={transport} value={muxOn} onChange={setMuxOn} />
+                {(muxOn || !MUX_OPTIONAL.includes(transport)) && (
+                  <More title={t("mux.title")} note={muxSpec.spec ? t("mux.custom") : t("mux.fromProfile")} show={!!muxSpec.bad}>
+                      <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />
+                    </More>
+                )}
+              </div>
+              {(isWs || (transport === "tcp" && !muxOn)) && (
+                <div className="more-group">
+                  <h4 className="more-h">{t("te.where")}</h4>
+                  <div className="grid-2">
+                    {isWs && (
+                      <div className="field">
+                        <label htmlFor="te-ws">{t("wz.wsPath")}</label>
+                        <input className="text mono" id="te-ws" dir="ltr" value={wsPath} onChange={(e) => setWsPath(e.target.value.trim())} />
+                      </div>
+                    )}
+                    {isWs && (
+                      <div className="field">
+                        <label htmlFor="te-wshost">{t("wz.wsHost")}</label>
+                        <input className="text mono" id="te-wshost" dir="ltr" value={wsHost} placeholder="cdn.example.com" onChange={(e) => setWsHost(e.target.value.trim())} />
+                        <span className="help">{t("wz.wsHostHelp")}</span>
+                      </div>
+                    )}
+                    {transport === "wss" && tls.mode === "self" && (
+                      <div className="field">
+                        <label htmlFor="te-sni">{t("wz.sni")}</label>
+                        <input className="text mono" id="te-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
+                        <span className="help">{t("wz.sniHelp")}</span>
+                      </div>
+                    )}
+                    {transport === "tcp" && !muxOn && (
+                      <div className="field">
+                        <label htmlFor="te-pool">{t("wz.pool")}</label>
+                        <input
+                          className="text mono"
+                          id="te-pool"
+                          dir="ltr"
+                          inputMode="numeric"
+                          value={pool ?? ""}
+                          placeholder="8"
+                          onChange={(e) => setPool(/^\d{1,3}$/.test(e.target.value.trim()) ? +e.target.value.trim() : undefined)}
+                        />
+                        <span className="help">{t("wz.poolHelp")}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              <div className="more-group more-fields wz-narrow">
+                <h4 className="more-h">{t("te.ports")}</h4>
+                <PerIpLimit id="te-perip" value={perIp} onChange={setPerIp} />
+                <UdpFlows id="te-udpflows" value={udpFlows} onChange={setUdpFlows} protocol={protocol} />
+                <ProxyProtocol value={proxy} onChange={setProxy} protocol={protocol} />
+              </div>
+              <div className="more-group">
+                <h4 className="more-h">{t("te.security")}</h4>
+                <label className="check">
+                  <input type="checkbox" checked={rotate || moved} disabled={moved} onChange={(e) => setRotate(e.target.checked)} /> {t("wz.rotate")}
+                </label>
+                {moved && <span className="help">{t("te.moveToken")}</span>}
+              </div>
+            </More>
           </fieldset>
 
           {(opId || error) && (

@@ -381,9 +381,9 @@ export function ChannelLink({ variant }: { variant: "square" | "chip" }) {
 
 /** A row of choices, one pressed. */
 /** Buttons of which one is on. An option can carry a count, shown as a badge beside its label. */
-export function Seg<T extends string>({ value, options, onChange }: { value: T; options: [T, string, string?][]; onChange: (v: T) => void }) {
+export function Seg<T extends string>({ value, options, onChange, label }: { value: T; options: [T, string, string?][]; onChange: (v: T) => void; label?: string }) {
   return (
-    <div className="seg" role="group">
+    <div className="seg" role="group" aria-label={label}>
       {options.map(([v, label, count]) => (
         <button key={v} type="button" aria-pressed={value === v} onClick={() => onChange(v)}>
           {label}

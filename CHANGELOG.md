@@ -37,6 +37,14 @@ panel: exact counts need this version on the servers too.
 
 ### Changed
 
+- **A calmer tunnel wizard and edit page.** Each choice (direction, transport, profile,
+  encryption) is one row of buttons with what the chosen one does under it, instead of a wall of
+  cards that all explained themselves at once. What most tunnels never change (encryption, mux,
+  the WebSocket and TLS details, per-address and UDP limits, PROXY protocol, a new token) is folded
+  under *More options*, with a line saying what is set there; it opens by itself when a value in
+  it is wrong. The wizard asks for the two servers before the name made from them, and its steps
+  are *Servers, Transport, Address, Ports, Build*. The edit page keeps four short cards and one
+  folded one.
 - The servers' network rate (and the new totals) count only the network cards: a GRE or VXLAN
   link, a bridge or docker's interfaces are no longer added to the card they run over. In a
   container, the interfaces of the default route stand for the card.
