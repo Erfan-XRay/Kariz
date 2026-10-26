@@ -923,6 +923,7 @@ impl Usage {
             settings: self.settings(),
             servers: HashMap::new(),
             tunnels: HashMap::new(),
+            sides: HashMap::new(),
         };
         let blank = || Totals {
             since: None,
@@ -962,6 +963,8 @@ impl Usage {
                 add(&mut s.tunnels, subject);
                 let t = out.tunnels.entry(name.to_owned()).or_insert_with(blank);
                 add(t, subject);
+                let side = out.sides.entry(name.to_owned()).or_default();
+                add(side.entry(id.to_owned()).or_insert_with(blank), subject);
             }
         }
         for (id, s) in &mut out.servers {
@@ -1008,6 +1011,8 @@ pub struct Summary {
     pub servers: HashMap<String, ServerSummary>,
     /// By tunnel name, both sides together.
     pub tunnels: HashMap<String, Totals>,
+    /// By tunnel name, then by server id: each side apart.
+    pub sides: HashMap<String, HashMap<String, Totals>>,
 }
 
 #[derive(Debug, Clone, Serialize)]

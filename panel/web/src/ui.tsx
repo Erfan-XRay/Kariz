@@ -280,11 +280,14 @@ export function Dialog({
   onClose,
   children,
   footer,
+  wide,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  /** Room for a chart. */
+  wide?: boolean;
 }) {
   const { t, low } = useApp();
   const ref = useRef<HTMLDivElement>(null);
@@ -328,7 +331,7 @@ export function Dialog({
   // On the page's body, so no moving parent can clip or shift it.
   return createPortal(
     <div ref={backdrop} className={`dialog-backdrop ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label={title} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="dialog" ref={ref}>
+      <div className={`dialog ${wide ? "wide" : ""}`} ref={ref}>
         <header>
           <h2>{title}</h2>
           <button className="x-btn" type="button" onClick={onClose} aria-label={t("close")}>

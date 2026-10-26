@@ -1,5 +1,62 @@
 // The panel's JSON API. Addresses are relative, so the app works under any secret path.
 
+import type { UsageSettings } from "./calendar";
+
+/** What a server or tunnel moved in some time, in bytes (`crate::usage::Row`). */
+export interface UsageRow {
+  rx: number;
+  tx: number;
+  /** The users' bytes, on every leg they cross. */
+  data: number;
+  /** What the tunnel adds on its link: encryption, framing, handshakes, pings. */
+  proto: number;
+  /** Sent again: TCP retransmissions, KCP resends, FEC parity. */
+  resend: number;
+  /** IP, TCP/UDP, link-layer and GRE/VXLAN headers. */
+  headers: number;
+  /** The users' own bytes each way, once. */
+  up: number;
+  down: number;
+  /** Of rx + tx, what is estimated (a server older than the wire counters). */
+  est: number;
+}
+
+export interface UsageTotals {
+  since: number | null;
+  all: UsageRow;
+  marks: UsageRow[];
+}
+
+export interface Quota {
+  limit: number;
+  count: "both" | "tx" | "rx";
+  reset_day: number;
+  warn: number;
+}
+
+export interface QuotaState extends Quota {
+  used: number;
+  period_start: number;
+  period_end: number;
+}
+
+export interface UsageSummary {
+  settings: UsageSettings;
+  servers: Record<string, { own: UsageTotals; tunnels: UsageTotals; quota: QuotaState | null }>;
+  tunnels: Record<string, UsageTotals>;
+  /** By tunnel, then by server id: each side apart. */
+  sides: Record<string, Record<string, UsageTotals>>;
+}
+
+export type UsageOf = "server" | "server-tunnels" | "tunnel";
+
+export interface UsageSeries {
+  since: number | null;
+  all: UsageRow;
+  settings: UsageSettings;
+  rows: [number, UsageRow][];
+}
+
 export interface SessionInfo {
   authenticated: boolean;
   has_password: boolean;
@@ -640,4 +697,15 @@ export const api = {
   applyUpdate: (confirm_major: boolean) => call<{ op: string }>("POST", "update/apply", { confirm_major }),
   updateServers: (restart_tunnels: boolean) => call<{ op: string }>("POST", "update/servers", { restart_tunnels }),
   newLink: () => call<{ token: string; valid_for: number }>("POST", "links"),
+  /** Usage over `from..to` (unix seconds), in 15-minute (`quarter`) or day buckets. */
+  usage: (of: UsageOf, id: string, from: number, to: number, step: "quarter" | "day") =>
+    call<UsageSeries>("GET", `usage?of=${of}&id=${encodeURIComponent(id)}&from=${from}&to=${to}&step=${step}`),
+  /** Every server's and tunnel's totals, and since each of `marks`. */
+  usageSummary: (marks: number[]) => call<UsageSummary>("GET", `usage/summary?marks=${marks.join(",")}`),
+  /** Starts counting again from now: a server (with `tunnels`, its tunnels too) or a tunnel. */
+  usageReset: (body: { server: string; tunnels?: boolean } | { tunnel: string }) => call<object>("POST", "usage/reset", body),
+  /** `limit` 0 removes the quota. */
+  usageQuota: (server: string, quota: Quota) => call<{ quota: QuotaState | null }>("POST", "usage/quota", { server, ...quota }),
+  usageSettings: () => call<UsageSettings>("GET", "usage/settings"),
+  setUsageSettings: (s: UsageSettings) => call<UsageSettings>("POST", "usage/settings", s),
 };

@@ -18,6 +18,7 @@ import { AutoRestartBlock } from "./AutoRestart";
 import { Wizard } from "./Wizard";
 import { TunnelEdit } from "./TunnelEdit";
 import { transportLabel } from "./transport";
+import { ResetUsage, UsagePanel, useUsage, volume } from "./Usage";
 
 const stateKey = { up: "st.up", down: "st.down", off: "st.off" } as const;
 
@@ -434,6 +435,7 @@ function TunnelPage({
         onChange={setTab}
         options={[
           ["overview", t("td.tab.overview")],
+          ["usage", t("td.tab.usage")],
           ["tools", t("td.tab.tools")],
           ["schedule", t("td.tab.schedule")],
         ]}
@@ -534,6 +536,18 @@ function TunnelPage({
         )}
       </div>
 
+      <div className="tab-panel" role="tabpanel" id="td-panel-usage" aria-labelledby="td-tab-usage" hidden={tab !== "usage"}>
+        <Card title={t("us.title")} sub={t("us.sub")} actions={<ResetUsage kind="tunnel" id={tunnel.name} name={tunnel.name} />}>
+          {tab === "usage" && (
+            <UsagePanel
+              kind="tunnel"
+              id={tunnel.name}
+              sides={[tunnel.entry, tunnel.exit].filter((s): s is NonNullable<typeof s> => !!s).map((s) => [s.server.id, s.server.name] as [string, string])}
+            />
+          )}
+        </Card>
+      </div>
+
       <div className="tab-panel" role="tabpanel" id="td-panel-schedule" aria-labelledby="td-tab-schedule" hidden={tab !== "schedule"}>
         <Card title={t("ar.title")} sub={t("ar.subTunnel")}>
           <AutoRestartBlock tunnel={tunnel.name} />
@@ -543,7 +557,7 @@ function TunnelPage({
   );
 }
 
-type TunnelTab = "overview" | "tools" | "schedule";
+type TunnelTab = "overview" | "usage" | "tools" | "schedule";
 
 type Filter = "all" | TunnelState;
 
@@ -561,6 +575,7 @@ export function TunnelsPage({
   onChanged: () => void;
 }) {
   const { t, num } = useApp();
+  const usage = useUsage();
   const tunnels = pairTunnels(servers);
   const online = servers.filter((s) => s.online);
   const [wizard, setWizard] = useState(false);
@@ -733,6 +748,7 @@ export function TunnelsPage({
                   <th className="hide-sm">{t("t.ports")}</th>
                   <th>{t("t.state")}</th>
                   <th>{t("t.rate")}</th>
+                  <th className="hide-sm">{t("t.month")}</th>
                   <th>
                     <span className="sr-only">{t("tun.start")}</span>
                   </th>
@@ -741,7 +757,7 @@ export function TunnelsPage({
               <tbody>
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="muted" style={{ textAlign: "center", padding: "var(--sp-7)" }}>
+                    <td colSpan={7} className="muted" style={{ textAlign: "center", padding: "var(--sp-7)" }}>
                       {t("tl.none")}
                     </td>
                   </tr>
@@ -805,6 +821,18 @@ export function TunnelsPage({
                         ) : (
                           "—"
                         )}
+                      </td>
+                      <td className="num hide-sm" dir="ltr">
+                        {(() => {
+                          const m = usage.summary?.tunnels[x.name]?.marks[2];
+                          if (!m) return "—";
+                          const v = volume(m.rx + m.tx);
+                          return (
+                            <>
+                              {num(v.value, v.decimals)} <small>{v.unit}</small>
+                            </>
+                          );
+                        })()}
                       </td>
                       <td>
                         <button
