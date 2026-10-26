@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.7.0-beta.3 - 2026-10-26
+
+A **beta**, like [2.7.0-beta.2](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#270-beta2---2026-10-26):
+only panels on the *Beta* channel are offered it; `kariz-manager update` and the stable channel
+stay on 2.6.1. To try it on a server by hand: `kariz-manager install --version v2.7.0-beta.3`.
+
+A **calmer tunnel wizard and edit page**: each choice is one row with the chosen option explained,
+and what most tunnels never change is folded under *More options*. A tunnel that went down **says
+why, in plain words**, on its page and on Telegram, and editing a tunnel no longer says "there is
+no such tunnel" when a server only failed to give its side. Update the panel first, then the
+servers from the panel; 2.7.0-beta.2 servers keep working.
+
+### Changed
+
+- **A calmer tunnel wizard and edit page.** Each choice (direction, transport, profile,
+  encryption) is one row of buttons with what the chosen one does under it, instead of a wall of
+  cards that all explained themselves at once. What most tunnels never change (encryption, mux,
+  the WebSocket and TLS details, per-address and UDP limits, PROXY protocol, a new token) is folded
+  under *More options*, with a line saying what is set there; it opens by itself when a value in
+  it is wrong. The wizard asks for the two servers before the name made from them, and its steps
+  are *Servers, Transport, Address, Ports, Build*. The edit page keeps four short cards and one
+  folded one.
+- **A tunnel that went down says why, in plain words.** Under the last error ("Operation timed
+  out (os error 110)", "Connection reset by peer") the tunnel page and the Telegram message say
+  what it likely means: the other server not reachable at all, an open connection that stopped
+  carrying packets, a connection cut by a reset, a handshake held back on the way, no answer
+  through the tunnel. The Telegram message also names the transport and the two servers, and the
+  other tunnels between the same two servers that are down at the same time: then it is the path,
+  not the tunnel.
+
+### Fixed
+
+- Editing a tunnel said "there is no such tunnel" whenever a server did not give its side (it was
+  slow to answer, or could not read the config). It now says which server, and why, with *Try
+  again*; "no such tunnel" is only said when its side really is gone.
+
 ## 2.7.0-beta.2 - 2026-10-26
 
 A **beta**, like [2.7.0-beta.1](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#270-beta1---2026-10-25):
@@ -37,30 +73,9 @@ panel: exact counts need this version on the servers too.
 
 ### Changed
 
-- **A calmer tunnel wizard and edit page.** Each choice (direction, transport, profile,
-  encryption) is one row of buttons with what the chosen one does under it, instead of a wall of
-  cards that all explained themselves at once. What most tunnels never change (encryption, mux,
-  the WebSocket and TLS details, per-address and UDP limits, PROXY protocol, a new token) is folded
-  under *More options*, with a line saying what is set there; it opens by itself when a value in
-  it is wrong. The wizard asks for the two servers before the name made from them, and its steps
-  are *Servers, Transport, Address, Ports, Build*. The edit page keeps four short cards and one
-  folded one.
 - The servers' network rate (and the new totals) count only the network cards: a GRE or VXLAN
   link, a bridge or docker's interfaces are no longer added to the card they run over. In a
   container, the interfaces of the default route stand for the card.
-- **A tunnel that went down says why, in plain words.** Under the last error ("Operation timed
-  out (os error 110)", "Connection reset by peer") the tunnel page and the Telegram message say
-  what it likely means: the other server not reachable at all, an open connection that stopped
-  carrying packets, a connection cut by a reset, a handshake held back on the way, no answer
-  through the tunnel. The Telegram message also names the transport and the two servers, and the
-  other tunnels between the same two servers that are down at the same time: then it is the path,
-  not the tunnel.
-
-### Fixed
-
-- Editing a tunnel said "there is no such tunnel" whenever a server did not give its side (it was
-  slow to answer, or could not read the config). It now says which server, and why, with *Try
-  again*; "no such tunnel" is only said when its side really is gone.
 
 Usage needs this version on the panel; exact counts need it on the servers too. A tunnel side on
 an older server shows the users' bytes alone, marked as an estimate.
