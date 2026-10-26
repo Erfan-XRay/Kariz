@@ -225,6 +225,9 @@ impl Meter {
     fn track_socket(&self, stream: &tokio::net::TcpStream, path: Path) -> Option<usize> {
         use std::os::fd::AsRawFd;
         let fd = stream.as_raw_fd();
+        // A socket the kernel will not describe (an emulator, a kernel before 4.2) is not
+        // tracked, and the status says it is not exact rather than counting nothing.
+        linux::tcp_info(fd)?;
         let tracked = Tracked {
             fd,
             ino: linux::inode(fd)?,
@@ -638,6 +641,12 @@ mod tests {
         let (mut dialed, mut accepted) = (dialed.unwrap(), accepted);
         let before = METER.snapshot().local;
         let guard = METER.track(&dialed, Leg::Link);
+        if guard._slot.is_none() {
+            // QEMU (the ARM tests) does not pass TCP_INFO through: nothing can be read, and
+            // the status says so.
+            assert!(!METER.snapshot().exact);
+            return eprintln!("TCP_INFO cannot be read here; skipped");
+        }
         dialed.write_all(&[7u8; 100_000]).await.unwrap();
         let mut got = vec![0u8; 100_000];
         accepted.read_exact(&mut got).await.unwrap();
