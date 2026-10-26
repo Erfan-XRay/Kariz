@@ -40,6 +40,19 @@ panel: exact counts need this version on the servers too.
 - The servers' network rate (and the new totals) count only the network cards: a GRE or VXLAN
   link, a bridge or docker's interfaces are no longer added to the card they run over. In a
   container, the interfaces of the default route stand for the card.
+- **A tunnel that went down says why, in plain words.** Under the last error ("Operation timed
+  out (os error 110)", "Connection reset by peer") the tunnel page and the Telegram message say
+  what it likely means: the other server not reachable at all, an open connection that stopped
+  carrying packets, a connection cut by a reset, a handshake held back on the way, no answer
+  through the tunnel. The Telegram message also names the transport and the two servers, and the
+  other tunnels between the same two servers that are down at the same time: then it is the path,
+  not the tunnel.
+
+### Fixed
+
+- Editing a tunnel said "there is no such tunnel" whenever a server did not give its side (it was
+  slow to answer, or could not read the config). It now says which server, and why, with *Try
+  again*; "no such tunnel" is only said when its side really is gone.
 
 Usage needs this version on the panel; exact counts need it on the servers too. A tunnel side on
 an older server shows the users' bytes alone, marked as an estimate.

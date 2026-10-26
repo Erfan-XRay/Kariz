@@ -30,7 +30,7 @@ old one are dropped.
 |---|---|
 | 🔴 Server *name* went offline | a server stayed offline for the wait time (60 seconds); the tunnels that run on it are named in the same message |
 | 🟢 Server *name* is back | it came back, with how long it was offline |
-| 🔴 Tunnel *name* is down | a tunnel stayed down for its wait time (30 seconds); the last error is shown |
+| 🔴 Tunnel *name* is down | a tunnel stayed down for its wait time (30 seconds); the transport and the two servers, the last error and what it likely means, and the other tunnels between the same two servers that are down too (then it is the path between them) |
 | 🟢 Tunnel *name* is up again | it is connected again, with how long it was down |
 | 🟠 Tunnel *name* is connected, but users cannot connect | three health probes in a row (45 seconds) found no way through: every stream taken, or the target the exit side connects to is down, which it names ([Status](status.md)) |
 | 🟢 Users get through tunnel *name* again | a probe got through again, with how long it was blocked |

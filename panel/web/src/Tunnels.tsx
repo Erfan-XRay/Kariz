@@ -19,6 +19,7 @@ import { Wizard } from "./Wizard";
 import { TunnelEdit } from "./TunnelEdit";
 import { transportLabel } from "./transport";
 import { ResetUsage, UsagePanel, useUsage, volume } from "./Usage";
+import { causeOf } from "./cause";
 
 const stateKey = { up: "st.up", down: "st.down", off: "st.off" } as const;
 
@@ -182,8 +183,22 @@ function SideFacts({ side, label }: { side: Tunnel["entry"]; label: string }) {
           </>
         )}
       </dl>
-      {s?.peer.last_error && !s.peer.connected && <p className="err small">{s.peer.last_error.text}</p>}
+      {s?.peer.last_error && !s.peer.connected && <ErrorWhy text={s.peer.last_error.text} />}
     </div>
+  );
+}
+
+/** A side's last error as it said it, and under it what that likely means. */
+function ErrorWhy({ text }: { text: string }) {
+  const { t } = useApp();
+  const cause = causeOf(text);
+  return (
+    <>
+      <p className="err small" dir="ltr">
+        {text}
+      </p>
+      {cause && <p className="muted small">{t("cause.likely", { why: t(`cause.${cause}`) })}</p>}
+    </>
   );
 }
 

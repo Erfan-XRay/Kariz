@@ -77,6 +77,12 @@ pub enum Notice {
         name: String,
         server: String,
         error: Option<String>,
+        transport: String,
+        /// The server on the tunnel's other end, when it is connected.
+        peer: Option<String>,
+        /// The other tunnels between the same two servers that are down too: when there are
+        /// some, it is the path between the servers, not this tunnel.
+        also: Vec<String>,
     },
     TunnelUp {
         name: String,
@@ -126,6 +132,9 @@ struct Track {
     tunnels: Vec<String>,
     /// A blocked tunnel: the target its exit side cannot reach.
     target: Option<String>,
+    /// A tunnel's transport, and the servers (connected ones, by name, sorted) it is on.
+    transport: String,
+    servers: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -202,6 +211,11 @@ impl Alerter {
             for (is_server, key) in due {
                 let subject = subject(is_server, &key);
                 let flap = self.flap(&subject, now);
+                let also = if is_server {
+                    Vec::new()
+                } else {
+                    self.also_down(&key)
+                };
                 let map = if is_server {
                     &mut self.servers
                 } else {
@@ -225,6 +239,9 @@ impl Alerter {
                         name: t.name.clone(),
                         server: t.server.clone(),
                         error: t.error.clone(),
+                        transport: t.transport.clone(),
+                        peer: t.servers.iter().find(|s| **s != t.server).cloned(),
+                        also,
                     }),
                     Flap::FirstHeldBack => out.push(Notice::Unstable {
                         name: t.name.clone(),
@@ -281,6 +298,21 @@ impl Alerter {
         out
     }
 
+    /// The other tunnels that are down between the same two servers as `name`.
+    fn also_down(&self, name: &str) -> Vec<String> {
+        let Some(t) = self.tunnels.get(name).filter(|t| t.servers.len() == 2) else {
+            return Vec::new();
+        };
+        let mut also: Vec<String> = self
+            .tunnels
+            .iter()
+            .filter(|(k, o)| k.as_str() != name && o.servers == t.servers)
+            .map(|(k, _)| k.clone())
+            .collect();
+        also.sort();
+        also
+    }
+
     fn look_at_servers(&mut self, views: &[ServerView], now: i64) {
         for s in views {
             let key = s.id.clone();
@@ -308,6 +340,8 @@ impl Alerter {
                     error: None,
                     tunnels: s.tunnels.iter().map(|t| t.info.name.clone()).collect(),
                     target: None,
+                    transport: String::new(),
+                    servers: Vec::new(),
                 });
             }
         }
@@ -318,8 +352,14 @@ impl Alerter {
 
     fn look_at_tunnels(&mut self, views: &[ServerView], now: i64) {
         let mut seen: HashMap<String, State> = HashMap::new();
+        // Each tunnel's transport and the servers it is on.
+        let mut places: HashMap<String, (String, Vec<String>)> = HashMap::new();
         for s in views.iter().filter(|s| s.online) {
             for t in &s.tunnels {
+                let place = places
+                    .entry(t.info.name.clone())
+                    .or_insert_with(|| (t.info.transport.clone(), Vec::new()));
+                place.1.push(s.name.clone());
                 let state = match &t.info.status {
                     Some(status) if !status.peer.connected => State::Down(
                         status.peer.last_error.as_ref().map(|e| e.text.clone()),
@@ -359,9 +399,15 @@ impl Alerter {
                         error: None,
                         tunnels: Vec::new(),
                         target: None,
+                        transport: String::new(),
+                        servers: Vec::new(),
                     });
                     t.error = error;
                     t.server = server;
+                    if let Some((transport, mut servers)) = places.remove(&name) {
+                        servers.sort();
+                        (t.transport, t.servers) = (transport, servers);
+                    }
                 }
                 State::Up => {
                     if let Some(t) = self.tunnels.remove(&name) {
@@ -433,6 +479,8 @@ impl Alerter {
                 error: None,
                 tunnels: Vec::new(),
                 target: None,
+                transport: String::new(),
+                servers: Vec::new(),
             });
             (t.server, t.target, t.error) = (server, target, error);
         }
@@ -663,11 +711,61 @@ mod tests {
             vec![Notice::TunnelDown {
                 name: "t".into(),
                 server: "A".into(),
-                error: None
+                error: None,
+                transport: "tcpmux".into(),
+                peer: None,
+                also: Vec::new(),
             }]
         );
         // Said once.
         assert!(a.step(&down, 60, R).is_empty());
+    }
+
+    #[test]
+    fn tunnels_down_together_between_two_servers_point_at_the_path() {
+        let mut a = settled();
+        let views = [
+            server(
+                "ir",
+                true,
+                vec![
+                    tunnel("t1", "entry", Some(false)),
+                    tunnel("t2", "entry", Some(false)),
+                    tunnel("t3", "entry", Some(true)),
+                ],
+            ),
+            server(
+                "de",
+                true,
+                vec![
+                    tunnel("t1", "exit", Some(false)),
+                    tunnel("t2", "exit", Some(false)),
+                    tunnel("t3", "exit", Some(true)),
+                ],
+            ),
+        ];
+        a.step(&views, 0, R);
+        let out = a.step(&views, 30, R);
+        let said: Vec<_> = out
+            .iter()
+            .filter_map(|n| match n {
+                Notice::TunnelDown {
+                    name,
+                    server,
+                    peer,
+                    also,
+                    ..
+                } => Some((name.as_str(), server.as_str(), peer.clone(), also.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("t1", "IR", Some("DE".to_owned()), vec!["t2".to_owned()]),
+                ("t2", "IR", Some("DE".to_owned()), vec!["t1".to_owned()]),
+            ]
+        );
     }
 
     #[test]

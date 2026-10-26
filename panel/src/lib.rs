@@ -9,6 +9,7 @@ pub mod auth;
 pub mod backup;
 pub mod bench;
 pub mod calendar;
+pub mod cause;
 pub mod cert;
 pub mod collect;
 pub mod config;

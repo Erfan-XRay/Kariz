@@ -1513,7 +1513,29 @@ async fn tunnel_spec(
         .await
     {
         Ok(spec) => reply(StatusCode::OK, json!(spec)),
-        Err(_) => error(StatusCode::NOT_FOUND, "no_such_tunnel"),
+        Err(e) => {
+            let (status, code) = spec_error(&q.server, &format!("{e:#}"));
+            error(status, &code)
+        }
+    }
+}
+
+/// Why a server did not give one side of a tunnel, as `code:server[:detail]`: an agent that
+/// is not connected, one that did not answer in time, a tunnel it does not have (its config
+/// file is gone), or the server's own reason (a config it cannot read, say).
+fn spec_error(server: &str, why: &str) -> (StatusCode, String) {
+    if why.contains("not connected") {
+        (StatusCode::BAD_GATEWAY, format!("offline:{server}"))
+    } else if why.contains("did not answer in time") {
+        (StatusCode::GATEWAY_TIMEOUT, format!("spec_slow:{server}"))
+    } else if why.contains("no_such_tunnel") || why.contains("No such file or directory") {
+        // (An agent before this one says the config file could not be read.)
+        (StatusCode::NOT_FOUND, format!("spec_missing:{server}"))
+    } else {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("spec_failed:{server}:{why}"),
+        )
     }
 }
 
@@ -2725,5 +2747,26 @@ async fn usage_settings_set(
             reply(StatusCode::OK, json!(body))
         }
         Err(e) => internal(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_side_that_cannot_be_read_says_which_server_and_why() {
+        let code = |why: &str| spec_error("fra", why).1;
+        assert_eq!(code("that server is not connected"), "offline:fra");
+        assert_eq!(code("the agent did not answer in time"), "spec_slow:fra");
+        assert_eq!(code("no_such_tunnel"), "spec_missing:fra");
+        assert_eq!(
+            code("failed to read config file /etc/kariz/a.toml: No such file or directory (os error 2)"),
+            "spec_missing:fra"
+        );
+        assert_eq!(
+            code("invalid config file /etc/kariz/a.toml: unknown field `mtu`"),
+            "spec_failed:fra:invalid config file /etc/kariz/a.toml: unknown field `mtu`"
+        );
     }
 }
