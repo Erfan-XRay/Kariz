@@ -228,19 +228,22 @@ servers. Good to know:
 
 *Tunnels*, *New tunnel* opens the wizard (it needs two connected servers):
 
-1. **Servers:** a name (small letters, digits, dashes) and which server is the *entry* (where
-   your users connect) and which the *exit* (which reaches the real services).
-2. **Kind:** *reverse* (the exit dials the entry, so the exit opens no port) or *direct* (the
-   entry dials the exit), the transport (`tcp`, `tcpmux`, `ws`, `wss`, `quic`, `kcp`) and the
-   profile (`balanced`, `ultraspeed`, `gaming`). For `quic` there is a switch, on by default, to
-   **seal every packet** (`obfs`, see [Transports](transports.md#obfs)); both servers need Kariz
-   1.7 or newer for it.
-3. **Connection:** the port the accepting side listens on and its address as the other side
-   reaches it. For `ws`/`wss`, the path. In *direct* mode you can tick **Use a private network
+1. **Servers:** which server is the *entry* (where your users connect) and which the *exit*
+   (which reaches the real services), then a name (small letters, digits, dashes), made from the
+   two until you type one.
+2. **Transport:** the direction, *reverse* (the exit dials the entry, so the exit opens no port)
+   or *direct* (the entry dials the exit), the transport (`auto`, `tcp`, `ws`, `wss`, `quic`,
+   `kcp`) and the profile (`balanced`, `ultraspeed`, `gaming`). Under **More options**: the
+   encryption, mux and its settings, and for `quic` a switch, on by default, to **seal every
+   packet** (`obfs`, see [Transports](transports.md#obfs)); both servers need Kariz 1.7 or newer
+   for it.
+3. **Address:** the port the accepting side listens on and its address as the other side
+   reaches it. For `ws`/`wss`, the path and the Host header are under **More options**. In *direct* mode you can tick **Use a private network
    (GRE or VXLAN)** and the tunnel runs over private addresses the panel hands out
    ([networks.md](networks.md)).
 4. **Ports:** what the entry opens: `443, 8080-8090, 2053=53`, with TCP, UDP or both, and the
-   host the exit reaches them at (default `127.0.0.1`).
+   host the exit reaches them at (default `127.0.0.1`). Under **More options**: a limit of
+   connections per user address, UDP clients per port, and PROXY protocol.
 5. **Build:** the review, then the panel does it on both servers, in order, and you watch each
    step: both servers check the settings and that the ports are free (a port that something
    else holds is named, with the program), the accepting side is written and started first,
@@ -262,7 +265,7 @@ and forgets it. So *a new token* cannot be undone if it fails half way; run it a
 
 ### Benchmark: which transport gets through best
 
-Not sure which transport (or which direction) to use between two servers? The **Kind** step of
+Not sure which transport (or which direction) to use between two servers? The **Transport** step of
 the wizard, and every tunnel's page, have a **Benchmark**. It takes about 20 seconds, makes no
 tunnel and changes nothing on the servers:
 

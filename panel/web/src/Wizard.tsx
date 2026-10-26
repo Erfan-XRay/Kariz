@@ -15,6 +15,7 @@ import { PerIpLimit, perIpOf } from "./PerIpLimit";
 import { UdpFlows, udpFlowsOf } from "./UdpFlows";
 import { ProxyProtocol, proxyOf } from "./ProxyProtocol";
 import type { ProxyChoice } from "./ProxyProtocol";
+import { Choice, More, noteOf, pairOf } from "./Choice";
 import { BenchPanel, benchLabel, isV6 } from "./Benchmark";
 import type { BenchChoice } from "./Benchmark";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, transportLabel } from "./transport";
@@ -131,7 +132,13 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   useEffect(() => {
     if (nameTouched || !entry || !exit) return;
     const guess = suggestName(serverName(entry), serverName(exit));
-    if (NAME.test(guess)) setName(guess);
+    if (!NAME.test(guess)) return;
+    setName(guess);
+    // An error about an empty name goes once the name is filled in for it.
+    if (errAt === "name") {
+      setErrAt(null);
+      setError("");
+    }
   }, [entry, exit, nameTouched]); // eslint-disable-line react-hooks/exhaustive-deps
   // An error about the servers goes once both are picked.
   useEffect(() => {
@@ -283,6 +290,38 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const labels = [t("wz.s1"), t("wz.s2"), t("wz.s3"), t("wz.s4"), t("wz.s5")];
   const dir = lang === "fa" ? -1 : 1;
 
+  // What the folded groups of each step hold now, on the line that stands for them.
+  const muxShown = muxOn || !MUX_OPTIONAL.includes(transport);
+  const muxSpec = muxToSpec(mux);
+  const selfSigned = transport === "wss" && tls.mode === "self";
+  const plainTcp = transport === "tcp" && !muxOn;
+  const udpPorts = protocol.includes("udp");
+  const kindNote = noteOf(
+    [
+      transport !== "quic" && pairOf(t("enc.title"), t(`enc.${enc}`)),
+      transport === "quic" && obfs && "obfs",
+      pairOf("mux", t(muxShown ? "mux.on" : "mux.off")),
+    ],
+    [],
+  );
+  const whereNote = noteOf(
+    [
+      isWs && wsPath !== "/" && pairOf(t("wz.wsPath"), wsPath),
+      isWs && wsHost && pairOf("Host", wsHost),
+      selfSigned && sni && pairOf("SNI", sni),
+      plainTcp && pool !== undefined && pairOf(t("wz.pool"), num(pool)),
+    ],
+    [isWs && t("wz.wsPath"), isWs && t("wz.wsHost"), selfSigned && t("wz.sni"), plainTcp && t("wz.pool")],
+  );
+  const portsNote = noteOf(
+    [
+      perIp && pairOf(t("perip.title"), perIp),
+      udpPorts && udpFlows && pairOf(t("udpflows.title"), udpFlows),
+      !!proxyOf(proxy, protocol) && pairOf(t("proxy.short"), proxy),
+    ],
+    [t("perip.title"), udpPorts && t("udpflows.title"), protocol !== "udp" && t("proxy.short")],
+  );
+
   return createPortal(
     <div ref={box} className={`wizard ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label={t("wz.titleNew")}>
       <div className="wz-top">
@@ -314,7 +353,23 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
               <>
                 <h3 className="wz-q">{t("wz.q1")}</h3>
                 <p className="wz-lead">{t("wz.lead1")}</p>
-                <div className="field" style={{ marginBottom: "var(--sp-5)", maxWidth: 360 }}>
+                <div className="pair">
+                  <Picker label={t("wz.entry")} servers={servers} value={entry} other={exit} locked={false} onPick={setEntry} />
+                  <div className="pair-mid">
+                    <svg viewBox="0 0 90 36" aria-hidden="true">
+                      <path d="M4 18 H80" stroke="var(--water)" strokeWidth="2" strokeDasharray="4 6" fill="none" />
+                      <path d="M74 10 L86 18 L74 26" stroke="var(--water)" strokeWidth="2" fill="none" />
+                    </svg>
+                  </div>
+                  <Picker label={t("wz.exit")} servers={servers} value={exit} other={entry} locked={false} onPick={setExit} />
+                </div>
+                {online.length < 2 && <p className="err small">{t("tun.needTwo")}</p>}
+                {errAt === "servers" && (
+                  <p className="err small" role="alert">
+                    {error}
+                  </p>
+                )}
+                <div className="field wz-name">
                   <label htmlFor="wz-name">{t("wz.name")}</label>
                   <input
                     className="text mono"
@@ -339,29 +394,12 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     </span>
                   )}
                 </div>
-                <div className="pair">
-                  <Picker label={t("wz.entry")} servers={servers} value={entry} other={exit} locked={false} onPick={setEntry} />
-                  <div className="pair-mid">
-                    <svg viewBox="0 0 90 36" aria-hidden="true">
-                      <path d="M4 18 H80" stroke="var(--water)" strokeWidth="2" strokeDasharray="4 6" fill="none" />
-                      <path d="M74 10 L86 18 L74 26" stroke="var(--water)" strokeWidth="2" fill="none" />
-                    </svg>
-                  </div>
-                  <Picker label={t("wz.exit")} servers={servers} value={exit} other={entry} locked={false} onPick={setExit} />
-                </div>
-                {online.length < 2 && <p className="err small">{t("tun.needTwo")}</p>}
-                {errAt === "servers" && (
-                  <p className="err small" role="alert">
-                    {error}
-                  </p>
-                )}
               </>
             )}
 
             {step === 1 && (
               <>
                 <h3 className="wz-q">{t("wz.q2")}</h3>
-                <p className="wz-lead">{t("wz.lead2")}</p>
                 <div className="wz-bench">
                   <BenchPanel
                     entry={entry}
@@ -383,62 +421,21 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     onApply={applyBench}
                   />
                 </div>
-                <div className="tiles" role="radiogroup" aria-label={t("wz.q2")}>
-                  {(["reverse", "direct"] as const).map((m) => (
-                    <button key={m} type="button" role="radio" aria-checked={mode === m} className="tile" onClick={() => setMode(m)}>
-                      <span className="t1">{t(`wz.mode.${m}`)}</span>
-                      <span className="t2">{t(`wz.mode.${m}.d`)}</span>
-                      <span className="tick">
-                        <Icon name="check" size={14} />
-                      </span>
-                    </button>
-                  ))}
+                <div className="wz-fields">
+                  <Choice label={t("wz.modeLabel")} value={mode} options={[["reverse", t("wz.mode.reverse")], ["direct", t("wz.mode.direct")]]} onChange={setMode} hint={t(`wz.mode.${mode}.d`)} />
+                  <Choice label={t("wz.transport")} mono value={transport} options={TRANSPORTS.map((x) => [x, x])} onChange={setTransport} hint={t(`wz.tr.${transport}`)} />
+                  <Choice label={t("wz.profile")} value={profile} options={PROFILES.map((p) => [p, t(`wz.pf.${p}`)])} onChange={setProfile} hint={t(`wz.pf.${profile}.d`)} />
                 </div>
-                <h3 className="wz-q" style={{ marginTop: "var(--sp-6)", fontSize: "var(--fs-lg)" }}>
-                  {t("wz.transport")}
-                </h3>
-                <div className="tiles" role="radiogroup" aria-label={t("wz.transport")}>
-                  {TRANSPORTS.map((x) => (
-                    <button key={x} type="button" role="radio" aria-checked={transport === x} className="tile" onClick={() => setTransport(x)}>
-                      <span className="t1 mono">{x}</span>
-                      <span className="t2">{t(`wz.tr.${x}`)}</span>
-                      <span className="tick">
-                        <Icon name="check" size={14} />
-                      </span>
-                    </button>
-                  ))}
-                </div>
-                <h3 className="wz-q" style={{ marginTop: "var(--sp-6)", fontSize: "var(--fs-lg)" }}>
-                  {t("wz.profile")}
-                </h3>
-                <div className="tiles" role="radiogroup" aria-label={t("wz.profile")}>
-                  {PROFILES.map((p) => (
-                    <button key={p} type="button" role="radio" aria-checked={profile === p} className="tile" onClick={() => setProfile(p)}>
-                      <span className="t1">{t(`wz.pf.${p}`)}</span>
-                      <span className="t2">{t(`wz.pf.${p}.d`)}</span>
-                      <span className="tick">
-                        <Icon name="check" size={14} />
-                      </span>
-                    </button>
-                  ))}
-                </div>
-                <div style={{ marginTop: "var(--sp-6)" }}>
+                <More title={t("more.title")} note={kindNote} show={step === 1 && !!error}>
                   <EncryptionChoice value={enc} onChange={setEnc} transport={transport} ack={encAck} onAck={setEncAck} />
-                </div>
-                {transport === "quic" && (
-                  <div style={{ marginTop: "var(--sp-5)" }}>
-                    <QuicObfs value={obfs} onChange={setObfs} />
-                  </div>
-                )}
-                <div style={{ marginTop: "var(--sp-5)" }}>
+                  {transport === "quic" && <QuicObfs value={obfs} onChange={setObfs} />}
                   <MuxToggle transport={transport} value={muxOn} onChange={setMuxOn} />
-                </div>
-                {(muxOn || !MUX_OPTIONAL.includes(transport)) && (
-                  <details className="adv">
-                    <summary>{t("mux.title")}</summary>
-                    <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />
-                  </details>
-                )}
+                  {(muxOn || !MUX_OPTIONAL.includes(transport)) && (
+                    <More title={t("mux.title")} note={muxSpec.spec ? t("mux.custom") : t("mux.fromProfile")} show={!!muxSpec.bad}>
+                      <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />
+                    </More>
+                  )}
+                </More>
               </>
             )}
 
@@ -447,7 +444,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                 <h3 className="wz-q">{t("wz.q3")}</h3>
                 <p className="wz-lead">{t("wz.lead3", { acceptor: serverName(acceptor), dialer: serverName(dialer) })}</p>
                 <GreChoice value={netId} onChange={setNetId} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} />
-                <div className="grid-2" style={{ display: "grid", gap: "var(--sp-5)", gridTemplateColumns: "1fr 1fr" }}>
+                <div className="grid-2 wz-grid">
                   <div className="field">
                     <label htmlFor="wz-port">{t("wz.port", { server: serverName(acceptor) })}</label>
                     <input
@@ -464,6 +461,8 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     {!portTouched && suggestedPort !== String(FIRST_TUNNEL_PORT) && (
                       <span className="help">{t("wz.portMoved", { first: String(FIRST_TUNNEL_PORT), server: serverName(acceptor), port: suggestedPort })}</span>
                     )}
+                    {transport === "auto" && <span className="help">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</span>}
+                    {udp && <span className="help">{t("wz.portUdp")}</span>}
                   </div>
                   <div className="field" hidden={!!netId}>
                     <label htmlFor="wz-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>
@@ -499,58 +498,60 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     )}
                     {mode === "direct" && <span className="help">{t("wz.directHelp", { server: serverName(acceptor), port: listenPort })}</span>}
                   </div>
-                  {isWs && (
-                    <div className="field">
-                      <label htmlFor="wz-ws">{t("wz.wsPath")}</label>
-                      <input className="text mono" id="wz-ws" dir="ltr" value={wsPath} onChange={(e) => setWsPath(e.target.value.trim())} />
-                    </div>
-                  )}
-                  {isWs && (
-                    <div className="field">
-                      <label htmlFor="wz-wshost">{t("wz.wsHost")}</label>
-                      <input className="text mono" id="wz-wshost" dir="ltr" value={wsHost} placeholder="cdn.example.com" onChange={(e) => setWsHost(e.target.value.trim())} />
-                      <span className="help">{t("wz.wsHostHelp")}</span>
-                    </div>
-                  )}
-                  {transport === "wss" && (
-                    <div style={{ gridColumn: "1 / -1" }}>
-                      <TlsChoice
-                        value={tls}
-                        onChange={setTls}
-                        server={acceptor}
-                        serverName={serverName(acceptor)}
-                        onHost={(h) => {
-                          setDialTouched(true);
-                          setDialHost(h);
-                        }}
-                      />
-                    </div>
-                  )}
-                  {transport === "wss" && tls.mode === "self" && (
-                    <div className="field">
-                      <label htmlFor="wz-sni">{t("wz.sni")}</label>
-                      <input className="text mono" id="wz-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
-                      <span className="help">{t("wz.sniHelp")}</span>
-                    </div>
-                  )}
-                  {transport === "tcp" && !muxOn && (
-                    <div className="field">
-                      <label htmlFor="wz-pool">{t("wz.pool")}</label>
-                      <input
-                        className="text mono"
-                        id="wz-pool"
-                        dir="ltr"
-                        inputMode="numeric"
-                        value={pool ?? ""}
-                        placeholder="8"
-                        onChange={(e) => setPool(/^\d{1,3}$/.test(e.target.value.trim()) ? +e.target.value.trim() : undefined)}
-                      />
-                      <span className="help">{t("wz.poolHelp")}</span>
-                    </div>
-                  )}
                 </div>
-                {udp && <p className="muted small">UDP</p>}
-                {transport === "auto" && <p className="muted small">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</p>}
+                {transport === "wss" && (
+                  <TlsChoice
+                    value={tls}
+                    onChange={setTls}
+                    server={acceptor}
+                    serverName={serverName(acceptor)}
+                    onHost={(h) => {
+                      setDialTouched(true);
+                      setDialHost(h);
+                    }}
+                  />
+                )}
+                {(isWs || (transport === "tcp" && !muxOn)) && (
+                  <More title={t("more.title")} note={whereNote} show={(step === 2 && !!error && isWs) || !!sni}>
+                    <div className="grid-2 wz-grid">
+                      {isWs && (
+                        <div className="field">
+                          <label htmlFor="wz-ws">{t("wz.wsPath")}</label>
+                          <input className="text mono" id="wz-ws" dir="ltr" value={wsPath} onChange={(e) => setWsPath(e.target.value.trim())} />
+                        </div>
+                      )}
+                      {isWs && (
+                        <div className="field">
+                          <label htmlFor="wz-wshost">{t("wz.wsHost")}</label>
+                          <input className="text mono" id="wz-wshost" dir="ltr" value={wsHost} placeholder="cdn.example.com" onChange={(e) => setWsHost(e.target.value.trim())} />
+                          <span className="help">{t("wz.wsHostHelp")}</span>
+                        </div>
+                      )}
+                      {transport === "wss" && tls.mode === "self" && (
+                        <div className="field">
+                          <label htmlFor="wz-sni">{t("wz.sni")}</label>
+                          <input className="text mono" id="wz-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
+                          <span className="help">{t("wz.sniHelp")}</span>
+                        </div>
+                      )}
+                      {transport === "tcp" && !muxOn && (
+                        <div className="field">
+                          <label htmlFor="wz-pool">{t("wz.pool")}</label>
+                          <input
+                            className="text mono"
+                            id="wz-pool"
+                            dir="ltr"
+                            inputMode="numeric"
+                            value={pool ?? ""}
+                            placeholder="8"
+                            onChange={(e) => setPool(/^\d{1,3}$/.test(e.target.value.trim()) ? +e.target.value.trim() : undefined)}
+                          />
+                          <span className="help">{t("wz.poolHelp")}</span>
+                        </div>
+                      )}
+                    </div>
+                  </More>
+                )}
               </>
             )}
 
@@ -558,12 +559,12 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
               <>
                 <h3 className="wz-q">{t("wz.q4")}</h3>
                 <p className="wz-lead">{t("wz.lead4")}</p>
-                <div className="field" style={{ maxWidth: 520 }}>
+                <div className="field wz-narrow">
                   <label htmlFor="wz-ports">{t("wz.ports")}</label>
                   <input className="text mono" id="wz-ports" dir="ltr" value={ports} placeholder="443, 8080-8090" onChange={(e) => setPorts(e.target.value)} />
                   <span className="help">{t("wz.portsHelp")}</span>
                 </div>
-                <div className="port-chips" style={{ margin: "var(--sp-4) 0" }} aria-live="polite">
+                <div className="port-chips" aria-live="polite">
                   {parsed.forwards.slice(0, 40).map((f) => (
                     <span className="pchip" key={f.listen + f.target}>
                       {f.listen.split(":").pop()}
@@ -573,21 +574,23 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                   {parsed.forwards.length > 40 && <span className="pchip">+{num(parsed.forwards.length - 40)}</span>}
                   {parsed.bad && <span className="pchip bad">{parsed.bad}</span>}
                 </div>
-                <div className="grid-2" style={{ display: "grid", gap: "var(--sp-5)", gridTemplateColumns: "1fr 1fr", maxWidth: 520 }}>
+                <div className="grid-2 wz-grid wz-narrow">
                   <div className="field">
                     <span className="label">{t("wz.protocol")}</span>
-                    <Seg value={protocol} options={[["tcp", "TCP"], ["udp", "UDP"], ["tcp+udp", "TCP+UDP"]]} onChange={setProtocol} />
+                    <Seg value={protocol} options={[["tcp", "TCP"], ["udp", "UDP"], ["tcp+udp", "TCP+UDP"]]} onChange={setProtocol} label={t("wz.protocol")} />
                   </div>
                   <div className="field">
                     <label htmlFor="wz-target">{t("wz.targetHost")}</label>
                     <input className="text mono" id="wz-target" dir="ltr" value={target} onChange={(e) => setTarget(e.target.value.trim())} />
                   </div>
                 </div>
-                <div style={{ maxWidth: 520 }}>
-                  <PerIpLimit id="wz-perip" value={perIp} onChange={setPerIp} />
-                  <UdpFlows id="wz-udpflows" value={udpFlows} onChange={setUdpFlows} protocol={protocol} />
-                  <ProxyProtocol value={proxy} onChange={setProxy} protocol={protocol} />
-                </div>
+                <More title={t("more.title")} note={portsNote} show={step === 3 && !!error && parsed.bad === undefined}>
+                  <div className="more-fields wz-narrow">
+                    <PerIpLimit id="wz-perip" value={perIp} onChange={setPerIp} />
+                    <UdpFlows id="wz-udpflows" value={udpFlows} onChange={setUdpFlows} protocol={protocol} />
+                    <ProxyProtocol value={proxy} onChange={setProxy} protocol={protocol} />
+                  </div>
+                </More>
               </>
             )}
 
@@ -607,10 +610,10 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                           </h4>
                           <dl className="kv">
                             <dt>{t("wz.transport")}</dt>
-                            <dd className="mono">
-                              {transportLabel(joinTransport(transport, muxOn).core)} · {mode} · {profile}
+                            <dd>
+                              <span className="mono">{transportLabel(joinTransport(transport, muxOn).core)}</span> · {t(`wz.mode.${mode}`)} · {t(`wz.pf.${profile}`)}
                             </dd>
-                            <dt>{accepts ? "⇢" : "⇠"}</dt>
+                            <dt>{t(accepts ? "td.listen" : "wz.review.dials")}</dt>
                             <dd className="mono" dir="ltr">
                               {netId ? (greAddr ? `${greAddr}:${listenPort}` : "GRE") : accepts ? `${listenHost}:${listenPort}` : `${dialHost}:${listenPort}`}
                             </dd>

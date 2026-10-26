@@ -40,7 +40,7 @@ export function GreChoice({
   const link = value ? linkBetween(links, value, entry, exit) : undefined;
   const addr = link ? (link.a === acceptor ? link.addr_a : link.addr_b) : "";
   return (
-    <div className="field gre-choice" style={{ marginBottom: "var(--sp-5)" }}>
+    <div className="field gre-choice">
       <label className="check">
         <input type="checkbox" checked={!!value} disabled={networks.length === 0 && !value} onChange={(e) => onChange(e.target.checked ? networks[0]?.id ?? "" : "")} /> {t("wz.gre")}
       </label>

@@ -107,7 +107,8 @@ test("the wizard asks for UDP clients per port only when the tunnel forwards UDP
   await page.locator("#wz-port").fill(String(await freePort()));
   await next(page);
   await page.locator("#wz-ports").fill("4433");
-  // TCP: nothing about UDP
+  // TCP: nothing about UDP (its limits are folded under More options)
+  await page.locator(".more > summary").click();
   await expect(page.locator("#wz-udpflows")).toHaveCount(0);
   await page.getByRole("button", { name: "TCP+UDP", exact: true }).click();
   const flows = page.locator("#wz-udpflows");

@@ -33,15 +33,22 @@ The new server opens no port: it connects to the panel. Codes work once, for 10 
 
 ## 3. Make your first tunnel
 
-Open **Tunnels**, then **New tunnel**. The wizard asks five short things and explains each one:
+Open **Tunnels**, then **New tunnel**. The wizard asks five short things and explains the choice you make:
 
 | Step | You choose |
 |---|---|
-| **Servers** | a name, the *entry* (where your users connect) and the *exit* (which reaches the real services) |
-| **Kind** | *reverse* (the exit dials the entry; the exit opens no port) or *direct*; the transport (for `quic`, whether every packet is sealed, on by default); the profile |
-| **Connection** | the port the accepting side listens on, and the address the other side reaches it at |
-| **Ports** | what the entry opens for your users: `443, 8080-8090, 2053=53`, TCP, UDP or both; optionally a limit of connections per user address, and *Real user IPs (PROXY protocol)* so Xray sees each user's address (only with `acceptProxyProtocol` on in Xray, see [configuration](configuration.md#real-user-addresses-proxy_protocol)) |
+| **Servers** | the *entry* (where your users connect) and the *exit* (which reaches the real services); the name is made from the two, change it if you like |
+| **Transport** | the direction, *reverse* (the exit dials the entry; the exit opens no port) or *direct*; the transport; the profile |
+| **Address** | the port the accepting side listens on, and the address the other side reaches it at |
+| **Ports** | what the entry opens for your users: `443, 8080-8090, 2053=53`, TCP, UDP or both |
 | **Build** | a review, then the panel builds both sides and shows every step |
+
+What most tunnels never change waits under **More options** at the foot of a step, with a line
+that says what is set there now: the encryption, sealed QUIC (on by default), mux and its settings
+on *Transport*; the WebSocket path and Host, the TLS server name and idle connections on
+*Address*; a limit of connections per user address, UDP clients per port and *Real user IPs
+(PROXY protocol)* so Xray sees each user's address (only with `acceptProxyProtocol` on in Xray,
+see [configuration](configuration.md#real-user-addresses-proxy_protocol)) on *Ports*.
 
 The wizard picks the port for you: 3080 for the first tunnel on a server, then 3081, 3082 and so on, the
 first one that none of that server's tunnels holds. You can type another.
