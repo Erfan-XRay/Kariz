@@ -180,6 +180,46 @@ const MIGRATIONS: &[&str] = &[
          addr TEXT NOT NULL,
          chosen INTEGER NOT NULL DEFAULT 0
      );",
+    // 20: usage (`crate::usage`). What a subject (`srv:ID`, a server's network cards;
+    // `tun:NAME@ID`, one side of a tunnel) moved, in 15-minute buckets for 90 days and in
+    // days of the panel's time zone for good; since when it is counted; the last reading
+    // of each counter, so nothing is lost or counted twice across restarts; and the
+    // monthly quota of a server, with how far its alerts went in the current period.
+    "CREATE TABLE usage (
+         subject TEXT NOT NULL,
+         ts INTEGER NOT NULL,
+         rx INTEGER NOT NULL, tx INTEGER NOT NULL,
+         data INTEGER NOT NULL, proto INTEGER NOT NULL,
+         resend INTEGER NOT NULL, headers INTEGER NOT NULL,
+         up INTEGER NOT NULL, down INTEGER NOT NULL, est INTEGER NOT NULL,
+         PRIMARY KEY (subject, ts)
+     ) WITHOUT ROWID;
+     CREATE INDEX usage_ts ON usage (ts);
+     CREATE TABLE usage_daily (
+         subject TEXT NOT NULL,
+         day INTEGER NOT NULL,
+         rx INTEGER NOT NULL, tx INTEGER NOT NULL,
+         data INTEGER NOT NULL, proto INTEGER NOT NULL,
+         resend INTEGER NOT NULL, headers INTEGER NOT NULL,
+         up INTEGER NOT NULL, down INTEGER NOT NULL, est INTEGER NOT NULL,
+         PRIMARY KEY (subject, day)
+     ) WITHOUT ROWID;
+     CREATE TABLE usage_since (subject TEXT PRIMARY KEY, since INTEGER NOT NULL);
+     CREATE TABLE usage_cursors (
+         subject TEXT PRIMARY KEY,
+         start INTEGER NOT NULL,
+         at INTEGER NOT NULL,
+         raw TEXT NOT NULL
+     );
+     CREATE TABLE usage_quotas (
+         server TEXT PRIMARY KEY,
+         limit_bytes INTEGER NOT NULL,
+         count TEXT NOT NULL,
+         reset_day INTEGER NOT NULL,
+         warn INTEGER NOT NULL,
+         period INTEGER NOT NULL DEFAULT 0,
+         level INTEGER NOT NULL DEFAULT 0
+     );",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

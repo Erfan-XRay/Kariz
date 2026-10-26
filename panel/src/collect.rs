@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use kariz::config::{mode_name, role_name, Config};
 
 use crate::manage::Services;
-use crate::wire::{ForwardInfo, Health, TunnelInfo};
+use crate::wire::{ForwardInfo, Health, NetTotals, TunnelInfo};
 
 /// This server's name.
 pub fn hostname() -> String {
@@ -57,27 +57,83 @@ pub fn parse_mem(meminfo: &str) -> Option<(u64, u64)> {
     Some((total * 1024, total.saturating_sub(available) * 1024))
 }
 
-/// Bytes received and sent over every interface but the loopback, from `/proc/net/dev`.
-pub fn parse_net(dev: &str) -> (u64, u64) {
-    let mut rx = 0;
-    let mut tx = 0;
+/// A network interface as `/sys/class/net` describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Iface {
+    pub name: String,
+    /// Backed by a device (a network card, virtual or not), not a bridge, veth or tunnel.
+    pub device: bool,
+    /// Ethernet: every packet on it carries a 14-byte header in its counters.
+    pub ether: bool,
+}
+
+/// The server's network interfaces, `None` where there is no `/sys/class/net`.
+fn read_ifaces() -> Option<Vec<Iface>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir("/sys/class/net").ok()?.flatten() {
+        let path = entry.path();
+        out.push(Iface {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            device: path.join("device").exists(),
+            ether: std::fs::read_to_string(path.join("type")).is_ok_and(|t| t.trim() == "1"),
+        });
+    }
+    Some(out)
+}
+
+/// The interfaces whose traffic a provider counts: the network cards. A container has
+/// none it can see, so there the interfaces of the default route stand for them; with
+/// neither, every interface but the loopback and Kariz's own `kz-` links.
+pub fn cards<'a>(ifaces: Option<&'a [Iface]>, route: Option<&str>) -> Option<Vec<&'a Iface>> {
+    let ifaces = ifaces?;
+    let with_device: Vec<&Iface> = ifaces.iter().filter(|i| i.device).collect();
+    if !with_device.is_empty() {
+        return Some(with_device);
+    }
+    let default: Vec<&str> = route
+        .unwrap_or_default()
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            (f.len() >= 8 && f[1] == "00000000" && f[7] == "00000000").then_some(f[0])
+        })
+        .collect();
+    let by_route: Vec<&Iface> = ifaces
+        .iter()
+        .filter(|i| default.contains(&i.name.as_str()))
+        .collect();
+    (!by_route.is_empty()).then_some(by_route)
+}
+
+/// Bytes and packets received and sent, from `/proc/net/dev`: over the interfaces named in
+/// `only`, or (`None`) over all but the loopback and the `kz-` links.
+pub fn parse_net(dev: &str, only: Option<&[&str]>) -> NetTotals {
+    let mut totals = NetTotals::default();
     for line in dev.lines() {
         let Some((name, rest)) = line.split_once(':') else {
             continue;
         };
-        if name.trim() == "lo" {
+        let name = name.trim();
+        let counted = match only {
+            Some(names) => names.contains(&name),
+            None => name != "lo" && !name.starts_with("kz-"),
+        };
+        if !counted {
             continue;
         }
         let fields: Vec<u64> = rest
             .split_whitespace()
             .filter_map(|f| f.parse().ok())
             .collect();
-        if fields.len() >= 9 {
-            rx += fields[0];
-            tx += fields[8];
+        if fields.len() >= 10 {
+            totals.rx_bytes += fields[0];
+            totals.rx_packets += fields[1];
+            totals.tx_bytes += fields[8];
+            totals.tx_packets += fields[9];
         }
     }
-    (rx, tx)
+    totals
 }
 
 fn first_number(text: &str) -> Option<f64> {
@@ -149,6 +205,8 @@ pub struct Proc {
     pub uptime: Option<String>,
     pub loadavg: Option<String>,
     pub route: Option<String>,
+    /// From `/sys/class/net`.
+    pub ifaces: Option<Vec<Iface>>,
 }
 
 impl Proc {
@@ -161,6 +219,7 @@ impl Proc {
             uptime: read("/proc/uptime"),
             loadavg: read("/proc/loadavg"),
             route: read("/proc/net/route"),
+            ifaces: read_ifaces(),
         }
     }
 }
@@ -201,7 +260,18 @@ impl Sampler {
             health.mem_used = Some(used);
         }
         if let Some(dev) = p.net_dev.as_deref() {
-            let now_bytes = parse_net(dev);
+            let cards = cards(p.ifaces.as_deref(), p.route.as_deref());
+            let names: Option<Vec<&str>> = cards
+                .as_ref()
+                .map(|c| c.iter().map(|i| i.name.as_str()).collect());
+            let mut totals = parse_net(dev, names.as_deref());
+            // Ethernet when every card is (VLAN tags and the like are not counted).
+            totals.link_header = match &cards {
+                Some(c) if c.iter().all(|i| i.ether) => 14,
+                Some(_) => 0,
+                None => 14,
+            };
+            let now_bytes = (totals.rx_bytes, totals.tx_bytes);
             if let Some(((rx0, tx0), at)) = self.net {
                 let secs = now.duration_since(at).as_secs_f64();
                 if secs > 0.05 {
@@ -210,6 +280,7 @@ impl Sampler {
                 }
             }
             self.net = Some((now_bytes, now));
+            health.net = Some(totals);
         }
         health.uptime_secs = p.uptime.as_deref().and_then(first_number).map(|s| s as u64);
         health.load1 = p.loadavg.as_deref().and_then(first_number);
@@ -424,6 +495,46 @@ eth1\t0000000A\t00000000\t0000\t0\t0\t0\t000000FF\t0\t0\t0\n";
     const NET_1: &str = "Inter-|   Receive |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 5000 10 0 0 0 0 0 0 5000 10 0 0 0 0 0 0\n  eth0: 1000 10 0 0 0 0 0 0 2000 10 0 0 0 0 0 0\n  eth1:  500  5 0 0 0 0 0 0  300  5 0 0 0 0 0 0\n";
     const NET_2: &str = "    lo: 9000 10 0 0 0 0 0 0 9000 10 0 0 0 0 0 0\n  eth0: 3000 10 0 0 0 0 0 0 6000 10 0 0 0 0 0 0\n  eth1:  500  5 0 0 0 0 0 0  300  5 0 0 0 0 0 0\n";
 
+    fn iface(name: &str, device: bool, ether: bool) -> Iface {
+        Iface {
+            name: name.into(),
+            device,
+            ether,
+        }
+    }
+
+    #[test]
+    fn only_the_network_cards_are_counted() {
+        let dev = "  eth0: 1000 10 0 0 0 0 0 0 2000 20 0 0 0 0 0 0\n\
+                   kz-ab12: 400 4 0 0 0 0 0 0 400 4 0 0 0 0 0 0\n\
+                   docker0: 70 1 0 0 0 0 0 0 70 1 0 0 0 0 0 0\n    lo: 9 1 0 0 0 0 0 0 9 1 0 0 0 0 0 0\n";
+        let ifaces = vec![
+            iface("eth0", true, true),
+            iface("kz-ab12", false, false),
+            iface("docker0", false, true),
+            iface("lo", false, false),
+        ];
+        let cards = cards(Some(&ifaces), None).unwrap();
+        let names: Vec<&str> = cards.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["eth0"]);
+        let t = parse_net(dev, Some(&names));
+        assert_eq!((t.rx_bytes, t.tx_bytes, t.tx_packets), (1000, 2000, 20));
+        // Without /sys: everything but the loopback and Kariz's links (GRE inside the
+        // card's own count would be counted twice).
+        assert_eq!(parse_net(dev, None).rx_bytes, 1070);
+
+        // A container sees no card: the default route's interface stands for it.
+        let route = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n\
+                     eth0\t00000000\t0100A8C0\t0003\t0\t0\t0\t00000000\n\
+                     eth0\t0000A8C0\t00000000\t0001\t0\t0\t0\t0000FFFF\n";
+        let in_container = vec![iface("eth0", false, true), iface("kz-ab12", false, false)];
+        let cards = super::cards(Some(&in_container), Some(route)).unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].name, "eth0");
+        assert!(super::cards(Some(&in_container), None).is_none());
+        assert!(super::cards(None, Some(route)).is_none());
+    }
+
     #[test]
     fn proc_files_are_parsed() {
         // busy = user+nice+system; idle = idle+iowait.
@@ -435,7 +546,9 @@ eth1\t0000000A\t00000000\t0000\t0\t0\t0\t000000FF\t0\t0\t0\n";
         assert_eq!(parse_mem(mem), Some((8_000_000 * 1024, 6_000_000 * 1024)));
         assert_eq!(parse_mem("MemTotal: 1 kB\n"), None);
         // The loopback is left out.
-        assert_eq!(parse_net(NET_1), (1500, 2300));
+        let all = parse_net(NET_1, None);
+        assert_eq!((all.rx_bytes, all.tx_bytes), (1500, 2300));
+        assert_eq!((all.rx_packets, all.tx_packets), (15, 15));
         assert_eq!(first_number("12345.67 8901.23"), Some(12345.67));
     }
 
@@ -451,6 +564,7 @@ eth1\t0000000A\t00000000\t0000\t0\t0\t0\t000000FF\t0\t0\t0\n";
                 uptime: Some("3600.5 100.0".into()),
                 loadavg: Some("0.52 0.40 0.30 1/200 999".into()),
                 route: None,
+                ifaces: None,
             },
             t0,
         );

@@ -283,6 +283,8 @@ pub struct Hub {
     pub bench: crate::bench::Runs,
     /// Charts and events.
     pub history: crate::history::History,
+    /// What the servers and tunnels used (`crate::usage`).
+    pub usage: Arc<crate::usage::Usage>,
     /// Private networks and their links.
     pub networks: crate::networks::Networks,
     /// How long a new tunnel has to connect (shortened in tests).
@@ -298,6 +300,25 @@ pub struct Hub {
 }
 
 pub const LOCAL: &str = "local";
+
+/// What a private-network link adds to each packet of a tunnel side's own link, from the
+/// address it dials or listens on: `Some(0)` over the internet, `None` when it cannot tell
+/// (listening on every address; the dialing side tells).
+fn encap_of(encaps: &[(String, u32)], info: &TunnelInfo) -> Option<u32> {
+    let addr = info.remote.as_deref().or(info.listen.as_deref())?;
+    let host = addr
+        .rsplit_once(':')
+        .map_or(addr, |(h, _)| h)
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    if let Some((_, extra)) = encaps.iter().find(|(a, _)| a == host) {
+        return Some(*extra);
+    }
+    let unspecified = host
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_unspecified());
+    (!unspecified).then_some(0)
+}
 
 /// The position a new server takes: after every other one, the panel's own included.
 const NEXT_POSITION: &str = "(SELECT max(
@@ -363,6 +384,7 @@ impl Hub {
         };
         Arc::new(Self {
             history: crate::history::History::new(db.clone()),
+            usage: Arc::new(crate::usage::Usage::new(db.clone())),
             networks: crate::networks::Networks::new(db.clone()),
             db,
             local: Agent::with_exec(
@@ -633,6 +655,16 @@ impl Hub {
     /// Whether a server can be asked right now (the panel's own always can).
     pub fn is_online(&self, server: &str) -> bool {
         server == LOCAL || self.live().get(server).is_some_and(|l| l.online)
+    }
+
+    /// Whether `server` is one of the panel's servers (its own included).
+    pub fn has_server(&self, server: &str) -> bool {
+        server == LOCAL
+            || self
+                .db
+                .conn()
+                .query_row("SELECT 1 FROM servers WHERE id = ?1", [server], |_| Ok(()))
+                .is_ok()
     }
 
     /// Remembers that a tunnel is to be removed from a server that cannot be reached now:
@@ -1504,6 +1536,9 @@ impl Hub {
             .conn()
             .execute("DELETE FROM servers WHERE id = ?1", [id])?
             == 1;
+        if removed {
+            self.usage.forget_server(id)?;
+        }
         // The panel stops dialing it, if it connected to it, and listening for it on a
         // port of its own.
         self.forget_reverse(id);
@@ -1829,6 +1864,23 @@ impl Hub {
         }
     }
 
+    /// The private-network links of server `id`: each end's address, and what the link
+    /// adds to every packet that crosses it.
+    fn link_encaps(&self, id: &str) -> Vec<(String, u32)> {
+        let Ok(links) = self.networks.links(None) else {
+            return Vec::new();
+        };
+        let host = |a: &str| a.split('/').next().unwrap_or(a).to_owned();
+        links
+            .into_iter()
+            .filter(|l| l.a == id || l.b == id)
+            .flat_map(|l| {
+                let extra = crate::net::overhead(l.kind, l.ipv6);
+                [(host(&l.addr_a), extra), (host(&l.addr_b), extra)]
+            })
+            .collect()
+    }
+
     fn update(&self, id: &str, health: Option<Health>, tunnels: Vec<TunnelInfo>) {
         let mut live = self.live();
         let entry = live.entry(id.to_owned()).or_default();
@@ -1854,6 +1906,26 @@ impl Hub {
             }
             if let Some(v) = h.tx_bps {
                 h_.record(&format!("srv:{id}:tx"), at, v * 8.0 / 1e6);
+            }
+            if let Some(net) = &h.net {
+                self.usage.record_server(id, at, h.uptime_secs, net);
+            }
+        }
+        // Agents before the network card totals: Ethernet, as nearly every server has.
+        let link_header = health
+            .as_ref()
+            .and_then(|h| h.net)
+            .map_or(14, |n| n.link_header);
+        let encaps = if tunnels.iter().any(|i| i.status.is_some()) {
+            self.link_encaps(id)
+        } else {
+            Vec::new()
+        };
+        for info in &tunnels {
+            if let Some(status) = &info.status {
+                let encap = encap_of(&encaps, info);
+                self.usage
+                    .record_side(&info.name, id, at, status, link_header, encap);
             }
         }
         entry.health = health;

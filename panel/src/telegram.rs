@@ -465,7 +465,8 @@ async fn alert_loop(hub: Arc<Hub>) {
                 continue;
             }
         };
-        let notices = alerter.step(&views, at, s.rules());
+        let mut notices = alerter.step(&views, at, s.rules());
+        notices.extend(quota_notices(&hub, &views));
         let speaking = s.ready()
             && !s.chats.is_empty()
             && !matches!(muted_until(&hub.db), Some(until) if until > at);
@@ -481,6 +482,36 @@ async fn alert_loop(hub: Arc<Hub>) {
         }
         flush(&hub, &s, &mut outbox, at).await;
     }
+}
+
+/// The servers whose monthly quota crossed its warning or its limit, each put in the
+/// panel's log too (whether or not Telegram is set up).
+fn quota_notices(hub: &Hub, views: &[crate::hub::ServerView]) -> Vec<Notice> {
+    let crossed = match hub.usage.quota_crossings() {
+        Ok(c) => c,
+        Err(e) => {
+            debug!(error = %e, "could not check the quotas");
+            return Vec::new();
+        }
+    };
+    crossed
+        .into_iter()
+        .map(|c| {
+            let name = views
+                .iter()
+                .find(|v| v.id == c.server)
+                .map_or_else(|| c.server.clone(), |v| v.name.clone());
+            let kind = if c.full { "quota_full" } else { "quota_warn" };
+            hub.history
+                .event(kind, &c.server, &format!("{} {}", c.used, c.limit));
+            Notice::Quota {
+                name,
+                used: c.used,
+                limit: c.limit,
+                full: c.full,
+            }
+        })
+        .collect()
 }
 
 fn queue(outbox: &mut VecDeque<Pending>, s: &Settings, text: String, at: i64) {
@@ -901,6 +932,32 @@ pub mod text {
                             "🟡 Tunnel <b>{name}</b> is nearly full: {streams} of {max} streams in use. When it is full new connections fail; raise \"Streams per connection\" or \"Connections\" in its mux settings."
                         );
                     }
+                }
+                Notice::Quota {
+                    name,
+                    used,
+                    limit,
+                    full,
+                } => {
+                    let (name, used, limit) = (esc(name), bytes(fa, *used), bytes(fa, *limit));
+                    let _ = match (fa, *full) {
+                        (true, false) => write!(
+                            out,
+                            "🟡 سرور <b>{name}</b> به هشدار سهمیهٔ ماهانه‌اش رسید: {used} از {limit} مصرف شده"
+                        ),
+                        (true, true) => write!(
+                            out,
+                            "🔴 سهمیهٔ ماهانهٔ سرور <b>{name}</b> تمام شد: {used} از {limit} مصرف شده"
+                        ),
+                        (false, false) => write!(
+                            out,
+                            "🟡 Server <b>{name}</b> reached the warning of its monthly quota: {used} of {limit} used"
+                        ),
+                        (false, true) => write!(
+                            out,
+                            "🔴 Server <b>{name}</b> used up its monthly quota: {used} of {limit}"
+                        ),
+                    };
                 }
             }
         }

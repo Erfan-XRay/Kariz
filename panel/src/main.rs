@@ -494,6 +494,7 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
         hub.start_reverse_links();
         tokio::spawn(kariz_panel::telegram::run(hub.clone()));
         tokio::spawn(kariz_panel::schedule::run(hub.clone()));
+        tokio::spawn(hub.usage.clone().run());
         let mut state = AppState::new(db);
         state.hub = hub.clone();
         if let Some(listen) = &config.agent_listen {
@@ -526,6 +527,9 @@ fn serve(config: Config, config_path: &std::path::Path) -> Result<()> {
             result = http::serve(listener, &config, app) => result,
             _ = shutdown_signal() => {
                 tracing::info!("shutting down");
+                if let Err(e) = hub.usage.flush() {
+                    tracing::warn!(error = %e, "could not save usage");
+                }
                 Ok(())
             }
         }
