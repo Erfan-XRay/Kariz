@@ -21,6 +21,7 @@ mod relay;
 pub mod speedtest;
 pub mod stats;
 mod udp;
+pub mod wire;
 
 use config::{Config, Role};
 

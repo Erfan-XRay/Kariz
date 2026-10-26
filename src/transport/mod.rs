@@ -15,6 +15,8 @@ pub mod kcp;
 pub mod quic;
 #[cfg(feature = "quic")]
 mod quic_obfs;
+#[cfg(feature = "quic")]
+mod quic_wire;
 pub mod tcp;
 pub mod tls;
 pub mod ws;
@@ -33,6 +35,7 @@ use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 
 use crate::config::{TlsConfig, TransportKind, Tuning, TunnelConfig, WsConfig};
+use crate::wire::{self, Leg, TcpGuard};
 
 /// A TLS connection over TCP, either side.
 pub type TlsTcp = tokio_rustls::TlsStream<TcpStream>;
@@ -118,11 +121,12 @@ impl Listener {
         match self {
             Self::Tcp(l) => {
                 let (s, peer) = l.accept().await?;
-                Ok((Incoming::Tcp(s), peer))
+                Ok((Incoming::Tcp(link_guard(&s), s), peer))
             }
             Self::Ws(l, config, tls) => {
                 let (stream, peer) = l.accept().await?;
                 let incoming = Incoming::Ws {
+                    guard: link_guard(&stream),
                     stream,
                     config: config.clone(),
                     tls: tls.clone(),
@@ -147,8 +151,10 @@ impl Listener {
 
 /// An accepted connection whose transport handshake may still be pending.
 pub enum Incoming {
-    Tcp(TcpStream),
+    Tcp(TcpGuard, TcpStream),
     Ws {
+        /// First, so it is dropped while the socket is still open.
+        guard: TcpGuard,
         stream: TcpStream,
         config: Arc<ws::ServerConfig>,
         tls: Option<TlsAcceptor>,
@@ -165,9 +171,10 @@ impl Incoming {
     /// caller can still [`TunnelStream::reject_upgrade`] after checking what it read.
     pub async fn establish(self) -> io::Result<TunnelStream> {
         match self {
-            Self::Tcp(s) => Ok(TunnelStream::Tcp(s)),
+            Self::Tcp(g, s) => Ok(TunnelStream::Tcp(g, s)),
             Self::Kcp(s) => Ok(TunnelStream::Kcp(s)),
             Self::Ws {
+                guard,
                 mut stream,
                 config,
                 tls: None,
@@ -175,11 +182,12 @@ impl Incoming {
             } => {
                 let accepted = ws::upgrade::accept(&mut stream, &config, peer).await?;
                 let (r, w) = stream.into_split();
-                let mut stream = TunnelStream::Ws(ws::WsStream::accepted(r, w, accepted)?);
+                let mut stream = TunnelStream::Ws(guard, ws::WsStream::accepted(r, w, accepted)?);
                 stream.answer_upgrade().await?;
                 Ok(stream)
             }
             Self::Ws {
+                guard,
                 stream,
                 config,
                 tls: Some(acceptor),
@@ -189,7 +197,7 @@ impl Incoming {
                 let accepted = ws::upgrade::accept(&mut stream, &config, peer).await?;
                 let (r, w) = tokio::io::split(stream);
                 let ws = ws::WsStream::accepted(r, w, accepted)?;
-                let mut stream = TunnelStream::Wss(Box::new(ws));
+                let mut stream = TunnelStream::Wss(guard, Box::new(ws));
                 stream.answer_upgrade().await?;
                 Ok(stream)
             }
@@ -256,7 +264,7 @@ impl Dialer {
                     stream.write_all(first).await?;
                     stream.flush().await?;
                 }
-                Ok(TunnelStream::Tcp(stream))
+                Ok(TunnelStream::Tcp(link_guard(&stream), stream))
             }
             Self::Kcp(d) => {
                 let mut stream = d.dial().await?;
@@ -288,18 +296,20 @@ impl WsDialer {
         } else {
             (&[][..], first)
         };
+        let guard = link_guard(&stream);
         let mut stream = match &self.tls {
             None => {
                 let read_ahead = ws::upgrade::connect(&mut stream, &self.config, early).await?;
                 let (r, w) = stream.into_split();
-                TunnelStream::Ws(ws::WsStream::new(r, w, ws::Role::Client, &read_ahead)?)
+                let ws = ws::WsStream::new(r, w, ws::Role::Client, &read_ahead)?;
+                TunnelStream::Ws(guard, ws)
             }
             Some(tls) => {
                 let mut stream = TlsTcp::Client(tls.connect(stream).await?);
                 let read_ahead = ws::upgrade::connect(&mut stream, &self.config, early).await?;
                 let (r, w) = tokio::io::split(stream);
                 let ws = ws::WsStream::new(r, w, ws::Role::Client, &read_ahead)?;
-                TunnelStream::Wss(Box::new(ws))
+                TunnelStream::Wss(guard, Box::new(ws))
             }
         };
         if !late.is_empty() {
@@ -349,6 +359,13 @@ fn set_tclass(_: &socket2::SockRef<'_>, _: u32) -> io::Result<()> {
     ))
 }
 
+/// Counts a tunnel connection on the wire ([`wire`]) while it lives. The guard sits in
+/// front of the socket in every variant below, so it is dropped (and reads the socket a
+/// last time) before the socket closes.
+fn link_guard(stream: &TcpStream) -> TcpGuard {
+    wire::meter().track(stream, Leg::Link)
+}
+
 /// QUIC is not a byte stream: it has its own endpoints ([`quic`]) and sessions.
 fn not_a_stream_transport() -> io::Error {
     io::Error::new(
@@ -359,11 +376,14 @@ fn not_a_stream_transport() -> io::Error {
 
 /// A single tunnel connection, whatever transport carries it.
 pub enum TunnelStream {
-    Tcp(TcpStream),
-    Ws(ws::WsStream<OwnedReadHalf, OwnedWriteHalf>),
+    Tcp(TcpGuard, TcpStream),
+    Ws(TcpGuard, ws::WsStream<OwnedReadHalf, OwnedWriteHalf>),
     /// Boxed: the TLS state is large, and it is one allocation per connection.
     /// TLS state is shared by both directions, so its halves share a lock.
-    Wss(Box<ws::WsStream<ReadHalf<TlsTcp>, WriteHalf<TlsTcp>>>),
+    Wss(
+        TcpGuard,
+        Box<ws::WsStream<ReadHalf<TlsTcp>, WriteHalf<TlsTcp>>>,
+    ),
     Kcp(kcp::KcpStream),
 }
 
@@ -372,7 +392,7 @@ impl TunnelStream {
     pub fn datagrams(&self) -> Option<kcp::KcpDatagrams> {
         match self {
             Self::Kcp(s) => s.datagrams(),
-            Self::Tcp(_) | Self::Ws(_) | Self::Wss(_) => None,
+            Self::Tcp(..) | Self::Ws(..) | Self::Wss(..) => None,
         }
     }
 
@@ -380,9 +400,9 @@ impl TunnelStream {
     /// case the caller checks that first (see [`Self::reject_upgrade`]).
     async fn answer_upgrade(&mut self) -> io::Result<()> {
         let early = match self {
-            Self::Tcp(_) | Self::Kcp(_) => return Ok(()),
-            Self::Ws(s) => s.reader().has_early(),
-            Self::Wss(s) => s.reader().has_early(),
+            Self::Tcp(..) | Self::Kcp(_) => return Ok(()),
+            Self::Ws(_, s) => s.reader().has_early(),
+            Self::Wss(_, s) => s.reader().has_early(),
         };
         if !early {
             self.flush().await?;
@@ -395,9 +415,9 @@ impl TunnelStream {
     /// else, false: the connection has to be dealt with some other way.
     pub fn reject_upgrade(&mut self) -> bool {
         match self {
-            Self::Tcp(_) | Self::Kcp(_) => false,
-            Self::Ws(s) => s.reject_upgrade(),
-            Self::Wss(s) => s.reject_upgrade(),
+            Self::Tcp(..) | Self::Kcp(_) => false,
+            Self::Ws(_, s) => s.reject_upgrade(),
+            Self::Wss(_, s) => s.reject_upgrade(),
         }
     }
 
@@ -409,15 +429,15 @@ impl TunnelStream {
         let would_block =
             |r: io::Result<usize>| matches!(r, Err(e) if e.kind() == io::ErrorKind::WouldBlock);
         match self {
-            Self::Tcp(s) => would_block(s.try_read(&mut probe)),
+            Self::Tcp(_, s) => would_block(s.try_read(&mut probe)),
             Self::Kcp(s) => s.is_alive(),
             // Anything from the peer (even a ping) means the connection is not idle.
-            Self::Ws(s) => {
+            Self::Ws(_, s) => {
                 !s.reader().has_buffered() && would_block(s.reader().get_ref().try_read(&mut probe))
             }
             // TLS may carry records that are not data (tickets, key updates), so read
             // through it; pending means idle and open.
-            Self::Wss(s) => {
+            Self::Wss(_, s) => {
                 let waker = Waker::from(Arc::new(NoopWaker));
                 let mut buf = ReadBuf::new(&mut probe);
                 Pin::new(&mut **s)
@@ -441,9 +461,9 @@ impl AsyncRead for TunnelStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_read(cx, buf),
-            Self::Ws(s) => Pin::new(s).poll_read(cx, buf),
-            Self::Wss(s) => Pin::new(&mut **s).poll_read(cx, buf),
+            Self::Tcp(_, s) => Pin::new(s).poll_read(cx, buf),
+            Self::Ws(_, s) => Pin::new(s).poll_read(cx, buf),
+            Self::Wss(_, s) => Pin::new(&mut **s).poll_read(cx, buf),
             Self::Kcp(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
@@ -456,9 +476,9 @@ impl AsyncWrite for TunnelStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_write(cx, buf),
-            Self::Ws(s) => Pin::new(s).poll_write(cx, buf),
-            Self::Wss(s) => Pin::new(&mut **s).poll_write(cx, buf),
+            Self::Tcp(_, s) => Pin::new(s).poll_write(cx, buf),
+            Self::Ws(_, s) => Pin::new(s).poll_write(cx, buf),
+            Self::Wss(_, s) => Pin::new(&mut **s).poll_write(cx, buf),
             Self::Kcp(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
@@ -469,36 +489,36 @@ impl AsyncWrite for TunnelStream {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-            Self::Ws(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-            Self::Wss(s) => Pin::new(&mut **s).poll_write_vectored(cx, bufs),
+            Self::Tcp(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            Self::Ws(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            Self::Wss(_, s) => Pin::new(&mut **s).poll_write_vectored(cx, bufs),
             Self::Kcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
         }
     }
 
     fn is_write_vectored(&self) -> bool {
         match self {
-            Self::Tcp(s) => s.is_write_vectored(),
-            Self::Ws(s) => s.is_write_vectored(),
-            Self::Wss(s) => s.is_write_vectored(),
+            Self::Tcp(_, s) => s.is_write_vectored(),
+            Self::Ws(_, s) => s.is_write_vectored(),
+            Self::Wss(_, s) => s.is_write_vectored(),
             Self::Kcp(_) => false,
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_flush(cx),
-            Self::Ws(s) => Pin::new(s).poll_flush(cx),
-            Self::Wss(s) => Pin::new(&mut **s).poll_flush(cx),
+            Self::Tcp(_, s) => Pin::new(s).poll_flush(cx),
+            Self::Ws(_, s) => Pin::new(s).poll_flush(cx),
+            Self::Wss(_, s) => Pin::new(&mut **s).poll_flush(cx),
             Self::Kcp(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_shutdown(cx),
-            Self::Ws(s) => Pin::new(s).poll_shutdown(cx),
-            Self::Wss(s) => Pin::new(&mut **s).poll_shutdown(cx),
+            Self::Tcp(_, s) => Pin::new(s).poll_shutdown(cx),
+            Self::Ws(_, s) => Pin::new(s).poll_shutdown(cx),
+            Self::Wss(_, s) => Pin::new(&mut **s).poll_shutdown(cx),
             Self::Kcp(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
@@ -510,19 +530,20 @@ impl TunnelStream {
     #[cfg_attr(not(feature = "kcp"), allow(unreachable_code))]
     pub fn into_split(self) -> (TunnelReader, TunnelWriter) {
         match self {
-            Self::Tcp(s) => {
+            // Both halves keep the guard: the one dropped last reads the socket.
+            Self::Tcp(g, s) => {
                 let (r, w) = s.into_split();
-                (TunnelReader::Tcp(r), TunnelWriter::Tcp(w))
+                (TunnelReader::Tcp(g.clone(), r), TunnelWriter::Tcp(g, w))
             }
-            Self::Ws(s) => {
+            Self::Ws(g, s) => {
                 let (r, w) = s.into_split();
-                (TunnelReader::Ws(r), TunnelWriter::Ws(w))
+                (TunnelReader::Ws(g.clone(), r), TunnelWriter::Ws(g, w))
             }
-            Self::Wss(s) => {
+            Self::Wss(g, s) => {
                 let (r, w) = s.into_split();
                 (
-                    TunnelReader::Wss(Box::new(r)),
-                    TunnelWriter::Wss(Box::new(w)),
+                    TunnelReader::Wss(g.clone(), Box::new(r)),
+                    TunnelWriter::Wss(g, Box::new(w)),
                 )
             }
             Self::Kcp(s) => {
@@ -535,17 +556,17 @@ impl TunnelStream {
 
 /// Receiving half of a [`TunnelStream`].
 pub enum TunnelReader {
-    Tcp(OwnedReadHalf),
-    Ws(ws::WsReader<OwnedReadHalf>),
-    Wss(Box<ws::WsReader<ReadHalf<TlsTcp>>>),
+    Tcp(TcpGuard, OwnedReadHalf),
+    Ws(TcpGuard, ws::WsReader<OwnedReadHalf>),
+    Wss(TcpGuard, Box<ws::WsReader<ReadHalf<TlsTcp>>>),
     Kcp(kcp::KcpReader),
 }
 
 /// Sending half of a [`TunnelStream`].
 pub enum TunnelWriter {
-    Tcp(OwnedWriteHalf),
-    Ws(ws::WsWriter<OwnedWriteHalf>),
-    Wss(Box<ws::WsWriter<WriteHalf<TlsTcp>>>),
+    Tcp(TcpGuard, OwnedWriteHalf),
+    Ws(TcpGuard, ws::WsWriter<OwnedWriteHalf>),
+    Wss(TcpGuard, Box<ws::WsWriter<WriteHalf<TlsTcp>>>),
     Kcp(kcp::KcpWriter),
 }
 
@@ -556,9 +577,9 @@ impl AsyncRead for TunnelReader {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_read(cx, buf),
-            Self::Ws(s) => Pin::new(s).poll_read(cx, buf),
-            Self::Wss(s) => Pin::new(&mut **s).poll_read(cx, buf),
+            Self::Tcp(_, s) => Pin::new(s).poll_read(cx, buf),
+            Self::Ws(_, s) => Pin::new(s).poll_read(cx, buf),
+            Self::Wss(_, s) => Pin::new(&mut **s).poll_read(cx, buf),
             Self::Kcp(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
@@ -571,9 +592,9 @@ impl AsyncWrite for TunnelWriter {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_write(cx, buf),
-            Self::Ws(s) => Pin::new(s).poll_write(cx, buf),
-            Self::Wss(s) => Pin::new(&mut **s).poll_write(cx, buf),
+            Self::Tcp(_, s) => Pin::new(s).poll_write(cx, buf),
+            Self::Ws(_, s) => Pin::new(s).poll_write(cx, buf),
+            Self::Wss(_, s) => Pin::new(&mut **s).poll_write(cx, buf),
             Self::Kcp(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
@@ -584,36 +605,36 @@ impl AsyncWrite for TunnelWriter {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-            Self::Ws(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-            Self::Wss(s) => Pin::new(&mut **s).poll_write_vectored(cx, bufs),
+            Self::Tcp(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            Self::Ws(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            Self::Wss(_, s) => Pin::new(&mut **s).poll_write_vectored(cx, bufs),
             Self::Kcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
         }
     }
 
     fn is_write_vectored(&self) -> bool {
         match self {
-            Self::Tcp(s) => s.is_write_vectored(),
-            Self::Ws(s) => s.is_write_vectored(),
-            Self::Wss(s) => s.is_write_vectored(),
+            Self::Tcp(_, s) => s.is_write_vectored(),
+            Self::Ws(_, s) => s.is_write_vectored(),
+            Self::Wss(_, s) => s.is_write_vectored(),
             Self::Kcp(_) => false,
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_flush(cx),
-            Self::Ws(s) => Pin::new(s).poll_flush(cx),
-            Self::Wss(s) => Pin::new(&mut **s).poll_flush(cx),
+            Self::Tcp(_, s) => Pin::new(s).poll_flush(cx),
+            Self::Ws(_, s) => Pin::new(s).poll_flush(cx),
+            Self::Wss(_, s) => Pin::new(&mut **s).poll_flush(cx),
             Self::Kcp(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_shutdown(cx),
-            Self::Ws(s) => Pin::new(s).poll_shutdown(cx),
-            Self::Wss(s) => Pin::new(&mut **s).poll_shutdown(cx),
+            Self::Tcp(_, s) => Pin::new(s).poll_shutdown(cx),
+            Self::Ws(_, s) => Pin::new(s).poll_shutdown(cx),
+            Self::Wss(_, s) => Pin::new(&mut **s).poll_shutdown(cx),
             Self::Kcp(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
@@ -680,10 +701,10 @@ pub(crate) mod tests {
                 let remote = l.local_addr().unwrap().to_string();
                 let d = Dialer::new(&settings, &remote, &tuning).unwrap();
                 let (dialed, accepted) = tokio::join!(d.dial(), l.accept());
-                let TunnelStream::Tcp(dialed) = dialed.unwrap() else {
+                let TunnelStream::Tcp(_, dialed) = dialed.unwrap() else {
                     panic!("not tcp")
                 };
-                let Incoming::Tcp(accepted) = accepted.unwrap().0 else {
+                let Incoming::Tcp(_, accepted) = accepted.unwrap().0 else {
                     panic!("not tcp")
                 };
                 for s in [&dialed, &accepted] {

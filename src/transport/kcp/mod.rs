@@ -45,6 +45,7 @@ use tracing::debug;
 use crate::config::{KcpConfig, KcpTiming, Tuning, TunnelConfig};
 use crate::crypto::handshake::Key;
 use crate::crypto::Psk;
+use crate::wire::{self, Leg, Path};
 use fec::{FecDecoder, FecEncoder, Shard};
 use protect::{Nonces, Protection};
 
@@ -190,6 +191,10 @@ struct Sender {
     next_new_sn: u32,
     plain: Vec<u8>,
     sealed: Vec<u8>,
+    /// The connected socket's peer, for counting what is sent ([`wire`]).
+    remote: Option<SocketAddr>,
+    /// Bytes of the next packet sent that are a resend or parity.
+    resend: usize,
 }
 
 impl Sender {
@@ -202,7 +207,6 @@ impl Sender {
     ) -> io::Result<Self> {
         let interval = Duration::from_millis(settings.timing.interval_ms.into());
         Ok(Self {
-            socket,
             peer,
             conv,
             protection: settings.protection.clone(),
@@ -214,6 +218,13 @@ impl Sender {
             next_new_sn: 0,
             plain: Vec::with_capacity(1500),
             sealed: Vec::with_capacity(1500),
+            remote: if peer.is_none() {
+                socket.peer_addr().ok()
+            } else {
+                None
+            },
+            socket,
+            resend: 0,
         })
     }
 
@@ -221,10 +232,18 @@ impl Sender {
     fn send_plain(&mut self) {
         self.protection
             .seal(&mut self.nonces, &self.plain, &mut self.sealed);
-        let _ = match self.peer {
+        let sent = match self.peer {
             Some(peer) => self.socket.try_send_to(&self.sealed, peer),
             None => self.socket.try_send(&self.sealed),
         };
+        let resend = std::mem::take(&mut self.resend);
+        if let (Ok(n), Some(peer)) = (sent, self.peer.or(self.remote)) {
+            let path = Path::new(Leg::Link, peer);
+            wire::meter().sent(path, n);
+            if resend > 0 {
+                wire::meter().resent(path, resend.min(n));
+            }
+        }
     }
 
     fn send(&mut self, kind: u8, body: &[u8]) {
@@ -267,6 +286,7 @@ impl Sender {
     /// follows when the group is full).
     fn kcp_packet(&mut self, packet: &[u8], now: Instant) {
         self.stats.kcp_packets.fetch_add(1, Ordering::Relaxed);
+        let mut resent = 0;
         for segment in segments(packet) {
             if segment[4] != KCP_CMD_PUSH {
                 continue;
@@ -276,8 +296,11 @@ impl Sender {
                 self.next_new_sn = sn.wrapping_add(1);
             } else {
                 self.stats.resent.fetch_add(1, Ordering::Relaxed);
+                resent += segment.len();
             }
         }
+        // As a data shard the packet goes out at once, so this counts with it either way.
+        self.resend = resent;
         let segments = packet;
         let Some(mut fec) = self.fec.take() else {
             return self.send(PACKET_DATA, segments);
@@ -317,6 +340,8 @@ impl Sender {
                 shard,
             } => {
                 self.stats.parity_packets.fetch_add(1, Ordering::Relaxed);
+                // Parity is all redundancy.
+                self.resend = usize::MAX;
                 self.plain.push(PACKET_FEC_PARITY);
                 self.plain.extend_from_slice(&self.conv.to_le_bytes());
                 self.plain.extend_from_slice(&group.to_le_bytes());
@@ -697,6 +722,8 @@ enum Inbound {
         socket: Arc<UdpSocket>,
         protection: Arc<Protection>,
         buf: Vec<u8>,
+        /// Where the packets come from, to count them ([`wire`]).
+        path: Option<Path>,
     },
 }
 
@@ -712,12 +739,17 @@ impl Inbound {
                 socket,
                 protection,
                 buf,
+                path,
             } => loop {
                 let n = match socket.recv(buf).await {
                     Ok(n) => n,
                     Err(e) if is_icmp_error(&e) => continue,
                     Err(e) => return Err(e),
                 };
+                // Counted whatever it is: it came over the network all the same.
+                if let Some(path) = *path {
+                    wire::meter().received(path, n);
+                }
                 let Some(plain) = protection.open(&mut buf[..n]) else {
                     continue;
                 };
@@ -1221,6 +1253,7 @@ impl KcpDialer {
             socket: socket.clone(),
             protection: self.settings.protection.clone(),
             buf: vec![0u8; 65_536],
+            path: socket.peer_addr().ok().map(|p| Path::new(Leg::Link, p)),
         };
         let (stream, driver) = Driver::start(conv, socket, None, inbound, &self.settings, None)?;
         tokio::spawn(driver.run(true));
@@ -1300,6 +1333,7 @@ async fn demultiplex(
                 continue;
             }
         };
+        wire::meter().received(Path::new(Leg::Link, peer), n);
         let Some(plain) = settings.protection.open(&mut buf[..n]) else {
             // Not made with the token: no answer, as from a closed port.
             continue;

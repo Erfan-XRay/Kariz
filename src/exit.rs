@@ -32,6 +32,7 @@ use crate::stats::Stats;
 use crate::transport::quic::{QuicDialer, QuicListener, QuicSettings};
 use crate::transport::{tcp, Dialer, Listener, Settings};
 use crate::udp;
+use crate::wire::{self, Leg, Path};
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
@@ -401,6 +402,7 @@ async fn serve(exit: &Exit, mut tunnel: Link, open: Open) {
             return;
         }
     };
+    let _wire = wire::meter().track(&target, Leg::Target);
     if proto::write_status(&mut tunnel, STATUS_OK).await.is_err() {
         return;
     }
@@ -479,6 +481,7 @@ async fn serve_stream(exit: &Exit, stream: SessionStream, syn: Bytes) {
             return stream.reset(ResetReason::DialFailed);
         }
     };
+    let _wire = wire::meter().track(&target, Leg::Target);
     let size = exit.tuning.buffer_size;
     if let Err(e) = relay_stream(&mut target, &stream, size, exit.target_counters()).await {
         debug!(target = %open.target, error = %e, "connection ended with error");
@@ -537,6 +540,7 @@ async fn serve_udp(exit: &Exit, mut tunnel: Link, open: Open) {
 
 async fn relay_udp(exit: &Exit, tunnel: Channel, socket: tokio::net::UdpSocket, open: &Open) {
     debug!(target = %open.target, "UDP flow opened");
+    let wire = socket.peer_addr().ok().map(|p| Path::new(Leg::Target, p));
     let (source, sink) = udp::Connected::new(socket);
     let (idle, duplicate) = (exit.tuning.udp.timeout, open.duplicate);
     match udp::relay(
@@ -546,6 +550,7 @@ async fn relay_udp(exit: &Exit, tunnel: Channel, socket: tokio::net::UdpSocket, 
         idle,
         duplicate,
         exit.target_counters(),
+        wire,
     )
     .await
     {

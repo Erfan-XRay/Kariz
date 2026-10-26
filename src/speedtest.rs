@@ -25,6 +25,7 @@ use tokio::time::{interval, sleep_until, timeout, timeout_at, Instant, MissedTic
 
 use crate::channel::{Channel, Link};
 use crate::session::SessionStream;
+use crate::wire;
 
 /// Longest a test stream lives on the exit side, whatever the entry does.
 pub const MAX_STREAM: Duration = Duration::from_secs(120);
@@ -60,28 +61,37 @@ impl From<Channel> for Pipe {
 }
 
 impl Pipe {
+    /// Sends `data`; what a test moves is counted apart in the wire counters
+    /// ([`wire::Meter::tested`]), on both sides.
     async fn send(&mut self, data: Bytes) -> io::Result<()> {
+        let len = data.len();
         match self {
-            Self::Stream(s) => s.send(data).await,
+            Self::Stream(s) => s.send(data).await?,
             Self::Link(l, _) => {
                 l.write_all(&data).await?;
-                l.flush().await
+                l.flush().await?;
             }
         }
+        wire::meter().tested(len);
+        Ok(())
     }
 
     /// The next chunk; `None` at the end of the stream.
     async fn recv(&mut self) -> io::Result<Option<Bytes>> {
-        match self {
-            Self::Stream(s) => s.recv().await,
+        let chunk = match self {
+            Self::Stream(s) => s.recv().await?,
             Self::Link(l, buf) => {
                 buf.reserve(CHUNK);
                 if l.read_buf(buf).await? == 0 {
                     return Ok(None);
                 }
-                Ok(Some(buf.split().freeze()))
+                Some(buf.split().freeze())
             }
+        };
+        if let Some(chunk) = &chunk {
+            wire::meter().tested(chunk.len());
         }
+        Ok(chunk)
     }
 
     /// Datagrams need a session stream.

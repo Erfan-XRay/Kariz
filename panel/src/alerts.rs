@@ -564,6 +564,7 @@ mod tests {
             forwards: Vec::new(),
             exit: None,
             probe: None,
+            wire: None,
         }
     }
 

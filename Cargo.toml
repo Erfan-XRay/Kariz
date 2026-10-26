@@ -55,6 +55,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 time = { version = "0.3", features = ["local-offset"] }
 webpki-roots = "1"
 
+# TCP_INFO and fstat for the wire counters (src/wire.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["quic", "kcp", "mimalloc"]
 # transport = "quic" (quinn).

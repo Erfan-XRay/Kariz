@@ -15,7 +15,8 @@ use std::time::Duration;
 
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{
-    Connection, Endpoint, EndpointConfig, IdleTimeout, MtuDiscoveryConfig, TransportConfig, VarInt,
+    AsyncUdpSocket, Connection, Endpoint, EndpointConfig, IdleTimeout, MtuDiscoveryConfig,
+    TransportConfig, VarInt,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
@@ -30,6 +31,7 @@ use tracing::debug;
 use crate::config::{Congestion, MuxSettings, QuicConfig, Tuning};
 use crate::crypto::Psk;
 use crate::transport::quic_obfs::{ObfsSocket, OVERHEAD as OBFS_OVERHEAD};
+use crate::transport::quic_wire::CountedSocket;
 
 const IDENTITY_CONTEXT: &str = "kariz 2026-10 quic identity v1";
 const RESET_KEY_CONTEXT: &str = "kariz 2026-10 quic stateless reset v1";
@@ -326,10 +328,12 @@ impl QuicSettings {
         }
         let runtime = quinn::default_runtime()
             .ok_or_else(|| io::Error::other("QUIC needs a tokio runtime"))?;
-        let Some(key) = &self.obfs_key else {
-            return Endpoint::new(self.endpoint_config(), server, socket, runtime);
+        // Counted at the bottom, sealed or not: the datagrams as they are on the wire.
+        let socket: Arc<dyn AsyncUdpSocket> = CountedSocket::new(runtime.wrap_udp_socket(socket)?);
+        let socket = match &self.obfs_key {
+            Some(key) => ObfsSocket::new(socket, key)?,
+            None => socket,
         };
-        let socket = ObfsSocket::new(runtime.wrap_udp_socket(socket)?, key)?;
         Endpoint::new_with_abstract_socket(self.endpoint_config(), server, socket, runtime)
     }
 }

@@ -31,6 +31,7 @@ use crate::stats::{ForwardStats, ProbeOutcome, Stats};
 use crate::transport::quic::{QuicDialer, QuicListener, QuicSettings};
 use crate::transport::{Dialer, Listener, Settings};
 use crate::udp;
+use crate::wire::{self, Leg};
 
 /// How many idle reverse connections the entry may queue before it starts dropping them.
 const POOL_CAPACITY: usize = 1024;
@@ -471,6 +472,7 @@ async fn handle_user(
     stats: &Arc<ForwardStats>,
 ) -> io::Result<()> {
     let _open = stats.tcp_connection();
+    let _wire = wire::meter().track(&user, Leg::User);
     user.set_nodelay(entry.tuning.nodelay)?;
     let size = entry.tuning.buffer_size;
     let channel = entry
