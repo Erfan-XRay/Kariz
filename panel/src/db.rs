@@ -157,6 +157,29 @@ const MIGRATIONS: &[&str] = &[
          SELECT count(*) FROM servers o
          WHERE o.created < servers.created OR (o.created = servers.created AND o.id < servers.id)
      );",
+    // 17: the interface of a deleted link, on a server that has not removed it yet (it was
+    // offline, or did not answer in time). The panel asks again until the server says it is
+    // gone; until then no new link takes the name or the subnet.
+    "CREATE TABLE pending_net_downs (
+         server TEXT NOT NULL,
+         ifname TEXT NOT NULL,
+         subnet TEXT NOT NULL,
+         PRIMARY KEY (server, ifname)
+     );",
+    // 18: a link's MTU, when it is not the most a 1500-byte path allows (0): the path MTU
+    // between its servers was measured smaller, or the admin set it.
+    "ALTER TABLE net_links ADD COLUMN mtu INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE net_links ADD COLUMN mtu_how TEXT NOT NULL DEFAULT '';",
+    // 19: links between the servers' IPv6 addresses: a network's links are made that way
+    // (unless one is made otherwise), and each server's IPv6 address for them, the one the
+    // admin chose (`chosen`) or the one it was last known by.
+    "ALTER TABLE networks ADD COLUMN ipv6 INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE net_links ADD COLUMN ipv6 INTEGER NOT NULL DEFAULT 0;
+     CREATE TABLE server_addr6 (
+         server TEXT PRIMARY KEY,
+         addr TEXT NOT NULL,
+         chosen INTEGER NOT NULL DEFAULT 0
+     );",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

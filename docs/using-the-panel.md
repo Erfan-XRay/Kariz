@@ -83,6 +83,12 @@ Open the tunnel, then:
 
 - **Edit:** the same wizard, filled in. Both sides change together; if they do not connect again,
   the old settings come back.
+- **Move it to other servers:** on the edit page, *Servers* has the entry and the exit to pick (and
+  *Swap*). The tunnel is set up and tested on its new servers first, and taken off a server it left
+  only once both sides connect; a server that is offline removes it when it connects again. If the
+  new pair does not connect, nothing changes. A side on a server that is offline can be moved this
+  way too, to bring the tunnel back on another server. A move gives both sides a new token, and its
+  new servers need Kariz 2.7 or newer.
 - **Start, stop, restart:** stopping also keeps it stopped at boot.
 - **Speed test:** measures download, upload, latency under load and UDP through the tunnel, for
   the seconds you choose.

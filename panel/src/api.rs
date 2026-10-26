@@ -81,6 +81,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/networks/delete", post(network_delete))
         .route("/api/networks/links", post(links_create))
         .route("/api/networks/links/delete", post(link_delete))
+        .route("/api/networks/links/mtu", post(link_mtu))
+        .route("/api/networks/links/family", post(link_family))
         .route("/api/servers/address", post(server_address))
         .route("/api/update", get(update_status))
         .route("/api/update/check", post(update_check))
@@ -492,16 +494,19 @@ async fn panel_addresses(State(state): State<AppState>, headers: HeaderMap) -> R
     // The panel server's public address as private network links use it (one that was set
     // for it, else its own).
     let gre_local = state.hub.addr_of(crate::hub::LOCAL);
+    // ...and its IPv6 one, for a link over IPv6.
+    let gre_local6 = state.hub.addr6_of(crate::hub::LOCAL);
     reply(
         StatusCode::OK,
-        json!({ "v4": v4, "v6": v6, "agent_port": state.agent_port, "gre": gre, "gre_local": gre_local }),
+        json!({ "v4": v4, "v6": v6, "agent_port": state.agent_port, "gre": gre, "gre_local": gre_local, "gre_local6": gre_local6 }),
     )
 }
 
 #[derive(Deserialize)]
 struct JoinGreBody {
     name: Option<String>,
-    /// The new server's public IPv4 address: the other end of the GRE link.
+    /// The new server's public IPv4 address, or its IPv6 one for a link over IPv6: the other
+    /// end of the link.
     ip: String,
     /// The private network to take the link's addresses from; none: the first, or a new one.
     network: Option<String>,
@@ -1185,6 +1190,9 @@ async fn remove_server(
         Ok(s) => s,
         Err(r) => return r,
     };
+    // Its private network interfaces go first, while it can still be asked; one that is
+    // offline keeps them (the page says how to remove them there).
+    let cleared = body.id == crate::hub::LOCAL || state.hub.clear_net(&body.id).await;
     match state.hub.remove(&body.id) {
         Ok(true) => {
             audit(
@@ -1193,7 +1201,7 @@ async fn remove_server(
                 &ip_of(&peer),
                 &format!("removed server {}", body.id),
             );
-            reply(StatusCode::OK, json!({}))
+            reply(StatusCode::OK, json!({ "net_left": !cleared }))
         }
         Ok(false) => error(StatusCode::NOT_FOUND, "no_such_server"),
         Err(e) => internal(e),
@@ -1214,6 +1222,8 @@ fn pair_error(e: anyhow::Error) -> Response {
         // `old_agent:`, and the ones that name what needs the newer version
         // (`old_agent_enc:`, `old_agent_limits:`, ...): the page says which server to update.
         _ if code.starts_with("old_agent") => error(StatusCode::CONFLICT, &code),
+        // A server a tunnel is to move to must be connected: the page says which.
+        _ if code.starts_with("offline:") => error(StatusCode::CONFLICT, &code),
         _ => internal(e),
     }
 }
@@ -1831,12 +1841,11 @@ fn net_error(e: anyhow::Error) -> Response {
     let code = text.split(':').next().unwrap_or_default();
     match code {
         "bad_name" | "bad_cidr" | "not_private" | "too_small" | "overlaps_route"
-        | "overlaps_network" | "bad_input" | "same_server" | "bad_port" => {
+        | "overlaps_network" | "bad_input" | "same_server" | "bad_port" | "bad_mtu" => {
             error(StatusCode::BAD_REQUEST, &text)
         }
-        "name_taken" | "in_use" | "agent_uses" | "pool_full" | "busy" => {
-            error(StatusCode::CONFLICT, &text)
-        }
+        "name_taken" | "in_use" | "agent_uses" | "pool_full" | "busy" | "old_agent_mtu"
+        | "mtu_unknown" => error(StatusCode::CONFLICT, &text),
         "no_such_network" | "no_such_link" | "no_such_server" => {
             error(StatusCode::NOT_FOUND, &text)
         }
@@ -1870,6 +1879,9 @@ struct NetworkBody {
     /// VXLAN's UDP port; left out or 0: 4789.
     #[serde(default)]
     port: Option<u16>,
+    /// Its links run between the servers' IPv6 addresses.
+    #[serde(default)]
+    ipv6: bool,
 }
 
 async fn network_create(
@@ -1895,11 +1907,12 @@ async fn network_create(
     let Some(kind) = LinkKind::parse(body.kind.as_deref().unwrap_or("gre")) else {
         return error(StatusCode::BAD_REQUEST, "bad_kind");
     };
-    match state.hub.networks.create_network_of(
+    match state.hub.networks.create_network_with(
         &body.name,
         &body.cidr,
         kind,
         body.port.unwrap_or(0),
+        body.ipv6,
         &named,
     ) {
         Ok(n) => {
@@ -1919,32 +1932,53 @@ async fn network_create(
     }
 }
 
+/// A network or a link to delete.
 #[derive(Deserialize)]
-struct IdBody {
+struct NetDeleteBody {
     id: String,
+    /// A network: its links go too (without it, a network with links is `in_use`).
+    #[serde(default)]
+    links: bool,
+    /// Delete a link that an offline server's agent reaches the panel through.
+    #[serde(default)]
+    force: bool,
 }
 
+/// Deleting is done in the panel at once; `later` lists the servers that remove the
+/// interfaces when they can (offline, or no answer yet).
 async fn network_delete(
     State(state): State<AppState>,
     peer: Peer,
     headers: HeaderMap,
-    Json(body): Json<IdBody>,
+    Json(body): Json<NetDeleteBody>,
 ) -> Response {
     let me = match authenticate(&state, &headers, true) {
         Ok(s) => s,
         Err(r) => return r,
     };
-    match state.hub.networks.delete_network(&body.id) {
-        Ok(true) => {
+    let done = if body.links {
+        crate::netops::delete_network(&state.hub, &body.id, body.force).await
+    } else {
+        match state.hub.networks.delete_network(&body.id) {
+            Ok(true) => Ok(Vec::new()),
+            Ok(false) => Err(anyhow::anyhow!("no_such_network")),
+            Err(e) => Err(e),
+        }
+    };
+    match done {
+        Ok(later) => {
             audit(
                 &state,
                 &format!("session {}", me.id),
                 &ip_of(&peer),
-                "deleted a network",
+                if body.links {
+                    "deleted a network and its links"
+                } else {
+                    "deleted a network"
+                },
             );
-            reply(StatusCode::OK, json!({}))
+            reply(StatusCode::OK, json!({ "later": later }))
         }
-        Ok(false) => error(StatusCode::NOT_FOUND, "no_such_network"),
         Err(e) => net_error(e),
     }
 }
@@ -1955,6 +1989,10 @@ struct LinksBody {
     servers: Vec<String>,
     /// Hub and spoke: this server is linked to each of the others (a full mesh without it).
     hub: Option<String>,
+    /// Between the servers' IPv6 addresses (true) or IPv4 ones (false); left out: as the
+    /// network's links are.
+    #[serde(default)]
+    ipv6: Option<bool>,
 }
 
 async fn links_create(
@@ -1967,7 +2005,13 @@ async fn links_create(
         Ok(s) => s,
         Err(r) => return r,
     };
-    match crate::netops::create_links(&state.hub, &body.network, body.servers, body.hub) {
+    match crate::netops::create_links_as(
+        &state.hub,
+        &body.network,
+        body.servers,
+        body.hub,
+        body.ipv6,
+    ) {
         Ok(op) => {
             audit(
                 &state,
@@ -1985,21 +2029,73 @@ async fn link_delete(
     State(state): State<AppState>,
     peer: Peer,
     headers: HeaderMap,
-    Json(body): Json<IdBody>,
+    Json(body): Json<NetDeleteBody>,
 ) -> Response {
     let me = match authenticate(&state, &headers, true) {
         Ok(s) => s,
         Err(r) => return r,
     };
-    match crate::netops::delete_link(&state.hub, &body.id).await {
-        Ok(()) => {
+    match crate::netops::delete_link(&state.hub, &body.id, body.force).await {
+        Ok(later) => {
             audit(
                 &state,
                 &format!("session {}", me.id),
                 &ip_of(&peer),
-                "deleted a network link",
+                if body.force {
+                    "deleted a network link (forced)"
+                } else {
+                    "deleted a network link"
+                },
             );
-            reply(StatusCode::OK, json!({}))
+            reply(StatusCode::OK, json!({ "later": later }))
+        }
+        Err(e) => net_error(e),
+    }
+}
+
+/// A link's MTU: `measure` the path between its servers again, or `mtu` (0: the default).
+#[derive(Deserialize)]
+struct MtuBody {
+    id: String,
+    #[serde(default)]
+    mtu: Option<u32>,
+    #[serde(default)]
+    measure: bool,
+}
+
+async fn link_mtu(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<MtuBody>,
+) -> Response {
+    use crate::netops::MtuChoice;
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let choice = match (body.measure, body.mtu) {
+        (true, _) => MtuChoice::Measure,
+        (false, None | Some(0)) => MtuChoice::Default,
+        (false, Some(m)) => MtuChoice::Set(m),
+    };
+    match crate::netops::set_link_mtu(&state.hub, &body.id, choice).await {
+        Ok(set) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!(
+                    "set a network link's MTU to {} ({})",
+                    set.mtu,
+                    if set.how.is_empty() {
+                        "default"
+                    } else {
+                        &set.how
+                    }
+                ),
+            );
+            reply(StatusCode::OK, json!(set))
         }
         Err(e) => net_error(e),
     }
@@ -2009,6 +2105,43 @@ async fn link_delete(
 struct AddressBody {
     id: String,
     addr: String,
+    /// The IPv6 address for links over IPv6 (else the address of IPv4 links).
+    #[serde(default)]
+    v6: bool,
+}
+
+/// A link to move between its servers' IPv4 and IPv6 addresses.
+#[derive(Deserialize)]
+struct FamilyBody {
+    id: String,
+    ipv6: bool,
+}
+
+async fn link_family(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<FamilyBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match crate::netops::set_link_family(&state.hub, &body.id, body.ipv6) {
+        Ok(op) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!(
+                    "moved a network link to {}",
+                    if body.ipv6 { "IPv6" } else { "IPv4" }
+                ),
+            );
+            reply(StatusCode::ACCEPTED, json!({ "op": op }))
+        }
+        Err(e) => net_error(e),
+    }
 }
 
 /// The address other servers reach a server at (private networks need both ends' addresses).
@@ -2022,13 +2155,22 @@ async fn server_address(
         Ok(s) => s,
         Err(r) => return r,
     };
-    match state.hub.set_addr(&body.id, &body.addr) {
+    let set = if body.v6 {
+        state.hub.set_addr6(&body.id, &body.addr)
+    } else {
+        state.hub.set_addr(&body.id, &body.addr)
+    };
+    match set {
         Ok(()) => {
             audit(
                 &state,
                 &format!("session {}", me.id),
                 &ip_of(&peer),
-                &format!("set the address of server {}", body.id),
+                &format!(
+                    "set the {}address of server {}",
+                    if body.v6 { "IPv6 " } else { "" },
+                    body.id
+                ),
             );
             // Links that were waiting for this address can be made now.
             let hub = state.hub.clone();

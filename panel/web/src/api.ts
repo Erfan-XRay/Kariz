@@ -191,6 +191,8 @@ export interface PanelAddresses {
   gre?: GreAddr[];
   /** The panel server's public IPv4 address as private network links use it, if it is known. */
   gre_local?: string | null;
+  /** ...and its IPv6 one, for links over IPv6. */
+  gre_local6?: string | null;
 }
 
 /** Where the panel dials a server it connects to (reverse): its agent listens on `port` and the next one. */
@@ -267,6 +269,9 @@ export interface ServerInfo {
   addr: string | null;
   /** The address it is known by (public IPv4, else IPv6): what private networks use until one is set. */
   addr_default?: string | null;
+  /** The same for links over IPv6: the IPv6 address that was set, and the one used until one is. */
+  addr6?: string | null;
+  addr6_default?: string | null;
   seen_secs: number | null;
   /** When the panel last heard from it (unix seconds), also from before the panel started. */
   last_seen?: number | null;
@@ -430,6 +435,8 @@ export interface Network {
   /** GRE, or VXLAN over UDP `port` (0 for GRE). */
   kind: LinkKind;
   port: number;
+  /** Its links run between the servers' IPv6 addresses (unless one was made otherwise). */
+  ipv6?: boolean;
   created: number;
   links: number;
   capacity: number;
@@ -448,6 +455,24 @@ export interface Link {
   ifname: string;
   kind: LinkKind;
   port: number;
+  /** 0: the most a 1500-byte path allows. `mtu_how`: `measured`, `set` (by hand) or empty. */
+  mtu: number;
+  mtu_how: "" | "measured" | "set";
+  /** It runs between its servers' IPv6 addresses (ip6gre, or VXLAN over IPv6). */
+  ipv6?: boolean;
+}
+
+/** A link's MTU after a change: `path` is what was measured; `later` get it when they connect. */
+export interface MtuSet {
+  mtu: number;
+  how: Link["mtu_how"];
+  path: number | null;
+  later: string[];
+}
+
+/** A deleted link or network: gone from the panel; `later` remove its interfaces when they can. */
+export interface NetDeleted {
+  later: string[];
 }
 
 export interface UpdateStatus {
@@ -542,7 +567,8 @@ export const api = {
   /** With `port`, the server's agent dials an agents port of its own across the link. */
   joinGre: (name: string | undefined, ip: string, network: string | undefined, transport: LinkTransport, kind: LinkKind = "gre", port?: number) =>
     call<GreJoin>("POST", "servers/join-gre", { name, ip, network, transport, kind, port }),
-  removeServer: (id: string) => call<object>("POST", "servers/remove", { id }),
+  /** `net_left`: the server was offline, so the private network interfaces the panel made there stay on it. */
+  removeServer: (id: string) => call<{ net_left?: boolean }>("POST", "servers/remove", { id }),
   /** With `gre`, a GRE link to the server is made first and the link to the panel goes across it (the answer then says what was made). */
   /** `port`: the agents port its agent dials (the panel's own clears a port of its own; left out: unchanged). */
   reconnectServer: (id: string, host: string, transport: LinkTransport, reverse?: { host: string; port: number }, gre?: NewGreLink, port?: number) =>
@@ -589,12 +615,20 @@ export const api = {
   backup: (passphrase: string) => call<{ data: string }>("POST", "backup", { passphrase }),
   restore: (passphrase: string, data: string, replace: boolean) => call<{ servers: number; restart: boolean }>("POST", "restore", { passphrase, data, replace }),
   networks: () => call<{ networks: Network[]; links: Link[] }>("GET", "networks"),
-  createNetwork: (name: string, cidr: string, kind: LinkKind = "gre", port?: number) =>
-    call<Network>("POST", "networks", { name, cidr, kind, ...(kind === "vxlan" && port ? { port } : {}) }),
-  deleteNetwork: (id: string) => call<object>("POST", "networks/delete", { id }),
-  createLinks: (network: string, servers: string[], hub?: string) => call<{ op: string }>("POST", "networks/links", { network, servers, hub }),
-  deleteLink: (id: string) => call<object>("POST", "networks/links/delete", { id }),
-  setAddress: (id: string, addr: string) => call<object>("POST", "servers/address", { id, addr }),
+  createNetwork: (name: string, cidr: string, kind: LinkKind = "gre", port?: number, ipv6 = false) =>
+    call<Network>("POST", "networks", { name, cidr, kind, ipv6, ...(kind === "vxlan" && port ? { port } : {}) }),
+  /** With `links`, the network's links go too. `later`: the servers that remove the interfaces when they can (offline, or no answer yet). */
+  deleteNetwork: (id: string, links = false, force = false) => call<NetDeleted>("POST", "networks/delete", { id, links, force }),
+  /** `ipv6`: between the servers' IPv6 addresses (left out: as the network's links are). */
+  createLinks: (network: string, servers: string[], hub?: string, ipv6?: boolean) => call<{ op: string }>("POST", "networks/links", { network, servers, hub, ipv6 }),
+  /** Moves a link between its servers' IPv4 and IPv6 addresses (an operation to follow). */
+  setLinkFamily: (id: string, ipv6: boolean) => call<{ op: string }>("POST", "networks/links/family", { id, ipv6 }),
+  /** `force`: delete a link that an offline server's agent reaches the panel through. */
+  deleteLink: (id: string, force = false) => call<NetDeleted>("POST", "networks/links/delete", { id, force }),
+  /** `measure`: measure the path again; else `mtu` (0: the default). */
+  setLinkMtu: (id: string, choice: { measure: true } | { mtu: number }) => call<MtuSet>("POST", "networks/links/mtu", { id, ...choice }),
+  /** `v6`: the IPv6 address for links over IPv6 (else the address of IPv4 links). Empty: back to the one it is known by. */
+  setAddress: (id: string, addr: string, v6 = false) => call<object>("POST", "servers/address", { id, addr, v6 }),
   update: () => call<UpdateStatus>("GET", "update"),
   checkUpdate: () => call<UpdateStatus>("POST", "update/check", {}),
   updateSettings: (body: { channel?: "stable" | "beta"; auto?: boolean }) => call<UpdateStatus>("POST", "update/settings", body),

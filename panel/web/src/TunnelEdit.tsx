@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ApiError, api } from "./api";
-import type { PairRequest } from "./api";
+import type { PairRequest, Spec, TunnelInfo } from "./api";
 import type { ServerInfo } from "./api";
 import type { Tunnel } from "./derive";
 import { useApp } from "./store";
@@ -21,11 +21,32 @@ import { PROFILES, addressesOf, hostOf, parsePorts, portOf } from "./Wizard";
 import { benchLabel, isV6 } from "./Benchmark";
 import type { BenchChoice } from "./Benchmark";
 
+/** What the panel last saw of a side it cannot ask now (its server is offline), as a spec to start from. */
+function specOf(name: string, info: TunnelInfo): Spec {
+  return {
+    name,
+    role: info.role,
+    mode: info.mode,
+    transport: info.transport,
+    profile: info.profile,
+    listen: info.listen ?? undefined,
+    remote: info.remote ?? undefined,
+    encryption: info.encryption || undefined,
+    forwards: info.forwards,
+  };
+}
+
 /** Editing a tunnel: everything about it on one page, no steps. */
 export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel; servers: ServerInfo[]; preset?: BenchChoice | null; onBack: () => void }) {
   const { t } = useApp();
-  const entry = tunnel.entry?.server.id ?? "";
-  const exit = tunnel.exit?.server.id ?? "";
+  // The servers it is on now, and the ones it is to be on (another server moves that side there).
+  const wasEntry = tunnel.entry?.server.id ?? "";
+  const wasExit = tunnel.exit?.server.id ?? "";
+  const [entry, setEntry] = useState(wasEntry);
+  const [exit, setExit] = useState(wasExit);
+  const online = (id: string) => !!servers.find((s) => s.id === id)?.online;
+  // A side whose server is offline was read from what the panel last saw of it.
+  const [away, setAway] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   // The tunnel cannot be edited now (a server is away, or it has one side only): say why.
   const [blocked, setBlocked] = useState(false);
@@ -82,21 +103,24 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
       setLoading(false);
       return;
     }
-    const away = [entry, exit].filter((id) => !servers.find((s) => s.id === id)?.online);
-    if (away.length) {
-      setError(t("te.offline", { servers: away.map(serverName).join(", ") }));
+    // One side offline: the tunnel can still be edited, to move that side to a server that is there.
+    const off = [wasEntry, wasExit].filter((id) => !online(id));
+    if (off.length === 2) {
+      setError(t("te.offline", { servers: off.map(serverName).join(", ") }));
       setBlocked(true);
       setLoading(false);
       return;
     }
+    setAway(off);
     let alive = true;
-    void Promise.all([api.tunnelSpec(entry, tunnel.name), api.tunnelSpec(exit, tunnel.name)])
+    const read = (side: typeof tunnel.entry, id: string) => (online(id) || !side ? api.tunnelSpec(id, tunnel.name) : Promise.resolve(specOf(tunnel.name, side.tunnel)));
+    void Promise.all([read(tunnel.entry, wasEntry), read(tunnel.exit, wasExit)])
       .then(([a, b]) => {
         if (!alive) return;
         const acc = a.mode === "reverse" ? a : b;
         const dia = a.mode === "reverse" ? b : a;
         setMode(a.mode);
-        const split = splitTransport(a.transport, a.mux ?? b.mux);
+        const split = splitTransport(a.transport || b.transport, a.mux ?? b.mux);
         setTransport(split.transport);
         setMuxOn(split.mux);
         setProfile(a.profile ?? "balanced");
@@ -104,12 +128,12 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
         setListenHost(hostOf(acc.listen) || "0.0.0.0");
         setListenPort(portOf(acc.listen));
         setDialHost(hostOf(dia.remote));
-        setWsPath(a.ws_path ?? "/");
+        setWsPath(a.ws_path ?? b.ws_path ?? "/");
         setWsHost(a.ws_host ?? b.ws_host ?? "");
         const real = acc.tls_cert && acc.tls_key ? { cert: acc.tls_cert, key: acc.tls_key } : null;
         // With a real certificate the server name is the certificate's own (not one to edit).
         setSni(real ? "" : (dia.tls_sni ?? ""));
-        setPool(a.pool);
+        setPool(a.pool ?? b.pool);
         const list = a.forwards;
         setPorts(list.map((f) => (portOf(f.listen) === portOf(f.target) ? portOf(f.listen) : `${portOf(f.listen)}=${portOf(f.target)}`)).join(", "));
         setProtocol(list[0]?.protocol ?? "tcp");
@@ -152,6 +176,37 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     }
     setNetId(id);
   };
+
+  // Another server for a side: the tunnel moves there (the other side follows it). The accepting
+  // server's address and certificate were that server's, so they start again for the new one.
+  const moved = entry !== wasEntry || exit !== wasExit;
+  const wasAcceptor = mode === "reverse" ? wasEntry : wasExit;
+  const [certMoved, setCertMoved] = useState(false);
+  const pick = (side: "entry" | "exit", id: string) => {
+    const next = side === "entry" ? { entry: id, exit } : { entry, exit: id };
+    const nextAcceptor = mode === "reverse" ? next.entry : next.exit;
+    if (nextAcceptor !== acceptor) refit(nextAcceptor);
+    setEntry(next.entry);
+    setExit(next.exit);
+  };
+  const swap = () => {
+    refit(dialer);
+    setEntry(exit);
+    setExit(entry);
+  };
+  const refit = (to: string) => {
+    const s = servers.find((x) => x.id === to);
+    if (!netId) setDialHost(s ? (addressesOf(s)[0] ?? "") : "");
+    if (!["0.0.0.0", "[::]"].includes(listenHost)) setListenHost("0.0.0.0");
+    if (tls.mode !== "self") {
+      setTls(emptyTls());
+      setCertMoved(true);
+    }
+  };
+  // The servers the tunnel leaves (none when the two only swap).
+  const left = [wasEntry, wasExit].filter((id) => id && id !== entry && id !== exit);
+  // A side left on an offline server cannot be saved: it has to move.
+  const stuck = away.filter((id) => id === entry || id === exit);
 
   const muxSpec = muxToSpec(mux);
   const request = (): PairRequest => ({
@@ -210,6 +265,9 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   }, [initial]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const problem = (): string => {
+    if (entry === exit) return t("te.sameServer");
+    if (stuck.length) return t("te.awayStay", { server: serverName(stuck[0]) });
+    if (moved && [entry, exit].some((id) => !online(id))) return t("te.moveOffline");
     if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
     if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
     if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
@@ -259,7 +317,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
         </button>
         <div className="td-title">
           <h2 className="td-name mono">{tunnel.name}</h2>
-          <p className="muted small">{t("te.lead", { entry: serverName(entry), exit: serverName(exit) })}</p>
+          <p className="muted small">{t("te.lead", { entry: serverName(wasEntry), exit: serverName(wasExit) })}</p>
         </div>
       </section>
       {preset && !blocked && !loading && (
@@ -286,6 +344,57 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
         </section>
       ) : (
         <>
+          <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>
+            <legend>{t("te.servers")}</legend>
+            <p className="muted small">{t("te.serversLead")}</p>
+            <div className="te-servers">
+              {(["entry", "exit"] as const).map((side) => {
+                const value = side === "entry" ? entry : exit;
+                const other = side === "entry" ? exit : entry;
+                const was = side === "entry" ? wasEntry : wasExit;
+                return (
+                  <div className="field" key={side}>
+                    <label htmlFor={`te-${side}`}>{t(side === "entry" ? "te.entry" : "te.exit")}</label>
+                    <select className="select" id={`te-${side}`} value={value} onChange={(e) => pick(side, e.target.value)}>
+                      {servers.map((s) => (
+                        <option key={s.id} value={s.id} disabled={s.id === other || (!s.online && s.id !== was)}>
+                          {s.name}
+                          {!s.online ? ` (${t("te.offlineTag")})` : ""}
+                        </option>
+                      ))}
+                    </select>
+                    {value !== was && <span className="help">{t("te.from", { server: serverName(was) })}</span>}
+                  </div>
+                );
+              })}
+              <button className="btn btn-ghost btn-sm te-swap" type="button" onClick={swap} title={t("te.swap")}>
+                <Icon name="arrange" size={16} />
+                {t("te.swap")}
+              </button>
+            </div>
+            {stuck.length > 0 && (
+              <div className="banner warn">
+                <Icon name="alert" size={18} />
+                <span>{t("te.awayStay", { server: serverName(stuck[0]) })}</span>
+              </div>
+            )}
+            {away.includes(wasEntry) && <p className="help">{t("te.fromInfo", { server: serverName(wasEntry) })}</p>}
+            {moved && (
+              <div className="banner info">
+                <Icon name="info" size={18} />
+                <span>
+                  {t(left.length ? "te.moveText" : "te.swapText", {
+                    from: left.map(serverName).join(", "),
+                    entry: serverName(entry),
+                    exit: serverName(exit),
+                  })}
+                  {away.some((id) => id !== entry && id !== exit) && ` ${t("te.moveAway")}`}
+                </span>
+              </div>
+            )}
+            {certMoved && wasAcceptor !== acceptor && <p className="help warn-text">{t("te.certMoved", { server: serverName(acceptor) })}</p>}
+          </fieldset>
+
           <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>
             <legend>{t("te.how")}</legend>
             <div className="field">
@@ -418,8 +527,9 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
           <fieldset className="card edit-sec" disabled={running || op?.state === "done"}>
             <legend>{t("te.security")}</legend>
             <label className="check">
-              <input type="checkbox" checked={rotate} onChange={(e) => setRotate(e.target.checked)} /> {t("wz.rotate")}
+              <input type="checkbox" checked={rotate || moved} disabled={moved} onChange={(e) => setRotate(e.target.checked)} /> {t("wz.rotate")}
             </label>
+            {moved && <span className="help">{t("te.moveToken")}</span>}
           </fieldset>
 
           {(opId || error) && (
@@ -431,6 +541,11 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
               )}
               <Checklist op={op} />
               {op?.state === "done" && <p className="ok small">{t("tun.done")}</p>}
+              {op?.state === "done" && !!op.offline?.length && (
+                <p className="warn-text small" role="status">
+                  {t("te.movedLater", { servers: op.offline.map((id) => names.get(id) ?? id).join(", ") })}
+                </p>
+              )}
               {op?.state === "failed" && (
                 <>
                   <p className="err small">{t("tun.failed", { why: opError(t, op.error, names) })}</p>

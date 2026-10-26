@@ -430,6 +430,10 @@ impl Agent {
                 let dir = self.config().kariz_dir;
                 ack(manage::delete(&dir, &*self.services, &name).await)
             }
+            Request::TunnelRevert { name } => {
+                let dir = self.config().kariz_dir;
+                ack(manage::revert(&dir, &name))
+            }
             Request::TunnelCtl { name, action } => ack(self.services.ctl(name, action).await),
             Request::Ports => to_json(
                 &tokio::task::spawn_blocking(manage::ports)
@@ -441,6 +445,9 @@ impl Agent {
             Request::NetSync { links } => ack(self.net.sync(links).await),
             Request::NetPing { name } => to_json(&self.net.ping(&name).await),
             Request::NetStatus => to_json(&self.net.status().await),
+            Request::NetPmtu { remote } => to_json(&crate::wire::PmtuReply {
+                mtu: self.net.path_mtu(&remote).await,
+            }),
             Request::BenchListen {
                 token,
                 transport,

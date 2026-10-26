@@ -379,6 +379,17 @@ pub fn put(dir: &Path, spec: &Spec) -> Result<Option<String>> {
     Ok(pin)
 }
 
+/// Puts back the config that the last [`put`] replaced (`NAME.toml.bak`): an edit that did
+/// not work is undone exactly, its token too (which the panel never sees, so it could not
+/// write the old one again itself).
+pub fn revert(dir: &Path, name: &str) -> Result<()> {
+    let path = config_path(dir, name)?;
+    let mut bak = path.as_os_str().to_owned();
+    bak.push(".bak");
+    let old = std::fs::read(Path::new(&bak)).context("there is no earlier config to put back")?;
+    crate::agent::write_private(&path, &old)
+}
+
 /// The spec of an existing tunnel, without its token.
 pub fn get(dir: &Path, name: &str) -> Result<Spec> {
     let path = config_path(dir, name)?;

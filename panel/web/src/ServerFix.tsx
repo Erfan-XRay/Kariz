@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError, kindLabel } from "./api";
 import type { GreJoin, LinkKind, LinkTransport, PanelAddresses, ServerInfo } from "./api";
-import { NewGreLinkFields, greJoinError, ipv4Ok, networkOfKind } from "./GreLink";
+import { NewGreLinkFields, greJoinError, linkIpOk, networkOfKind, panelEnd } from "./GreLink";
 import { AgentPortField, agentPortError, agentPortOf, agentPortOk } from "./AgentPort";
 import { useNetworks } from "./Networks";
 import { useApp } from "./store";
@@ -128,8 +128,8 @@ export function ServerFixDialog({ server, servers, agentsOn, onChanged, onClose 
   // The panel needs no agents port of its own when it is the one that connects.
   const blocked = !agentsOn && way === "dial";
   const portOk = /^\d+$/.test(rport) && +rport > 0 && +rport < 65535;
-  const panelPublic = own ? (own.gre_local ?? null) : undefined;
-  const ready = way === "reverse" ? (newLink ? ipv4Ok(ip) && panelPublic !== null && portOk : viaLink ? portOk : reverseOk(rhost, rport)) : !!host.trim() && agentPortOk(ownPort);
+  const panelPublic = panelEnd(own, ip);
+  const ready = way === "reverse" ? (newLink ? linkIpOk(ip) && panelPublic !== null && portOk : viaLink ? portOk : reverseOk(rhost, rport)) : !!host.trim() && agentPortOk(ownPort);
 
   return (
     <Dialog

@@ -50,12 +50,18 @@ export function GreChoice({
           <select className="select" aria-label={t("wz.greNet")} value={value} onChange={(e) => onChange(e.target.value)} style={{ maxWidth: 360 }}>
             {networks.map((n) => (
               <option key={n.id} value={n.id}>
-                {n.name} ({n.cidr}, {kindLabel(n.kind)})
+                {n.name} ({n.cidr}, {kindLabel(n.kind)}
+                {n.ipv6 ? " · IPv6" : ""})
               </option>
             ))}
           </select>
           <span className="help">{t("wz.greText")}</span>
           {/* The address is isolated left to right, so a Persian sentence around it keeps its order. */}
+          {link?.ipv6 && (
+            <span className="help">
+              <span className="tag">IPv6</span> {t("wz.greOver6")}
+            </span>
+          )}
           <span className="help">{link ? t("wz.greAddrs", { addr: `⁦${addr}:${port}⁩`, server: `⁨${serverName(acceptor)}⁩` }) : t("wz.greNew")}</span>
         </>
       )}

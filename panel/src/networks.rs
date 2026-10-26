@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 
 use anyhow::{anyhow, bail, Result};
-use rusqlite::{params, TransactionBehavior};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 
 use crate::auth::now;
@@ -111,6 +111,9 @@ pub struct Network {
     /// How its links are made, and for VXLAN the UDP port (0 for GRE).
     pub kind: LinkKind,
     pub port: u16,
+    /// Its links run between the servers' IPv6 addresses (unless a link was made
+    /// otherwise): `ip6gre`, or VXLAN over IPv6.
+    pub ipv6: bool,
     pub created: i64,
     /// Links that take a /30 of it now, and how many it can hold at most.
     pub links: u32,
@@ -136,6 +139,13 @@ pub struct Link {
     /// Its network's kind and port.
     pub kind: LinkKind,
     pub port: u16,
+    /// The MTU its interfaces get: 0 for the most a 1500-byte path allows
+    /// ([`crate::net::max_mtu`]). `mtu_how` says where a value came from: `measured`
+    /// (the path MTU between its servers, when it was made or asked for) or `set` (by hand).
+    pub mtu: u32,
+    pub mtu_how: String,
+    /// It runs between its servers' IPv6 addresses, not their IPv4 ones.
+    pub ipv6: bool,
 }
 
 /// Which servers a link joins, and how a set of servers is joined.
@@ -202,6 +212,20 @@ impl Networks {
         port: u16,
         routes: &[(String, Vec<String>)],
     ) -> Result<Network> {
+        self.create_network_with(name, cidr, kind, port, false, routes)
+    }
+
+    /// [`Self::create_network_of`], with links between the servers' IPv6 addresses when
+    /// `ipv6` (the private addresses are IPv4 either way).
+    pub fn create_network_with(
+        &self,
+        name: &str,
+        cidr: &str,
+        kind: LinkKind,
+        port: u16,
+        ipv6: bool,
+        routes: &[(String, Vec<String>)],
+    ) -> Result<Network> {
         if !valid_name(name) {
             bail!("bad_name");
         }
@@ -236,8 +260,8 @@ impl Networks {
         }
         let id = random_hex(6)?;
         tx.execute(
-            "INSERT INTO networks (id, name, cidr, created, kind, port) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, name, pool.to_string(), now(), kind.as_str(), port],
+            "INSERT INTO networks (id, name, cidr, created, kind, port, ipv6) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, name, pool.to_string(), now(), kind.as_str(), port, ipv6],
         )?;
         tx.commit()?;
         drop(conn);
@@ -259,7 +283,7 @@ impl Networks {
         let conn = self.db.conn();
         let mut stmt = conn.prepare(
             "SELECT n.id, n.name, n.cidr, n.created, (SELECT COUNT(*) FROM net_links l WHERE l.network = n.id),
-                    n.kind, n.port
+                    n.kind, n.port, n.ipv6
              FROM networks n ORDER BY n.created, n.id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -273,6 +297,7 @@ impl Networks {
                 links: r.get(4)?,
                 kind: kind_of(&r.get::<_, String>(5)?),
                 port: r.get(6)?,
+                ipv6: r.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -282,7 +307,7 @@ impl Networks {
         let conn = self.db.conn();
         let mut stmt = conn.prepare(
             "SELECT l.id, l.network, l.a, l.b, l.subnet, l.addr_a, l.addr_b, l.gre_key, l.ifname,
-                    l.created, n.kind, n.port
+                    l.created, n.kind, n.port, l.mtu, l.mtu_how, l.ipv6
              FROM net_links l JOIN networks n ON n.id = l.network
              WHERE (?1 IS NULL OR l.network = ?1) ORDER BY l.created, l.id",
         )?;
@@ -300,6 +325,9 @@ impl Networks {
                 created: r.get(9)?,
                 kind: kind_of(&r.get::<_, String>(10)?),
                 port: r.get(11)?,
+                mtu: r.get(12)?,
+                mtu_how: r.get(13)?,
+                ipv6: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -315,15 +343,28 @@ impl Networks {
         pairs: &[(String, String)],
         routes: &Routes,
     ) -> Result<Vec<Link>> {
+        self.create_links_as(network, pairs, routes, None)
+    }
+
+    /// [`Self::create_links`], over IPv6 or IPv4 as `ipv6` says (none: as the network's
+    /// links are).
+    pub fn create_links_as(
+        &self,
+        network: &str,
+        pairs: &[(String, String)],
+        routes: &Routes,
+        ipv6: Option<bool>,
+    ) -> Result<Vec<Link>> {
         let mut conn = self.db.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (cidr, kind, port): (String, String, u16) = tx
+        let (cidr, kind, port, net_v6): (String, String, u16, bool) = tx
             .query_row(
-                "SELECT cidr, kind, port FROM networks WHERE id = ?1",
+                "SELECT cidr, kind, port, ipv6 FROM networks WHERE id = ?1",
                 [network],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .map_err(|_| anyhow!("no_such_network"))?;
+        let ipv6 = ipv6.unwrap_or(net_v6);
         let kind = kind_of(&kind);
         let pool = Cidr::parse(&cidr)?;
         let mut used: HashSet<u32> = {
@@ -333,6 +374,21 @@ impl Networks {
                 .map(|c| c.net)
                 .collect()
         };
+        // An interface that a server has not removed yet keeps its name and its subnet: a
+        // new link with either would clash with it (or be removed with it).
+        let mut gone_names: HashSet<String> = HashSet::new();
+        {
+            let mut stmt = tx.prepare("SELECT ifname, subnet FROM pending_net_downs")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (ifname, subnet) = row?;
+                gone_names.insert(ifname);
+                if let Ok(c) = Cidr::parse(&subnet) {
+                    used.insert(c.net);
+                }
+            }
+        }
         let mut made = Vec::new();
         for (x, y) in pairs {
             if x == y {
@@ -371,7 +427,19 @@ impl Networks {
             let gre_key = (1u32..=VNI_MAX)
                 .find(|k| !taken.contains(k))
                 .ok_or_else(|| anyhow!("pool_full"))?;
-            let id = random_hex(6)?;
+            let mut id = random_hex(6)?;
+            for _ in 0..32 {
+                let ifname = format!("kz-{}", &id[..5]);
+                let in_use: bool = tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM net_links WHERE ifname = ?1)",
+                    [&ifname],
+                    |r| r.get(0),
+                )?;
+                if !in_use && !gone_names.contains(&ifname) {
+                    break;
+                }
+                id = random_hex(6)?;
+            }
             let link = Link {
                 ifname: format!("kz-{}", &id[..5]),
                 id,
@@ -389,13 +457,16 @@ impl Networks {
                 created: now(),
                 kind,
                 port,
+                mtu: 0,
+                mtu_how: String::new(),
+                ipv6,
             };
             tx.execute(
-                "INSERT INTO net_links (id, network, a, b, subnet, addr_a, addr_b, gre_key, ifname, created)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO net_links (id, network, a, b, subnet, addr_a, addr_b, gre_key, ifname, created, ipv6)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     link.id, link.network, link.a, link.b, link.subnet, link.addr_a, link.addr_b,
-                    link.gre_key, link.ifname, link.created
+                    link.gre_key, link.ifname, link.created, link.ipv6
                 ],
             )?;
             made.push(link);
@@ -404,12 +475,84 @@ impl Networks {
         Ok(made)
     }
 
+    /// Removes a link's row and remembers, for both of its servers, that its interface is to
+    /// go ([`Self::pending_downs`]) until the server says it is gone ([`Self::down_done`]).
+    /// One transaction: a link is never forgotten without its clean-up.
     pub fn delete_link(&self, id: &str) -> Result<bool> {
-        Ok(self
-            .db
+        let mut conn = self.db.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<(String, String, String, String)> = tx
+            .query_row(
+                "SELECT a, b, ifname, subnet FROM net_links WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((a, b, ifname, subnet)) = row else {
+            return Ok(false);
+        };
+        for server in [&a, &b] {
+            tx.execute(
+                "INSERT OR REPLACE INTO pending_net_downs (server, ifname, subnet) VALUES (?1, ?2, ?3)",
+                params![server, ifname, subnet],
+            )?;
+        }
+        tx.execute("DELETE FROM net_links WHERE id = ?1", [id])?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Moves a link between the servers' IPv4 and IPv6 addresses. Its MTU goes back to the
+    /// default (the path is another one). False when there is no such link.
+    pub fn set_ipv6(&self, id: &str, ipv6: bool) -> Result<bool> {
+        Ok(self.db.conn().execute(
+            "UPDATE net_links SET ipv6 = ?2, mtu = 0, mtu_how = '' WHERE id = ?1",
+            params![id, ipv6],
+        )? > 0)
+    }
+
+    /// Sets a link's MTU (0: the default of its kind) and where it came from. False when
+    /// there is no such link.
+    pub fn set_mtu(&self, id: &str, mtu: u32, how: &str) -> Result<bool> {
+        Ok(self.db.conn().execute(
+            "UPDATE net_links SET mtu = ?2, mtu_how = ?3 WHERE id = ?1",
+            params![id, mtu, how],
+        )? > 0)
+    }
+
+    /// The interfaces of deleted links that `server` still has to remove.
+    pub fn pending_downs(&self, server: &str) -> Result<Vec<String>> {
+        let conn = self.db.conn();
+        let mut stmt =
+            conn.prepare("SELECT ifname FROM pending_net_downs WHERE server = ?1 ORDER BY ifname")?;
+        let rows = stmt.query_map([server], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// `server` removed `ifname` (or never had it).
+    pub fn down_done(&self, server: &str, ifname: &str) -> Result<()> {
+        self.db.conn().execute(
+            "DELETE FROM pending_net_downs WHERE server = ?1 AND ifname = ?2",
+            params![server, ifname],
+        )?;
+        Ok(())
+    }
+
+    /// The servers with interfaces still to remove.
+    pub fn servers_with_downs(&self) -> Result<Vec<String>> {
+        let conn = self.db.conn();
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT server FROM pending_net_downs ORDER BY server")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// A server that left the panel is never asked again.
+    pub fn forget_downs(&self, server: &str) -> Result<()> {
+        self.db
             .conn()
-            .execute("DELETE FROM net_links WHERE id = ?1", [id])?
-            > 0)
+            .execute("DELETE FROM pending_net_downs WHERE server = ?1", [server])?;
+        Ok(())
     }
 
     /// A network with links in it cannot be deleted: its addresses are in use.
@@ -595,8 +738,11 @@ mod tests {
             (1, 2, 3)
         );
         assert_ne!(first[0].subnet, second[0].subnet);
-        // freeing the first key lets the next link take it again
+        // freeing the first key lets the next link take it again (its subnet once both
+        // servers removed the old interface)
         n.delete_link(&first[0].id).unwrap();
+        n.down_done("a", &first[0].ifname).unwrap();
+        n.down_done("b", &first[0].ifname).unwrap();
         let again = n.create_links(&net.id, &pair, &Routes::new()).unwrap();
         assert_eq!(again[0].gre_key, 1);
         assert_eq!(
@@ -781,5 +927,44 @@ mod tests {
         assert!(n.delete_link(&l[0].id).unwrap());
         assert!(!n.delete_link(&l[0].id).unwrap());
         assert!(n.delete_network(&net.id).unwrap());
+    }
+
+    #[test]
+    fn a_deleted_links_interface_is_remembered_and_its_name_and_subnet_wait_for_it() {
+        let n = nets();
+        let net = n.create_network("main", "10.77.0.0/24", &[]).unwrap();
+        let pair = [("a".to_owned(), "b".to_owned())];
+        let make = || {
+            n.create_links(&net.id, &pair, &Routes::new())
+                .unwrap()
+                .remove(0)
+        };
+        let old = make();
+        assert_eq!(old.subnet, "10.77.0.0/30");
+        assert!(n.delete_link(&old.id).unwrap());
+        // both servers have it to remove, and nothing else
+        for s in ["a", "b"] {
+            assert_eq!(n.pending_downs(s).unwrap(), vec![old.ifname.clone()]);
+        }
+        assert!(n.pending_downs("c").unwrap().is_empty());
+        assert_eq!(n.servers_with_downs().unwrap(), vec!["a", "b"]);
+
+        // a new link does not take the name or the subnet of an interface that may still
+        // be up on one of them
+        let new = make();
+        assert_eq!(new.subnet, "10.77.0.4/30");
+        assert_ne!(new.ifname, old.ifname);
+        n.down_done("a", &old.ifname).unwrap();
+        assert_eq!(make().subnet, "10.77.0.8/30", "b has not removed it yet");
+        // once both servers removed it, its subnet is free again
+        n.down_done("b", &old.ifname).unwrap();
+        assert!(n.servers_with_downs().unwrap().is_empty());
+        assert_eq!(make().subnet, "10.77.0.0/30");
+
+        // a server that leaves is never waited for
+        let gone = make();
+        n.delete_link(&gone.id).unwrap();
+        n.forget_downs("a").unwrap();
+        assert_eq!(n.servers_with_downs().unwrap(), vec!["b"]);
     }
 }

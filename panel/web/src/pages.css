@@ -939,6 +939,19 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
 .net-card .usage { display: grid; gap: 6px; margin-bottom: var(--sp-4); font-size: var(--fs-xs); color: var(--text-3); }
 .net-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-4); }
 .net-honest { margin: 0; max-width: 760px; }
+.del-ends { list-style: none; margin: var(--sp-3) 0; padding: 0; display: grid; gap: var(--sp-2); }
+.del-ends li { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.del-ends .nm { font-weight: 600; }
+.del-why { margin-top: var(--sp-3); }
+.addr-fam { margin-inline-start: var(--sp-4); }
+.del-why .btn { margin-inline-start: var(--sp-1); }
+.mtu-btn { display: inline-flex; align-items: center; gap: var(--sp-1); padding: 2px var(--sp-2); border: var(--hairline) solid transparent; border-radius: var(--r-2); background: none; color: inherit; font: inherit; cursor: pointer; }
+.mtu-btn:hover, .mtu-btn:focus-visible { border-color: var(--line-strong); }
+.mtu-btn svg { color: var(--text-3); }
+.mtu-now { display: flex; align-items: center; gap: var(--sp-2); margin: var(--sp-3) 0; }
+.mtu-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+.mtu-own { display: flex; gap: var(--sp-2); }
+.mtu-own input { max-width: 9em; }
 
 /* ------------------------------------------------------------------ the wizard */
 
@@ -1060,6 +1073,10 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
 .mux-fields .btn { justify-self: start; }
 .text.is-bad { border-color: var(--danger); }
 .tunnel-edit { display: grid; gap: var(--sp-5); max-width: 980px; }
+.te-servers { display: grid; grid-template-columns: 1fr 1fr auto; gap: var(--sp-4); align-items: start; }
+.te-servers .select { width: 100%; }
+.te-swap { margin-top: 26px; }
+@media (max-width: 720px) { .te-servers { grid-template-columns: 1fr; } .te-swap { margin-top: 0; justify-self: start; } }
 .edit-head { display: flex; align-items: center; gap: var(--sp-4); }
 .edit-sec { display: grid; gap: var(--sp-5); border: 1px solid var(--line); margin: 0; min-width: 0; }
 .edit-sec > legend { font-weight: 600; font-size: var(--fs-md, 16px); padding: 0 var(--sp-2); float: none; width: auto; }

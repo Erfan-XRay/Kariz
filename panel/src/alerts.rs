@@ -598,6 +598,8 @@ mod tests {
             hostname: String::new(),
             addr: None,
             addr_default: None,
+            addr6: None,
+            addr6_default: None,
             seen_secs: None,
             link: None,
             last_seen: Some(1),
