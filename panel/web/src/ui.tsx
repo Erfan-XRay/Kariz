@@ -280,11 +280,14 @@ export function Dialog({
   onClose,
   children,
   footer,
+  wide,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  /** Room for a chart. */
+  wide?: boolean;
 }) {
   const { t, low } = useApp();
   const ref = useRef<HTMLDivElement>(null);
@@ -317,7 +320,11 @@ export function Dialog({
   closing.current = onClose;
   useEffect(() => {
     const id = requestAnimationFrame(() => setOn(true));
-    const key = (e: KeyboardEvent) => e.key === "Escape" && closing.current();
+    // Escape closes the dialog on top only: one opened from another leaves its parent open.
+    const key = (e: KeyboardEvent) => {
+      const open = document.querySelectorAll(".dialog-backdrop[role=dialog]");
+      if (e.key === "Escape" && open[open.length - 1] === backdrop.current) closing.current();
+    };
     addEventListener("keydown", key);
     ref.current?.querySelector<HTMLElement>("input, button:not(.x-btn)")?.focus();
     return () => {
@@ -328,7 +335,7 @@ export function Dialog({
   // On the page's body, so no moving parent can clip or shift it.
   return createPortal(
     <div ref={backdrop} className={`dialog-backdrop ${on ? "is-on" : ""}`} role="dialog" aria-modal="true" aria-label={title} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="dialog" ref={ref}>
+      <div className={`dialog ${wide ? "wide" : ""}`} ref={ref}>
         <header>
           <h2>{title}</h2>
           <button className="x-btn" type="button" onClick={onClose} aria-label={t("close")}>

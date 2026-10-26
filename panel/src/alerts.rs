@@ -104,6 +104,14 @@ pub enum Notice {
         streams: u64,
         max: u64,
     },
+    /// A server's monthly quota reached its warning, or (`full`) its limit
+    /// (`crate::usage`; not decided here).
+    Quota {
+        name: String,
+        used: u64,
+        limit: u64,
+        full: bool,
+    },
 }
 
 /// A subject that is down, since when, and whether the user was told.
@@ -564,6 +572,7 @@ mod tests {
             forwards: Vec::new(),
             exit: None,
             probe: None,
+            wire: None,
         }
     }
 

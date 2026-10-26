@@ -74,6 +74,21 @@ test("the dialogs pass axe and keep the keyboard inside", async ({ page }) => {
   await page.keyboard.press("Escape");
   await expect(page.locator(".dialog")).toHaveCount(0);
 
+  // a server's usage, its quota and the calendar of its days
+  await page.locator(".srv").first().getByRole("button", { name: "Usage" }).click();
+  await expect(page.locator(".dialog.wide .usage")).toBeVisible();
+  await scan(page, "the usage dialog", ".dialog");
+  await page.locator(".dialog.wide").getByRole("button", { name: "Set a quota" }).click();
+  await expect(page.locator("#q-amount")).toBeVisible();
+  await scan(page, "the quota dialog", ".dialog:not(.wide)");
+  await page.keyboard.press("Escape");
+  await page.locator(".dialog.wide").getByRole("button", { name: "Pick days…" }).click();
+  await expect(page.locator(".dialog .cal")).toBeVisible();
+  await scan(page, "the day picker", ".dialog:not(.wide)");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".dialog")).toHaveCount(0);
+
   // the settings dialogs
   await goTo(page, "settings");
   await page.locator(".set-row .btn").first().click();

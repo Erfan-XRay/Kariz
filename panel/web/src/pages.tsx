@@ -17,6 +17,7 @@ import { NewGreLinkFields, greJoinError, linkIpOk, networkOfKind, panelEnd } fro
 import { AgentPortField, agentPortError, agentPortOf, agentPortOk } from "./AgentPort";
 import { ArrangeServers, arranged } from "./Arrange";
 import { hostPort, linkPorts, reverseOk, transportLabel } from "./transport";
+import { ServerUsageDialog, ServerUsageLine, UsageSettingsRows } from "./Usage";
 import { Card, CodeBlock, CopyValue, Dialog, Empty, Icon, Odo, Seg, Sep, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
 
 // ---------------------------------------------------------------- the map
@@ -825,6 +826,7 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
   const [removing, setRemoving] = useState<ServerInfo | null>(null);
   const [fixing, setFixing] = useState<string | null>(null);
   const [auto, setAuto] = useState<string | null>(null);
+  const [usageOf, setUsageOf] = useState<ServerInfo | null>(null);
   // The order being arranged, while the page is in its Arrange mode.
   const [order, setOrder] = useState<string[] | null>(null);
   const [saving, setSaving] = useState(false);
@@ -986,6 +988,7 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                     </dl>
                   </>
                 )}
+                <ServerUsageLine id={s.id} />
                 {s.reverse && (
                   <div className="srv-ips">
                     <span className="badge" title={t("srv.viaRev", { addr: hostPort(s.reverse.host, s.reverse.port) })}>
@@ -1017,6 +1020,10 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
                   <span className={`badge ${s.tunnels.length ? "" : "muted"}`}>{t(s.tunnels.length === 1 ? "srv.tn1" : "srv.tn", { n: num(s.tunnels.length) })}</span>
                   {s.addr && s.addr !== s.ip4 && s.addr !== s.ip6 && <CopyValue what={t("srv.address")} value={s.addr} />}
                   <span className="grow" />
+                  <button className="btn btn-quiet btn-sm" type="button" onClick={() => setUsageOf(s)}>
+                    <Icon name="gauge" size={16} />
+                    {t("us.open")}
+                  </button>
                   <button className="btn btn-quiet btn-sm" type="button" onClick={() => setAuto(s.id)}>
                     <Icon name="clock" size={16} />
                     {t("srv.auto")}
@@ -1052,6 +1059,7 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
       {fixing && servers.find((s) => s.id === fixing) && (
         <ServerFixDialog server={servers.find((s) => s.id === fixing)!} servers={servers} agentsOn={agentsOn} onChanged={onChanged} onClose={() => setFixing(null)} />
       )}
+      {usageOf && <ServerUsageDialog id={usageOf.id} name={usageOf.name} onClose={() => setUsageOf(null)} />}
       {auto && servers.find((s) => s.id === auto) && (
         <AutoRestartDialog server={auto} name={servers.find((s) => s.id === auto)!.name} offline={!servers.find((s) => s.id === auto)!.online} onClose={() => setAuto(null)} />
       )}
@@ -1286,6 +1294,7 @@ export function SettingsPage({ hasPassword, onPasswordSet, updates }: { hasPassw
     ["sec", t("set.sec"), "shield"],
     ["upd", t("set.updates"), "update"],
     ["tg", t("set.telegram"), "bell"],
+    ["use", t("set.usage"), "gauge"],
     ["bak", t("set.backup"), "download"],
     ["look", t("set.look"), "palette"],
   ];
@@ -1342,6 +1351,9 @@ export function SettingsPage({ hasPassword, onPasswordSet, updates }: { hasPassw
         <div id="set-tg" className="set-section">
           <TelegramSection />
         </div>
+        <Card title={t("set.usage")} id="set-use" className="set-section">
+          <UsageSettingsRows row={row} />
+        </Card>
         <Card title={t("set.backup")} id="set-bak" className="set-section">
           {row(
             t("set.backupSave"),

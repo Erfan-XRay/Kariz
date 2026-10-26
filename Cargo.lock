@@ -937,6 +937,7 @@ dependencies = [
  "getrandom 0.4.3",
  "httparse",
  "kcp",
+ "libc",
  "libmimalloc-sys",
  "mimalloc",
  "quinn",

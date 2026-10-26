@@ -497,10 +497,13 @@ pub struct Health {
     pub cpu_pct: Option<f64>,
     pub mem_total: Option<u64>,
     pub mem_used: Option<u64>,
-    /// Bytes per second over the network interfaces (not the loopback), since the
-    /// previous sample.
+    /// Bytes per second over the network cards, since the previous sample.
     pub rx_bps: Option<f64>,
     pub tx_bps: Option<f64>,
+    /// What the network cards moved since the server started (`collect::cards`). Left
+    /// out by agents older than 2.7.0-beta.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net: Option<NetTotals>,
     pub uptime_secs: Option<u64>,
     pub load1: Option<f64>,
     /// The IPv4 networks this server already has routes for (`172.17.0.0/16`, a cloud's
@@ -514,6 +517,19 @@ pub struct Health {
     pub ip4: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip6: Option<String>,
+}
+
+/// Counters of a server's network cards, as `/proc/net/dev` has them (since boot, and
+/// reset when an interface is made again).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetTotals {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub rx_packets: u64,
+    pub tx_packets: u64,
+    /// Bytes of link-layer header in every packet counted (14 on Ethernet): the tunnels'
+    /// own counts, at the IP level, get them added to compare.
+    pub link_header: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

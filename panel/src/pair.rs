@@ -1172,6 +1172,10 @@ async fn run_delete(hub: &Hub, op: &str, name: &str) -> Result<(), String> {
             "DELETE FROM schedules WHERE kind = 'tunnel' AND subject = ?1",
             [name],
         );
+        // Its usage goes with it.
+        if let Err(e) = hub.usage.forget_tunnel(name) {
+            tracing::warn!(error = %e, tunnel = name, "could not remove the usage of a deleted tunnel");
+        }
     }
     failed.map_or(Ok(()), Err)
 }

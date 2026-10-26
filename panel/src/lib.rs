@@ -8,6 +8,7 @@ pub mod api;
 pub mod auth;
 pub mod backup;
 pub mod bench;
+pub mod calendar;
 pub mod cert;
 pub mod collect;
 pub mod config;
@@ -27,6 +28,7 @@ pub mod sign;
 pub mod telegram;
 pub mod update;
 pub mod updater;
+pub mod usage;
 pub mod wire;
 
 use std::path::Path;

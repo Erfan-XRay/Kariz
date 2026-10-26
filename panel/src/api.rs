@@ -102,6 +102,14 @@ pub fn routes() -> Router<AppState> {
         .route("/api/telegram/pair", post(telegram_pair))
         .route("/api/telegram/chats/remove", post(telegram_remove_chat))
         .route("/api/telegram/test", post(telegram_test))
+        .route("/api/usage", get(usage_series))
+        .route("/api/usage/summary", get(usage_summary))
+        .route("/api/usage/reset", post(usage_reset))
+        .route("/api/usage/quota", post(usage_quota))
+        .route(
+            "/api/usage/settings",
+            get(usage_settings_get).post(usage_settings_set),
+        )
         .layer(DefaultBodyLimit::max(16 * 1024))
 }
 
@@ -2483,5 +2491,239 @@ async fn telegram_test(State(state): State<AppState>, headers: HeaderMap) -> Res
         Ok(bot) => reply(StatusCode::OK, json!({ "ok": true, "bot": bot })),
         // A refusal by Telegram or the network is the answer, not a server error.
         Err(why) => reply(StatusCode::OK, json!({ "ok": false, "error": why })),
+    }
+}
+
+// ---- usage ----
+
+#[derive(Deserialize)]
+struct UsageQuery {
+    /// `server`, `server-tunnels` or `tunnel`.
+    of: String,
+    id: String,
+    from: i64,
+    to: i64,
+    /// `quarter` (15 minutes) or `day`.
+    step: Option<String>,
+}
+
+/// A subject's usage over a time, in buckets (`crate::usage`).
+async fn usage_series(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<UsageQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    let daily = match q.step.as_deref() {
+        None | Some("quarter") => false,
+        Some("day") => true,
+        Some(_) => return error(StatusCode::BAD_REQUEST, "bad_input"),
+    };
+    let Some(of) = crate::usage::Of::parse(&q.of, &q.id) else {
+        return error(StatusCode::BAD_REQUEST, "bad_input");
+    };
+    // At most a year of quarters, or 20 years of days.
+    let span = q.to.saturating_sub(q.from);
+    let most = if daily {
+        20 * 366 * 86_400
+    } else {
+        366 * 86_400
+    };
+    if span <= 0 || span > most {
+        return error(StatusCode::BAD_REQUEST, "bad_input");
+    }
+    let usage = &state.hub.usage;
+    let totals = match usage.totals(&of, &[]) {
+        Ok(t) => t,
+        Err(e) => return internal(e),
+    };
+    match usage.series(&of, q.from, q.to, daily) {
+        Ok(rows) => reply(
+            StatusCode::OK,
+            json!({
+                "since": totals.since,
+                "all": totals.all,
+                "settings": usage.settings(),
+                "rows": rows.into_iter().map(|(ts, r)| json!([ts, r])).collect::<Vec<_>>(),
+            }),
+        ),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct SummaryQuery {
+    /// Unix seconds, comma separated (today, this week, this month as the browser counts
+    /// them in the panel's calendar).
+    marks: Option<String>,
+}
+
+/// Every server's and tunnel's totals.
+async fn usage_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<SummaryQuery>,
+) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    let marks: Option<Vec<i64>> = q
+        .marks
+        .as_deref()
+        .filter(|m| !m.is_empty())
+        .map_or(Some(Vec::new()), |m| {
+            m.split(',').map(|v| v.trim().parse().ok()).collect()
+        });
+    let Some(marks) = marks.filter(|m| m.len() <= 8) else {
+        return error(StatusCode::BAD_REQUEST, "bad_input");
+    };
+    match state.hub.usage.summary(&marks) {
+        Ok(s) => reply(StatusCode::OK, json!(s)),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct UsageResetBody {
+    server: Option<String>,
+    tunnel: Option<String>,
+    /// With `server`: its tunnels too.
+    #[serde(default)]
+    tunnels: bool,
+}
+
+/// Starts counting a server or a tunnel again from now.
+async fn usage_reset(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<UsageResetBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let usage = &state.hub.usage;
+    let (result, what) = match (&body.server, &body.tunnel) {
+        (Some(id), None) if !id.is_empty() => (
+            usage.reset_server(id, body.tunnels),
+            if body.tunnels {
+                format!("reset the usage of server {id} and its tunnels")
+            } else {
+                format!("reset the usage of server {id}")
+            },
+        ),
+        (None, Some(name)) if !name.is_empty() => (
+            usage.reset_tunnel(name),
+            format!("reset the usage of tunnel {name}"),
+        ),
+        _ => return error(StatusCode::BAD_REQUEST, "bad_input"),
+    };
+    match result {
+        Ok(()) => {
+            audit(&state, &format!("session {}", me.id), &ip_of(&peer), &what);
+            reply(StatusCode::OK, json!({}))
+        }
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct QuotaBody {
+    server: String,
+    /// Bytes; 0 removes the quota.
+    limit: u64,
+    #[serde(default)]
+    count: String,
+    #[serde(default)]
+    reset_day: u32,
+    #[serde(default)]
+    warn: u32,
+}
+
+/// Sets or removes a server's monthly quota.
+async fn usage_quota(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<QuotaBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    if body.server.is_empty() || !state.hub.has_server(&body.server) {
+        return error(StatusCode::NOT_FOUND, "no_such_server");
+    }
+    let quota = crate::usage::Quota {
+        limit: body.limit,
+        count: body.count,
+        reset_day: body.reset_day,
+        warn: body.warn,
+    };
+    let set = (body.limit > 0).then_some(&quota);
+    if set.is_some_and(|q| !q.valid()) {
+        return error(StatusCode::BAD_REQUEST, "bad_input");
+    }
+    let usage = &state.hub.usage;
+    match usage.set_quota(&body.server, set) {
+        Ok(()) => {
+            let what = match set {
+                Some(q) => format!(
+                    "set the quota of server {} to {} bytes",
+                    body.server, q.limit
+                ),
+                None => format!("removed the quota of server {}", body.server),
+            };
+            audit(&state, &format!("session {}", me.id), &ip_of(&peer), &what);
+            match usage.quota(&body.server) {
+                Ok(q) => reply(StatusCode::OK, json!({ "quota": q })),
+                Err(e) => internal(e),
+            }
+        }
+        Err(e) => internal(e),
+    }
+}
+
+async fn usage_settings_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = authenticate(&state, &headers, false) {
+        return r;
+    }
+    reply(StatusCode::OK, json!(state.hub.usage.settings()))
+}
+
+/// The calendar and time zone usage is shown in.
+async fn usage_settings_set(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<crate::usage::Settings>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    if !body.valid() {
+        return error(StatusCode::BAD_REQUEST, "bad_input");
+    }
+    match state.hub.usage.set_settings(body) {
+        Ok(()) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!(
+                    "set usage to the {} calendar at UTC{}{}:{:02}",
+                    body.calendar.name(),
+                    if body.offset < 0 { "-" } else { "+" },
+                    body.offset.abs() / 60,
+                    body.offset.abs() % 60
+                ),
+            );
+            reply(StatusCode::OK, json!(body))
+        }
+        Err(e) => internal(e),
     }
 }

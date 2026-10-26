@@ -1,6 +1,7 @@
 //! How `kariz status` shows a daemon's status (docs/status.md).
 
 use kariz::stats::{ForwardStatus, LastError, ProbeOutcome, ProbeStatus, Status};
+use kariz::wire::WireStatus;
 
 use crate::logging::{Style, AQUA, BOLD, DIM, RED, TEAL, YELLOW};
 
@@ -252,8 +253,34 @@ pub fn render(style: &Style, name: &str, now: &Status, before: Option<(&Status, 
             forward_line(style, f, before_f)
         ));
     }
+    if let Some(wire) = &now.wire {
+        let (sent, received) = on_network(wire);
+        let before = before.and_then(|(b, secs)| {
+            let (sent, received) = on_network(b.wire.as_ref()?);
+            Some((sent, received, secs))
+        });
+        let mut line = format!(
+            "  {} {}",
+            label("on the wire"),
+            traffic(style, sent, received, before)
+        );
+        if !wire.exact {
+            line.push_str(&style.paint(DIM, " · not all of it could be read"));
+        }
+        out.push(line);
+    }
     out.push(String::new());
     out.join("\n")
+}
+
+/// Bytes sent and received over the network (the loopback left out), headers and resends
+/// included.
+fn on_network(wire: &WireStatus) -> (u64, u64) {
+    let legs = [&wire.user, &wire.link, &wire.target];
+    (
+        legs.iter().map(|l| l.sent.bytes).sum(),
+        legs.iter().map(|l| l.received.bytes).sum(),
+    )
 }
 
 #[cfg(test)]
@@ -309,6 +336,7 @@ mod tests {
             }],
             exit: None,
             probe: None,
+            wire: None,
         }
     }
 

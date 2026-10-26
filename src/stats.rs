@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{mode_name, role_name, Config};
 use crate::session::Session;
+use crate::wire::{meter, Path};
 
 /// Version of the `status` document; readers ignore fields they do not know.
 pub const STATUS_VERSION: u32 = 1;
@@ -123,6 +124,8 @@ pub struct Tally<'a> {
     flushed: Instant,
     /// Nothing counted yet: the first packet is added at once.
     fresh: bool,
+    /// Also counted as packets on the wire: where, and whether sent (or received).
+    wire: Option<(Path, bool)>,
 }
 
 impl<'a> Tally<'a> {
@@ -137,7 +140,14 @@ impl<'a> Tally<'a> {
             packets: 0,
             flushed: Instant::now(),
             fresh: true,
+            wire: None,
         }
+    }
+
+    /// Counts the packets on the wire too ([`crate::wire`]), as sent on `path` or received.
+    pub fn on_wire(mut self, path: Option<Path>, sent: bool) -> Self {
+        self.wire = path.map(|p| (p, sent));
+        self
     }
 
     pub fn add(&mut self, n: usize) {
@@ -156,6 +166,15 @@ impl<'a> Tally<'a> {
     pub fn flush(&mut self) {
         if self.bytes > 0 {
             self.target.fetch_add(self.bytes, Relaxed);
+        }
+        match self.wire {
+            Some((path, true)) if self.packets > 0 => {
+                meter().sent_many(path, self.bytes, self.packets.into())
+            }
+            Some((path, false)) if self.packets > 0 => {
+                meter().received_many(path, self.bytes, self.packets.into())
+            }
+            _ => {}
         }
         self.bytes = 0;
         self.packets = 0;
@@ -484,6 +503,7 @@ impl Stats {
             forwards,
             exit,
             probe: self.probe.snapshot(),
+            wire: Some(crate::wire::meter().snapshot()),
         }
     }
 }
@@ -508,6 +528,10 @@ pub struct Status {
     /// Entry side, once the first probe is done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe: Option<ProbeStatus>,
+    /// Everything this side's sockets moved, headers and resends included (Kariz 2.7.0-beta.2
+    /// and newer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<crate::wire::WireStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

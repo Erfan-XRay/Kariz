@@ -38,6 +38,7 @@ use crate::proto::{self, Duplicate, MAX_DATAGRAM};
 use crate::relay::Counters;
 use crate::session::{ResetReason, SessionStream};
 use crate::stats::{ForwardStats, Tally};
+use crate::wire::{Leg, Path};
 
 /// Receive buffer for one packet: the largest UDP payload fits.
 const PACKET_BUFFER: usize = 64 * 1024;
@@ -155,7 +156,8 @@ impl Copies {
 /// in either direction for `idle`, or either side ends it. Ends the tunnel side cleanly
 /// (`FIN` or shutdown) so the peer ends its side too. `duplicate`: the flow's packet
 /// duplication, as both sides know it from the open request. `counters.read` counts the
-/// bytes of packets from the local side, `counters.written` those delivered to it.
+/// bytes of packets from the local side, `counters.written` those delivered to it; `wire`, where the local side is, counts them as packets
+/// on the wire.
 pub async fn relay<Src, Snk>(
     channel: Channel,
     mut source: Src,
@@ -163,6 +165,7 @@ pub async fn relay<Src, Snk>(
     idle: Duration,
     duplicate: Option<Duplicate>,
     counters: Counters<'_>,
+    wire: Option<Path>,
 ) -> io::Result<()>
 where
     Src: PacketSource,
@@ -193,7 +196,7 @@ where
     match channel {
         Channel::Stream(stream) => {
             let up = async {
-                let mut tally = Tally::new(counters.read);
+                let mut tally = Tally::new(counters.read).on_wire(wire, false);
                 let (mut numbering, mut copies) = (Numbering::default(), Copies::default());
                 loop {
                     let due = copies.next_due();
@@ -224,7 +227,7 @@ where
                 }
             };
             let down = async {
-                let mut tally = Tally::new(counters.written);
+                let mut tally = Tally::new(counters.written).on_wire(wire, true);
                 let mut dedup = duplicate.map(|_| Dedup::default());
                 loop {
                     match stream.recv_datagram().await {
@@ -259,7 +262,7 @@ where
         Channel::Link(link) => {
             let (mut reader, mut writer) = link.into_halves();
             let up = async {
-                let mut tally = Tally::new(counters.read);
+                let mut tally = Tally::new(counters.read).on_wire(wire, false);
                 let mut batch = Vec::with_capacity(WRITE_BATCH);
                 // Numbered like any flow with duplication, but a channel loses nothing,
                 // so nothing is copied.
@@ -289,7 +292,7 @@ where
                 Ok(())
             };
             let down = async {
-                let mut tally = Tally::new(counters.written);
+                let mut tally = Tally::new(counters.written).on_wire(wire, true);
                 let mut dedup = duplicate.map(|_| Dedup::default());
                 while let Some(packet) = proto::read_datagram(&mut reader).await? {
                     touch();
@@ -678,7 +681,8 @@ fn start_flow<O, F>(
                 written: &stats.traffic.down,
             };
             let sink = ReplyTo { socket, client };
-            relay(channel, rx, sink, idle, duplicate, counters).await
+            let wire = Some(Path::new(Leg::User, client));
+            relay(channel, rx, sink, idle, duplicate, counters, wire).await
         }
         .await;
         let open_failed = match &result {

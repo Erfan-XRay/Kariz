@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Usage of every tunnel and server, as the network really carried it.** A tunnel's new *Usage*
+  tab shows today, this week, this month and the total since it was counted, download and upload,
+  each of its two servers, and a chart of today by the hour, 7 or 30 days, this month, this year
+  by month, or days picked on a calendar. *Breakdown* splits it into the users' data (on every leg
+  it crosses), the tunnel's own overhead (encryption, framing, handshakes, pings), resends and FEC
+  parity, and packet headers (IP, TCP/UDP, Ethernet, and a GRE or VXLAN link's). A server's card
+  shows this month's usage; its *Usage* dialog has the network card's chart (the real cards, not
+  links or bridges counted twice) and how much of it its tunnels were. The tunnel list has a
+  column for this month. [Usage](docs/using-the-panel.md#usage).
+- **Monthly quota of a server.** A volume a month, what counts (both directions, upload only, or
+  download only), the day it renews on and a warning share; the card shows how much is used, and
+  the log and Telegram tell at the warning and when it is used up, once a period.
+- **Reset usage** of a tunnel, or of a server (with its tunnels if you like). Deleting a tunnel or
+  removing a server takes its usage with it.
+- **Solar Hijri or Gregorian calendar, and the time zone** for usage, in *Settings → Usage*
+  (Solar Hijri and Tehran by default).
+- **`wire` in the status document**: everything a side's sockets sent and received, by leg (users,
+  link, targets, loopback), with packets, headers and resends. Every TCP socket is read from the
+  kernel (`TCP_INFO`), UDP is counted packet by packet, QUIC below its seal. `kariz status` shows
+  it on an *on the wire* line. [Status](docs/status.md#wire-what-the-network-really-carried).
+
+### Changed
+
+- The servers' network rate (and the new totals) count only the network cards: a GRE or VXLAN
+  link, a bridge or docker's interfaces are no longer added to the card they run over. In a
+  container, the interfaces of the default route stand for the card.
+
+Usage needs this version on the panel; exact counts need it on the servers too. A tunnel side on
+an older server shows the users' bytes alone, marked as an estimate.
+
 ## 2.7.0-beta.1 - 2026-10-25
 
 A **beta**: only panels on the *Beta* channel are offered it; `kariz-manager update` and the stable

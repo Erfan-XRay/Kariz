@@ -35,6 +35,8 @@ old one are dropped.
 | 🟠 Tunnel *name* is connected, but users cannot connect | three health probes in a row (45 seconds) found no way through: every stream taken, or the target the exit side connects to is down, which it names ([Status](status.md)) |
 | 🟢 Users get through tunnel *name* again | a probe got through again, with how long it was blocked |
 | 🟡 Tunnel *name* is nearly full | 80 % of its streams are in use; told once, and again only after it dropped below 70 % |
+| 🟡 Server *name* reached the warning of its monthly quota | its [monthly quota](using-the-panel.md#usage) passed its warning share (80 % by default), with how much is used of how much; once a period |
+| 🔴 Server *name* used up its monthly quota | it reached the quota itself; once a period |
 
 So that you are not woken up for nothing:
 
