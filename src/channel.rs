@@ -640,7 +640,9 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.to_string().contains("404"), "{err}");
-        assert!(started.elapsed() < Duration::from_secs(3));
+        // Answered at once, not held the way a failed handshake is (5-30 s); a busy CI machine
+        // running every test at once has taken over 3 s.
+        assert!(started.elapsed() < Duration::from_secs(DRAIN_SECS.0));
     }
 
     #[tokio::test]
