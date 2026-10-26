@@ -795,6 +795,18 @@ pub mod text {
         }
     }
 
+    /// What a tunnel's error likely means, on a line of its own (nothing for one not known).
+    fn cause(out: &mut String, fa: bool, error: &str) {
+        if let Some(c) = crate::cause::Cause::of(error) {
+            let _ = write!(
+                out,
+                "\n{} {}",
+                if fa { "احتمالاً:" } else { "Likely:" },
+                esc(c.hint(fa))
+            );
+        }
+    }
+
     pub fn notices(fa: bool, list: &[Notice]) -> String {
         let mut out = String::new();
         for notice in list {
@@ -828,6 +840,9 @@ pub mod text {
                     name,
                     server,
                     error,
+                    transport,
+                    peer,
+                    also,
                 } => {
                     let (name, server) = (esc(name), esc(server));
                     if fa {
@@ -838,8 +853,30 @@ pub mod text {
                             "🔴 Tunnel <b>{name}</b> is down (reported by {server})"
                         );
                     }
+                    match (transport.is_empty(), peer) {
+                        (false, Some(p)) if fa => {
+                            let _ = write!(out, "\n{} بین {server} و {}", esc(transport), esc(p));
+                        }
+                        (false, Some(p)) => {
+                            let _ =
+                                write!(out, "\n{} between {server} and {}", esc(transport), esc(p));
+                        }
+                        (false, None) => {
+                            let _ = write!(out, "\n{}", esc(transport));
+                        }
+                        (true, _) => {}
+                    }
                     if let Some(e) = error {
                         let _ = write!(out, "\n<i>{}</i>", esc(e));
+                        cause(&mut out, fa, e);
+                    }
+                    if !also.is_empty() {
+                        let list = esc(&also.join(if fa { "، " } else { ", " }));
+                        if fa {
+                            let _ = write!(out, "\nهم‌زمان این تانل‌های بین همین دو سرور هم قطع‌اند: {list}. پس مشکل از مسیر بین دو سرور است، نه از این تانل.");
+                        } else {
+                            let _ = write!(out, "\nThese tunnels between the same two servers are down too: {list}. So it is the path between the servers, not this tunnel.");
+                        }
                     }
                 }
                 Notice::TunnelUp { name, down_secs } => {
@@ -901,6 +938,7 @@ pub mod text {
                     }
                     if let Some(e) = error.as_ref().filter(|_| target.is_none()) {
                         let _ = write!(out, "\n<i>{}</i>", esc(e));
+                        cause(&mut out, fa, e);
                     }
                 }
                 Notice::TunnelUnblocked { name, blocked_secs } => {
@@ -1477,6 +1515,9 @@ mod tests {
                 name: "a<b>".into(),
                 server: "s&s".into(),
                 error: Some("x < y".into()),
+                transport: String::new(),
+                peer: None,
+                also: Vec::new(),
             },
             Notice::TunnelUp {
                 name: "t".into(),
@@ -1486,8 +1527,33 @@ mod tests {
         let en = text::notices(false, &notes);
         assert!(en.contains("a&lt;b&gt;") && en.contains("s&amp;s") && en.contains("x &lt; y"));
         assert!(en.contains("down for 4m 12s"));
+        // An error with no known reason is shown as it is, with no guess.
+        assert!(!en.contains("Likely:"));
         let fa = text::notices(true, &notes);
         assert!(fa.contains("۴ دقیقه و ۱۲ ثانیه"));
+    }
+
+    #[test]
+    fn a_drop_says_its_likely_reason_and_whether_the_path_is_to_blame() {
+        let notes = [Notice::TunnelDown {
+            name: "t1".into(),
+            server: "Tehran".into(),
+            error: Some("mux session closed: Connection reset by peer (os error 104)".into()),
+            transport: "tcpmux".into(),
+            peer: Some("Frankfurt".into()),
+            also: vec!["t2".into(), "t3".into()],
+        }];
+        let en = text::notices(false, &notes);
+        assert!(en.contains("tcpmux between Tehran and Frankfurt"), "{en}");
+        assert!(
+            en.contains("Likely: The connection was cut by a reset"),
+            "{en}"
+        );
+        assert!(en.contains("down too: t2, t3"), "{en}");
+        let fa = text::notices(true, &notes);
+        assert!(fa.contains("tcpmux بین Tehran و Frankfurt"), "{fa}");
+        assert!(fa.contains("احتمالاً: اتصال با یک ریست بریده شد"), "{fa}");
+        assert!(fa.contains("t2، t3"), "{fa}");
     }
 
     #[test]

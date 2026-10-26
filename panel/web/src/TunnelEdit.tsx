@@ -5,7 +5,7 @@ import type { ServerInfo } from "./api";
 import type { Tunnel } from "./derive";
 import { useApp } from "./store";
 import { Icon, Seg } from "./ui";
-import { Checklist, opError, useOp } from "./ops";
+import { Checklist, describeError, opError, useOp } from "./ops";
 import { MuxFields, MuxToggle, muxFromSpec, muxSpecOf, muxToSpec } from "./MuxFields";
 import { TlsChoice, emptyTls, isLetsEncrypt, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
@@ -50,6 +50,9 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   const [loading, setLoading] = useState(true);
   // The tunnel cannot be edited now (a server is away, or it has one side only): say why.
   const [blocked, setBlocked] = useState(false);
+  // The servers did not say what the tunnel has (it is not that it cannot be edited): they can be asked again.
+  const [retry, setRetry] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const [mode, setMode] = useState("reverse");
   const [transport, setTransport] = useState("tcp");
   const [muxOn, setMuxOn] = useState(true);
@@ -112,6 +115,10 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
       return;
     }
     setAway(off);
+    setError("");
+    setBlocked(false);
+    setRetry(false);
+    setLoading(true);
     let alive = true;
     const read = (side: typeof tunnel.entry, id: string) => (online(id) || !side ? api.tunnelSpec(id, tunnel.name) : Promise.resolve(specOf(tunnel.name, side.tunnel)));
     void Promise.all([read(tunnel.entry, wasEntry), read(tunnel.exit, wasExit)])
@@ -149,15 +156,19 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
         setTls(real ? { mode: isLetsEncrypt(real.cert) ? "real" : "own", host: dia.tls_sni || hostOf(dia.remote), email: "", ...real } : emptyTls());
         setInitial("");
       })
-      .catch(() => {
-        setError(t("tun.failed", { why: "no_such_tunnel" }));
+      .catch((e) => {
+        if (!alive) return;
+        // The server's own reason (which server, and why), not a guess that the tunnel is gone.
+        const names = new Map(servers.map((s) => [s.id, s.name]));
+        setError(t("tun.failed", { why: e instanceof ApiError ? describeError(t, e.code, names) : String(e) }));
+        setRetry(!(e instanceof ApiError && e.code.startsWith("spec_missing")));
         setBlocked(true);
       })
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
-  }, [tunnel.name]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tunnel.name, attempt]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A tunnel that listens on the private address of a link runs over that link's network.
   useEffect(() => {
@@ -336,6 +347,11 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
             <button className="btn btn-ghost" type="button" onClick={onBack}>
               {t("td.back")}
             </button>
+            {retry && (
+              <button className="btn btn-primary" type="button" onClick={() => setAttempt((n) => n + 1)}>
+                {t("te.retry")}
+              </button>
+            )}
           </div>
         </section>
       ) : loading ? (

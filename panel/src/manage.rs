@@ -393,6 +393,9 @@ pub fn revert(dir: &Path, name: &str) -> Result<()> {
 /// The spec of an existing tunnel, without its token.
 pub fn get(dir: &Path, name: &str) -> Result<Spec> {
     let path = config_path(dir, name)?;
+    if !path.exists() {
+        bail!("no_such_tunnel");
+    }
     let c = Config::load(&path)?;
     Ok(Spec {
         name: name.to_owned(),
