@@ -6,7 +6,84 @@ import { pairTunnels, rateParts } from "./derive";
 import type { Tunnel, TunnelState } from "./derive";
 import { useApp } from "./store";
 import { Chart } from "./Chart";
-import { Card, Dialog, Empty, Icon, Menu, Seg, Sep, Skeleton, Stat, Tabs, useAgo } from "./ui";
+import { Card, Dialog, Empty, Icon, Menu, Seg, Sep, Skeleton, Stat, Tabs, useAgo, useSpan } from "./ui";
+import { ArrangeList, arranged } from "./Arrange";
+import type { ArrangeItem } from "./Arrange";
+
+/** The longest label a tunnel can be given (as the panel checks it). */
+const MAX_LABEL = 48;
+
+/** Gives a tunnel a name to be shown by. Its own name, which its files and services carry, stays. */
+function RenameDialog({ tunnel, onClose, onSaved }: { tunnel: Tunnel; onClose: () => void; onSaved: () => void }) {
+  const { t, num, toast } = useApp();
+  const [label, setLabel] = useState(tunnel.label ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const clean = label.trim().replace(/\s+/g, " ");
+  const long = [...clean].length > MAX_LABEL;
+  const same = clean === (tunnel.label ?? "");
+  const save = async (value: string) => {
+    setBusy(true);
+    setError("");
+    try {
+      await api.labelTunnel(tunnel.name, value);
+      toast(value ? t("rn.saved", { name: value }) : t("rn.cleared", { name: tunnel.name }), "ok");
+      onSaved();
+    } catch {
+      setBusy(false);
+      setError(t("rn.failed"));
+    }
+  };
+  return (
+    <Dialog
+      title={t("rn.title")}
+      onClose={onClose}
+      footer={
+        <>
+          {tunnel.label && (
+            <button className="btn btn-quiet btn-sm" type="button" disabled={busy} onClick={() => save("")}>
+              {t("rn.clear")}
+            </button>
+          )}
+          <span className="grow" />
+          <button className="btn btn-ghost btn-sm" type="button" onClick={onClose}>
+            {t("cancel")}
+          </button>
+          <button className="btn btn-primary btn-sm" type="submit" form="rn-form" disabled={busy || long || same}>
+            {t("rn.save")}
+          </button>
+        </>
+      }
+    >
+      <form
+        id="rn-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!busy && !long && !same) save(clean);
+        }}
+      >
+        <div className="field">
+          <label htmlFor="rn-label">{t("rn.label")}</label>
+          <input
+            className="text"
+            id="rn-label"
+            dir="auto"
+            autoFocus
+            autoComplete="off"
+            placeholder={tunnel.name}
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            aria-describedby="rn-help"
+          />
+          <span className="help" id="rn-help">
+            {t("rn.help", { name: tunnel.name })}
+          </span>
+          <span className="err">{long ? t("rn.long", { n: num(MAX_LABEL) }) : error}</span>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
 import { Checklist, opError, useOp } from "./ops";
 import { RouteScene } from "./RouteScene";
 import { SpeedTest } from "./SpeedTest";
@@ -275,6 +352,7 @@ function TunnelPage({
   onBack,
   onAct,
   onEdit,
+  onRename,
 }: {
   tunnel: Tunnel;
   servers: ServerInfo[];
@@ -282,8 +360,10 @@ function TunnelPage({
   onAct: (a: Action) => void;
   /** With a benchmark's choice, the edit page opens with it filled in. */
   onEdit: (preset?: BenchChoice) => void;
+  onRename: () => void;
 }) {
   const { t, num } = useApp();
+  const span = useSpan();
   const [tab, setTab] = useState<TunnelTab>("overview");
   const { links } = useNetworks();
   const forwards = tunnel.entry?.tunnel.forwards ?? tunnel.exit?.tunnel.forwards ?? [];
@@ -329,9 +409,27 @@ function TunnelPage({
             <Icon name="back" size={18} />
           </button>
           <div className="td-title">
-            <h2 className="td-name mono">{tunnel.name}</h2>
+            <div className="td-name-row">
+              <h2 className={`td-name ${tunnel.label ? "" : "mono"}`} dir="auto">
+                {tunnel.title}
+              </h2>
+              <button className="icon-square td-rename" type="button" onClick={onRename} aria-label={t("rn.open", { name: tunnel.title })} title={t("rn.title")}>
+                <Icon name="edit" size={16} />
+              </button>
+            </div>
+            {tunnel.label && (
+              <span className="td-system mono" dir="ltr" title={t("rn.system")}>
+                {tunnel.name}
+              </span>
+            )}
             <div className="td-tags">
               <StateBadge state={tunnel.state} />
+              {tunnel.uptime != null && (
+                <span className="tag up-for" title={t("up.title")}>
+                  <Icon name="clock" size={14} />
+                  {t("up.for", { span: span(tunnel.uptime) })}
+                </span>
+              )}
               <span className={`tag ${tunnel.via ? "via" : ""}`} dir="ltr" title={tunnel.via ? t("td.autoNow", { via: tunnel.via.replace(/tcpmux/g, "tcp") }) : undefined}>
                 {transportLabel(tunnel.transport, tunnel.via)}
               </span>
@@ -357,6 +455,7 @@ function TunnelPage({
             <Menu
               label={t("more")}
               items={[
+                { label: t("rn.title"), icon: "edit", run: onRename },
                 { label: t("tun.rotate"), icon: "key", disabled: !tunnel.paired, run: () => onAct("rotate") },
                 { label: t("tun.delete"), icon: "trash", danger: true, run: () => onAct("delete") },
               ]}
@@ -589,11 +688,65 @@ export function TunnelsPage({
   setOpen: (name: string | null) => void;
   onChanged: () => void;
 }) {
-  const { t, num } = useApp();
+  const { t, num, toast } = useApp();
+  const span = useSpan();
   const usage = useUsage();
-  const tunnels = pairTunnels(servers);
+  const paired = pairTunnels(servers);
   const online = servers.filter((s) => s.online);
   const [wizard, setWizard] = useState(false);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  // The order being arranged, while the page is in its Arrange mode; a saved one is shown
+  // until the next reading of the servers has it too.
+  const [order, setOrder] = useState<string[] | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState<string[] | null>(null);
+  const keyed = paired.map((x) => ({ ...x, id: x.name }));
+  const byName = new Map(keyed.map((x) => [x.name, x]));
+  const tunnels = saved ? arranged(saved, keyed).map((n) => byName.get(n)!) : paired;
+  useEffect(() => {
+    if (saved && arranged(saved, keyed).join() === paired.map((x) => x.name).join()) setSaved(null);
+  }, [servers, saved]); // eslint-disable-line react-hooks/exhaustive-deps
+  const saveOrder = async () => {
+    if (!order) return;
+    const names = arranged(order, keyed);
+    if (names.join() === tunnels.map((x) => x.name).join()) {
+      setOrder(null);
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.orderTunnels(names);
+      toast(t("arr.savedTunnels"), "ok");
+      setSaved(names);
+      setOrder(null);
+    } catch {
+      toast(t("arr.failed"), "err");
+    }
+    setSaving(false);
+    onChanged();
+  };
+  const arrangeItems = tunnels.map(
+    (x): ArrangeItem => ({
+      id: x.name,
+      name: x.title,
+      badge: x.label && (
+        <span className="t-sys mono" dir="ltr">
+          {x.name}
+        </span>
+      ),
+      sub: x.paired ? (
+        <span className="t-route">
+          <span>{x.entry!.server.name}</span>
+          <Icon name="arrow" size={14} />
+          <span>{x.exit!.server.name}</span>
+        </span>
+      ) : (
+        (x.entry ?? x.exit)!.server.name
+      ),
+      state: x.state,
+      label: t(stateKey[x.state]),
+    }),
+  );
   const [editing, setEditing] = useState<string | null>(null);
   // A benchmark's choice the edit page opens with.
   const [preset, setPreset] = useState<BenchChoice | null>(null);
@@ -614,7 +767,7 @@ export function TunnelsPage({
     (x) =>
       (filter === "all" || x.state === filter) &&
       (!q ||
-        [x.name, x.entry?.server.name, x.exit?.server.name, x.transport, ...(x.entry?.tunnel.forwards ?? []).map((f) => f.listen)]
+        [x.name, x.label, x.entry?.server.name, x.exit?.server.name, x.transport, ...(x.entry?.tunnel.forwards ?? []).map((f) => f.listen)]
           .join(" ")
           .toLowerCase()
           .includes(q)),
@@ -675,6 +828,16 @@ export function TunnelsPage({
           }}
         />
       )}
+      {renaming && tunnels.find((x) => x.name === renaming) && (
+        <RenameDialog
+          tunnel={tunnels.find((x) => x.name === renaming)!}
+          onClose={() => setRenaming(null)}
+          onSaved={() => {
+            setRenaming(null);
+            onChanged();
+          }}
+        />
+      )}
     </>
   );
 
@@ -707,6 +870,7 @@ export function TunnelsPage({
             setPreset(choice ?? null);
             setEditing(openTunnel.name);
           }}
+          onRename={() => setRenaming(openTunnel.name)}
         />
         {dialogs}
       </>
@@ -716,23 +880,46 @@ export function TunnelsPage({
   return (
     <div className="page is-on">
       <div className="page-band">
-        <Seg
-          value={filter}
-          options={(["all", "up", "down", "off"] as Filter[]).map((f) => [f, f === "all" ? t("tl.all") : t(stateKey[f]), num(f === "all" ? tunnels.length : count(f))] as [Filter, string, string])}
-          onChange={setFilter}
-        />
-        <label className="search">
-          <Icon name="search" size={18} />
-          <input type="search" placeholder={t("tl.search")} aria-label={t("tl.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
-        </label>
-        <div className="grow" />
-        <button className="btn btn-primary btn-sm" type="button" disabled={online.length < 2} title={online.length < 2 ? t("tun.needTwo") : undefined} onClick={() => setWizard(true)}>
-          <span className="shine" />
-          <Icon name="plus" size={18} />
-          {t("tun.new")}
-        </button>
+        {order ? (
+          <>
+            <div className="grow" />
+            <button className="btn btn-ghost btn-sm" type="button" onClick={() => setOrder(null)} disabled={saving}>
+              {t("cancel")}
+            </button>
+            <button className="btn btn-primary btn-sm" type="button" onClick={saveOrder} disabled={saving}>
+              <Icon name="check" size={18} />
+              {t("arr.done")}
+            </button>
+          </>
+        ) : (
+          <>
+            <Seg
+              value={filter}
+              options={(["all", "up", "down", "off"] as Filter[]).map((f) => [f, f === "all" ? t("tl.all") : t(stateKey[f]), num(f === "all" ? tunnels.length : count(f))] as [Filter, string, string])}
+              onChange={setFilter}
+            />
+            <label className="search">
+              <Icon name="search" size={18} />
+              <input type="search" placeholder={t("tl.search")} aria-label={t("tl.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
+            </label>
+            <div className="grow" />
+            {loaded && tunnels.length > 1 && (
+              <button className="btn btn-ghost btn-sm" type="button" onClick={() => setOrder(tunnels.map((x) => x.name))}>
+                <Icon name="arrange" size={18} />
+                {t("arr.start")}
+              </button>
+            )}
+            <button className="btn btn-primary btn-sm" type="button" disabled={online.length < 2} title={online.length < 2 ? t("tun.needTwo") : undefined} onClick={() => setWizard(true)}>
+              <span className="shine" />
+              <Icon name="plus" size={18} />
+              {t("tun.new")}
+            </button>
+          </>
+        )}
       </div>
-      {!loaded ? (
+      {order && loaded ? (
+        <ArrangeList items={arrangeItems} order={order} onOrder={setOrder} hint={t("arr.hintTunnels")} />
+      ) : !loaded ? (
         <div className="card">
           <Skeleton rows={4} height={44} />
         </div>
@@ -762,6 +949,7 @@ export function TunnelsPage({
                   <th>{t("t.transport")}</th>
                   <th className="hide-sm">{t("t.ports")}</th>
                   <th>{t("t.state")}</th>
+                  <th className="hide-sm">{t("t.uptime")}</th>
                   <th>{t("t.rate")}</th>
                   <th className="hide-sm">{t("t.month")}</th>
                   <th>
@@ -772,7 +960,7 @@ export function TunnelsPage({
               <tbody>
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="muted" style={{ textAlign: "center", padding: "var(--sp-7)" }}>
+                    <td colSpan={8} className="muted" style={{ textAlign: "center", padding: "var(--sp-7)" }}>
                       {t("tl.none")}
                     </td>
                   </tr>
@@ -786,9 +974,14 @@ export function TunnelsPage({
                         <div className="t-cell">
                           <span className={`t-mark ${x.state}`} aria-hidden="true" />
                           <div>
-                            <button className="linklike t-name" type="button" onClick={() => setOpen(x.name)}>
-                              {x.name}
+                            <button className={`linklike t-name ${x.label ? "is-label" : ""}`} type="button" dir="auto" onClick={() => setOpen(x.name)}>
+                              {x.title}
                             </button>
+                            {x.label && (
+                              <span className="t-sys mono" dir="ltr">
+                                {x.name}
+                              </span>
+                            )}
                             <span className="t-route">
                               {x.paired ? (
                                 <>
@@ -823,6 +1016,7 @@ export function TunnelsPage({
                       <td>
                         <StateBadge state={x.state} />
                       </td>
+                      <td className="hide-sm t-up">{x.uptime != null ? span(x.uptime) : "—"}</td>
                       <td className="rate num">
                         {x.state === "up" ? (
                           <div className="rate-cell">

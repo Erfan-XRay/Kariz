@@ -221,8 +221,8 @@ servers. Good to know:
 - A server that is **offline** is not restarted: the panel tries again as soon as it is back (a
   daily time that the panel itself slept through is skipped, unless it is back within the hour).
 - *Restart now* tries it at once; the card shows when the next restart is and how the last one
-  went. Each restart is in *Events* and the audit log. The timers need the panel to be running,
-  and are not part of the backup.
+  went. Each restart is in *Events* and the audit log. The timers need the panel to be running;
+  a backup keeps them (since 2.7.0-beta.4).
 
 ## Make a tunnel
 
@@ -309,12 +309,22 @@ hours. Both servers need this release (`POST /api/bench`, `GET /api/bench?id=`,
   particles follow the throughput); a dashed empty channel is a stopped tunnel; a red pulse
   is one that is broken. Hover for details.
 - **Servers:** CPU, memory, network, uptime and the number of tunnels of each server. (On
-  Linux; nothing is shown where there is no `/proc`.)
+  Linux; nothing is shown where there is no `/proc`.) The two buttons beside *Arrange* show them
+  as **cards** or as **rows** (one line each, the actions in a menu); the browser remembers it.
 - **Tunnels** come from the `*.toml` files in `/etc/kariz` on each server, with systemd's
   state and the running daemon's `kariz status`. A tunnel is drawn when its entry and exit
   have **the same name**, which is how the panel names the two sides. Each tunnel's page
   has charts of its throughput and round trip over 1 hour, 24 hours, 7 days and 30 days. The
   last hour is kept in memory; five-minute averages are stored in the database for 30 days.
+  The list and the tunnel's page say **how long it has been up** (since its link last came up).
+- **Renaming a tunnel:** the pencil beside its name (or *More actions*, *Rename*) gives it a
+  name to be shown by, in any language and with spaces, up to 48 characters. Its own name stays
+  under it: its files and services (`kariz@NAME`) keep it, so nothing restarts. *Use its own
+  name* takes the label away.
+- **Arranging tunnels:** *Arrange* on the Tunnels page, like the one for servers: drag a tunnel
+  by its handle, or move it with its buttons or Alt+↑ / Alt+↓. New tunnels come after the
+  arranged ones. Labels and the order are kept by the panel (`POST /api/tunnels/label`,
+  `POST /api/tunnels/order`) and are in the backup.
 - **Networks:** private GRE networks between your servers, with addresses that are never
   repeated ([networks.md](networks.md)).
 - **Logs:** pick a tunnel and read the log of **both sides interleaved by time**, filtered by
@@ -369,14 +379,21 @@ The menu has the same (items 3 to 10). Without the manager: `kariz-panel init`, 
 
 *Settings*, *Download a backup* gives one file, locked with a passphrase you choose (10
 characters or more; Argon2id and ChaCha20-Poly1305). It holds the servers this panel knows,
-with the keys they prove themselves with, and the token they dial with. It does **not** hold
-tunnels (they live on the servers, in their own files, and the panel reads them from there),
-sessions or login links. Keep the passphrase: without it the file cannot be opened.
+with the keys they prove themselves with, the token they dial with, where the panel dials the
+ones it connects to, and their agents ports. Since 2.7.0-beta.4 it also holds the private
+networks and their links, each server's address for them, the automatic restarts, the usage
+quotas, the tunnels' labels and order, and the Telegram bot and update settings. It does
+**not** hold tunnels (they live on the servers, in their own files, and the panel reads them
+from there), the admin password, sessions, login links, history or usage counts. Keep the
+passphrase: without it the file cannot be opened. A backup from an older panel restores what it
+has and leaves the rest of the new panel as it is.
 
 To move to a new server: install the panel there, sign in, *Restore a backup*, then
-`systemctl restart kariz-panel` so the agents can connect with the restored token. They dial
-the panel's address, so point that name at the new server (or run `kariz-panel agent` again on
-each server with a new join code if the address changed).
+`systemctl restart kariz-panel` so the agents can connect with the restored token and the bot
+starts. They dial the panel's address, so point that name at the new server (or run
+`kariz-panel agent` again on each server with a new join code if the address changed). A server
+whose agent reaches the panel **over a private network link** dials the old panel's end of that
+link: give it a new code (*Reconnect*) after the move.
 
 ## Your own certificate
 

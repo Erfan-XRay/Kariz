@@ -220,6 +220,12 @@ const MIGRATIONS: &[&str] = &[
          period INTEGER NOT NULL DEFAULT 0,
          level INTEGER NOT NULL DEFAULT 0
      );",
+    // 21: the name a tunnel is shown by and its place in the list (`crate::tunnel_meta`).
+    "CREATE TABLE tunnel_meta (
+         name TEXT PRIMARY KEY,
+         label TEXT NOT NULL DEFAULT '',
+         position INTEGER
+     );",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

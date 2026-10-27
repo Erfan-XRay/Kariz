@@ -1,5 +1,54 @@
 # Changelog
 
+## 2.7.0-beta.4 - 2026-10-27
+
+A **beta**, like [2.7.0-beta.3](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#270-beta3---2026-10-26):
+only panels on the *Beta* channel are offered it; `kariz-manager update` and the stable channel
+stay on 2.6.1. To try it on a server by hand: `kariz-manager install --version v2.7.0-beta.4`.
+
+**Open connections no longer pile up** over the day: a user that vanished, or went silent after
+its connection was half closed, is now closed instead of kept until the tunnel restarted. Tunnels
+can be **renamed** (a name to be shown by, in any language) and **arranged**, the list says **how
+long each one has been up**, servers can be shown **as rows**, and a **backup now brings back the
+private networks, automatic restarts, quotas and the Telegram bot** too. Update the panel first,
+then the servers from the panel (the connection fix is in the servers' `kariz`); 2.7.0-beta.3
+servers keep working.
+
+### Added
+
+- **Rename a tunnel.** The pencil beside its name (or *More actions*, *Rename*) gives it a name
+  to be shown by, in any language and with spaces, up to 48 characters, everywhere in the panel:
+  the list, its page, the map, the dashboard, the logs and the command palette. Its own name stays
+  under it, since its files and services carry it, so nothing restarts. *Use its own name* takes
+  the label away.
+- **Arrange the tunnels.** *Arrange* on the Tunnels page, like the one for servers: drag a
+  tunnel by its handle, or move it with its buttons or Alt+↑ / Alt+↓. New tunnels come after the
+  arranged ones.
+- **How long a tunnel has been up**, in its own column on the Tunnels page and as a tag on the
+  tunnel's page: the time since its link last came up, so a tunnel that drops now and then shows
+  it at a glance.
+- **Servers as rows.** Two buttons beside *Arrange* show the servers as cards or as one row each
+  (state, CPU, memory, network, uptime, tunnels, IPv4, and the actions in a menu); the browser
+  remembers the choice.
+
+### Changed
+
+- **A backup holds more.** Besides the servers, it now holds the private networks and their links,
+  each server's address for them, the automatic restarts, the usage quotas, the tunnels' labels
+  and order, and the Telegram bot and update settings, so a panel moved to a new server comes back
+  whole. Tunnels themselves still live on the servers; the admin password, sessions, history and
+  usage counts are still not in it. A backup from an older panel restores what it has and leaves
+  the rest as it is.
+
+### Fixed
+
+- **Open connections grew all day and took memory with them**, until the tunnel restarted (seen
+  with reverse tunnels and mux, over GRE). A user that vanished without closing (a phone that
+  changed networks, a NAT that forgot the connection) was never noticed, and a connection whose
+  one side had ended could wait for the other side for good. User and target connections now get
+  TCP keepalive (`tuning.keepalive_secs`), and once one direction of a connection has ended, the
+  other has two minutes to move or the connection is closed.
+
 ## 2.7.0-beta.3 - 2026-10-26
 
 A **beta**, like [2.7.0-beta.2](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#270-beta2---2026-10-26):

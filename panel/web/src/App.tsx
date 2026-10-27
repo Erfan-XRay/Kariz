@@ -9,7 +9,7 @@ import { PAGES, Shell } from "./Shell";
 import type { Live, PageId } from "./Shell";
 import { TunnelsPage } from "./Tunnels";
 import { ServersDialog, UpdateDialog, UpdatePill, UpdatesSection, useUpdate } from "./Update";
-import { pairTunnels } from "./derive";
+import { pairTunnels, withMeta } from "./derive";
 import { useApp } from "./store";
 
 type Screen = "boot" | "login" | "app";
@@ -180,7 +180,7 @@ export function App() {
         .then((r) => {
           if (!alive) return;
           misses = 0;
-          setServers(r.servers);
+          setServers(withMeta(r.servers, r.tunnel_meta));
           setAgentsOn(r.agents);
           setLoaded(true);
           setLive({ state: "ok", at: Date.now() });
@@ -199,12 +199,13 @@ export function App() {
     };
   }, [screen, signOut, reload]);
 
-  const tunnelNames = useMemo(() => pairTunnels(servers).map((x) => x.name), [servers]);
-  const tunnelCount = tunnelNames.length;
+  const tunnelTitles = useMemo(() => pairTunnels(servers).map((x) => [x.name, x.title] as const), [servers]);
+  const tunnelCount = tunnelTitles.length;
   const items = useMemo(
-    () => tunnelNames.map((name) => ({ label: t("pal.openTunnel", { name }), icon: "tunnels", run: () => navigate({ page: "tunnels", tunnel: name }) })),
-    [tunnelNames.join(), t, navigate], // eslint-disable-line react-hooks/exhaustive-deps
+    () => tunnelTitles.map(([name, title]) => ({ label: t("pal.openTunnel", { name: title }), icon: "tunnels", run: () => navigate({ page: "tunnels", tunnel: name }) })),
+    [tunnelTitles.join(), t, navigate], // eslint-disable-line react-hooks/exhaustive-deps
   );
+  const tunnelTitle = tunnelTitles.find(([name]) => name === route.tunnel)?.[1];
   const subtitle =
     route.page === "map"
       ? t("page.mapSub", { s: num(servers.length), t: num(tunnelCount) })
@@ -236,6 +237,7 @@ export function App() {
       {screen === "app" && (
         <Shell
           route={route}
+          tunnelTitle={tunnelTitle}
           navigate={navigate}
           subtitle={subtitle}
           rising={rising}

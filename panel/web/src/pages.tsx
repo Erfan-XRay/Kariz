@@ -18,7 +18,7 @@ import { AgentPortField, agentPortError, agentPortOf, agentPortOk } from "./Agen
 import { ArrangeServers, arranged } from "./Arrange";
 import { hostPort, linkPorts, reverseOk, transportLabel } from "./transport";
 import { ServerUsageDialog, ServerUsageLine, UsageSettingsRows } from "./Usage";
-import { Card, CodeBlock, CopyValue, Dialog, Empty, Icon, Odo, Seg, Sep, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
+import { Card, CodeBlock, CopyValue, Dialog, Empty, Icon, Menu, Odo, Seg, Sep, Skeleton, Sparkline, Stat, StatePill, useAgo } from "./ui";
 
 // ---------------------------------------------------------------- the map
 
@@ -65,7 +65,7 @@ export function MapPage({
           b: x.exit!.server.id,
           st: x.state,
           rate: x.rate,
-          label: x.name,
+          label: x.title,
           value: x.state === "up" ? `${num(r.value, r.decimals)} ${r.unit}` : t(stateKey[x.state]),
         };
       }),
@@ -128,21 +128,21 @@ export function MapPage({
       key: `t-${x.name}`,
       tone: "danger" as const,
       icon: "tunnels",
-      text: t("att.broken", { name: x.name }),
+      text: t("att.broken", { name: x.title }),
       action: [t("att.open"), () => navigate({ page: "tunnels", tunnel: x.name })] as [string, () => void],
     })),
     ...blocked.map((x) => ({
       key: `b-${x.name}`,
       tone: "danger" as const,
       icon: "tunnels",
-      text: t("att.blocked", { name: x.name }),
+      text: t("att.blocked", { name: x.title }),
       action: [t("att.open"), () => navigate({ page: "tunnels", tunnel: x.name })] as [string, () => void],
     })),
     ...crowded.map((x) => ({
       key: `f-${x.name}`,
       tone: "warn" as const,
       icon: "tunnels",
-      text: t("att.crowded", { name: x.name, n: num(Math.round(((x.capacity?.streams ?? 0) / (x.capacity?.max ?? 1)) * 100)) }),
+      text: t("att.crowded", { name: x.title, n: num(Math.round(((x.capacity?.streams ?? 0) / (x.capacity?.max ?? 1)) * 100)) }),
       action: [t("att.open"), () => navigate({ page: "tunnels", tunnel: x.name })] as [string, () => void],
     })),
     ...offline.map((s) => ({
@@ -314,7 +314,7 @@ export function MapPage({
             </div>
           )}
           <p className="sr-only" id="map-alt">
-            {t("alt.prefix")} {servers.map((s) => s.name).join(", ")}; {tunnels.map((x) => `${x.name}: ${t(stateKey[x.state])}`).join(", ")}
+            {t("alt.prefix")} {servers.map((s) => s.name).join(", ")}; {tunnels.map((x) => `${x.title}: ${t(stateKey[x.state])}`).join(", ")}
           </p>
         </div>
       </section>
@@ -352,7 +352,7 @@ export function MapPage({
                     <button type="button" className={`t-row ${x.state}`} onClick={() => navigate({ page: "tunnels", tunnel: x.name })}>
                       <span className={`t-mark ${x.state}`} aria-hidden="true" />
                       <span className="t-main">
-                        <span className="t-name">{x.name}</span>
+                        <span className={`t-name ${x.label ? "is-label" : ""}`} dir="auto">{x.title}</span>
                         <span className="t-route">
                           {x.paired ? (
                             <>
@@ -819,6 +819,17 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   );
 }
 
+type ServerView = "cards" | "rows";
+const VIEW_KEY = "kariz.servers.view";
+
+function savedView(): ServerView {
+  try {
+    return localStorage.getItem(VIEW_KEY) === "rows" ? "rows" : "cards";
+  } catch {
+    return "cards";
+  }
+}
+
 export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers: ServerInfo[]; loaded: boolean; agentsOn: boolean; onChanged: () => void }) {
   const { t, num, toast, digitsOf } = useApp();
   const ago = useAgo();
@@ -857,6 +868,16 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
     setSaving(false);
     onChanged();
   };
+  // Cards, or one row each (remembered in this browser).
+  const [view, setView] = useState<ServerView>(savedView);
+  const pickView = (v: ServerView) => {
+    setView(v);
+    try {
+      localStorage.setItem(VIEW_KEY, v);
+    } catch {
+      // storage blocked: the choice lasts until the page is reloaded
+    }
+  };
   // Added, and its agent has never connected (one added over GRE waits here until its command is run).
   const waiting = (s: ServerInfo) => !s.local && !s.online && !s.last_seen;
   const uptime = (secs: number) => {
@@ -890,6 +911,14 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
           </>
         ) : (
           <>
+            <div className="view-pick" role="group" aria-label={t("srv.view")}>
+              {(["cards", "rows"] as ServerView[]).map((v) => (
+                <button key={v} type="button" aria-pressed={view === v} title={t(`srv.view.${v}`)} onClick={() => pickView(v)}>
+                  <Icon name={v} size={18} />
+                  <span className="sr-only">{t(`srv.view.${v}`)}</span>
+                </button>
+              ))}
+            </div>
             {loaded && servers.length > 1 && (
               <button className="btn btn-ghost btn-sm" type="button" onClick={() => setOrder(servers.map((s) => s.id))}>
                 <Icon name="arrange" size={18} />
@@ -913,6 +942,95 @@ export function ServersPage({ servers, loaded, agentsOn, onChanged }: { servers:
               <Skeleton rows={3} height={28} />
             </div>
           ))}
+        </div>
+      ) : view === "rows" ? (
+        <div className="card flush">
+          <div className="tunnels-wrap">
+            <table className="srv-rows">
+              <thead>
+                <tr>
+                  <th>{t("srv.col.server")}</th>
+                  <th>{t("t.state")}</th>
+                  <th className="hide-sm">{t("srv.cpu")}</th>
+                  <th className="hide-sm">{t("srv.ram")}</th>
+                  <th className="hide-sm hide-md">{t("srv.net")}</th>
+                  <th className="hide-md">{t("srv.uptime")}</th>
+                  <th className="hide-sm">{t("srv.col.tunnels")}</th>
+                  <th className="hide-md">{t("srv.ip4")}</th>
+                  <th>
+                    <span className="sr-only">{t("more")}</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map((s) => {
+                  const h = s.health;
+                  const mem = h?.mem_total ? ((h.mem_used ?? 0) * 100) / h.mem_total : null;
+                  const rx = h?.rx_bps != null ? bytesPerSec(h.rx_bps) : null;
+                  const tx = h?.tx_bps != null ? bytesPerSec(h.tx_bps) : null;
+                  const pct = (v: number | null | undefined) => (s.online && v != null ? `${num(Math.round(v))}%` : "—");
+                  return (
+                    <tr key={s.id} className={s.online ? "" : "is-off"}>
+                      <td>
+                        <div className="sr-id">
+                          <span className="sr-name">
+                            {s.name}
+                            {s.local && <span className="badge">{t("srv.panelBadge")}</span>}
+                          </span>
+                          <span className="sr-sub">{s.version ? `${t("srv.version", { v: s.version })} · ${s.arch}` : t("srv.notYet")}</span>
+                        </div>
+                      </td>
+                      <td>
+                        <StatePill
+                          state={s.online ? "up" : "down"}
+                          label={s.online ? t("srv.online") : waiting(s) ? t("srv.waiting") : `${t("srv.offline")}${s.seen_secs != null ? ` · ${ago(s.seen_secs)}` : ""}`}
+                        />
+                      </td>
+                      <td className="num hide-sm">
+                        <span className={`sr-pct ${s.online && (h?.cpu_pct ?? 0) >= 85 ? "hot" : ""}`}>{pct(h?.cpu_pct)}</span>
+                      </td>
+                      <td className="num hide-sm">
+                        <span className={`sr-pct ${s.online && (mem ?? 0) >= 90 ? "hot" : ""}`}>{pct(mem)}</span>
+                      </td>
+                      <td className="num hide-sm hide-md" dir="ltr">
+                        {s.online && rx && tx ? (
+                          <span className="sr-net">
+                            <span className="down-c">↓ {num(rx.value, rx.decimals)}</span> <span className="up-c">↑ {num(tx.value, tx.decimals)}</span> <small>{rx.unit}</small>
+                          </span>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="hide-md">{s.online && h?.uptime_secs != null ? uptime(h.uptime_secs) : "—"}</td>
+                      <td className="num hide-sm">{num(s.tunnels.length)}</td>
+                      <td className="hide-md" dir="ltr">
+                        {s.ip4 || s.ip6 ? <CopyValue what={s.ip4 ? t("srv.ip4") : t("srv.ip6")} value={(s.ip4 ?? s.ip6)!} /> : "—"}
+                      </td>
+                      <td>
+                        <div className="sr-acts">
+                          {!s.online && !s.local && (
+                            <button className="btn btn-primary btn-sm" type="button" onClick={() => setFixing(s.id)}>
+                              <Icon name="restart" size={16} />
+                              <span className="sr-fix">{t(waiting(s) ? "srv.newCode" : "srv.reconnect")}</span>
+                            </button>
+                          )}
+                          <Menu
+                            label={t("srv.actions", { name: s.name })}
+                            items={[
+                              { label: t("us.open"), icon: "gauge", run: () => setUsageOf(s) },
+                              { label: t("srv.auto"), icon: "clock", run: () => setAuto(s.id) },
+                              ...(!s.local && s.online ? [{ label: t("srv.edit"), icon: "edit", run: () => setFixing(s.id) }] : []),
+                              ...(!s.local ? [{ label: t("srv.remove"), icon: "trash", danger: true, run: () => setRemoving(s) }] : []),
+                            ]}
+                          />
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         <ul className="srv-list">

@@ -1,23 +1,122 @@
 //! A backup of the panel: the servers it knows (with the keys they prove themselves with),
 //! the link token they dial with, and where the panel dials the ones it connects to
-//! (reverse), in one file locked with a passphrase.
+//! (reverse), in one file locked with a passphrase. Since 2.7.0-beta.4 also the private
+//! networks and their links, the servers' addresses, automatic restarts, usage quotas,
+//! the tunnels' labels and order, and the Telegram and update settings ([`TABLES`],
+//! [`META_KEYS`]).
 //!
 //! Tunnels are not in it: they live on the servers, in their own files, and the panel
-//! reads them from there. Sessions and login links are not in it either.
+//! reads them from there. Sessions, login links, the admin password, history and usage
+//! counts are not in it either.
 //!
 //! The file is `KZB1`, a random salt, a random nonce, then the JSON sealed with
 //! ChaCha20-Poly1305 under a key that Argon2id makes from the passphrase.
 
+use std::collections::BTreeMap;
+
 use anyhow::{anyhow, bail, Context, Result};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
-use rusqlite::params;
+use rusqlite::types::{Value as SqlValue, ValueRef};
+use rusqlite::{params, params_from_iter, Connection};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::auth::now;
 use crate::db::Db;
 
 const MAGIC: &[u8; 4] = b"KZB1";
 pub const MIN_PASSPHRASE: usize = 10;
+
+/// Tables a backup carries whole, a table before the ones that refer to it.
+const TABLES: &[&str] = &[
+    "networks",
+    "net_links",
+    "pending_net_downs",
+    "server_addrs",
+    "server_addr6",
+    "server_seen",
+    "schedules",
+    "usage_quotas",
+    "tunnel_meta",
+];
+
+/// Settings a backup carries (the bot, its quiet hours and digest, automatic updates).
+const META_KEYS: &[&str] = &[
+    "telegram",
+    "telegram_mute",
+    "telegram_digest",
+    "update_channel",
+    "update_auto",
+];
+
+type Row = serde_json::Map<String, Value>;
+
+/// Every row of `table`, as column name to value.
+fn dump(conn: &Connection, table: &str) -> Result<Vec<Row>> {
+    let mut stmt = conn.prepare(&format!("SELECT * FROM {table}"))?;
+    let names: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
+    let rows = stmt.query_map([], |r| {
+        let mut row = Row::new();
+        for (i, name) in names.iter().enumerate() {
+            let value = match r.get_ref(i)? {
+                ValueRef::Null | ValueRef::Blob(_) => Value::Null,
+                ValueRef::Integer(n) => n.into(),
+                ValueRef::Real(f) => f.into(),
+                ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned().into(),
+            };
+            row.insert(name.clone(), value);
+        }
+        Ok(row)
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Puts `rows` into `table` (emptied first by the caller): the columns this panel's table
+/// has, so a backup from a panel a version apart still restores.
+fn load(conn: &Connection, table: &str, rows: &[Row]) -> Result<()> {
+    let columns: Vec<String> = conn
+        .prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    for row in rows {
+        let (names, values): (Vec<&String>, Vec<SqlValue>) = columns
+            .iter()
+            .filter_map(|c| {
+                let v = row.get(c)?;
+                Some((
+                    c,
+                    match v {
+                        Value::Null => SqlValue::Null,
+                        Value::Bool(b) => SqlValue::Integer(i64::from(*b)),
+                        Value::Number(n) => match n.as_i64() {
+                            Some(i) => SqlValue::Integer(i),
+                            None => SqlValue::Real(n.as_f64().unwrap_or_default()),
+                        },
+                        Value::String(s) => SqlValue::Text(s.clone()),
+                        other => SqlValue::Text(other.to_string()),
+                    },
+                ))
+            })
+            .unzip();
+        if names.is_empty() {
+            continue;
+        }
+        let marks = (1..=names.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let names = names
+            .iter()
+            .map(|n| n.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        conn.execute(
+            &format!("INSERT INTO {table} ({names}) VALUES ({marks})"),
+            params_from_iter(values),
+        )?;
+    }
+    Ok(())
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Server {
@@ -67,6 +166,13 @@ struct Payload {
     /// Where the panel's own server stood among them; none: before them all.
     #[serde(default)]
     local_position: Option<i64>,
+    /// The rows of [`TABLES`]. None in backups from before 2.7.0-beta.4: then the panel's
+    /// own are left as they are.
+    #[serde(default)]
+    tables: Option<BTreeMap<String, Vec<Row>>>,
+    /// The settings of [`META_KEYS`] that were set.
+    #[serde(default)]
+    meta: BTreeMap<String, String>,
 }
 
 fn derive(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
@@ -151,6 +257,22 @@ pub fn export(db: &Db, passphrase: &str) -> Result<Vec<u8>> {
         reverse,
         ports,
         local_position: db.meta("local_position")?.and_then(|p| p.parse().ok()),
+        tables: Some({
+            let conn = db.conn();
+            TABLES
+                .iter()
+                .map(|t| Ok((t.to_string(), dump(&conn, t)?)))
+                .collect::<Result<_>>()?
+        }),
+        meta: {
+            let mut meta = BTreeMap::new();
+            for key in META_KEYS {
+                if let Some(value) = db.meta(key)? {
+                    meta.insert(key.to_string(), value);
+                }
+            }
+            meta
+        },
     };
     seal(serde_json::to_vec(&payload)?, passphrase)
 }
@@ -248,6 +370,28 @@ pub fn import(db: &Db, passphrase: &str, file: &[u8], replace: bool) -> Result<u
             [token],
         )?;
     }
+    if let Some(tables) = &payload.tables {
+        // Emptied the other way round, so no row is left pointing at a deleted one.
+        for table in TABLES.iter().rev() {
+            tx.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+        for table in TABLES {
+            load(
+                &tx,
+                table,
+                tables.get(*table).map_or(&[][..], Vec::as_slice),
+            )?;
+        }
+        for key in META_KEYS {
+            match payload.meta.get(*key) {
+                Some(value) => tx.execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    params![key, value],
+                )?,
+                None => tx.execute("DELETE FROM meta WHERE key = ?1", [key])?,
+            };
+        }
+    }
     tx.commit()?;
     Ok(payload.servers.len())
 }
@@ -280,6 +424,81 @@ mod tests {
             )
             .unwrap();
         db
+    }
+
+    #[test]
+    fn a_backup_brings_back_networks_settings_and_tunnel_labels() {
+        let db = db_with_servers();
+        db.conn()
+            .execute_batch(
+                "INSERT INTO networks (id, name, cidr, created, kind, port, ipv6) VALUES ('n1', 'core', '10.77.0.0/16', 5, 'gre', 0, 0);
+                 INSERT INTO net_links (id, network, a, b, subnet, addr_a, addr_b, gre_key, ifname, created, mtu, mtu_how, ipv6)
+                     VALUES ('l1', 'n1', 'a1', 'b2', '10.77.0.0/30', '10.77.0.1', '10.77.0.2', 7, 'kz-l1', 6, 1400, 'measured', 0);
+                 INSERT INTO server_addrs (server, addr) VALUES ('a1', 'fra.example.com');
+                 INSERT INTO schedules (kind, subject, mode, every_secs, since) VALUES ('tunnel', 'web', 'every', 21600, 9);
+                 INSERT INTO usage_quotas (server, limit_bytes, count, reset_day, warn) VALUES ('a1', 1000, 'both', 1, 80);",
+            )
+            .unwrap();
+        db.set_meta("telegram", "{\"token\":\"bot-secret-token-1234\"}")
+            .unwrap();
+        crate::tunnel_meta::set_label(&db, "web", "وب آلمان").unwrap();
+        crate::tunnel_meta::set_order(&db, &["web".into()]).unwrap();
+        let file = export(&db, "a long enough passphrase").unwrap();
+        assert!(!String::from_utf8_lossy(&file).contains("bot-secret-token-1234"));
+
+        let fresh = Db::in_memory().unwrap();
+        // A setting the backup does not have goes, like the network the panel had.
+        fresh.set_meta("update_auto", "1").unwrap();
+        fresh
+            .conn()
+            .execute(
+                "INSERT INTO networks (id, name, cidr, created) VALUES ('n9', 'old', '10.9.0.0/16', 1)",
+                [],
+            )
+            .unwrap();
+        import(&fresh, "a long enough passphrase", &file, false).unwrap();
+        let conn = fresh.conn();
+        let networks: Vec<String> = conn
+            .prepare("SELECT name FROM networks")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(networks, ["core"]);
+        let link: (String, i64, String) = conn
+            .query_row(
+                "SELECT ifname, mtu, mtu_how FROM net_links WHERE id = 'l1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(link, ("kz-l1".into(), 1400, "measured".into()));
+        let addr: String = conn
+            .query_row(
+                "SELECT addr FROM server_addrs WHERE server = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(addr, "fra.example.com");
+        let every: i64 = conn
+            .query_row(
+                "SELECT every_secs FROM schedules WHERE subject = 'web'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(every, 21600);
+        drop(conn);
+        assert_eq!(
+            fresh.meta("telegram").unwrap().as_deref(),
+            Some("{\"token\":\"bot-secret-token-1234\"}")
+        );
+        assert_eq!(fresh.meta("update_auto").unwrap(), None);
+        let meta = crate::tunnel_meta::all(&fresh).unwrap();
+        assert_eq!(meta["web"].label.as_deref(), Some("وب آلمان"));
+        assert_eq!(meta["web"].position, Some(0));
     }
 
     #[test]

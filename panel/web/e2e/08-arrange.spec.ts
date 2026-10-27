@@ -49,3 +49,27 @@ test("the servers can be put in order with the keyboard and keep it", async ({ p
   await goTo(page, "map");
   await expect(page.getByText(`Map of servers and tunnels: ${saved.join(", ")}`)).toBeAttached();
 });
+
+// The servers as one row each: the same servers in the same order, and the choice is kept.
+test("the servers can be shown as rows, and the page remembers it", async ({ page }) => {
+  await signIn(page);
+  await goTo(page, "servers");
+  await expect.poll(async () => (await cardNames(page)).length).toBeGreaterThan(1);
+  const cards = await cardNames(page);
+  const rows = () => page.locator(".srv-rows tbody .sr-name").evaluateAll((els) => els.map((e) => e.firstChild?.textContent?.trim() ?? ""));
+
+  await page.getByRole("button", { name: "Rows" }).click();
+  await expect(page.getByRole("button", { name: "Rows" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("li.srv")).toHaveCount(0);
+  expect(await rows()).toEqual(cards);
+  // every row has its actions in a menu
+  await page.getByRole("button", { name: `Actions for ${cards[0]}` }).click();
+  await expect(page.getByRole("menuitem", { name: "Usage" })).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.reload();
+  await goTo(page, "servers");
+  await expect.poll(rows).toEqual(cards);
+  await page.getByRole("button", { name: "Cards" }).click();
+  await expect.poll(() => cardNames(page)).toEqual(cards);
+});

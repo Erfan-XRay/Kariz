@@ -1176,6 +1176,7 @@ async fn run_delete(hub: &Hub, op: &str, name: &str) -> Result<(), String> {
         if let Err(e) = hub.usage.forget_tunnel(name) {
             tracing::warn!(error = %e, tunnel = name, "could not remove the usage of a deleted tunnel");
         }
+        let _ = crate::tunnel_meta::forget(&hub.db, name);
     }
     failed.map_or(Ok(()), Err)
 }

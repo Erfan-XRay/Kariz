@@ -128,6 +128,15 @@ const ICONS: Record<string, ReactNode> = {
   more: <path d="M6 12h.01M12 12h.01M18 12h.01" strokeWidth="3" />,
   grip: <path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" strokeWidth="3" />,
   arrange: <path d="M7 4v16M4 7l3-3 3 3M17 20V4M14 17l3 3 3-3" />,
+  cards: (
+    <>
+      <rect x="4" y="4" width="7" height="7" rx="1.5" />
+      <rect x="13" y="4" width="7" height="7" rx="1.5" />
+      <rect x="4" y="13" width="7" height="7" rx="1.5" />
+      <rect x="13" y="13" width="7" height="7" rx="1.5" />
+    </>
+  ),
+  rows: <path d="M4 6h16M4 12h16M4 18h16" />,
   cpu: (
     <>
       <rect x="6" y="6" width="12" height="12" rx="2" />
@@ -720,5 +729,18 @@ export function useAgo() {
     if (secs < 3600) return t("ago.m", { n: num(Math.floor(secs / 60)) });
     if (secs < 86400) return t("ago.h", { n: num(Math.floor(secs / 3600)) });
     return t("ago.d", { n: num(Math.floor(secs / 86400)) });
+  };
+}
+
+/** How long something has been up: "3 d 4 h", "4 h 12 min", "12 min". */
+export function useSpan() {
+  const { t, num } = useApp();
+  return (secs: number) => {
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    if (d > 0) return t("srv.days", { d: num(d), h: num(h) });
+    if (h > 0) return t("srv.hours", { h: num(h), m: num(m) });
+    return t("span.m", { m: num(Math.max(1, m)) });
   };
 }

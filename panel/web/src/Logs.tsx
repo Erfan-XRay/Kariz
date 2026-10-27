@@ -109,7 +109,7 @@ export function LogsPage({ servers }: { servers: ServerInfo[] }) {
             <select className="select" aria-label={t("t.name")} value={name} onChange={(e) => setName(e.target.value)}>
               {tunnels.map((x) => (
                 <option key={x.name} value={x.name}>
-                  {x.name}
+                  {x.label ? `${x.label} (${x.name})` : x.name}
                 </option>
               ))}
             </select>
