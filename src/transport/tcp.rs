@@ -64,7 +64,18 @@ pub async fn connect(addr: &str, tuning: &Tuning) -> io::Result<TcpStream> {
             )
         })??;
     stream.set_nodelay(tuning.nodelay)?;
+    keep_alive(&stream, tuning)?;
     Ok(stream)
+}
+
+/// TCP keepalive on a user's or a target's connection, so one whose other end vanished
+/// (a phone that changed networks, a NAT that forgot it) is noticed and closed instead of
+/// staying open for good.
+pub fn keep_alive(stream: &TcpStream, tuning: &Tuning) -> io::Result<()> {
+    let keepalive = TcpKeepalive::new()
+        .with_time(tuning.keepalive)
+        .with_interval(tuning.keepalive);
+    SockRef::from(stream).set_tcp_keepalive(&keepalive)
 }
 
 /// Socket options for long-lived tunnel connections: nodelay plus TCP keepalive,

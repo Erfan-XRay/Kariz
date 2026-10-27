@@ -474,6 +474,7 @@ async fn handle_user(
     let _open = stats.tcp_connection();
     let _wire = wire::meter().track(&user, Leg::User);
     user.set_nodelay(entry.tuning.nodelay)?;
+    crate::transport::tcp::keep_alive(&user, &entry.tuning)?;
     let size = entry.tuning.buffer_size;
     let channel = entry
         .open_channel(open)
