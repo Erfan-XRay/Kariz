@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.7.1 - 2026-10-27
+
+The stable release after 2.6.1, with everything of the four betas
+([2.7.0-beta.1](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#270-beta1---2026-10-25),
+[2.7.0-beta.2](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#270-beta2---2026-10-26),
+[2.7.0-beta.3](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#270-beta3---2026-10-26) and
+[2.7.0-beta.4](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#270-beta4---2026-10-27)); there is no 2.7.0. Private
+network links can run **over IPv6**, a link's **MTU fits its path**
+([#92](https://github.com/Erfan-XRay/Kariz/issues/92)), **deletes always work** and a tunnel can be
+**moved to other servers**. The panel shows **how much every tunnel and server has used**, with
+**monthly quotas**, its **port and certificate** can be set from the manager
+([#95](https://github.com/Erfan-XRay/Kariz/issues/95)), wss tunnels take **a certificate of your
+own**, the tunnel wizard is **calmer**, a tunnel that went down **says why**, tunnels can be
+**renamed and arranged** and show **how long they have been up**, servers can be shown **as rows**,
+a **backup brings back the whole panel**, and **open connections no longer pile up** over the day.
+
+Update the panel first, then the agents from the panel (or `kariz-manager update` on each server).
+Links over IPv6, changing a link's MTU, moving a tunnel, a wss certificate of your own, exact usage
+counts and the connection fix need this version on the servers involved; everything that worked
+before keeps working with 2.6 agents. A server on one of the betas is offered 2.7.1 on either
+channel; the details of each change are in the beta entries below.
+
 ## 2.7.0-beta.4 - 2026-10-27
 
 A **beta**, like [2.7.0-beta.3](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#270-beta3---2026-10-26):
