@@ -23,6 +23,7 @@ export interface Command {
 
 export function Shell({
   route,
+  tunnelTitle,
   navigate,
   subtitle,
   rising,
@@ -33,6 +34,8 @@ export function Shell({
   children,
 }: {
   route: Route;
+  /** The open tunnel's label, if it was given one. */
+  tunnelTitle?: string;
   navigate: (to: Route) => void;
   subtitle: string;
   rising: boolean;
@@ -56,11 +59,11 @@ export function Shell({
 
   // The tab (and a screen reader) says which page this is: "iran-eu — Tunnels — Kariz".
   useEffect(() => {
-    document.title = [route.tunnel, t(`page.${page}`), "Kariz"].filter(Boolean).join(" — ");
+    document.title = [route.tunnel && (tunnelTitle ?? route.tunnel), t(`page.${page}`), "Kariz"].filter(Boolean).join(" — ");
     return () => {
       document.title = "Kariz";
     };
-  }, [page, route.tunnel, lang]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [page, route.tunnel, tunnelTitle, lang]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -129,7 +132,7 @@ export function Shell({
                 {t("page.tunnels")}
               </button>
               <Icon name="chevron" size={16} />
-              <span className="mono">{route.tunnel}</span>
+              {tunnelTitle && tunnelTitle !== route.tunnel ? <span dir="auto">{tunnelTitle}</span> : <span className="mono">{route.tunnel}</span>}
             </span>
           ) : (
             <span>{t(`page.${page}`)}</span>

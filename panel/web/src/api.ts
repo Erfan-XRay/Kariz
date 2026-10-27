@@ -89,8 +89,18 @@ export interface ProbeStatus {
   secs_ago: number;
 }
 
+/** What the panel keeps about a tunnel: the name it is shown by, and its place in the list. */
+export interface TunnelMeta {
+  label?: string;
+  position?: number;
+}
+
 export interface TunnelStatus {
+  /** Seconds the daemon has run. */
+  uptime_secs?: number;
   peer: {
+    /** Seconds since the link came up this time; null while down. */
+    connected_secs?: number | null;
     connected: boolean;
     transport?: string | null;
     sessions: number | null;
@@ -122,6 +132,8 @@ export interface TunnelInfo {
   status: TunnelStatus | null;
   error: string | null;
   rate_mbps: number | null;
+  /** The panel's label and place for it (put here by the page from `tunnel_meta`). */
+  meta?: TunnelMeta;
 }
 
 export interface Latency {
@@ -616,7 +628,8 @@ export const api = {
   login: (password: string) => call<{ csrf: string }>("POST", "login", { password }),
   loginWithLink: (token: string) => call<{ csrf: string }>("POST", "link", { token }),
   logout: () => call<object>("POST", "logout"),
-  servers: () => call<{ servers: ServerInfo[]; agents: boolean }>("GET", "servers"),
+  /** `tunnel_meta`: the names tunnels are shown by and their places, by tunnel name (missing from an older panel). */
+  servers: () => call<{ servers: ServerInfo[]; agents: boolean; tunnel_meta?: Record<string, TunnelMeta> }>("GET", "servers"),
   /** With `port`, the server gets an agents port of its own (and is listed now, waiting for its agent). */
   joinCode: (name: string | undefined, host: string, transport: LinkTransport, port?: number) =>
     call<{ code: string; valid_for: number; id?: string; name?: string; port?: number }>("POST", "servers/join-code", { name, host, transport, port }),
@@ -636,6 +649,10 @@ export const api = {
   renameServer: (id: string, name: string) => call<object>("POST", "servers/rename", { id, name }),
   /** Every server's id once (the panel's own, `local`, too), in the order every list shows them. */
   orderServers: (ids: string[]) => call<object>("POST", "servers/order", { ids }),
+  /** The name a tunnel is shown by (empty: its own name again); its own name stays. */
+  labelTunnel: (name: string, label: string) => call<object>("POST", "tunnels/label", { name, label }),
+  /** Tunnel names in the order the Tunnels page lists them; the ones left out come after. */
+  orderTunnels: (names: string[]) => call<object>("POST", "tunnels/order", { names }),
   schedules: () => call<{ schedules: ScheduleRow[] }>("GET", "schedules"),
   setSchedule: (body: ScheduleBody) => call<object>("POST", "schedules", body),
   deleteSchedule: (kind: string, subject: string) => call<object>("POST", "schedules/delete", { kind, subject }),

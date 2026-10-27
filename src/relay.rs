@@ -130,7 +130,9 @@ async fn relay_stream_with(
             }
             total += buf.len() as u64;
             counters.read.fetch_add(buf.len() as u64, Relaxed);
-            ended.within(idle, stream.send(buf.split().freeze())).await?;
+            ended
+                .within(idle, stream.send(buf.split().freeze()))
+                .await?;
         }
     };
     let down = async {

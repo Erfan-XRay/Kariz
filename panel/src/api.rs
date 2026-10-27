@@ -62,6 +62,8 @@ pub fn routes() -> Router<AppState> {
             post(tunnel_edit).layer(DefaultBodyLimit::max(128 * 1024)),
         )
         .route("/api/tunnels/control", post(tunnel_control))
+        .route("/api/tunnels/label", post(label_tunnel))
+        .route("/api/tunnels/order", post(order_tunnels))
         .route("/api/tunnels/delete", post(tunnel_delete))
         .route("/api/op", get(op_status))
         .route("/api/ports", get(server_ports))
@@ -460,7 +462,12 @@ async fn servers(State(state): State<AppState>, headers: HeaderMap) -> Response 
     match state.hub.snapshot() {
         Ok(list) => reply(
             StatusCode::OK,
-            json!({ "servers": list, "agents": state.agent_port.is_some() }),
+            json!({
+                "servers": list,
+                "agents": state.agent_port.is_some(),
+                // The names tunnels are shown by and their places, by tunnel name.
+                "tunnel_meta": crate::tunnel_meta::all(&state.db).unwrap_or_default(),
+            }),
         ),
         Err(e) => internal(e),
     }
@@ -1076,6 +1083,72 @@ async fn order_servers(
                 &format!("session {}", me.id),
                 &ip_of(&peer),
                 "arranged the servers",
+            );
+            reply(StatusCode::OK, json!({}))
+        }
+        Err(e) if format!("{e:#}") == "bad_order" => error(StatusCode::BAD_REQUEST, "bad_order"),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct TunnelLabelBody {
+    name: String,
+    /// Empty: shown by its own name again.
+    label: String,
+}
+
+/// The name a tunnel is shown by. Its own name (its files and services) stays.
+async fn label_tunnel(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<TunnelLabelBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match crate::tunnel_meta::set_label(&state.db, &body.name, &body.label) {
+        Ok(()) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                &format!("renamed tunnel {} to \"{}\"", body.name, body.label.trim()),
+            );
+            reply(StatusCode::OK, json!({}))
+        }
+        Err(e) => match format!("{e:#}").as_str() {
+            code @ ("bad_name" | "bad_label") => error(StatusCode::BAD_REQUEST, code),
+            _ => internal(e),
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct TunnelOrderBody {
+    /// Tunnel names in the order to keep; the ones left out come after them.
+    names: Vec<String>,
+}
+
+async fn order_tunnels(
+    State(state): State<AppState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Json(body): Json<TunnelOrderBody>,
+) -> Response {
+    let me = match authenticate(&state, &headers, true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match crate::tunnel_meta::set_order(&state.db, &body.names) {
+        Ok(()) => {
+            audit(
+                &state,
+                &format!("session {}", me.id),
+                &ip_of(&peer),
+                "arranged the tunnels",
             );
             reply(StatusCode::OK, json!({}))
         }

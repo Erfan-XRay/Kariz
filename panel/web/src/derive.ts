@@ -1,8 +1,14 @@
 // Turns what each server reports into what the panel shows: a tunnel is one config on the
 // entry server and one on the exit server, with the same name.
-import type { ProbeStatus, ServerInfo, TunnelInfo, TunnelStatus } from "./api";
+import type { ProbeStatus, ServerInfo, TunnelInfo, TunnelMeta, TunnelStatus } from "./api";
 
 export type TunnelState = "up" | "down" | "off";
+
+/** The servers with each tunnel's label and place from the panel put on it. */
+export function withMeta(servers: ServerInfo[], meta: Record<string, TunnelMeta> | undefined): ServerInfo[] {
+  if (!meta) return servers;
+  return servers.map((s) => ({ ...s, tunnels: s.tunnels.map((t) => (meta[t.name] ? { ...t, meta: meta[t.name] } : t)) }));
+}
 
 export interface Side {
   server: ServerInfo;
@@ -11,6 +17,14 @@ export interface Side {
 
 export interface Tunnel {
   name: string;
+  /** The name the admin gave it to be shown by; null: its own name. */
+  label: string | null;
+  /** What the panel calls it: the label, else its name. */
+  title: string;
+  /** Its place as the admin arranged the tunnels; null: after those, as the servers list them. */
+  position: number | null;
+  /** Seconds the link has been up this time; null while it is down. */
+  uptime: number | null;
   entry?: Side;
   exit?: Side;
   /** Both sides are known: only then it is drawn on the map. */
@@ -70,8 +84,9 @@ export function pairTunnels(servers: ServerInfo[]): Tunnel[] {
       byName.set(tunnel.name, slot);
     }
   }
-  return [...byName.entries()].map(([name, { entry, exit }]) => {
+  const list = [...byName.entries()].map(([name, { entry, exit }]): Tunnel => {
     const any = entry ?? exit!;
+    const meta = entry?.tunnel.meta ?? exit?.tunnel.meta;
     const sides = [entry, exit].filter((s): s is Side => !!s);
     const connected = entry?.tunnel.status?.peer.connected ?? exit?.tunnel.status?.peer.connected ?? false;
     const stopped = sides.some((s) => s.tunnel.active === false);
@@ -81,6 +96,10 @@ export function pairTunnels(servers: ServerInfo[]): Tunnel[] {
     const capacity = capacityOf([status, exit?.tunnel.status]);
     return {
       name,
+      label: meta?.label || null,
+      title: meta?.label || name,
+      position: meta?.position ?? null,
+      uptime: connected ? entry?.tunnel.status?.peer.connected_secs ?? exit?.tunnel.status?.peer.connected_secs ?? null : null,
       entry,
       exit,
       paired: !!entry && !!exit,
@@ -98,6 +117,9 @@ export function pairTunnels(servers: ServerInfo[]): Tunnel[] {
       blocked: state === "up" ? blockedOf(probe, capacity) : null,
     };
   });
+  // The arranged ones first, in their order; the others after them, as the servers list them.
+  const at = (x: Tunnel) => x.position ?? Number.MAX_SAFE_INTEGER;
+  return list.map((x, i) => [x, i] as const).sort(([a, i], [b, j]) => at(a) - at(b) || i - j).map(([x]) => x);
 }
 
 /** "12.3 Mbit/s" style numbers: Mbps below a gigabit. */

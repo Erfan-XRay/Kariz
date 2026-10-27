@@ -27,6 +27,7 @@ pub mod reverse;
 pub mod schedule;
 pub mod sign;
 pub mod telegram;
+pub mod tunnel_meta;
 pub mod update;
 pub mod updater;
 pub mod usage;

@@ -192,6 +192,33 @@ test.describe("the tunnel", () => {
     await expect(dialog.locator(".us-quota")).toHaveCount(0, { timeout: 10_000 });
   });
 
+  test("is given a name to be shown by, and says how long it has been up", async ({ page }) => {
+    await signIn(page);
+    await goTo(page, "tunnels");
+    const row = page.locator(".tunnels tr", { hasText: "demo" });
+    // a connected tunnel says for how long
+    await expect(row.locator(".t-up")).toHaveText(/\d+ (min|h|d)/, { timeout: 30_000 });
+    await row.click();
+    const head = page.locator(".hero-route .head");
+    await expect(head.locator(".tag.up-for")).toContainText("Up for");
+    await head.getByRole("button", { name: "Rename demo" }).click();
+    await page.locator("#rn-label").fill("  Web   Germany ");
+    await page.locator(".dialog").getByRole("button", { name: "Save" }).click();
+    await expect(page.locator(".toast", { hasText: "Now shown as Web Germany." })).toBeVisible();
+    // the label is the title; its own name, which its services keep, is under it
+    await expect(head.locator(".td-name")).toHaveText("Web Germany", { timeout: 10_000 });
+    await expect(head.locator(".td-system")).toHaveText("demo");
+    await page.reload();
+    await goTo(page, "tunnels");
+    await expect(page.locator(".tunnels tr .t-name", { hasText: "Web Germany" })).toBeVisible();
+    // and back to its own name
+    await page.locator(".tunnels tr", { hasText: "demo" }).click();
+    await head.getByRole("button", { name: "Rename Web Germany" }).click();
+    await page.locator(".dialog").getByRole("button", { name: "Use its own name" }).click();
+    await expect(head.locator(".td-name")).toHaveText("demo", { timeout: 10_000 });
+    await expect(head.locator(".td-system")).toHaveCount(0);
+  });
+
   test("is stopped, started again and deleted, from its page", async ({ page }) => {
     await signIn(page);
     await goTo(page, "tunnels");

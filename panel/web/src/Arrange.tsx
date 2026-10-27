@@ -1,14 +1,41 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { KeyboardEvent, PointerEvent } from "react";
+import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 import type { ServerInfo } from "./api";
 import { useApp } from "./store";
 import { Icon, StatePill } from "./ui";
 
-/** The ids of `order` that are still servers, then any server that came since. */
-export function arranged(order: string[], servers: ServerInfo[]): string[] {
-  const known = new Set(servers.map((s) => s.id));
+/** The ids of `order` that are still in `items`, then any item that came since. */
+export function arranged(order: string[], items: { id: string }[]): string[] {
+  const known = new Set(items.map((s) => s.id));
   const kept = order.filter((id) => known.has(id));
-  return [...kept, ...servers.map((s) => s.id).filter((id) => !kept.includes(id))];
+  return [...kept, ...items.map((s) => s.id).filter((id) => !kept.includes(id))];
+}
+
+/** One row to put in order. */
+export interface ArrangeItem {
+  id: string;
+  name: string;
+  badge?: ReactNode;
+  sub: ReactNode;
+  state: "up" | "down" | "off";
+  label: string;
+}
+
+/** The servers as rows to put in order. */
+export function ArrangeServers({ servers, order, onOrder }: { servers: ServerInfo[]; order: string[]; onOrder: (ids: string[]) => void }) {
+  const { t } = useApp();
+  const items = servers.map((s): ArrangeItem => {
+    const waiting = !s.local && !s.online && !s.last_seen;
+    return {
+      id: s.id,
+      name: s.name,
+      badge: s.local && <span className="badge">{t("srv.panelBadge")}</span>,
+      sub: s.version ? t("srv.version", { v: s.version }) : t("srv.notYet"),
+      state: s.online ? "up" : "down",
+      label: s.online ? t("srv.online") : waiting ? t("srv.waiting") : t("srv.offline"),
+    };
+  });
+  return <ArrangeList items={items} order={order} onOrder={onOrder} hint={t("arr.hint")} />;
 }
 
 function moved(list: string[], from: number, to: number): string[] {
@@ -37,15 +64,15 @@ interface Drag {
 type Part = "up" | "down";
 
 /**
- * The servers as short rows to put in order: dragged by their handle (mouse, pen or touch), or
- * moved with their buttons and Alt+Up / Alt+Down. Rows that make way slide into place.
+ * Short rows to put in order: dragged by their handle (mouse, pen or touch), or moved with
+ * their buttons and Alt+Up / Alt+Down. Rows that make way slide into place.
  */
-export function ArrangeServers({ servers, order, onOrder }: { servers: ServerInfo[]; order: string[]; onOrder: (ids: string[]) => void }) {
+export function ArrangeList({ items, order, onOrder, hint }: { items: ArrangeItem[]; order: string[]; onOrder: (ids: string[]) => void; hint: string }) {
   const { t, num, low } = useApp();
   const [said, setSaid] = useState("");
   const [dragging, setDragging] = useState<string | null>(null);
-  const list = arranged(order, servers);
-  const byId = new Map(servers.map((s) => [s.id, s]));
+  const list = arranged(order, items);
+  const byId = new Map(items.map((s) => [s.id, s]));
   const rows = useRef(new Map<string, HTMLLIElement>());
   const tops = useRef(new Map<string, number>());
   const drag = useRef<Drag | null>(null);
@@ -161,16 +188,15 @@ export function ArrangeServers({ servers, order, onOrder }: { servers: ServerInf
   return (
     <>
       <p className="arr-hint" id="arr-hint">
-        {t("arr.hint")}
+        {hint}
       </p>
       <ol className="arr-list" aria-describedby="arr-hint">
         {list.map((id, i) => {
           const s = byId.get(id)!;
-          const waiting = !s.local && !s.online && !s.last_seen;
           return (
             <li
               key={id}
-              className={`arr-row ${dragging === id ? "is-dragging" : ""} ${s.online ? "" : "is-off"}`}
+              className={`arr-row ${dragging === id ? "is-dragging" : ""} ${s.state === "up" ? "" : "is-off"}`}
               ref={(el) => {
                 if (el) rows.current.set(id, el);
                 else rows.current.delete(id);
@@ -194,11 +220,11 @@ export function ArrangeServers({ servers, order, onOrder }: { servers: ServerInf
               <div className="arr-id">
                 <div className="arr-name">
                   <span>{s.name}</span>
-                  {s.local && <span className="badge">{t("srv.panelBadge")}</span>}
+                  {s.badge}
                 </div>
-                <div className="arr-sub">{s.version ? t("srv.version", { v: s.version }) : t("srv.notYet")}</div>
+                <div className="arr-sub">{s.sub}</div>
               </div>
-              <StatePill state={s.online ? "up" : "down"} label={s.online ? t("srv.online") : waiting ? t("srv.waiting") : t("srv.offline")} />
+              <StatePill state={s.state} label={s.label} />
               <span className="arr-moves">
                 <button className="arr-move" type="button" data-part="up" disabled={i === 0} aria-label={t("arr.up", { name: s.name })} title={t("arr.upKey")} onClick={() => move(id, -1, "up")}>
                   <Icon name="up" size={18} />
