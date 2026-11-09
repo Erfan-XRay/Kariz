@@ -47,17 +47,22 @@ ip -n "$EXIT" link set lo up
 
 entry_fw() { ip netns exec "$ENTRY" iptables -w "$@"; }
 exit_fw() { ip netns exec "$EXIT" iptables -w "$@"; }
-entry_fw -A OUTPUT -s "$A" -d "$B" -p tcp --sport "$PORT" --tcp-flags RST RST -j DROP
-exit_fw -A OUTPUT -s "$B" -d "$A" -p tcp --dport "$PORT" --tcp-flags RST RST -j DROP
-entry_fw -A INPUT -s "$B" -d "$A" -p tcp --dport "$PORT" --tcp-flags PSH,ACK PSH,ACK \
-    -m comment --comment paqet-carrier-in -j ACCEPT
-exit_fw -A INPUT -s "$A" -d "$B" -p tcp --sport "$PORT" --tcp-flags PSH,ACK PSH,ACK \
-    -m comment --comment paqet-carrier-out -j ACCEPT
-entry_fw -A INPUT -p udp --dport "$PORT" -j DROP
-exit_fw -A INPUT -p udp --sport "$PORT" -j DROP
+# A stateful host firewall like ufw's: loopback and established replies only, and no
+# UDP. Nothing here lets a segment without a handshake in: Kariz adds its own rules.
+for fw in entry_fw exit_fw; do
+    "$fw" -A INPUT -i lo -j ACCEPT
+    "$fw" -A INPUT -m conntrack --ctstate INVALID -j DROP
+    "$fw" -A INPUT -p tcp -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    "$fw" -P INPUT DROP
+done
 
+# Packets accepted by Kariz's own Paqet rules in INPUT.
 counter() {
-    "$1" -nvx -L INPUT | awk -v marker="$2" 'index($0, marker) {sum += $1} END {print sum+0}'
+    "$1" -nvx -L INPUT | awk 'index($0, "kariz-paqet") {sum += $1} END {print sum+0}'
+}
+# Kariz's Paqet rules left in the raw and filter tables.
+rules_left() {
+    { "$1" -t raw -S; "$1" -S; } | grep -c kariz-paqet || true
 }
 
 token=$("$BIN" token)
@@ -156,6 +161,7 @@ client() {
 
 ip netns exec "$EXIT" python3 "$WORK/echo.py" "$TARGET" >"$WORK/echo.log" 2>&1 &
 ip netns exec "$ENTRY" "$BIN" run -c "$WORK/entry.toml" >"$WORK/entry.log" 2>&1 &
+entry_pid=$!
 write_exit "$wrong"
 ip netns exec "$EXIT" "$BIN" run -c "$WORK/exit.toml" >"$WORK/wrong.log" 2>&1 &
 wrong_pid=$!
@@ -163,14 +169,25 @@ if client tcp 4; then
     echo "Paqet forwarded traffic with the wrong token" >&2
     exit 1
 fi
-test "$(counter entry_fw paqet-carrier-in)" -gt 0
-test "$(counter exit_fw paqet-carrier-out)" -eq 0
+test "$(counter entry_fw)" -gt 0
+test "$(counter exit_fw)" -eq 0
 kill "$wrong_pid"
 wait "$wrong_pid" || true
+# A stopped dialer takes its rules with it.
+test "$(rules_left exit_fw)" -eq 0
 
 write_exit "$token"
 ip netns exec "$EXIT" "$BIN" run -c "$WORK/exit.toml" >"$WORK/exit.log" 2>&1 &
+exit_pid=$!
 client tcp 15
 client udp 15
-test "$(counter exit_fw paqet-carrier-out)" -gt 0
-echo "Paqet forwarded TCP and UDP inside raw TCP segments and rejected the wrong token"
+test "$(counter exit_fw)" -gt 0
+test "$(rules_left entry_fw)" -eq 4
+# Every dial to the entry shares one set of rules.
+test "$(rules_left exit_fw)" -eq 4
+
+kill "$entry_pid" "$exit_pid"
+wait "$entry_pid" "$exit_pid" || true
+test "$(rules_left entry_fw)" -eq 0
+test "$(rules_left exit_fw)" -eq 0
+echo "Paqet forwarded TCP and UDP behind a stateful firewall using its own rules, removed them on stop, and rejected the wrong token"

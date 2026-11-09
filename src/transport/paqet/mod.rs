@@ -14,9 +14,12 @@
 //!
 //! This phase supports IPv4 only and requires `CAP_NET_RAW` (root in practice). The
 //! kernel's TCP stack also sees the synthetic segments and answers unknown ones with
-//! RST, so the host needs scoped firewall rules; see `docs/paqet.md`.
+//! RST, so each socket adds scoped firewall rules of its own (`firewall`, `docs/paqet.md`).
 
 pub mod packet;
+
+#[cfg_attr(not(all(target_os = "linux", feature = "kcp")), allow(dead_code))]
+pub(crate) mod firewall;
 
 #[cfg(all(target_os = "linux", feature = "kcp"))]
 pub(crate) mod raw;

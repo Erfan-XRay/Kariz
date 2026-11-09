@@ -30,7 +30,7 @@ export const choiceOf = (c: BenchCandidate): BenchChoice => ({
 /** Whether a host is an IPv6 address (with or without brackets). */
 export const isV6 = (host: string) => host.replace(/^\[|\]$/g, "").includes(":");
 
-const LABELS: Record<string, string> = { tcpmux: "TCP", kcp: "KCP", ws: "WS", wss: "WSS", quic: "QUIC" };
+const LABELS: Record<string, string> = { tcpmux: "TCP", kcp: "KCP", ws: "WS", wss: "WSS", quic: "QUIC", paqet: "Paqet" };
 /** A transport as the benchmark shows it. */
 export const benchLabel = (transport: string) => LABELS[transport] ?? transport.toUpperCase();
 

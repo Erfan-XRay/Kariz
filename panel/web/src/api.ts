@@ -73,6 +73,8 @@ export interface Health {
   load1: number | null;
   /** IPv4 networks the server already routes. */
   routes?: string[];
+  /** Its own IPv4: the address its route to the internet leaves from (a private one behind NAT). */
+  ip4?: string | null;
 }
 
 /** The entry side's health probe (2.4): a connection made the way a user's is, to the target. */

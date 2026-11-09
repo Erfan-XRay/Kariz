@@ -26,22 +26,19 @@ use crate::speedtest::{self, Latency, Options, Pipe, Rate};
 /// The transports a benchmark measures, in the order it measures them. `tcp` without mux
 /// moves data like `tcpmux` (one connection per user connection instead of one shared), and
 /// `auto` switches between `tcpmux`, `kcp` and `ws`: both are judged by those. `paqet` is
-/// not measured in phase 1: it needs root/CAP_NET_RAW and host firewall rules, which a
-/// panel-run benchmark cannot assume.
-#[cfg(feature = "quic")]
-pub const TRANSPORTS: [TransportKind; 5] = [
+/// measured where it is built (Linux, with KCP): the panel's agent runs as root, and a
+/// Paqet socket adds the firewall rules it needs itself (`transport::paqet::firewall`).
+/// It comes last: its listener holds the TCP port of the lane a little longer than the
+/// others (until its KCP conversations end).
+pub const TRANSPORTS: &[TransportKind] = &[
     TransportKind::Tcpmux,
     TransportKind::Kcp,
     TransportKind::Ws,
     TransportKind::Wss,
+    #[cfg(feature = "quic")]
     TransportKind::Quic,
-];
-#[cfg(not(feature = "quic"))]
-pub const TRANSPORTS: [TransportKind; 4] = [
-    TransportKind::Tcpmux,
-    TransportKind::Kcp,
-    TransportKind::Ws,
-    TransportKind::Wss,
+    #[cfg(all(target_os = "linux", feature = "kcp"))]
+    TransportKind::Paqet,
 ];
 
 /// Longest a test session lives on the listening end, whatever the dialing end does.

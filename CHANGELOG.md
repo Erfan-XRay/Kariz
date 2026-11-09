@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.8.0-beta.2 - 2026-11-09
+
+Paqet now works like any other transport, with nothing to set up by hand. In 2.8.0-beta.1
+a Paqet tunnel made in the panel timed out at the connect step unless the host firewall
+rules had been added first. Update both servers of a Paqet tunnel.
+
+- **The firewall rules are Kariz's job.** Each Paqet socket adds the `iptables` rules it
+  needs at the top of their chains. They accept its segments, keep connection tracking off
+  them, and drop the kernel's TCP resets for them. The rules are removed when the tunnel
+  stops, and rules left by a killed process are cleaned up. A host firewall like ufw or
+  firewalld no longer stops the tunnel. A firewall in front of the servers, such as a
+  cloud provider's, must still let the port through.
+- **The listener's local IPv4 is filled in.** The wizard and the edit page use the
+  address the listening server's route to the internet leaves from, which is correct
+  behind NAT too. The firewall warning is gone from both forms.
+- **Paqet is in the benchmark.** It is measured over IPv4 in both directions when both
+  servers run 2.8.0-beta.2 or newer, and choosing its result fills in the wizard.
+- **Faster and steadier.** Each flow keeps its own TCP sequence and acknowledgment
+  numbers, so a stateful firewall on the path keeps every mux connection in its window.
+  The raw socket buffers get their full size above `rmem_max`, so bursts are not dropped.
+  The dialing side only receives its peer's packets, and a reconnect runs no `iptables`.
+
+See the [Paqet setup guide](https://github.com/Erfan-XRay/Kariz/blob/v2.8.0-beta.2/docs/paqet.md).
+
+This prerelease is available on the Beta update channel.
+
 ## 2.8.0-beta.1 - 2026-11-09
 
 Paqet is a native Kariz tunnel transport for Linux IPv4. It carries encrypted KCP
