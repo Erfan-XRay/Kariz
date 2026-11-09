@@ -11,7 +11,7 @@ import { MuxFields, MuxToggle, emptyMux, muxSpecOf, muxToSpec } from "./MuxField
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
-import { KcpFields, PaqetBind, PaqetNote, emptyKcp, kcpSpecOf, kcpToSpec, validPaqetBind } from "./PaqetFields";
+import { KcpFields, PaqetBind, emptyKcp, kcpSpecOf, kcpToSpec, paqetBindGuess, validPaqetBind } from "./PaqetFields";
 import { PerIpLimit, perIpOf } from "./PerIpLimit";
 import { UdpFlows, udpFlowsOf } from "./UdpFlows";
 import { ProxyProtocol, proxyOf } from "./ProxyProtocol";
@@ -183,6 +183,14 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     const guess = addrChoices[0];
     if (guess) setDialHost(guess);
   }, [acceptor, servers]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Paqet's local IPv4 of the listener follows the accepting server (and the address it is dialed at) until
+  // one is typed.
+  const [paqetTouched, setPaqetTouched] = useState(false);
+  const paqetGuess = paqetBindGuess(acceptorServer, dialHost);
+  useEffect(() => {
+    if (!paqetTouched) setPaqetBind(paqetGuess);
+  }, [paqetTouched, paqetGuess]);
 
   // The port a new tunnel listens on starts at 3080 and moves up past the ports the accepting
   // server's other tunnels hold: 3080, then 3081, then 3082. It follows the choice of server
@@ -438,7 +446,6 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                   <Choice label={t("wz.transport")} mono value={transport} options={TRANSPORTS.map((x) => [x, x])} onChange={setTransport} hint={t(`wz.tr.${transport}`)} />
                   <Choice label={t("wz.profile")} value={profile} options={PROFILES.map((p) => [p, t(`wz.pf.${p}`)])} onChange={setProfile} hint={t(`wz.pf.${profile}.d`)} />
                 </div>
-                {transport === "paqet" && <PaqetNote />}
                 <More title={t("more.title")} note={kindNote} show={step === 1 && !!error}>
                   <EncryptionChoice value={enc} onChange={setEnc} transport={transport} ack={encAck} onAck={setEncAck} />
                   {transport === "quic" && <QuicObfs value={obfs} onChange={setObfs} />}
@@ -480,10 +487,16 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                       <span className="help">{t("wz.portMoved", { first: String(firstTunnelPort(transport)), server: serverName(acceptor), port: suggestedPort })}</span>
                     )}
                     {transport === "auto" && <span className="help">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</span>}
-                    {transport === "paqet" && <span className="help">{t("paqet.port")}</span>}
                     {udp && <span className="help">{t("wz.portUdp")}</span>}
                   </div>
-                  {transport === "paqet" && !netId && <PaqetBind id="wz-paqet-bind" value={paqetBind} onChange={setPaqetBind} />}
+                  {transport === "paqet" && !netId && <PaqetBind
+                      id="wz-paqet-bind"
+                      value={paqetBind}
+                      onChange={(v) => {
+                        setPaqetTouched(true);
+                        setPaqetBind(v);
+                      }}
+                    />}
                   <div className="field" hidden={!!netId}>
                     <label htmlFor="wz-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>
                     <input
@@ -498,7 +511,6 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                       }}
                     />
                     <span className="help">{t("wz.dialHelp")}</span>
-                    {transport === "paqet" && <span className="help">{t("paqet.ip")}</span>}
                     {addrChoices.length > 0 && (
                       <span className="addr-chips" aria-label={t("wz.dialSeen", { server: serverName(acceptor) })}>
                         {addrChoices.map((a) => (

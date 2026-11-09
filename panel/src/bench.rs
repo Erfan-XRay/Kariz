@@ -51,6 +51,8 @@ const SPEED_TOP: usize = 3;
 const MAX_LISTENERS: usize = 12;
 /// The whole run, whatever happens.
 const BUDGET: Duration = Duration::from_secs(60);
+/// The first release whose agents measure Paqet in a benchmark.
+const PAQET_BENCH_SINCE: &str = "2.8.0-beta.2";
 
 // ---- the agent's half ----
 
@@ -60,7 +62,8 @@ pub struct Listeners(Arc<AtomicUsize>);
 
 fn kind_of(name: &str) -> Option<TransportKind> {
     kariz::bench::TRANSPORTS
-        .into_iter()
+        .iter()
+        .copied()
         .find(|k| k.name() == name)
 }
 
@@ -118,6 +121,13 @@ pub async fn listen(
     let host = match ip {
         Some(std::net::IpAddr::V6(a)) => format!("[{a}]"),
         Some(std::net::IpAddr::V4(a)) => a.to_string(),
+        // A Paqet listener needs one concrete IPv4 address: this server's own, the one its
+        // route to the internet leaves from (what a dialer's packets arrive at, behind NAT
+        // too).
+        None if kind == TransportKind::Paqet => match crate::collect::local_ips().0 {
+            Some(own) => own,
+            None => return failed("no IPv4 address of this server for paqet".into()),
+        },
         None => "0.0.0.0".into(),
     };
     let live = listeners.0.clone();
@@ -440,6 +450,13 @@ fn candidates(
         (_, None) => format!("missing:{}", ask.exit),
         _ => "tested".to_owned(),
     };
+    // Both agents measure Paqet only from the release whose benchmark has it.
+    let paqet_ok = [&ask.entry, &ask.exit].into_iter().all(|id| {
+        views
+            .iter()
+            .find(|s| &s.id == id)
+            .is_some_and(|s| crate::pair::release_at_least(&s.version, PAQET_BENCH_SINCE))
+    });
     let gre_transports: Vec<&str> = kariz::bench::TRANSPORTS
         .iter()
         .map(|k| k.name())
@@ -500,7 +517,11 @@ fn candidates(
             }
         }
         for (path, host) in paths {
-            for kind in kariz::bench::TRANSPORTS {
+            for &kind in kariz::bench::TRANSPORTS {
+                // Paqet is IPv4 only, and measured only by agents that know it.
+                if kind == TransportKind::Paqet && (path != "public" || is_v6(&host) || !paqet_ok) {
+                    continue;
+                }
                 add(kind.name(), path, host.clone(), None, None);
                 if kind == TransportKind::Wss && ask.sni.is_some() {
                     add(kind.name(), path, host.clone(), None, ask.sni.clone());

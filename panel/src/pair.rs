@@ -443,7 +443,7 @@ pub(crate) fn validate_kcp(transport: &str, kcp: Option<&KcpSpec>) -> Result<()>
 /// Whether `version` is `min` or a later release, prereleases in their order
 /// (`2.6.0-beta.3` is before `2.6.0-beta.4`, which is before `2.6.0`). One that cannot be
 /// read counts as too old.
-fn release_at_least(version: &str, min: &str) -> bool {
+pub(crate) fn release_at_least(version: &str, min: &str) -> bool {
     match (
         crate::update::Version::parse(version),
         crate::update::Version::parse(min),

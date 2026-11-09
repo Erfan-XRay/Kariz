@@ -269,7 +269,7 @@ Not sure which transport (or which direction) to use between two servers? The **
 the wizard, and every tunnel's page, have a **Benchmark**. It takes about 20 seconds, makes no
 tunnel and changes nothing on the servers:
 
-1. **Quick check.** Every transport (`tcp` with mux, `kcp`, `ws`, `wss`, `quic`) in **both
+1. **Quick check.** Every transport (`tcp` with mux, `kcp`, `ws`, `wss`, `quic`, and `paqet` over IPv4 when both servers run 2.8.0-beta.2 or newer) in **both
    directions** (which server takes the connection): one server listens for a short test
    session, the other dials it, and the panel notes whether it got through, how long the
    handshake took and the round trips. It uses the port the tunnel would get, since filters

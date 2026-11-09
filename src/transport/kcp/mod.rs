@@ -1268,6 +1268,16 @@ pub struct KcpDialer {
     settings: ConnSettings,
 }
 
+/// Runs `open` on Tokio's blocking pool: opening a Paqet socket may run `iptables` (its
+/// firewall rules), which must not hold up a runtime worker and every task on it.
+async fn off_runtime(
+    open: impl FnOnce() -> io::Result<PacketSocket> + Send + 'static,
+) -> io::Result<PacketSocket> {
+    tokio::task::spawn_blocking(open)
+        .await
+        .map_err(io::Error::other)?
+}
+
 impl KcpDialer {
     pub fn new(remote: &str, params: &KcpParams, tuning: &Tuning) -> Self {
         Self {
@@ -1291,7 +1301,8 @@ impl KcpDialer {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "remote did not resolve"))?
         };
         let socket = if self.settings.paqet {
-            PacketSocket::paqet_dial(peer, self.settings.socket_buffer, self.settings.dscp)?
+            let (buffer, dscp) = (self.settings.socket_buffer, self.settings.dscp);
+            off_runtime(move || PacketSocket::paqet_dial(peer, buffer, dscp)).await?
         } else {
             PacketSocket::udp_connect(peer, self.settings.socket_buffer, self.settings.dscp).await?
         };
@@ -1340,7 +1351,8 @@ impl KcpListener {
         };
         let settings = ConnSettings::new(params, tuning);
         let socket = if settings.paqet {
-            PacketSocket::paqet_listen(addr, settings.socket_buffer, settings.dscp)?
+            let (buffer, dscp) = (settings.socket_buffer, settings.dscp);
+            off_runtime(move || PacketSocket::paqet_listen(addr, buffer, dscp)).await?
         } else {
             PacketSocket::udp_bind(addr, settings.socket_buffer, settings.dscp)?
         };

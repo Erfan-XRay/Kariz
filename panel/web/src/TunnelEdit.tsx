@@ -10,7 +10,7 @@ import { MuxFields, MuxToggle, muxFromSpec, muxSpecOf, muxToSpec } from "./MuxFi
 import { TlsChoice, emptyTls, isLetsEncrypt, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
-import { KcpFields, PaqetBind, PaqetNote, emptyKcp, kcpFromSpec, kcpSpecOf, kcpToSpec, validPaqetBind } from "./PaqetFields";
+import { KcpFields, PaqetBind, emptyKcp, kcpFromSpec, kcpSpecOf, kcpToSpec, paqetBindGuess, validPaqetBind } from "./PaqetFields";
 import { PerIpLimit, perIpOf } from "./PerIpLimit";
 import { UdpFlows, udpFlowsOf } from "./UdpFlows";
 import { ProxyProtocol, proxyFromSpec, proxyOf } from "./ProxyProtocol";
@@ -267,6 +267,14 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     if (transport !== "paqet" && !netId && isV6(dialHost) && listenHost === "0.0.0.0") setListenHost("[::]");
   }, [dialHost, netId, listenHost, transport]);
 
+  // A tunnel made Paqet, or given another listening server, starts from that server's own IPv4: a Paqet
+  // listener needs a concrete address, not every one.
+  useEffect(() => {
+    if (transport !== "paqet" || netId || !["0.0.0.0", "[::]"].includes(listenHost)) return;
+    const guess = paqetBindGuess(servers.find((x) => x.id === acceptor), dialHost);
+    if (guess) setListenHost(guess);
+  }, [transport, netId, listenHost, acceptor, dialHost, servers]);
+
   // Opened from a benchmark result: once what the tunnel has is known, its direction, transport, network, the
   // IPv6 address of an IPv6 result and the server name of a wss one are put in, as changes to look over and save.
   const [presetDone, setPresetDone] = useState(false);
@@ -442,7 +450,6 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
               {joinTransport(transport, muxOn).core !== tunnel.transport && <span className="help warn-text">{t("te.transportChange")}</span>}
             </Choice>
             <Choice label={t("wz.profile")} value={profile} options={PROFILES.map((x) => [x, t(`wz.pf.${x}`)])} onChange={setProfile} hint={t(`wz.pf.${profile}.d`)} />
-            {transport === "paqet" && <PaqetNote />}
           </fieldset>
 
           <fieldset className="card edit-sec" disabled={locked}>
@@ -455,7 +462,6 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                 <label htmlFor="te-port">{t("wz.port", { server: serverName(acceptor) })}</label>
                 <input className="text mono" id="te-port" dir="ltr" inputMode="numeric" value={listenPort} onChange={(e) => setListenPort(e.target.value.trim())} />
                 {transport === "auto" && <span className="help">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</span>}
-                {transport === "paqet" && <span className="help">{t("paqet.port")}</span>}
                 {(transport === "quic" || transport === "kcp") && <span className="help">{t("wz.portUdp")}</span>}
               </div>
               {transport === "paqet" && !netId && <PaqetBind id="te-paqet-bind" value={listenHost === "0.0.0.0" || listenHost === "[::]" ? "" : listenHost} onChange={setListenHost} />}
@@ -472,7 +478,6 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                   </span>
                 )}
                 {mode === "direct" && <span className="help">{t("wz.directHelp", { server: serverName(acceptor), port: listenPort })}</span>}
-                {transport === "paqet" && <span className="help">{t("paqet.ip")}</span>}
               </div>
             </div>
             {transport === "wss" && <TlsChoice value={tls} onChange={setTls} server={acceptor} serverName={serverName(acceptor)} onHost={(h) => setDialHost(h)} />}

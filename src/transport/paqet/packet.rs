@@ -27,6 +27,9 @@ const WINDOW: u16 = u16::MAX;
 pub struct Incoming<'a> {
     pub payload: &'a [u8],
     pub peer: SocketAddrV4,
+    /// The segment's sequence number: the reply's acknowledgment is this plus the
+    /// payload length, as a real TCP endpoint's would be.
+    pub sequence: u32,
 }
 
 /// Builds a TCP segment (header and `payload`) for `source` -> `destination`.
@@ -126,6 +129,7 @@ pub fn parse_ipv4_tcp(packet: &[u8], local_ip: Ipv4Addr, local_port: u16) -> Opt
     Some(Incoming {
         payload,
         peer: SocketAddrV4::new(source_ip, source_port),
+        sequence: u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]),
     })
 }
 
@@ -227,6 +231,10 @@ mod tests {
         let incoming = parse_ipv4_tcp(&packet, *destination().ip(), destination().port()).unwrap();
         assert_eq!(incoming.payload, b"a packet");
         assert_eq!(incoming.peer, source());
+        assert_eq!(
+            incoming.sequence, 7,
+            "the sequence number it was built with"
+        );
     }
 
     #[test]

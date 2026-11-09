@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
-import type { KcpSpec } from "./api";
+import type { KcpSpec, ServerInfo } from "./api";
 import { useApp } from "./store";
-import { Icon } from "./ui";
 
 /** The KCP presets the core knows, from gentle to aggressive. */
 export type KcpMode = "normal" | "fast" | "fast2" | "fast3" | "manual";
@@ -370,17 +369,6 @@ export function KcpFields({ value, onChange, profile }: { value: KcpForm; onChan
   );
 }
 
-/** The Paqet prerequisites, the same on the wizard and the edit page. */
-export function PaqetNote() {
-  const { t } = useApp();
-  return (
-    <div className="banner warn" role="note">
-      <Icon name="alert" size={18} />
-      <span>{t("paqet.help")}</span>
-    </div>
-  );
-}
-
 export function validPaqetBind(value: string): boolean {
   const octets = value.split(".");
   return octets.length === 4 && +octets[0] > 0 && +octets[0] < 224 &&
@@ -399,4 +387,13 @@ export function PaqetBind({ id, value, onChange }: { id: string; value: string; 
       <span className={`help ${invalid ? "err" : ""}`} id={`${id}-help`}>{t(invalid ? "paqet.badBind" : "paqet.bindHelp")}</span>
     </div>
   );
+}
+
+/** The local IPv4 a new Paqet listener starts with: the address the listening server's own route to the
+ * internet leaves from (its agent reports it, a private one behind NAT), else the IPv4 it is dialed at. */
+export function paqetBindGuess(server: ServerInfo | undefined, dialHost: string): string {
+  for (const ip of [server?.health?.ip4, dialHost, server?.ip4]) {
+    if (ip && validPaqetBind(ip)) return ip;
+  }
+  return "";
 }
