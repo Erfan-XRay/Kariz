@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.8.1 - 2026-11-09
+
+The stable release after 2.7.1, with everything of the two betas
+([2.8.0-beta.1](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#280-beta1---2026-11-09) and
+[2.8.0-beta.2](https://github.com/Erfan-XRay/Kariz/blob/main/CHANGELOG.md#280-beta2---2026-11-09)); there is
+no 2.8.0. Kariz has a seventh transport, **Paqet**, and it needs nothing set up by hand. Update both
+servers of a Paqet tunnel.
+
+- **Paqet: KCP inside raw TCP.** The same encrypted KCP packets as `kcp`, carried in raw TCP segments
+  with no handshake instead of UDP, for routes that block or throttle UDP but let TCP through. Linux and
+  IPv4. It uses the profile, mux and `[tunnel.kcp]` settings like `kcp`.
+- **Nothing to set up.** Each Paqet socket adds the `iptables` rules it needs (accept its segments,
+  keep connection tracking off them, drop the kernel's resets) and removes them when the tunnel stops,
+  so a host firewall like ufw or firewalld does not stop it. A firewall in front of the servers, such
+  as a cloud provider's, must still let the port through.
+- **Listens like the other transports.** A Paqet listener is on every IPv4 address and answers each
+  flow from the address it came to, so there is no address to fill in and a server with several
+  addresses works. For a 2.8.0 beta listener the panel uses that server's own IPv4 address.
+- **IPv4 and public addresses only.** When Paqet is chosen, the wizard and the edit page turn off the
+  private network (GRE or VXLAN) option and offer only IPv4 addresses.
+- **In the benchmark.** Paqet is measured over IPv4 in both directions, and choosing its result fills
+  in the wizard.
+- **Steadier on real paths.** Each flow keeps its own TCP sequence and acknowledgment numbers, raw
+  socket buffers get their full size, and the dialing side only receives its peer's packets.
+- **The Networks page on phones and tablets.** A network's links are cards instead of a table wider
+  than the screen, and the server addresses take less room. On wide screens the address fields line up.
+- **Documentation.** Paqet is in the README, the transport guide and troubleshooting, with a full
+  [Paqet guide](https://github.com/Erfan-XRay/Kariz/blob/v2.8.1/docs/paqet.md). A route that drops TCP
+  without a handshake in front of a server stops Paqet (`handshake timed out`); use `kcp` or `tcpmux`
+  there.
+
 ## 2.8.0-beta.2 - 2026-11-09
 
 Paqet now works like any other transport, with nothing to set up by hand. In 2.8.0-beta.1

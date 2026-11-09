@@ -672,7 +672,7 @@ export function NetworksPage({ servers, onChanged, onOpenTunnel }: { servers: Se
             {mine.length === 0 ? (
               <p className="muted small">{t("net.noLinks")}</p>
             ) : (
-              <table className="plain-table">
+              <table className="plain-table net-links">
                 <thead>
                   <tr>
                     <th>{t("t.route")}</th>
@@ -685,7 +685,7 @@ export function NetworksPage({ servers, onChanged, onOpenTunnel }: { servers: Se
                 <tbody>
                   {mine.map((l) => (
                     <tr key={l.id}>
-                      <td>
+                      <td className="lk-route">
                         {name(l.a)} <span className="muted">↔</span> {name(l.b)}
                         {l.ipv6 !== !!n.ipv6 && (
                           <>
@@ -694,13 +694,15 @@ export function NetworksPage({ servers, onChanged, onOpenTunnel }: { servers: Se
                           </>
                         )}
                       </td>
-                      <td className="mono" dir="ltr">
-                        {l.addr_a} · {l.addr_b}
+                      <td className="lk-addrs" data-label={t("net.addrs")}>
+                        <span className="mono" dir="ltr">
+                          {l.addr_a} · {l.addr_b}
+                        </span>
                       </td>
                       <td className="mono hide-sm" dir="ltr">
                         {l.kind === "vxlan" ? `VNI ${l.gre_key}` : l.gre_key} · {l.ifname}
                       </td>
-                      <td>
+                      <td className="lk-mtu" data-label={t("net.mtu")}>
                         <button className="mtu-btn" type="button" aria-label={t("net.mtuTitle", { a: name(l.a), b: name(l.b) })} onClick={() => setFitting(l)}>
                           <span className="mono" dir="ltr">
                             {num(linkMtu(l))}

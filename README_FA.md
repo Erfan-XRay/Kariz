@@ -28,7 +28,7 @@
 ```mermaid
 flowchart LR
     U([Users]) -->|TCP / UDP| E[Entry]
-    E <==>|"Kariz tunnel<br/>tcp · tcpmux · ws · wss · quic · kcp"| X[Exit]
+    E <==>|"Kariz tunnel<br/>tcp · tcpmux · ws · wss · quic · kcp · paqet"| X[Exit]
     X --> T([Targets])
 ```
 
@@ -69,9 +69,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/script
 
 ## چه چیزی دارد
 
-- **شش ترنسپورت.** `tcp`، `tcpmux`، `ws` و `wss` (برای CDN و جایی که ترافیک باید شبیه HTTPS باشد) و `quic` و `kcp` روی UDP برای مسیرهای دور یا پراتلاف. `quic` را می‌شود بسته‌به‌بسته مهر و موم کرد تا برای شبکه‌ای که QUIC را فیلتر می‌کند شبیه QUIC نباشد.
+- **هفت ترنسپورت.** `tcp`، `tcpmux`، `ws` و `wss` (برای CDN و جایی که ترافیک باید شبیه HTTPS باشد)، `quic` و `kcp` روی UDP برای مسیرهای دور یا پراتلاف، و [`paqet`](docs/fa/paqet.md): KCP داخل بسته‌های خام TCP بدون دست‌دهی، برای مسیرهایی که UDP را می‌بندند ولی TCP را رد می‌کنند. `quic` را می‌شود بسته‌به‌بسته مهر و موم کرد تا برای شبکه‌ای که QUIC را فیلتر می‌کند شبیه QUIC نباشد. قواعد فایروالی که Paqet لازم دارد را خود کاریز می‌گذارد.
 - **هر دو جهت.** خروجی می‌تواند به ورودی وصل شود (`reverse`) یا برعکس (`direct`)، با اتصال دوبارهٔ خودکار.
-- **TCP و UDP.** WireGuard، DNS و بازی از آن رد می‌شوند. روی `kcp` و `quic` بستهٔ گم‌شده چیز دیگری را معطل نمی‌کند و برای بازی FEC و تکثیر اختیاری بسته هم هست.
+- **TCP و UDP.** WireGuard، DNS و بازی از آن رد می‌شوند. روی `kcp`، `paqet` و `quic` بستهٔ گم‌شده چیز دیگری را معطل نمی‌کند و برای بازی FEC و تکثیر اختیاری بسته هم هست.
 - **پنلی که اشتباهش را خودش جمع می‌کند.** ویزارد تانل اول هر دو سرور را می‌سنجد و اگر جایی خطا شود هر دو را به حالت قبل برمی‌گرداند. نقشهٔ زنده، نمودار، لاگ، تست سرعت، پشتیبان‌گیری، شبکهٔ خصوصی و به‌روزرسانی هم همان‌جاست.
 - **مصرف واقعی.** هر تانل و هر سرور مصرف امروز، این هفته، این ماه و کل خود را روی نمودار ساعتی، روزانه یا ماهانه (شمسی یا میلادی) نشان می‌دهد؛ از شمارنده‌های خود هسته، با هدرها و بازارسال‌ها، و جدا شده به دادهٔ کاربران و سربار. هر سرور می‌تواند سهمیهٔ ماهانه‌ای داشته باشد که پیش از تمام شدن هشدار می‌دهد.
 - **اعلان در تلگرام.** رباتِ خودتان وقتی سروری آفلاین یا تانلی قطع شود (و وقتی برگردد) خبر می‌دهد و به `/status` با وضعیت همهٔ سرورها و تانل‌ها جواب می‌دهد. جایی که تلگرام بسته است از پروکسی یا از یک تانل رد می‌شود. [راه‌اندازی](https://erfan-xray.github.io/Kariz/fa/docs/telegram/).
@@ -86,7 +86,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/script
 | [شروع کار](https://erfan-xray.github.io/Kariz/fa/docs/getting-started/) | نصب، اولین تانل، systemd |
 | [کار با پنل](https://erfan-xray.github.io/Kariz/fa/docs/using-the-panel/) · [تور راهنما](https://erfan-xray.github.io/Kariz/fa/docs/tour/) · [ویدیوی آموزشی](https://erfan-xray.github.io/Kariz/fa/docs/video/) | پنل، صفحه به صفحه، و در دو دقیقه ویدیو |
 | [اسکریپت مدیر](https://erfan-xray.github.io/Kariz/fa/docs/manager/) | نصب، به‌روزرسانی، منو |
-| [ترنسپورت‌ها](https://erfan-xray.github.io/Kariz/fa/docs/transports/) · [کدام یکی؟](https://erfan-xray.github.io/Kariz/fa/docs/how-it-works/) | انتخاب و تنظیم |
+| [ترنسپورت‌ها](https://erfan-xray.github.io/Kariz/fa/docs/transports/) · [کدام یکی؟](https://erfan-xray.github.io/Kariz/fa/docs/how-it-works/) · [Paqet](https://erfan-xray.github.io/Kariz/fa/docs/paqet/) | انتخاب و تنظیم |
 | [مرجع پیکربندی](https://erfan-xray.github.io/Kariz/fa/docs/configuration/) | همهٔ تنظیم‌ها با مقدار پیش‌فرض و محدوده |
 | [UDP و بازی](https://erfan-xray.github.io/Kariz/fa/docs/udp-and-games/) · [CDN](https://erfan-xray.github.io/Kariz/fa/docs/cdn/) | راه‌اندازی‌های خاص |
 | [عیب‌یابی](https://erfan-xray.github.io/Kariz/fa/docs/troubleshooting/) · [امنیت](https://erfan-xray.github.io/Kariz/fa/docs/security/) | وقتی چیزی درست کار نمی‌کند |

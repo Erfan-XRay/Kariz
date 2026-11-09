@@ -199,6 +199,42 @@ impl PairRequest {
         self.transport == "paqet"
     }
 
+    /// A Paqet tunnel listens on every IPv4 address (`0.0.0.0`), as the other transports
+    /// do. Its listening agent knows that from [`PAQET_ANY_SINCE`]; an older one gets
+    /// its own IPv4 address instead (the one its route to the internet leaves from, as
+    /// it reports it), or `old_agent_paqet_any:SERVER:VERSION` when it reports none.
+    fn fit_paqet_listen(&mut self, hub: &Hub) -> Result<()> {
+        if !self.needs_paqet() {
+            return Ok(());
+        }
+        let Some((host, port)) = self.listen.rsplit_once(':') else {
+            return Ok(());
+        };
+        if host != "0.0.0.0" {
+            return Ok(());
+        }
+        let port = port.to_owned();
+        let acceptor = self.acceptor_first()[0].to_owned();
+        let Some(server) = hub.snapshot()?.into_iter().find(|s| s.id == acceptor) else {
+            return Ok(());
+        };
+        if release_at_least(&server.version, PAQET_ANY_SINCE) {
+            return Ok(());
+        }
+        let own = server
+            .health
+            .as_ref()
+            .and_then(|h| h.ip4.clone())
+            .filter(|ip| ip.parse::<std::net::Ipv4Addr>().is_ok());
+        match own {
+            Some(ip) => {
+                self.listen = format!("{ip}:{port}");
+                Ok(())
+            }
+            None => bail!("old_agent_paqet_any:{acceptor}:{}", server.version),
+        }
+    }
+
     /// Whether the tunnel's QUIC packets are sealed.
     fn sealed(&self) -> bool {
         self.quic_obfs && self.transport == "quic"
@@ -364,6 +400,9 @@ impl PairRequest {
 /// The first release with the native Paqet transport: raw TCP, its own encrypted KCP wire
 /// and `[tunnel.kcp]` tuning on both sides.
 const PAQET_SINCE: &str = "2.8.0-beta.1";
+
+/// The first release whose Paqet listener may be on every IPv4 address (`0.0.0.0`).
+const PAQET_ANY_SINCE: &str = "2.8.1";
 
 /// The first release whose agent writes `tuning.udp_max_flows` from the panel.
 const UDP_FLOWS_SINCE: &str = "2.6.0-beta.4";
@@ -615,6 +654,8 @@ pub async fn check_with_kcp(
     req.validate()?;
     validate_kcp(&req.transport, kcp)?;
     req.require_new_enough(hub)?;
+    let mut req = req.clone();
+    req.fit_paqet_listen(hub)?;
     let (entry, exit) = req.specs_with_kcp(None, None, kcp);
     let a = hub
         .ask_as(&req.entry, &Request::TunnelCheck { spec: entry })
@@ -738,10 +779,15 @@ pub fn create(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
 }
 
 /// [`create`] with a `paqet` tunnel's KCP tuning.
-pub fn create_with_kcp(hub: &Arc<Hub>, req: PairRequest, kcp: Option<KcpSpec>) -> Result<String> {
+pub fn create_with_kcp(
+    hub: &Arc<Hub>,
+    mut req: PairRequest,
+    kcp: Option<KcpSpec>,
+) -> Result<String> {
     req.validate()?;
     validate_kcp(&req.transport, kcp.as_ref())?;
     req.require_new_enough(hub)?;
+    req.fit_paqet_listen(hub)?;
     let id = hub.ops.begin("create", &req.name)?;
     let hub = hub.clone();
     let op = id.clone();
@@ -958,10 +1004,11 @@ pub fn edit(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
 }
 
 /// [`edit`] with a `paqet` tunnel's KCP tuning.
-pub fn edit_with_kcp(hub: &Arc<Hub>, req: PairRequest, kcp: Option<KcpSpec>) -> Result<String> {
+pub fn edit_with_kcp(hub: &Arc<Hub>, mut req: PairRequest, kcp: Option<KcpSpec>) -> Result<String> {
     req.validate()?;
     validate_kcp(&req.transport, kcp.as_ref())?;
     req.require_new_enough(hub)?;
+    req.fit_paqet_listen(hub)?;
     let old = place(hub, &req.name)?.sides;
     let (_, moved) = moves(&old, &req);
     if moved {

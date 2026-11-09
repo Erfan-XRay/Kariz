@@ -969,13 +969,6 @@ impl Config {
                  100 s (Cloudflare)",
             );
         }
-        if self.tunnel.transport == TransportKind::Paqet {
-            warnings.push(
-                "paqet needs root or CAP_NET_RAW, a concrete IPv4 listen address, and scoped \
-                 firewall rules that allow the TCP port and suppress the kernel's RST replies; \
-                 see docs/paqet.md",
-            );
-        }
         if self.forward.iter().any(|f| f.protocol.has_udp()) && !self.mux().enabled {
             warnings.push(
                 "UDP is forwarded without mux: every UDP flow uses its own tunnel connection; \
@@ -1153,21 +1146,15 @@ impl Config {
         self.validate_kcp()
     }
 
-    /// Paqet phase 1 is IPv4 only and needs a concrete listening address: a wildcard
-    /// raw socket could not choose the reply source reliably. Names are resolved at bind
-    /// time; only literals can be checked here.
+    /// Paqet is IPv4 only. A listener may be on one address or on every IPv4 one
+    /// (`0.0.0.0`), where it answers each flow from the address the flow came to. Names
+    /// are resolved at bind time; only literals can be checked here.
     fn validate_paqet_addresses(&self) -> Result<()> {
         if let Some(addr) = self.tunnel.listen.as_deref().and_then(parse_socket_addr) {
             if addr.is_ipv6() {
                 bail!(
                     "transport = \"paqet\" supports IPv4 only in this phase; tunnel.listen \
                      cannot be {addr}"
-                );
-            }
-            if addr.ip().is_unspecified() {
-                bail!(
-                    "transport = \"paqet\" needs a concrete IPv4 address in tunnel.listen, \
-                     not {addr}; a wildcard socket could send replies from the wrong address"
                 );
             }
         }
@@ -1730,9 +1717,12 @@ mod tests {
         );
         assert!(parse_err(&fec_too_large).contains("1417"));
 
-        // A wildcard listener cannot choose a reliable reply source; IPv6 is phase 2.
+        // A listener on every IPv4 address answers each flow from the address it came to;
+        // IPv6 is not supported yet.
         let wildcard = with_transport("exit", "paqet", "");
-        assert!(parse_err(&wildcard).contains("concrete IPv4"));
+        Config::parse(&wildcard).unwrap();
+        let listen6 = wildcard.replace("listen = \"0.0.0.0:443\"", "listen = \"[::]:443\"");
+        assert!(parse_err(&listen6).contains("IPv4 only"));
         let ipv6 = with_transport("entry", "paqet", "").replace(
             "remote = \"203.0.113.1:443\"",
             "remote = \"[2001:db8::1]:443\"",

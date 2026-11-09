@@ -8,7 +8,7 @@ flowchart TD
     A{Does UDP reach the<br/>other server reliably?} -->|no, or unsure| B{Is there a CDN or<br/>reverse proxy in between?}
     A -->|yes| C{Is the path lossy?<br/>long, international, throttled}
     B -->|yes| WS[ws / wss]
-    B -->|no| TM[tcpmux, or wss<br/>to look like HTTPS]
+    B -->|no| TM[tcpmux, wss to look like HTTPS,<br/>or paqet when TCP passes and UDP does not]
     C -->|yes| K[kcp<br/>or quic with BBR]
     C -->|no| TM2[tcpmux<br/>or quic]
 ```
@@ -21,7 +21,7 @@ flowchart TD
 | `wss` | WebSocket over TLS (HTTPS) | behind a CDN, or on its own to look like an HTTPS site |
 | `quic` | QUIC over UDP: streams and datagrams, TLS 1.3 | UDP flows without head-of-line blocking; paths where UDP works well |
 | `kcp` | KCP over UDP, every packet encrypted, optional FEC | lossy links where TCP collapses; games |
-| [`paqet`](paqet.md) | Encrypted KCP in raw TCP over IPv4 on Linux | Routes that pass synthetic TCP. Requires scoped firewall rules. |
+| [`paqet`](paqet.md) | the same encrypted KCP, in raw TCP segments with no handshake (IPv4, Linux) | UDP is blocked or throttled but TCP gets through |
 
 Everything except `quic` runs the same layers on top: the handshake (mutual
 authentication with the token, X25519 for forward secrecy), AEAD records, and mux.
@@ -112,6 +112,23 @@ loss, where TCP collapses.
 KCP runs in user space, a packet at a time, so on localhost it reaches a fraction of
 TCP's speed (hundreds of Mbit/s). Between two servers this rarely matters.
 
+## `paqet`
+
+Paqet carries the packets of `kcp` (sealed with the token, with the same presets, FEC and
+windows) inside raw TCP segments instead of UDP datagrams. Each segment looks like data on an
+established TCP connection, and there is no handshake. It is for routes that block or throttle
+UDP but let TCP through.
+
+- **Nothing to set up.** The tunnel service opens the raw socket and adds the host firewall
+  rules Paqet needs, and removes them when the tunnel stops.
+- **IPv4 only, and not over GRE or VXLAN**: inside a private network a filter sees only the
+  outer packets, so Paqet gains nothing there. The panel offers neither for Paqet.
+- **The same settings as `kcp`:** the profile, `[tunnel.mux]`, `[tunnel.kcp]` and `[tuning]`.
+- **It needs a path that passes TCP without a handshake.** A stateful firewall in front of a
+  server that drops such segments stops it (`handshake timed out`).
+
+The whole guide, with examples and troubleshooting: [Paqet over raw TCP](paqet.md).
+
 ## `wss` with a real certificate
 
 By default a listening `wss` side serves a self-signed certificate that the dialing side pins.
@@ -158,4 +175,5 @@ transport gets through. It needs the three ports open on the listening side; if 
 ## Modes and transports
 
 Every transport works in both modes. The listening side needs its port reachable:
-TCP for `tcp`, `tcpmux`, `ws` and `wss`, UDP for `quic` and `kcp`. For `paqet`, follow the [raw TCP firewall setup](paqet.md).
+TCP for `tcp`, `tcpmux`, `ws`, `wss` and `paqet`, UDP for `quic` and `kcp`. For `paqet`, Kariz
+opens its own host firewall; a firewall in front of the server still has to let the TCP port through.

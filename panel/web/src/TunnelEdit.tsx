@@ -10,7 +10,7 @@ import { MuxFields, MuxToggle, muxFromSpec, muxSpecOf, muxToSpec } from "./MuxFi
 import { TlsChoice, emptyTls, isLetsEncrypt, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
-import { KcpFields, PaqetBind, emptyKcp, kcpFromSpec, kcpSpecOf, kcpToSpec, paqetBindGuess, validPaqetBind } from "./PaqetFields";
+import { KcpFields, emptyKcp, kcpFromSpec, kcpSpecOf, kcpToSpec } from "./PaqetFields";
 import { PerIpLimit, perIpOf } from "./PerIpLimit";
 import { UdpFlows, udpFlowsOf } from "./UdpFlows";
 import { ProxyProtocol, proxyFromSpec, proxyOf } from "./ProxyProtocol";
@@ -232,7 +232,8 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     mode,
     transport: joinTransport(transport, muxOn).core,
     profile,
-    listen: `${listenHost}:${listenPort}`,
+    // Paqet listens on every IPv4 address (the panel gives an older listening agent its own one).
+    listen: `${transport === "paqet" ? "0.0.0.0" : listenHost}:${listenPort}`,
     dial: `${dialHost.includes(":") && !dialHost.startsWith("[") ? `[${dialHost}]` : dialHost}:${listenPort}`,
     network: netId || undefined,
     pool,
@@ -267,13 +268,22 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     if (transport !== "paqet" && !netId && isV6(dialHost) && listenHost === "0.0.0.0") setListenHost("[::]");
   }, [dialHost, netId, listenHost, transport]);
 
-  // A tunnel made Paqet, or given another listening server, starts from that server's own IPv4: a Paqet
-  // listener needs a concrete address, not every one.
+  // Paqet runs over the public IPv4 addresses only: a private network is let go (back to the public
+  // addresses), and an IPv6 address to dial gives way to the accepting server's IPv4 one.
+  const ipv4Choices = choices.filter((a) => !isV6(a));
+  // (Once, when Paqet is chosen, the tunnel is loaded or the accepting server changes: an IPv6 address typed
+  // afterwards is not replaced under the cursor, it gets the IPv4-only error.)
   useEffect(() => {
-    if (transport !== "paqet" || netId || !["0.0.0.0", "[::]"].includes(listenHost)) return;
-    const guess = paqetBindGuess(servers.find((x) => x.id === acceptor), dialHost);
-    if (guess) setListenHost(guess);
-  }, [transport, netId, listenHost, acceptor, dialHost, servers]);
+    if (transport !== "paqet" || !netReady) return;
+    if (netId) {
+      // Back to the public addresses, at the accepting server's IPv4 one.
+      setNetId("");
+      setListenHost("0.0.0.0");
+      setDialHost(ipv4Choices[0] ?? "");
+    } else if (isV6(dialHost) && ipv4Choices[0]) {
+      setDialHost(ipv4Choices[0]);
+    }
+  }, [transport, netReady, acceptor]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Opened from a benchmark result: once what the tunnel has is known, its direction, transport, network, the
   // IPv6 address of an IPv6 result and the server name of a wss one are put in, as changes to look over and save.
@@ -295,8 +305,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     if (moved && [entry, exit].some((id) => !online(id))) return t("te.moveOffline");
     if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
     if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
-    if (transport === "paqet" && !netId && !validPaqetBind(listenHost)) return t("paqet.badBind");
-    if (transport === "paqet" && !netId && isV6(dialHost)) return t("paqet.ip");
+    if (transport === "paqet" && isV6(dialHost)) return t("paqet.ip");
     if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
     if (transport === "wss" && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
     if (!cipherReady(enc, transport, encAck)) return t("enc.needAck");
@@ -455,7 +464,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
           <fieldset className="card edit-sec" disabled={locked}>
             <legend>{t("te.where")}</legend>
             <p className="muted small">{t("wz.lead3", { acceptor: serverName(acceptor), dialer: serverName(dialer) })}</p>
-            <GreChoice value={netId} onChange={chooseNetwork} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} />
+            <GreChoice value={netId} onChange={chooseNetwork} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} blocked={transport === "paqet" ? t("paqet.noNetwork") : undefined} />
             {!netId && loadedHost !== null && !!linkWithAddress(links, loadedHost) && <p className="help warn-text">{t("te.greOff")}</p>}
             <div className="grid-2">
               <div className="field">
@@ -464,13 +473,13 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                 {transport === "auto" && <span className="help">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</span>}
                 {(transport === "quic" || transport === "kcp") && <span className="help">{t("wz.portUdp")}</span>}
               </div>
-              {transport === "paqet" && !netId && <PaqetBind id="te-paqet-bind" value={listenHost === "0.0.0.0" || listenHost === "[::]" ? "" : listenHost} onChange={setListenHost} />}
               <div className="field" hidden={!!netId}>
                 <label htmlFor="te-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>
                 <input className="text mono" id="te-dial" dir="ltr" value={dialHost} placeholder="203.0.113.5" onChange={(e) => setDialHost(e.target.value.trim())} />
-                {choices.length > 0 && (
+                {transport === "paqet" && <span className="help">{t("paqet.ipv4Only")}</span>}
+                {(transport === "paqet" ? ipv4Choices : choices).length > 0 && (
                   <span className="addr-chips">
-                    {choices.map((a) => (
+                    {(transport === "paqet" ? ipv4Choices : choices).map((a) => (
                       <button key={a} type="button" className={`pchip as-btn ${a === dialHost ? "on" : ""}`} dir="ltr" onClick={() => setDialHost(a)}>
                         {a}
                       </button>

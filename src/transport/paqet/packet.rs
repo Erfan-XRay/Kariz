@@ -30,6 +30,9 @@ pub struct Incoming<'a> {
     /// The segment's sequence number: the reply's acknowledgment is this plus the
     /// payload length, as a real TCP endpoint's would be.
     pub sequence: u32,
+    /// The address it was sent to: the source of the replies to it (for a listener on
+    /// every address, the one the peer dialed).
+    pub local: Ipv4Addr,
 }
 
 /// Builds a TCP segment (header and `payload`) for `source` -> `destination`.
@@ -72,9 +75,9 @@ pub fn build_tcp_segment(
 /// Parses a received IPv4 packet and returns the TCP payload and where it came from.
 ///
 /// Raw IPv4 sockets receive the IP header as well as the segment. Packets for another
-/// address or port, fragments (the kernel reassembles before a raw socket sees them),
-/// non-data segments and segments with a bad checksum are rejected. A rejected packet
-/// never reaches the AEAD or KCP.
+/// address (`local_ip`, or any unicast one when it is `0.0.0.0`) or port, fragments (the
+/// kernel reassembles before a raw socket sees them), non-data segments and segments with
+/// a bad checksum are rejected. A rejected packet never reaches the AEAD or KCP.
 pub fn parse_ipv4_tcp(packet: &[u8], local_ip: Ipv4Addr, local_port: u16) -> Option<Incoming<'_>> {
     if packet.len() < IPV4_HEADER + TCP_HEADER || packet[0] >> 4 != 4 {
         return None;
@@ -98,10 +101,14 @@ pub fn parse_ipv4_tcp(packet: &[u8], local_ip: Ipv4Addr, local_port: u16) -> Opt
     }
     let source_ip = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
     let destination_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-    if destination_ip != local_ip
-        || source_ip.is_unspecified()
-        || source_ip.is_multicast()
-        || source_ip.is_broadcast()
+    let to_us = if local_ip.is_unspecified() {
+        !(destination_ip.is_unspecified()
+            || destination_ip.is_multicast()
+            || destination_ip.is_broadcast())
+    } else {
+        destination_ip == local_ip
+    };
+    if !to_us || source_ip.is_unspecified() || source_ip.is_multicast() || source_ip.is_broadcast()
     {
         return None;
     }
@@ -119,7 +126,7 @@ pub fn parse_ipv4_tcp(packet: &[u8], local_ip: Ipv4Addr, local_port: u16) -> Opt
     if flags & (FLAG_SYN | FLAG_RST | FLAG_FIN) != 0 || flags & FLAG_ACK == 0 {
         return None;
     }
-    if !tcp_checksum_valid(source_ip, local_ip, tcp) {
+    if !tcp_checksum_valid(source_ip, destination_ip, tcp) {
         return None;
     }
     let payload = &tcp[data_offset..];
@@ -130,6 +137,7 @@ pub fn parse_ipv4_tcp(packet: &[u8], local_ip: Ipv4Addr, local_port: u16) -> Opt
         payload,
         peer: SocketAddrV4::new(source_ip, source_port),
         sequence: u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]),
+        local: destination_ip,
     })
 }
 
@@ -299,6 +307,18 @@ mod tests {
             parse_ipv4_tcp(&packet, Ipv4Addr::new(203, 0, 113, 1), destination().port()).is_none()
         );
         assert!(parse_ipv4_tcp(&packet, *destination().ip(), destination().port() + 1).is_none());
+    }
+
+    #[test]
+    fn a_listener_on_every_address_takes_any_unicast_one_and_says_which() {
+        let packet = ipv4(&segment(b"data"));
+        let incoming =
+            parse_ipv4_tcp(&packet, Ipv4Addr::UNSPECIFIED, destination().port()).unwrap();
+        assert_eq!(incoming.local, *destination().ip());
+        assert!(parse_ipv4_tcp(&packet, Ipv4Addr::UNSPECIFIED, destination().port() + 1).is_none());
+        let mut broadcast = packet.clone();
+        broadcast[16..20].copy_from_slice(&[255, 255, 255, 255]);
+        assert!(parse_ipv4_tcp(&broadcast, Ipv4Addr::UNSPECIFIED, destination().port()).is_none());
     }
 
     #[test]
