@@ -376,6 +376,26 @@ export interface ForwardSpec {
   protocol: string;
 }
 
+/** A Paqet tunnel's native KCP wire (`[tunnel.kcp]`); what is left out keeps the profile's value. */
+export interface KcpSpec {
+  mode?: "normal" | "fast" | "fast2" | "fast3" | "manual";
+  /** Manual mode only. */
+  nodelay?: boolean;
+  interval_ms?: number;
+  resend?: number;
+  no_congestion?: boolean;
+  /** In packets. */
+  send_window?: number;
+  recv_window?: number;
+  /** KCP packet size, its 24-byte header included. */
+  mtu?: number;
+  /** 0/0 turns FEC off; left out keeps the profile's default. */
+  fec_data?: number;
+  fec_parity?: number;
+  /** UDP flows take the datagram path beside KCP. */
+  datagrams?: boolean;
+}
+
 /** What the wizard sends: one tunnel, both sides. */
 /** A tunnel's mux settings; what is left out keeps the profile's value. */
 export interface MuxSpec {
@@ -404,6 +424,8 @@ export interface PairRequest {
   ws_host?: string;
   tls_sni?: string;
   mux?: MuxSpec;
+  /** Paqet only: `[tunnel.kcp]` tuning. */
+  kcp?: KcpSpec;
   /** wss: the files of a real certificate on the listening side. */
   tls_cert?: string;
   tls_key?: string;
@@ -440,6 +462,8 @@ export interface Spec {
   tls_sni?: string;
   tls_pin?: string;
   mux?: MuxSpec;
+  /** Paqet only: the `[tunnel.kcp]` table that was in the file. */
+  kcp?: KcpSpec;
   tls_cert?: string;
   tls_key?: string;
   encryption?: string;

@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use kariz::config::{mode_name, role_name, Config, Role};
 
-use crate::wire::{CheckReply, ForwardInfo, PortOwner, Spec, SpeedReply, TextReply};
+use crate::wire::{CheckReply, ForwardInfo, KcpSpec, PortOwner, Spec, SpeedReply, TextReply};
 
 const PLACEHOLDER_TOKEN: &str = "0000000000000000000000000000000000000000000000000000";
 
@@ -59,6 +59,56 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
         let mut quic = Table::new();
         quic.insert("obfs".into(), Value::Boolean(true));
         tunnel.insert("quic".into(), Value::Table(quic));
+    }
+    // Paqet runs its own encrypted KCP wire; `[tunnel.kcp]` is its tuning only for paqet
+    // (an older core refuses the table on every other transport).
+    if spec.transport == "paqet" {
+        if let Some(k) = spec.kcp.as_ref().filter(|k| !k.is_empty()) {
+            let mut kcp = Table::new();
+            if let Some(mode) = &k.mode {
+                kcp.insert("mode".into(), text(mode));
+            }
+            if let Some(v) = k.nodelay {
+                kcp.insert("nodelay".into(), Value::Boolean(v));
+            }
+            if let Some(v) = k.interval_ms {
+                kcp.insert("interval_ms".into(), Value::Integer(i64::from(v)));
+            }
+            if let Some(v) = k.resend {
+                kcp.insert("resend".into(), Value::Integer(i64::from(v)));
+            }
+            if let Some(v) = k.no_congestion {
+                kcp.insert("no_congestion".into(), Value::Boolean(v));
+            }
+            if let Some(v) = k.send_window {
+                kcp.insert("send_window".into(), Value::Integer(i64::from(v)));
+            }
+            if let Some(v) = k.recv_window {
+                kcp.insert("recv_window".into(), Value::Integer(i64::from(v)));
+            }
+            if let Some(v) = k.mtu {
+                kcp.insert(
+                    "mtu".into(),
+                    Value::Integer(i64::try_from(v).unwrap_or(i64::MAX)),
+                );
+            }
+            if let Some(v) = k.fec_data {
+                kcp.insert(
+                    "fec_data".into(),
+                    Value::Integer(i64::try_from(v).unwrap_or(i64::MAX)),
+                );
+            }
+            if let Some(v) = k.fec_parity {
+                kcp.insert(
+                    "fec_parity".into(),
+                    Value::Integer(i64::try_from(v).unwrap_or(i64::MAX)),
+                );
+            }
+            if let Some(v) = k.datagrams {
+                kcp.insert("datagrams".into(), Value::Boolean(v));
+            }
+            tunnel.insert("kcp".into(), Value::Table(kcp));
+        }
     }
     if let Some(listen) = &spec.listen {
         tunnel.insert("listen".into(), text(listen));
@@ -170,6 +220,10 @@ fn build(dir: &Path, spec: &Spec, for_check: bool) -> Result<(String, Config)> {
         bail!("the token is too short or has characters it should not");
     }
     plain_text(spec)?;
+    // The core validates this too once its version knows `paqet`; checking here gives the
+    // panel the same ranges before a line is written, and keeps a KCP table off anything
+    // but paqet.
+    crate::pair::validate_kcp(&spec.transport, spec.kcp.as_ref())?;
     let files = cert_files(dir, spec);
     let text = render(
         spec,
@@ -284,6 +338,10 @@ pub fn wanted_ports(spec: &Spec) -> Vec<(&'static str, u16)> {
     let port =
         |addr: &str| -> Option<u16> { addr.rsplit_once(':').map_or(addr, |(_, p)| p).parse().ok() };
     if is_acceptor(spec) {
+        // Paqet listens on a raw TCP port: the kernel's TCP stack (with scoped RST
+        // suppression) sees the port, so a TCP conflict must be reported like any other.
+        // Such a raw listener does not appear in `/proc/net/tcp`; the tunnel's own port is
+        // excluded by `check` below, from the spec it is replacing.
         let udp = matches!(spec.transport.as_str(), "quic" | "kcp");
         if let Some(p) = spec.listen.as_deref().and_then(port) {
             out.push((if udp { "udp" } else { "tcp" }, p));
@@ -390,6 +448,33 @@ pub fn revert(dir: &Path, name: &str) -> Result<()> {
     crate::agent::write_private(&path, &old)
 }
 
+/// A `paqet` tunnel's `[tunnel.kcp]` as the page holds it, with only the keys the file had:
+/// defaults the core fills in are left out, so an edit does not write them back.
+fn kcp_spec_from_toml(value: Option<&toml::Value>) -> Option<KcpSpec> {
+    let table = value?.as_table()?;
+    let int = |key: &str| table.get(key).and_then(toml::Value::as_integer);
+    let uint = |key: &str| int(key).and_then(|v| u32::try_from(v).ok());
+    let size = |key: &str| int(key).and_then(|v| usize::try_from(v).ok());
+    let boolean = |key: &str| table.get(key).and_then(toml::Value::as_bool);
+    let kcp = KcpSpec {
+        mode: table
+            .get("mode")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned),
+        nodelay: boolean("nodelay"),
+        interval_ms: uint("interval_ms"),
+        resend: uint("resend"),
+        no_congestion: boolean("no_congestion"),
+        send_window: uint("send_window"),
+        recv_window: uint("recv_window"),
+        mtu: size("mtu"),
+        fec_data: size("fec_data"),
+        fec_parity: size("fec_parity"),
+        datagrams: boolean("datagrams"),
+    };
+    (!kcp.is_empty()).then_some(kcp)
+}
+
 /// The spec of an existing tunnel, without its token.
 pub fn get(dir: &Path, name: &str) -> Result<Spec> {
     let path = config_path(dir, name)?;
@@ -397,11 +482,23 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
         bail!("no_such_tunnel");
     }
     let c = Config::load(&path)?;
+    let transport = c.tunnel.transport.name().to_owned();
+    // Read the table as it is in the file, not the defaults the core fills in: an edit
+    // keeps only the values the admin set, and never silently resets a manual tuning. Only
+    // paqet has KCP tuning here; a plain kcp tunnel keeps its config as the panel found it.
+    let kcp = (transport == "paqet")
+        .then(|| {
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+        })
+        .flatten()
+        .and_then(|raw| kcp_spec_from_toml(raw.get("tunnel").and_then(|t| t.get("kcp"))));
     Ok(Spec {
         name: name.to_owned(),
         role: role_name(c.role).to_owned(),
         mode: mode_name(c.mode).to_owned(),
-        transport: c.tunnel.transport.name().to_owned(),
+        transport,
         profile: Some(c.profile.name().to_owned()),
         listen: c.tunnel.listen.clone(),
         remote: c.tunnel.remote.clone(),
@@ -435,6 +532,7 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
             coalesce: c.tunnel.mux.coalesce,
         })
         .filter(|m| !m.is_empty()),
+        kcp,
         tls_sni: c.tunnel.tls.as_ref().and_then(|t| t.sni.clone()),
         tls_cert: c
             .tunnel
@@ -1269,6 +1367,118 @@ mod tests {
             ..Default::default()
         });
         assert!(put(&d.0, &s).is_err());
+    }
+
+    /// Before the core carries Paqet, `Config::parse` cannot read its transport (and its
+    /// `[tunnel.kcp]`); the tests that need the core say so and skip on that worktree.
+    fn core_knows_paqet() -> bool {
+        Config::parse(
+            "role = \"entry\"\nmode = \"reverse\"\n[tunnel]\n\
+             transport = \"paqet\"\nlisten = \"0.0.0.0:44300\"\n\
+             token = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+        )
+        .is_ok()
+    }
+
+    #[test]
+    fn a_paqet_tunnel_wants_a_tcp_port_and_renders_its_kcp_tuning() {
+        let mut s = spec("raw");
+        s.transport = "paqet".into();
+        s.listen = Some("0.0.0.0:44300".into());
+        s.kcp = Some(KcpSpec {
+            mode: Some("manual".into()),
+            nodelay: Some(true),
+            interval_ms: Some(20),
+            resend: Some(2),
+            no_congestion: Some(false),
+            send_window: Some(2048),
+            recv_window: Some(4096),
+            mtu: Some(1400),
+            fec_data: Some(10),
+            fec_parity: Some(3),
+            datagrams: Some(false),
+        });
+        // Raw TCP: the listening port is a TCP one, not UDP as KCP's own transport is.
+        let wanted = wanted_ports(&s);
+        assert_eq!(wanted[0], ("tcp", 44300), "{wanted:?}");
+        assert!(!wanted.iter().any(|(proto, _)| *proto == "udp"), "{wanted:?}");
+        let text = render(&s, &"a".repeat(48), None).unwrap();
+        for line in [
+            "transport = \"paqet\"",
+            "[tunnel.kcp]",
+            "mode = \"manual\"",
+            "interval_ms = 20",
+            "send_window = 2048",
+            "recv_window = 4096",
+            "mtu = 1400",
+            "fec_data = 10",
+            "fec_parity = 3",
+            "datagrams = false",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+        // The table is Paqet's alone: another transport does not write it.
+        let mut other = s.clone();
+        other.transport = "kcp".into();
+        assert!(!render(&other, &"a".repeat(48), None)
+            .unwrap()
+            .contains("[tunnel.kcp]"));
+    }
+
+    #[test]
+    fn a_paqet_port_conflict_is_a_tcp_conflict() {
+        if !core_knows_paqet() {
+            eprintln!("skipped: the core in this worktree does not know paqet yet");
+            return;
+        }
+        let d = Dir::new();
+        let mut s = spec("raw");
+        s.transport = "paqet".into();
+        s.listen = Some("0.0.0.0:44300".into());
+        let owners = [owner("tcp", 44300, "nginx"), owner("udp", 44300, "wg")];
+        let r = check(&d.0, &owners, &s);
+        assert!(!r.ok);
+        assert_eq!(r.conflicts.len(), 1, "{r:?}");
+        assert_eq!(r.conflicts[0].proto, "tcp");
+        // Its own listening port is not a conflict on an edit.
+        put(&d.0, &s).unwrap();
+        assert!(check(&d.0, &owners, &s).ok);
+    }
+
+    #[test]
+    fn paqet_kcp_tuning_keeps_only_the_keys_the_file_had() {
+        if !core_knows_paqet() {
+            eprintln!("skipped: the core in this worktree does not know paqet yet");
+            return;
+        }
+        let d = Dir::new();
+        let mut s = spec("raw");
+        s.transport = "paqet".into();
+        s.listen = Some("0.0.0.0:44300".into());
+        // A hand-tuned file: the keys left out must stay left out, not be filled with
+        // defaults the panel happened to see.
+        s.kcp = Some(KcpSpec {
+            mode: Some("manual".into()),
+            interval_ms: Some(30),
+            send_window: Some(2048),
+            mtu: Some(1300),
+            ..Default::default()
+        });
+        put(&d.0, &s).unwrap();
+        let got = get(&d.0, "raw").unwrap();
+        assert_eq!(got.transport, "paqet");
+        assert_eq!(got.kcp, s.kcp);
+        let text = std::fs::read_to_string(d.0.join("raw.toml")).unwrap();
+        assert!(text.contains("[tunnel.kcp]"), "{text}");
+        assert!(!text.contains("recv_window"), "{text}");
+        assert!(!text.contains("datagrams"), "{text}");
+        // An edit without a token keeps the token and the table.
+        let mut edit = got;
+        edit.token = None;
+        edit.kcp.as_mut().unwrap().mtu = Some(1280);
+        put(&d.0, &edit).unwrap();
+        assert_eq!(get(&d.0, "raw").unwrap().kcp.unwrap().mtu, Some(1280));
+        assert_eq!(existing_token(&d.0.join("raw.toml")), Some("a".repeat(48)));
     }
 
     #[test]

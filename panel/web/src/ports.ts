@@ -6,6 +6,11 @@ export const hostOf = (addr: string | undefined) => (addr ? addr.slice(0, addr.l
 
 /** The port a new tunnel starts from. */
 export const FIRST_TUNNEL_PORT = 3080;
+/** Paqet's raw TCP port is better kept high and on its own, away from the ports people know. */
+export const FIRST_PAQET_PORT = 44300;
+
+/** The first port a new tunnel of this transport tries. */
+export const firstTunnelPort = (transport: string) => (transport === "paqet" ? FIRST_PAQET_PORT : FIRST_TUNNEL_PORT);
 
 /** The ports on a server that its tunnels hold: the one a tunnel listens on (and the next one for an auto tunnel, which also listens for a WebSocket) and the forwarded ones. */
 export function portsInUse(server: Pick<ServerInfo, "tunnels"> | undefined): Set<number> {
@@ -24,10 +29,10 @@ export function portsInUse(server: Pick<ServerInfo, "tunnels"> | undefined): Set
   return used;
 }
 
-/** The first port from 3080 up that none of the server's tunnels holds, so the second tunnel gets 3081, the third 3082, and none of them meets an error for a port that is taken. */
+/** The first port from the transport's start that none of the server's tunnels holds, so the second tunnel gets the next one, and none of them meets an error for a port that is taken. */
 export function freeTunnelPort(used: Set<number>, transport: string): number {
   const free = (p: number) => !used.has(p) && (transport !== "auto" || !used.has(p + 1));
-  let port = FIRST_TUNNEL_PORT;
+  let port = firstTunnelPort(transport);
   while (port < 65534 && !free(port)) port++;
   return port;
 }

@@ -10,6 +10,7 @@ import { MuxFields, MuxToggle, muxFromSpec, muxSpecOf, muxToSpec } from "./MuxFi
 import { TlsChoice, emptyTls, isLetsEncrypt, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
+import { KcpFields, PaqetNote, emptyKcp, kcpFromSpec, kcpSpecOf, kcpToSpec } from "./PaqetFields";
 import { PerIpLimit, perIpOf } from "./PerIpLimit";
 import { UdpFlows, udpFlowsOf } from "./UdpFlows";
 import { ProxyProtocol, proxyFromSpec, proxyOf } from "./ProxyProtocol";
@@ -69,6 +70,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   const [protocol, setProtocol] = useState("tcp");
   const [target, setTarget] = useState("127.0.0.1");
   const [mux, setMux] = useState(muxFromSpec());
+  const [kcp, setKcp] = useState(emptyKcp());
   const [tls, setTls] = useState(emptyTls());
   const [enc, setEnc] = useState("auto");
   const [encAck, setEncAck] = useState(false);
@@ -147,6 +149,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
         setProtocol(list[0]?.protocol ?? "tcp");
         setTarget(hostOf(list[0]?.target) || "127.0.0.1");
         setMux(muxFromSpec(a.mux ?? b.mux));
+        setKcp(kcpFromSpec(a.kcp ?? b.kcp));
         setEnc(a.encryption ?? "auto");
         setObfs(!!(a.quic_obfs ?? b.quic_obfs));
         setPerIp(String(a.max_conns_per_ip ?? b.max_conns_per_ip ?? ""));
@@ -221,6 +224,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   const stuck = away.filter((id) => id === entry || id === exit);
 
   const muxSpec = muxToSpec(mux);
+  const kcpSpec = kcpToSpec(kcp);
   const request = (): PairRequest => ({
     name: tunnel.name,
     entry,
@@ -236,6 +240,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
     tls_sni: transport === "wss" && tls.mode === "self" && sni.trim() ? sni.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
+    kcp: kcpSpecOf(kcp, transport),
     encryption: cipherOf(enc, transport),
     quic_obfs: obfsOf(obfs, transport),
     max_conns_per_ip: perIpOf(perIp).value,
@@ -287,6 +292,10 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     if (!cipherReady(enc, transport, encAck)) return t("enc.needAck");
     if (parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
     if (muxSpec.bad) return `${t(`mux.${muxSpec.bad}`)}: ${t("mux.badValue")}`;
+    if (transport === "paqet") {
+      const bad = kcpToSpec(kcp).bad;
+      if (bad) return t(`kcp.bad.${bad}`);
+    }
     if (perIpOf(perIp).bad) return t("perip.bad");
     if (protocol.includes("udp") && udpFlowsOf(udpFlows).bad) return t("udpflows.bad");
     return "";
@@ -313,6 +322,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
       transport === "quic" && obfs && "obfs",
       MUX_OPTIONAL.includes(transport) && !muxOn && pairOf("mux", t("mux.off")),
       !!muxSpec.spec && t("mux.title"),
+      transport === "paqet" && !!kcpSpec.spec && pairOf(t("kcp.title"), t("kcp.custom")),
       isWs && wsPath !== "/" && pairOf(t("wz.wsPath"), wsPath),
       isWs && wsHost && pairOf("Host", wsHost),
       transport === "wss" && tls.mode === "self" && sni && pairOf("SNI", sni),
@@ -327,6 +337,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   const moreBad =
     !cipherReady(enc, transport, encAck) ||
     !!muxSpec.bad ||
+    (transport === "paqet" && !!kcpSpec.bad) ||
     !!perIpOf(perIp).bad ||
     (udpPorts && !!udpFlowsOf(udpFlows).bad) ||
     (isWs && !wsPath.startsWith("/"));
@@ -429,6 +440,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
               {joinTransport(transport, muxOn).core !== tunnel.transport && <span className="help warn-text">{t("te.transportChange")}</span>}
             </Choice>
             <Choice label={t("wz.profile")} value={profile} options={PROFILES.map((x) => [x, t(`wz.pf.${x}`)])} onChange={setProfile} hint={t(`wz.pf.${profile}.d`)} />
+            {transport === "paqet" && <PaqetNote />}
           </fieldset>
 
           <fieldset className="card edit-sec" disabled={locked}>
@@ -441,6 +453,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                 <label htmlFor="te-port">{t("wz.port", { server: serverName(acceptor) })}</label>
                 <input className="text mono" id="te-port" dir="ltr" inputMode="numeric" value={listenPort} onChange={(e) => setListenPort(e.target.value.trim())} />
                 {transport === "auto" && <span className="help">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</span>}
+                {transport === "paqet" && <span className="help">{t("paqet.port")}</span>}
                 {(transport === "quic" || transport === "kcp") && <span className="help">{t("wz.portUdp")}</span>}
               </div>
               <div className="field" hidden={!!netId}>
@@ -456,6 +469,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                   </span>
                 )}
                 {mode === "direct" && <span className="help">{t("wz.directHelp", { server: serverName(acceptor), port: listenPort })}</span>}
+                {transport === "paqet" && <span className="help">{t("paqet.ip")}</span>}
               </div>
             </div>
             {transport === "wss" && <TlsChoice value={tls} onChange={setTls} server={acceptor} serverName={serverName(acceptor)} onHost={(h) => setDialHost(h)} />}
@@ -504,6 +518,11 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                   <More title={t("mux.title")} note={muxSpec.spec ? t("mux.custom") : t("mux.fromProfile")} show={!!muxSpec.bad}>
                       <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />
                     </More>
+                )}
+                {transport === "paqet" && (
+                  <More title={t("kcp.title")} note={kcpSpec.spec ? t("kcp.custom") : t("kcp.fromProfile")} show={!!error && !!kcpSpec.bad}>
+                    <KcpFields value={kcp} onChange={setKcp} profile={profile} />
+                  </More>
                 )}
               </div>
               {(isWs || (transport === "tcp" && !muxOn)) && (
