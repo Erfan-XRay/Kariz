@@ -972,7 +972,7 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
 /* ------------------------------------------------------------------ networks */
 
 .addr-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-3); }
-.addr-row { display: grid; grid-template-columns: minmax(120px, 200px) minmax(160px, 320px) auto; gap: var(--sp-3); align-items: center; }
+.addr-row { display: grid; grid-template-columns: minmax(120px, 200px) minmax(160px, 320px) minmax(0, 1fr); gap: var(--sp-3); align-items: center; }
 .addr-row .nm { font-weight: 600; }
 .addr-row .btn { justify-self: start; }
 .net-card .usage { display: grid; gap: 6px; margin-bottom: var(--sp-4); font-size: var(--fs-xs); color: var(--text-3); }
@@ -984,6 +984,41 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
 .del-why { margin-top: var(--sp-3); }
 .addr-fam { margin-inline-start: var(--sp-4); }
 .del-why .btn { margin-inline-start: var(--sp-1); }
+
+/* Up to tablet width (the rail takes room beside the page): the server addresses compact, and a network's links
+ as small cards, one under the other, instead of a table wider than its card. */
+@media (max-width: 1023px) {
+  /* A server's address: its name and the buttons on one line, the field the whole width under them (no line of
+     its own for the buttons, and every field as wide as the next). */
+  .addr-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "nm btns" "edit edit"; align-items: center; gap: var(--sp-2) var(--sp-3); }
+  .addr-row .nm { grid-area: nm; min-width: 0; }
+  .addr-row .addr-edit { grid-area: edit; min-width: 0; }
+  .addr-row .addr-edit .text { width: 100%; min-width: 0; }
+  .addr-row .addr-btns { grid-area: btns; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-2); }
+  .addr-list { gap: var(--sp-4); }
+  .net-links, .net-links tbody { display: block; }
+  .net-links thead, .net-links .hide-sm { display: none; }
+  .net-links tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "route route" "addrs mtu" "acts acts";
+    align-items: end;
+    gap: var(--sp-2) var(--sp-3);
+    padding: var(--sp-3) 0;
+    border-bottom: var(--hairline) solid var(--line);
+  }
+  .net-links tr:last-child { border-bottom: 0; }
+  .net-links td { padding: 0; border: 0; min-width: 0; }
+  .card:not(.flush) .net-links td:first-child { padding: 0; }
+  .net-links .lk-route { grid-area: route; font-weight: 600; }
+  .net-links .lk-addrs { grid-area: addrs; }
+  .net-links .lk-addrs .mono { overflow-wrap: anywhere; }
+  .net-links .lk-mtu { grid-area: mtu; justify-self: end; text-align: end; }
+  .net-links td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 2px; font-size: var(--fs-xs); color: var(--text-3); }
+  .net-links .link-acts { grid-area: acts; display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
+  .net-links .link-acts .btn { justify-content: center; }
+  .net-actions .btn { flex: 1 1 auto; justify-content: center; }
+}
 .mtu-btn { display: inline-flex; align-items: center; gap: var(--sp-1); padding: 2px var(--sp-2); border: var(--hairline) solid transparent; border-radius: var(--r-2); background: none; color: inherit; font: inherit; cursor: pointer; }
 .mtu-btn:hover, .mtu-btn:focus-visible { border-color: var(--line-strong); }
 .mtu-btn svg { color: var(--text-3); }
@@ -1230,7 +1265,6 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
   .log-line .who { display: none; }
   .log-view { height: calc(100vh - 330px); }
   .set-row { grid-template-columns: 1fr; gap: var(--sp-3); }
-  .addr-row { grid-template-columns: 1fr; }
   .plain-table .hide-sm, .tunnels .hide-sm, .srv-rows .hide-sm { display: none; }
   .srv-rows .sr-fix { display: none; }
   .srv-rows th, .srv-rows td { padding: var(--sp-3) var(--sp-2); }

@@ -56,6 +56,10 @@ first one that none of that server's tunnels holds. You can type another.
 Not sure what to pick? The default (reverse, `tcpmux`, `balanced`) is right for most paths; the
 [transport chooser](https://erfan-xray.github.io/Kariz/docs/how-it-works/) answers in four questions.
 
+With *paqet* (KCP inside raw TCP, for routes that block UDP), there is nothing more to fill in: the
+listening server listens on all of its IPv4 addresses, the private-network option is off and only IPv4
+addresses are offered, and Kariz opens the servers' firewalls itself. See [Paqet over raw TCP](paqet.md).
+
 **If anything fails, both servers are put back as they were**, and the wizard tells you which
 step failed and why. You cannot end with half a tunnel.
 

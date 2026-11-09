@@ -10,6 +10,9 @@ VE="kpe$$"
 VX="kpx$$"
 A=192.0.2.21
 B=192.0.2.22
+# A second address of the entry: the exit dials it, and the entry (listening on every
+# address) must answer from it.
+A2=192.0.2.31
 PORT=31080
 FORWARD=18080
 TARGET=18081
@@ -39,6 +42,7 @@ ip link add "$VE" type veth peer name "$VX"
 ip link set "$VE" netns "$ENTRY"
 ip link set "$VX" netns "$EXIT"
 ip -n "$ENTRY" addr add "$A/24" dev "$VE"
+ip -n "$ENTRY" addr add "$A2/24" dev "$VE"
 ip -n "$EXIT" addr add "$B/24" dev "$VX"
 ip -n "$ENTRY" link set "$VE" up
 ip -n "$EXIT" link set "$VX" up
@@ -72,7 +76,7 @@ role = "entry"
 mode = "reverse"
 [tunnel]
 transport = "paqet"
-listen = "$A:$PORT"
+listen = "0.0.0.0:$PORT"
 token = "$token"
 [tunnel.kcp]
 mtu = 1200
@@ -89,7 +93,7 @@ role = "exit"
 mode = "reverse"
 [tunnel]
 transport = "paqet"
-remote = "$A:$PORT"
+remote = "$A2:$PORT"
 token = "$1"
 [tunnel.kcp]
 mtu = 1200

@@ -28,7 +28,7 @@ reaches the real destinations.
 ```mermaid
 flowchart LR
     U([Users]) -->|TCP / UDP| E[Entry]
-    E <==>|"Kariz tunnel<br/>tcp · tcpmux · ws · wss · quic · kcp"| X[Exit]
+    E <==>|"Kariz tunnel<br/>tcp · tcpmux · ws · wss · quic · kcp · paqet"| X[Exit]
     X --> T([Targets])
 ```
 
@@ -63,12 +63,14 @@ Want to look first? The [live demo](https://erfan-xray.github.io/Kariz/try/) run
 
 ## What you get
 
-- **Six transports.** `tcp`, `tcpmux`, `ws` and `wss` (for CDNs and sites that must look like HTTPS), and
-  `quic` and `kcp` over UDP for long or lossy paths. `quic` can be sealed packet by packet, so it does
-  not look like QUIC to a network that filters it.
+- **Seven transports.** `tcp`, `tcpmux`, `ws` and `wss` (for CDNs and sites that must look like HTTPS),
+  `quic` and `kcp` over UDP for long or lossy paths, and [`paqet`](docs/paqet.md): KCP inside raw TCP
+  segments with no handshake, for routes that block UDP but let TCP through. `quic` can be sealed packet
+  by packet, so it does not look like QUIC to a network that filters it. Kariz adds the firewall rules
+  Paqet needs itself.
 - **Both directions.** The exit can dial the entry (`reverse`) or the other way round (`direct`), with
   automatic reconnects.
-- **TCP and UDP.** WireGuard, DNS and games work through it; on `kcp` and `quic` a lost packet delays
+- **TCP and UDP.** WireGuard, DNS and games work through it; on `kcp`, `paqet` and `quic` a lost packet delays
   nothing else, and games get FEC and optional packet duplication.
 - **A panel that undoes its mistakes.** The tunnel wizard checks both servers first, and if anything fails
   it puts both back as they were. Live map, charts, logs, speed test, backups, private networks and
@@ -92,7 +94,7 @@ Everything else is on the website, in English and Persian:
 | [Getting started](https://erfan-xray.github.io/Kariz/docs/getting-started/) | install, the first tunnel, systemd |
 | [Using the panel](https://erfan-xray.github.io/Kariz/docs/using-the-panel/) · [Guided tour](https://erfan-xray.github.io/Kariz/docs/tour/) · [Video tutorial](https://erfan-xray.github.io/Kariz/docs/video/) | the panel, page by page, and in two minutes of video |
 | [The manager script](https://erfan-xray.github.io/Kariz/docs/manager/) | installing, updating, the menu |
-| [Transports](https://erfan-xray.github.io/Kariz/docs/transports/) · [Which one?](https://erfan-xray.github.io/Kariz/docs/how-it-works/) | choosing and tuning |
+| [Transports](https://erfan-xray.github.io/Kariz/docs/transports/) · [Which one?](https://erfan-xray.github.io/Kariz/docs/how-it-works/) · [Paqet](https://erfan-xray.github.io/Kariz/docs/paqet/) | choosing and tuning |
 | [Configuration reference](https://erfan-xray.github.io/Kariz/docs/configuration/) | every setting, default and limit |
 | [UDP and games](https://erfan-xray.github.io/Kariz/docs/udp-and-games/) · [CDN](https://erfan-xray.github.io/Kariz/docs/cdn/) | specific setups |
 | [Troubleshooting](https://erfan-xray.github.io/Kariz/docs/troubleshooting/) · [Security](https://erfan-xray.github.io/Kariz/docs/security/) | when something is wrong |

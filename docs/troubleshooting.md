@@ -54,6 +54,12 @@ connects and `quic` does not, the path is probably recognising QUIC: set
 `obfs = true` in `[tunnel.quic]` on both sides. With `obfs` on one side only, the connect
 times out.
 
+**`paqet` never connects (`handshake timed out`).** Paqet sends TCP without a handshake, and
+some datacenters and providers drop such segments in front of the server. If `kcp` or
+`tcpmux` work between the same two servers, the route does not let Paqet through: use one of
+them there. Kariz opens the host firewall itself; `paqet could not add a firewall rule` in the
+log means it could not (see [Paqet over raw TCP](paqet.md#troubleshooting)).
+
 **A server joined with *QUIC* never shows up.** The link uses UDP on the port after the
 panel's agents port, so that UDP port has to be open on the panel's server and in any cloud
 firewall. If UDP is blocked on the path altogether, choose *Auto* (or *TCP* or *WSS*) in *Add
@@ -66,7 +72,7 @@ server*. More in [The web panel](panel.md#troubleshooting).
 | `tunnel.encryption = "none"` | traffic is readable on the wire |
 | ping interval above 90 s over `ws` / `wss` | a CDN will cut idle connections |
 | UDP forwarded without mux | every UDP flow takes a whole tunnel connection |
-| `forward.duplicate has no effect here` | copies are only sent over `kcp` (with mux) and `quic` |
+| `forward.duplicate has no effect here` | copies are only sent over `kcp` and `paqet` (with mux) and `quic` |
 | `quic.congestion = "bbr"` | experimental in quinn; fills queues |
 | `tls.insecure = true` | the server certificate is not verified |
 | `tuning.dscp` over QUIC or on Windows | the mark does not reach the wire there |

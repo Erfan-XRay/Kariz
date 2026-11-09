@@ -13,11 +13,16 @@
 //! what the peer sent. A stateful firewall on the path checks both against a window per
 //! flow; one counter shared by several mux connections, or a fixed acknowledgment,
 //! leaves that window and gets the segments dropped as invalid.
+//!
+//! A listener may be on every IPv4 address (`0.0.0.0`), like the other transports. Each
+//! flow then remembers the address its packets came to and is answered from it
+//! (`IP_PKTINFO` on the send), so a server with several addresses answers on the one
+//! that was dialed and the TCP checksum covers the right one.
 
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Mutex;
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -47,9 +52,13 @@ struct Flow {
     sequence: u32,
     /// What this side acknowledges: the end of the peer's latest segment.
     acknowledgment: u32,
+    /// This side's address in the flow: where the peer's packets arrive, and the source
+    /// of the replies.
+    local: Ipv4Addr,
 }
 
-/// A raw IPv4 socket bound to one local address and TCP port.
+/// A raw IPv4 socket bound to one local address (or every one, on the listening side)
+/// and TCP port.
 pub(crate) struct RawSocket {
     fd: AsyncFd<Socket>,
     local: SocketAddrV4,
@@ -64,7 +73,8 @@ pub(crate) struct RawSocket {
 }
 
 impl RawSocket {
-    /// Listens on a concrete local IPv4 address (`port` 0 picks a free TCP port).
+    /// Listens on one local IPv4 address, or on every one (`0.0.0.0`); `port` 0 picks a
+    /// free TCP port.
     pub(crate) fn listen(local: SocketAddr, buffer: usize, dscp: Option<u8>) -> io::Result<Self> {
         let SocketAddr::V4(local) = local else {
             return Err(io::Error::new(
@@ -72,13 +82,6 @@ impl RawSocket {
                 "paqet supports IPv4 only in this phase",
             ));
         };
-        if local.ip().is_unspecified() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "paqet needs a concrete IPv4 listen address, not 0.0.0.0: a wildcard \
-                 socket could send replies from the wrong address",
-            ));
-        }
         Self::bind(*local.ip(), local.port(), None, buffer, dscp)
     }
 
@@ -171,28 +174,37 @@ impl RawSocket {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Records that `peer` sent a segment ending at `end`: the acknowledgment of the next
-    /// reply. A segment that arrived late (ending before the latest one) changes nothing.
-    fn heard(&self, peer: SocketAddrV4, end: u32) {
+    /// Whether this is a listener on every address, which answers each flow from the
+    /// address its packets came to.
+    fn on_every_address(&self) -> bool {
+        self.local.ip().is_unspecified()
+    }
+
+    /// Records that `peer` sent a segment ending at `end` to `local`: the acknowledgment
+    /// and the source address of the next reply. A segment that arrived late (ending
+    /// before the latest one) does not move the acknowledgment back.
+    fn heard(&self, peer: SocketAddrV4, end: u32, local: Ipv4Addr) {
         let mut flows = self.flows();
         if let Some(flow) = flows.get_mut(&peer) {
             if later(end, flow.acknowledgment) {
                 flow.acknowledgment = end;
             }
+            flow.local = local;
         } else if flows.len() < MAX_FLOWS {
             flows.insert(
                 peer,
                 Flow {
                     sequence: random_u32(),
                     acknowledgment: end,
+                    local,
                 },
             );
         }
     }
 
-    /// The sequence and acknowledgment numbers of a segment of `length` bytes to `peer`,
-    /// and the flow's sequence number moved past it.
-    fn numbers(&self, peer: SocketAddrV4, length: usize) -> (u32, u32) {
+    /// The sequence and acknowledgment numbers of a segment of `length` bytes to `peer`
+    /// and the address it goes from, and the flow's sequence number moved past it.
+    fn numbers(&self, peer: SocketAddrV4, length: usize) -> (u32, u32, Ipv4Addr) {
         let mut flows = self.flows();
         if flows.len() >= MAX_FLOWS && !flows.contains_key(&peer) {
             flows.clear();
@@ -200,10 +212,17 @@ impl RawSocket {
         let flow = flows.entry(peer).or_insert_with(|| Flow {
             sequence: random_u32(),
             acknowledgment: random_u32(),
+            // A peer not heard from yet (only after the table was cleared): the address
+            // the route to it leaves from.
+            local: if self.on_every_address() {
+                route_local_ip(peer).unwrap_or(Ipv4Addr::UNSPECIFIED)
+            } else {
+                *self.local.ip()
+            },
         });
         let sequence = flow.sequence;
         flow.sequence = sequence.wrapping_add(length as u32);
-        (sequence, flow.acknowledgment)
+        (sequence, flow.acknowledgment, flow.local)
     }
 
     pub(crate) fn local_addr(&self) -> SocketAddr {
@@ -221,9 +240,14 @@ impl RawSocket {
                 Ok(result) => result?,
                 Err(_) => continue,
             };
-            let Some((start, length, peer, sequence)) =
-                parse_payload(&buf[..length], *self.local.ip(), self.local.port())
-                    .filter(|&(_, _, peer, _)| self.peer.map_or(true, |remote| remote == peer))
+            let Some(Payload {
+                start,
+                length,
+                peer,
+                sequence,
+                local,
+            }) = parse_payload(&buf[..length], *self.local.ip(), self.local.port())
+                .filter(|p| self.peer.map_or(true, |remote| remote == p.peer))
             else {
                 invalid += 1;
                 if invalid % INVALID_BEFORE_YIELD == 0 {
@@ -231,7 +255,7 @@ impl RawSocket {
                 }
                 continue;
             };
-            self.heard(peer, sequence.wrapping_add(length as u32));
+            self.heard(peer, sequence.wrapping_add(length as u32), local);
             buf.copy_within(start..start + length, 0);
             return Ok((length, SocketAddr::V4(peer)));
         }
@@ -270,8 +294,9 @@ impl RawSocket {
         peer: SocketAddrV4,
         scratch: &mut Vec<u8>,
     ) -> io::Result<usize> {
-        let (sequence, acknowledgment) = self.numbers(peer, payload.len());
-        packet::build_tcp_segment(self.local, peer, sequence, acknowledgment, payload, scratch)?;
+        let (sequence, acknowledgment, from) = self.numbers(peer, payload.len());
+        let source = SocketAddrV4::new(from, self.local.port());
+        packet::build_tcp_segment(source, peer, sequence, acknowledgment, payload, scratch)?;
         let address = libc::sockaddr_in {
             sin_family: libc::AF_INET as libc::sa_family_t,
             sin_port: 0,
@@ -280,16 +305,21 @@ impl RawSocket {
             },
             sin_zero: [0; 8],
         };
+        let fd = self.fd.get_ref().as_raw_fd();
         let sent = loop {
-            let sent = unsafe {
-                libc::sendto(
-                    self.fd.get_ref().as_raw_fd(),
-                    scratch.as_ptr().cast(),
-                    scratch.len(),
-                    0,
-                    (&address as *const libc::sockaddr_in).cast(),
-                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-                )
+            let sent = if self.on_every_address() && !from.is_unspecified() {
+                send_from(fd, scratch, &address, from)
+            } else {
+                unsafe {
+                    libc::sendto(
+                        fd,
+                        scratch.as_ptr().cast(),
+                        scratch.len(),
+                        0,
+                        (&address as *const libc::sockaddr_in).cast(),
+                        std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    )
+                }
             };
             if sent >= 0 {
                 break sent as usize;
@@ -312,6 +342,44 @@ impl RawSocket {
 
 fn raw_socket() -> io::Result<Socket> {
     Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::TCP))
+}
+
+/// `sendmsg` of `data` to `to` with `from` as the IPv4 source (`IP_PKTINFO`'s
+/// `ipi_spec_dst`, which a raw socket's send honours): a listener on every address
+/// answers from the address the flow came to, not the one the route would pick. The
+/// return value is `sendmsg`'s.
+fn send_from(fd: RawFd, data: &[u8], to: &libc::sockaddr_in, from: Ipv4Addr) -> isize {
+    let info_len = std::mem::size_of::<libc::in_pktinfo>() as libc::c_uint;
+    // Room for one control message, aligned for `cmsghdr`.
+    let mut control = [0u64; 8];
+    let space = unsafe { libc::CMSG_SPACE(info_len) } as usize;
+    debug_assert!(space <= std::mem::size_of_val(&control));
+    let mut iov = libc::iovec {
+        iov_base: data.as_ptr().cast_mut().cast(),
+        iov_len: data.len(),
+    };
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_name = (to as *const libc::sockaddr_in).cast_mut().cast();
+    msg.msg_namelen = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = space as _;
+    let info = libc::in_pktinfo {
+        ipi_ifindex: 0,
+        ipi_spec_dst: libc::in_addr {
+            s_addr: u32::from_ne_bytes(from.octets()),
+        },
+        ipi_addr: libc::in_addr { s_addr: 0 },
+    };
+    unsafe {
+        let header = libc::CMSG_FIRSTHDR(&msg);
+        (*header).cmsg_level = libc::IPPROTO_IP;
+        (*header).cmsg_type = libc::IP_PKTINFO;
+        (*header).cmsg_len = libc::CMSG_LEN(info_len) as _;
+        std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<libc::in_pktinfo>(), info);
+        libc::sendmsg(fd, &msg, 0)
+    }
 }
 
 /// Whether TCP number `a` comes after `b` (modulo 2^32, as TCP compares them).
@@ -392,21 +460,26 @@ fn recv_once(socket: &Socket, buf: &mut [u8]) -> io::Result<usize> {
     }
 }
 
-/// The payload's offset and length, its sender and its sequence number, if the IPv4
-/// packet is usable.
-fn parse_payload(
-    packet: &[u8],
-    local_ip: Ipv4Addr,
-    local_port: u16,
-) -> Option<(usize, usize, SocketAddrV4, u32)> {
+/// Where a received packet's payload is in the buffer, and what the flow needs of it.
+struct Payload {
+    start: usize,
+    length: usize,
+    peer: SocketAddrV4,
+    sequence: u32,
+    /// The address it was sent to.
+    local: Ipv4Addr,
+}
+
+/// The payload of a received IPv4 packet, if it is usable.
+fn parse_payload(packet: &[u8], local_ip: Ipv4Addr, local_port: u16) -> Option<Payload> {
     let incoming = packet::parse_ipv4_tcp(packet, local_ip, local_port)?;
-    let start = incoming.payload.as_ptr() as usize - packet.as_ptr() as usize;
-    Some((
-        start,
-        incoming.payload.len(),
-        incoming.peer,
-        incoming.sequence,
-    ))
+    Some(Payload {
+        start: incoming.payload.as_ptr() as usize - packet.as_ptr() as usize,
+        length: incoming.payload.len(),
+        peer: incoming.peer,
+        sequence: incoming.sequence,
+        local: incoming.local,
+    })
 }
 
 /// Attaches a classic BPF filter for IPv4 TCP packets whose destination port is `port`.

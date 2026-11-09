@@ -24,6 +24,7 @@ export function GreChoice({
   acceptor,
   port,
   serverName,
+  blocked,
 }: {
   value: string;
   onChange: (network: string) => void;
@@ -35,10 +36,22 @@ export function GreChoice({
   acceptor: string;
   port: string;
   serverName: (id: string) => string;
+  /** Why the transport cannot run over a private network (Paqet): the choice is off and cannot be made. */
+  blocked?: string;
 }) {
   const { t } = useApp();
   const link = value ? linkBetween(links, value, entry, exit) : undefined;
   const addr = link ? (link.a === acceptor ? link.addr_a : link.addr_b) : "";
+  if (blocked) {
+    return (
+      <div className="field gre-choice">
+        <label className="check">
+          <input type="checkbox" checked={false} disabled aria-describedby="gre-blocked" onChange={() => {}} /> {t("wz.gre")}
+        </label>
+        <span className="help" id="gre-blocked">{blocked}</span>
+      </div>
+    );
+  }
   return (
     <div className="field gre-choice">
       <label className="check">

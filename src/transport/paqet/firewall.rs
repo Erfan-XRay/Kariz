@@ -153,7 +153,8 @@ impl Drop for Installed {
 }
 
 /// The four rules of a socket on `local` (see the module documentation): its `port` on
-/// the listening side, the `peer`'s address and port on the dialing side.
+/// the listening side, the `peer`'s address and port on the dialing side. A listener on
+/// every address (`local` is `0.0.0.0`) gets rules for its port on any of them.
 pub(crate) fn rules_for(
     local: Ipv4Addr,
     port: Option<u16>,
@@ -166,8 +167,11 @@ pub(crate) fn rules_for(
     if let Some(peer) = peer {
         incoming.extend(["-s".into(), peer.ip().to_string()]);
     }
-    incoming.extend(["-d".into(), local.to_string(), "-p".into(), "tcp".into()]);
-    outgoing.extend(["-s".into(), local.to_string()]);
+    if !local.is_unspecified() {
+        incoming.extend(["-d".into(), local.to_string()]);
+        outgoing.extend(["-s".into(), local.to_string()]);
+    }
+    incoming.extend(["-p".into(), "tcp".into()]);
     if let Some(peer) = peer {
         outgoing.extend(["-d".into(), peer.ip().to_string()]);
     }
@@ -371,6 +375,22 @@ mod tests {
                 "filter INPUT -d 192.0.2.21 -p tcp --dport 31080 -m comment --comment kariz-paqet pid=7 -j ACCEPT",
                 "filter OUTPUT -s 192.0.2.21 -p tcp --sport 31080 --tcp-flags RST RST -m comment --comment kariz-paqet pid=7 -j DROP",
             ]
+        );
+    }
+
+    #[test]
+    fn a_listener_on_every_address_is_scoped_to_its_port_alone() {
+        let rules: Vec<String> = rules_for(Ipv4Addr::UNSPECIFIED, Some(31080), None, "c")
+            .iter()
+            .map(joined)
+            .collect();
+        assert_eq!(
+            rules[2],
+            "filter INPUT -p tcp --dport 31080 -m comment --comment c -j ACCEPT"
+        );
+        assert_eq!(
+            rules[3],
+            "filter OUTPUT -p tcp --sport 31080 --tcp-flags RST RST -m comment --comment c -j DROP"
         );
     }
 

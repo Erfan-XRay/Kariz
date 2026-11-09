@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { KcpSpec, ServerInfo } from "./api";
+import type { KcpSpec } from "./api";
 import { useApp } from "./store";
 
 /** The KCP presets the core knows, from gentle to aggressive. */
@@ -367,33 +367,4 @@ export function KcpFields({ value, onChange, profile }: { value: KcpForm; onChan
       </button>
     </div>
   );
-}
-
-export function validPaqetBind(value: string): boolean {
-  const octets = value.split(".");
-  return octets.length === 4 && +octets[0] > 0 && +octets[0] < 224 &&
-    octets.every((octet) => /^(0|[1-9]\d{0,2})$/.test(octet) && +octet < 256);
-}
-
-export function PaqetBind({ id, value, onChange }: { id: string; value: string; onChange: (value: string) => void }) {
-  const { t } = useApp();
-  const invalid = value !== "" && !validPaqetBind(value);
-  return (
-    <div className="field">
-      <label htmlFor={id}>{t("paqet.bind")}</label>
-      <input className={`text mono ${invalid ? "is-bad" : ""}`} id={id} dir="ltr" value={value}
-        placeholder="192.0.2.21" aria-invalid={invalid} aria-describedby={`${id}-help`}
-        onChange={(event) => onChange(event.target.value.trim())} />
-      <span className={`help ${invalid ? "err" : ""}`} id={`${id}-help`}>{t(invalid ? "paqet.badBind" : "paqet.bindHelp")}</span>
-    </div>
-  );
-}
-
-/** The local IPv4 a new Paqet listener starts with: the address the listening server's own route to the
- * internet leaves from (its agent reports it, a private one behind NAT), else the IPv4 it is dialed at. */
-export function paqetBindGuess(server: ServerInfo | undefined, dialHost: string): string {
-  for (const ip of [server?.health?.ip4, dialHost, server?.ip4]) {
-    if (ip && validPaqetBind(ip)) return ip;
-  }
-  return "";
 }

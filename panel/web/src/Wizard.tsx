@@ -11,7 +11,7 @@ import { MuxFields, MuxToggle, emptyMux, muxSpecOf, muxToSpec } from "./MuxField
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
-import { KcpFields, PaqetBind, emptyKcp, kcpSpecOf, kcpToSpec, paqetBindGuess, validPaqetBind } from "./PaqetFields";
+import { KcpFields, emptyKcp, kcpSpecOf, kcpToSpec } from "./PaqetFields";
 import { PerIpLimit, perIpOf } from "./PerIpLimit";
 import { UdpFlows, udpFlowsOf } from "./UdpFlows";
 import { ProxyProtocol, proxyOf } from "./ProxyProtocol";
@@ -95,10 +95,11 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [portTouched, setPortTouched] = useState(false);
   const [dialHost, setDialHost] = useState("");
   // The host the accepting side listens on: every IPv4 address, every address (IPv6 too) when it is dialed at
-  // its IPv6 address, or (for a tunnel that was made over a private network) its private one.
-  const [paqetBind, setPaqetBind] = useState("");
+  // its IPv6 address, or (for a tunnel that was made over a private network) its private one. Paqet is IPv4
+  // only and never over a private network: every IPv4 address.
   const [netId, setNetId] = useState("");
-  const listenHost = transport === "paqet" && !netId ? paqetBind : isV6(dialHost) ? "[::]" : "0.0.0.0";
+  const paqet = transport === "paqet";
+  const listenHost = !paqet && isV6(dialHost) ? "[::]" : "0.0.0.0";
   const { networks, links } = useNetworks();
   const [wsPath, setWsPath] = useState("/");
   const [wsHost, setWsHost] = useState("");
@@ -184,13 +185,16 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     if (guess) setDialHost(guess);
   }, [acceptor, servers]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Paqet's local IPv4 of the listener follows the accepting server (and the address it is dialed at) until
-  // one is typed.
-  const [paqetTouched, setPaqetTouched] = useState(false);
-  const paqetGuess = paqetBindGuess(acceptorServer, dialHost);
+  // Paqet runs over the public IPv4 addresses only: a private network is let go, and an IPv6 address to dial
+  // gives way to the accepting server's IPv4 one.
+  const ipv4Choices = addrChoices.filter((a) => !isV6(a));
+  // (Once, when Paqet is chosen or the accepting server changes: an IPv6 address typed afterwards is not
+  // replaced under the cursor, it gets the IPv4-only error.)
   useEffect(() => {
-    if (!paqetTouched) setPaqetBind(paqetGuess);
-  }, [paqetTouched, paqetGuess]);
+    if (!paqet) return;
+    if (netId) setNetId("");
+    if (isV6(dialHost) && ipv4Choices[0]) setDialHost(ipv4Choices[0]);
+  }, [paqet, acceptor]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The port a new tunnel listens on starts at 3080 and moves up past the ports the accepting
   // server's other tunnels hold: 3080, then 3081, then 3082. It follows the choice of server
@@ -241,8 +245,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     if (s === 2) {
       if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
       if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
-      if (transport === "paqet" && !netId && !validPaqetBind(listenHost)) return t("paqet.badBind");
-      if (transport === "paqet" && !netId && isV6(dialHost)) return t("paqet.ip");
+      if (paqet && isV6(dialHost)) return t("paqet.ip");
       if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
       if (transport === "wss" && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
     }
@@ -468,7 +471,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
               <>
                 <h3 className="wz-q">{t("wz.q3")}</h3>
                 <p className="wz-lead">{t("wz.lead3", { acceptor: serverName(acceptor), dialer: serverName(dialer) })}</p>
-                <GreChoice value={netId} onChange={setNetId} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} />
+                <GreChoice value={netId} onChange={setNetId} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} blocked={paqet ? t("paqet.noNetwork") : undefined} />
                 <div className="grid-2 wz-grid">
                   <div className="field">
                     <label htmlFor="wz-port">{t("wz.port", { server: serverName(acceptor) })}</label>
@@ -489,14 +492,6 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     {transport === "auto" && <span className="help">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</span>}
                     {udp && <span className="help">{t("wz.portUdp")}</span>}
                   </div>
-                  {transport === "paqet" && !netId && <PaqetBind
-                      id="wz-paqet-bind"
-                      value={paqetBind}
-                      onChange={(v) => {
-                        setPaqetTouched(true);
-                        setPaqetBind(v);
-                      }}
-                    />}
                   <div className="field" hidden={!!netId}>
                     <label htmlFor="wz-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>
                     <input
@@ -511,9 +506,10 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                       }}
                     />
                     <span className="help">{t("wz.dialHelp")}</span>
-                    {addrChoices.length > 0 && (
+                    {paqet && <span className="help">{t("paqet.ipv4Only")}</span>}
+                    {(paqet ? ipv4Choices : addrChoices).length > 0 && (
                       <span className="addr-chips" aria-label={t("wz.dialSeen", { server: serverName(acceptor) })}>
-                        {addrChoices.map((a) => (
+                        {(paqet ? ipv4Choices : addrChoices).map((a) => (
                           <button
                             key={a}
                             type="button"

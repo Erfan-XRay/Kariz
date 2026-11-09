@@ -25,7 +25,7 @@ How a packet travels depends on the transport:
 |---|---|---|
 | `tcp`, `tcpmux`, `ws`, `wss` | inside the TCP stream | is resent; everything behind it waits |
 | `quic` | as QUIC datagrams (large ones on a stream) | is lost; nothing waits |
-| `kcp` | beside KCP's stream, sealed with the session keys | is lost, or rebuilt by FEC; nothing waits |
+| `kcp`, `paqet` | beside KCP's stream, sealed with the session keys | is lost, or rebuilt by FEC; nothing waits |
 
 ## Games
 
@@ -78,7 +78,7 @@ The full numbers, including bursty loss, are in [Performance](performance.md).
 `duplicate = 2` (or 3) on a UDP rule sends each packet that many times in all, in both
 directions, `duplicate_gap_ms` apart (default 5). The receiver drops the copies.
 
-- **Where it helps:** only over `kcp` and `quic`, and only where a packet may be lost.
+- **Where it helps:** only over `kcp`, `paqet` and `quic`, and only where a packet may be lost.
   Packets that travel reliably (in a stream) are sent once.
 - **What it does:** over a path losing 10 % each way, echoed game packets lost 0.5-3.5 %
   of round trips with 2 copies, against 21-23 % without.
