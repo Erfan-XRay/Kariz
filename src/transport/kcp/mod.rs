@@ -1,15 +1,19 @@
-//! `transport = "kcp"`: KCP, an ARQ protocol over UDP that trades bandwidth for latency,
-//! as a byte stream under the tunnel's handshake, records and mux.
+//! `transport = "kcp"` and `transport = "paqet"`: KCP, an ARQ protocol that trades
+//! bandwidth for latency, as a byte stream under the tunnel's handshake, records and mux.
 //!
 //! ```text
 //!  handshake / records / kmux      unchanged, over a KcpStream
 //!  KcpStream                       reader and writer halves, fed by a driver task
 //!  KCP (message mode)              one driver per connection: `kcp` crate, our timers
-//!  packet protection               every UDP packet sealed with a key from the token
-//!  UDP socket                      the dialer's own, or the listener's shared one
+//!  packet protection               every packet sealed with a key from the token
+//!  carrier                         UDP (kcp), or synthetic IPv4 TCP segments (paqet)
 //! ```
 //!
-//! Each UDP packet carries one of these (the first plaintext byte): KCP segments, a ping,
+//! Paqet differs only below protection: its key is derived under its own context and the
+//! sealed packets go in the payload of raw IPv4 TCP segments. KCP, FEC, datagrams,
+//! keepalive, demultiplexing and the security rules below are the same for both.
+//!
+//! Each carrier packet carries one of these (the first plaintext byte): KCP segments, a ping,
 //! a close, a datagram, or with FEC on (`fec.rs`) KCP segments or a datagram as a data
 //! shard, or a parity shard. Datagrams travel beside KCP,
 //! not through it: they are never resent and never wait for a lost segment.
@@ -20,13 +24,14 @@
 //! know (after a restart, say) is answered with a close, so the dialer finds out at once.
 //! Packets that were not sealed with the token get no answer at all.
 
+mod carrier;
 mod fec;
 pub mod protect;
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{self, Write};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,7 +41,6 @@ use std::time::Duration;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use kcp::Kcp;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep_until, Instant};
@@ -46,10 +50,14 @@ use crate::config::{KcpConfig, KcpTiming, Tuning, TunnelConfig};
 use crate::crypto::handshake::Key;
 use crate::crypto::Psk;
 use crate::wire::{self, Leg, Path};
+use carrier::PacketSocket;
 use fec::{FecDecoder, FecEncoder, Shard};
 use protect::{Nonces, Protection};
 
 const KEY_CONTEXT: &str = "kariz 2026-10 kcp packets v1";
+/// Paqet's packet key is derived from the same token under its own context: a Paqet
+/// packet cannot be opened as a KCP one, or the other way round.
+const PAQET_KEY_CONTEXT: &str = "kariz 2026-10 paqet packets v1";
 
 /// Packet types, the first byte of a packet's plaintext.
 const PACKET_DATA: u8 = 0;
@@ -102,17 +110,27 @@ const DATAGRAM_QUEUE: usize = 256;
 /// id (`PACKET_DATAGRAM`) or its marker (FEC).
 const DATAGRAM_HEADER: usize = 4;
 
-/// What listeners and dialers need from `[tunnel]`: `[tunnel.kcp]` and the packet key.
+/// What listeners and dialers need from `[tunnel]`: `[tunnel.kcp]`, the packet key and
+/// the carrier below KCP (UDP, or the raw IPv4 TCP framing of Paqet).
 #[derive(Clone, Default)]
 pub struct KcpParams {
     pub config: KcpConfig,
     key: Key,
+    carrier: CarrierKind,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum CarrierKind {
+    #[default]
+    Udp,
+    Paqet,
 }
 
 impl fmt::Debug for KcpParams {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KcpParams")
             .field("config", &self.config)
+            .field("carrier", &self.carrier)
             .finish_non_exhaustive()
     }
 }
@@ -123,6 +141,17 @@ impl KcpParams {
         Self {
             config,
             key: Psk::new(&tunnel.token).subkey(KEY_CONTEXT),
+            carrier: CarrierKind::Udp,
+        }
+    }
+
+    /// `transport = "paqet"`: the same KCP settings and packet format, with a key of
+    /// Paqet's own and synthetic raw TCP below the packets.
+    pub fn new_paqet(tunnel: &TunnelConfig, config: KcpConfig) -> Self {
+        Self {
+            config,
+            key: Psk::new(&tunnel.token).subkey(PAQET_KEY_CONTEXT),
+            carrier: CarrierKind::Paqet,
         }
     }
 }
@@ -140,6 +169,8 @@ struct ConnSettings {
     dscp: Option<u8>,
     /// Whether streams offer their datagram side (`[tunnel.kcp] datagrams`).
     datagrams: bool,
+    /// The raw IPv4 TCP carrier instead of UDP.
+    paqet: bool,
     protection: Arc<Protection>,
     /// Data and parity shards per FEC group; `None`: FEC off.
     fec: Option<(usize, usize)>,
@@ -156,30 +187,17 @@ impl ConnSettings {
             socket_buffer: tuning.udp.socket_buffer,
             dscp: tuning.dscp,
             datagrams: params.config.datagrams,
+            paqet: params.carrier == CarrierKind::Paqet,
             protection: Arc::new(Protection::new(&params.key)),
             fec: params.config.fec(),
         }
     }
 }
 
-fn udp_socket(addr: SocketAddr, buffer: usize, dscp: Option<u8>) -> io::Result<UdpSocket> {
-    let socket = std::net::UdpSocket::bind(addr)?;
-    let sock = socket2::SockRef::from(&socket);
-    if let Err(e) = sock
-        .set_recv_buffer_size(buffer)
-        .and_then(|_| sock.set_send_buffer_size(buffer))
-    {
-        debug!(error = %e, "could not set KCP socket buffers");
-    }
-    super::mark_dscp(&sock, dscp);
-    socket.set_nonblocking(true)?;
-    UdpSocket::from_std(socket)
-}
-
 /// Seals packets and sends them without waiting: a full socket buffer drops the packet,
 /// as a congested link would, and KCP sends it again.
 struct Sender {
-    socket: Arc<UdpSocket>,
+    socket: PacketSocket,
     /// `None`: the socket is connected.
     peer: Option<SocketAddr>,
     conv: u32,
@@ -191,6 +209,8 @@ struct Sender {
     next_new_sn: u32,
     plain: Vec<u8>,
     sealed: Vec<u8>,
+    /// The raw carrier's TCP header and payload, reused for every packet.
+    scratch: Vec<u8>,
     /// The connected socket's peer, for counting what is sent ([`wire`]).
     remote: Option<SocketAddr>,
     /// Bytes of the next packet sent that are a resend or parity.
@@ -199,7 +219,7 @@ struct Sender {
 
 impl Sender {
     fn new(
-        socket: Arc<UdpSocket>,
+        socket: PacketSocket,
         peer: Option<SocketAddr>,
         conv: u32,
         settings: &ConnSettings,
@@ -218,8 +238,9 @@ impl Sender {
             next_new_sn: 0,
             plain: Vec::with_capacity(1500),
             sealed: Vec::with_capacity(1500),
+            scratch: Vec::new(),
             remote: if peer.is_none() {
-                socket.peer_addr().ok()
+                socket.peer_addr()
             } else {
                 None
             },
@@ -233,13 +254,19 @@ impl Sender {
         self.protection
             .seal(&mut self.nonces, &self.plain, &mut self.sealed);
         let sent = match self.peer {
-            Some(peer) => self.socket.try_send_to(&self.sealed, peer),
-            None => self.socket.try_send(&self.sealed),
+            Some(peer) => self
+                .socket
+                .try_send_to(&self.sealed, peer, &mut self.scratch),
+            None => self.socket.try_send(&self.sealed, &mut self.scratch),
         };
         let resend = std::mem::take(&mut self.resend);
         if let (Ok(n), Some(peer)) = (sent, self.peer.or(self.remote)) {
             let path = Path::new(Leg::Link, peer);
-            wire::meter().sent(path, n);
+            if self.socket.is_paqet() {
+                wire::meter().sent_tcp(path, n);
+            } else {
+                wire::meter().sent(path, n);
+            }
             if resend > 0 {
                 wire::meter().resent(path, resend.min(n));
             }
@@ -719,7 +746,7 @@ enum Inbound {
     Listener(mpsc::Receiver<Bytes>),
     /// The dialer's own socket.
     Dialer {
-        socket: Arc<UdpSocket>,
+        socket: PacketSocket,
         protection: Arc<Protection>,
         buf: Vec<u8>,
         /// Where the packets come from, to count them ([`wire`]).
@@ -740,23 +767,36 @@ impl Inbound {
                 protection,
                 buf,
                 path,
-            } => loop {
-                let n = match socket.recv(buf).await {
-                    Ok(n) => n,
-                    Err(e) if is_icmp_error(&e) => continue,
-                    Err(e) => return Err(e),
-                };
-                // Counted whatever it is: it came over the network all the same.
-                if let Some(path) = *path {
-                    wire::meter().received(path, n);
+            } => {
+                // A flood of packets that fail to open must not keep this future running
+                // without a break.
+                let mut invalid = 0u32;
+                loop {
+                    let n = match socket.recv(buf).await {
+                        Ok(n) => n,
+                        Err(e) if is_icmp_error(&e) => continue,
+                        Err(e) => return Err(e),
+                    };
+                    // Counted whatever it is: it came over the network all the same.
+                    if let Some(path) = *path {
+                        if socket.is_paqet() {
+                            wire::meter().received_tcp(path, n);
+                        } else {
+                            wire::meter().received(path, n);
+                        }
+                    }
+                    let Some(plain) = protection.open(&mut buf[..n]) else {
+                        invalid += 1;
+                        if invalid % 32 == 0 {
+                            tokio::task::yield_now().await;
+                        }
+                        continue;
+                    };
+                    if conv_of(plain) == Some(conv) {
+                        return Ok(Bytes::copy_from_slice(plain));
+                    }
                 }
-                let Some(plain) = protection.open(&mut buf[..n]) else {
-                    continue;
-                };
-                if conv_of(plain) == Some(conv) {
-                    return Ok(Bytes::copy_from_slice(plain));
-                }
-            },
+            }
         }
     }
 }
@@ -872,7 +912,7 @@ type ConnKey = (SocketAddr, u32);
 impl Driver {
     fn start(
         conv: u32,
-        socket: Arc<UdpSocket>,
+        socket: PacketSocket,
         peer: Option<SocketAddr>,
         inbound: Inbound,
         settings: &ConnSettings,
@@ -1237,23 +1277,31 @@ impl KcpDialer {
     }
 
     pub async fn dial(&self) -> io::Result<KcpStream> {
-        let peer = tokio::net::lookup_host(&self.remote)
-            .await?
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "remote did not resolve"))?;
-        let local = match peer {
-            SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
-            SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        let mut addresses = tokio::net::lookup_host(&self.remote).await?;
+        let peer = if self.settings.paqet {
+            addresses.find(|addr| addr.is_ipv4()).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "paqet supports IPv4 only in this phase",
+                )
+            })?
+        } else {
+            addresses
+                .next()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "remote did not resolve"))?
         };
-        let socket = udp_socket(local, self.settings.socket_buffer, self.settings.dscp)?;
-        socket.connect(peer).await?;
-        let socket = Arc::new(socket);
+        let socket = if self.settings.paqet {
+            PacketSocket::paqet_dial(peer, self.settings.socket_buffer, self.settings.dscp)?
+        } else {
+            PacketSocket::udp_connect(peer, self.settings.socket_buffer, self.settings.dscp).await?
+        };
+        let peer = socket.peer_addr().unwrap_or(peer);
         let conv = Nonces::new()?.next_u32();
         let inbound = Inbound::Dialer {
             socket: socket.clone(),
             protection: self.settings.protection.clone(),
             buf: vec![0u8; 65_536],
-            path: socket.peer_addr().ok().map(|p| Path::new(Leg::Link, p)),
+            path: Some(Path::new(Leg::Link, peer)),
         };
         let (stream, driver) = Driver::start(conv, socket, None, inbound, &self.settings, None)?;
         tokio::spawn(driver.run(true));
@@ -1261,8 +1309,8 @@ impl KcpDialer {
     }
 }
 
-/// One UDP socket for every dialer: packets are sorted into conversations by peer
-/// address and conversation id.
+/// One socket for every dialer (UDP, or the raw Paqet carrier): packets are sorted into
+/// conversations by peer address and conversation id.
 pub struct KcpListener {
     local: SocketAddr,
     accepted: tokio::sync::Mutex<mpsc::Receiver<(KcpStream, SocketAddr)>>,
@@ -1277,12 +1325,26 @@ impl Drop for KcpListener {
 
 impl KcpListener {
     pub async fn bind(addr: &str, params: &KcpParams, tuning: &Tuning) -> io::Result<Self> {
-        let addr = tokio::net::lookup_host(addr).await?.next().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "listen address did not resolve")
-        })?;
+        let mut addresses = tokio::net::lookup_host(addr).await?;
+        let addr = if params.carrier == CarrierKind::Paqet {
+            addresses.find(|addr| addr.is_ipv4()).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "paqet supports IPv4 only in this phase",
+                )
+            })?
+        } else {
+            addresses.next().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "listen address did not resolve")
+            })?
+        };
         let settings = ConnSettings::new(params, tuning);
-        let socket = Arc::new(udp_socket(addr, settings.socket_buffer, settings.dscp)?);
-        let local = socket.local_addr()?;
+        let socket = if settings.paqet {
+            PacketSocket::paqet_listen(addr, settings.socket_buffer, settings.dscp)?
+        } else {
+            PacketSocket::udp_bind(addr, settings.socket_buffer, settings.dscp)?
+        };
+        let local = socket.local_addr();
         let (tx, rx) = mpsc::channel(ACCEPT_QUEUE);
         let task = tokio::spawn(demultiplex(socket, settings, tx));
         Ok(Self {
@@ -1307,7 +1369,7 @@ impl KcpListener {
 }
 
 async fn demultiplex(
-    socket: Arc<UdpSocket>,
+    socket: PacketSocket,
     settings: ConnSettings,
     accepted: mpsc::Sender<(KcpStream, SocketAddr)>,
 ) {
@@ -1318,6 +1380,8 @@ async fn demultiplex(
         return;
     };
     let mut buf = vec![0u8; 65_536];
+    // Invalid packets must not keep this loop from yielding to the runtime forever.
+    let mut budget = 0u32;
     loop {
         let (n, peer) = tokio::select! {
             received = socket.recv_from(&mut buf) => match received {
@@ -1333,7 +1397,17 @@ async fn demultiplex(
                 continue;
             }
         };
-        wire::meter().received(Path::new(Leg::Link, peer), n);
+        budget += 1;
+        if budget >= 256 {
+            budget = 0;
+            tokio::task::yield_now().await;
+        }
+        let path = Path::new(Leg::Link, peer);
+        if socket.is_paqet() {
+            wire::meter().received_tcp(path, n);
+        } else {
+            wire::meter().received(path, n);
+        }
         let Some(plain) = settings.protection.open(&mut buf[..n]) else {
             // Not made with the token: no answer, as from a closed port.
             continue;

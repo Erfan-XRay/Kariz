@@ -11,6 +11,7 @@ pub mod kcp;
 #[cfg(not(feature = "kcp"))]
 #[path = "kcp_disabled.rs"]
 pub mod kcp;
+pub mod paqet;
 #[cfg(feature = "quic")]
 pub mod quic;
 #[cfg(feature = "quic")]
@@ -51,13 +52,19 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// `kcp`: `[tunnel.kcp]` with the profile's defaults (`Config::kcp`).
+    /// `kcp`: `[tunnel.kcp]` with the profile's defaults (`Config::kcp`). Paqet reuses
+    /// those settings with its own packet key and carrier.
     pub fn new(tunnel: &TunnelConfig, kcp: crate::config::KcpConfig) -> Self {
+        let kcp = if tunnel.transport == TransportKind::Paqet {
+            kcp::KcpParams::new_paqet(tunnel, kcp)
+        } else {
+            kcp::KcpParams::new(tunnel, kcp)
+        };
         Self {
             kind: tunnel.transport,
             ws: tunnel.ws.clone(),
             tls: tunnel.tls.clone(),
-            kcp: kcp::KcpParams::new(tunnel, kcp),
+            kcp,
         }
     }
 }
@@ -94,7 +101,7 @@ impl Listener {
         };
         match settings.kind {
             TransportKind::Quic | TransportKind::Auto => return Err(not_a_stream_transport()),
-            TransportKind::Kcp => {
+            TransportKind::Kcp | TransportKind::Paqet => {
                 let listener = kcp::KcpListener::bind(addr, &settings.kcp, tuning).await?;
                 return Ok(Self::Kcp(listener));
             }
@@ -102,9 +109,10 @@ impl Listener {
         }
         let tcp = tcp::TcpTransportListener::bind(addr, tuning).await?;
         match settings.kind {
-            TransportKind::Quic | TransportKind::Kcp | TransportKind::Auto => {
-                unreachable!("handled above")
-            }
+            TransportKind::Quic
+            | TransportKind::Kcp
+            | TransportKind::Paqet
+            | TransportKind::Auto => unreachable!("handled above"),
             TransportKind::Tcp | TransportKind::Tcpmux => Ok(Self::Tcp(tcp)),
             TransportKind::Ws | TransportKind::Wss => Ok(Self::Ws(
                 tcp,
@@ -222,7 +230,7 @@ pub struct WsDialer {
 
 impl Dialer {
     pub fn new(settings: &Settings, addr: &str, tuning: &Tuning) -> io::Result<Self> {
-        if settings.kind == TransportKind::Kcp {
+        if matches!(settings.kind, TransportKind::Kcp | TransportKind::Paqet) {
             return Ok(Self::Kcp(kcp::KcpDialer::new(addr, &settings.kcp, tuning)));
         }
         let tcp = tcp::TcpTransportDialer::new(addr, tuning);
@@ -230,7 +238,7 @@ impl Dialer {
         let (config, tls) = match settings.kind {
             TransportKind::Tcp | TransportKind::Tcpmux => return Ok(Self::Tcp(tcp)),
             TransportKind::Quic | TransportKind::Auto => return Err(not_a_stream_transport()),
-            TransportKind::Kcp => unreachable!("handled above"),
+            TransportKind::Kcp | TransportKind::Paqet => unreachable!("handled above"),
             TransportKind::Ws => (ws::ClientConfig::new(ws, addr, "http", 80), None),
             TransportKind::Wss => {
                 // SNI: tls.sni, else the Host we send, else the host we dial.

@@ -26,6 +26,10 @@ impl KcpParams {
     pub fn new(_: &TunnelConfig, _: crate::config::KcpConfig) -> Self {
         Self
     }
+
+    pub fn new_paqet(_: &TunnelConfig, _: crate::config::KcpConfig) -> Self {
+        Self
+    }
 }
 
 pub enum KcpListener {}

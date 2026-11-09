@@ -21,7 +21,9 @@ use crate::config::{TransportKind, Tuning, WsConfig};
 use crate::crypto::Crypto;
 use crate::transport::{Dialer, Listener, Settings};
 
-/// The transports `auto` uses, in the order a dialing side tries them.
+/// The transports `auto` uses, in the order a dialing side tries them. Paqet is
+/// deliberately absent: it needs root or CAP_NET_RAW and host firewall rules, so it is
+/// never entered by automatic fallback.
 pub const KINDS: [TransportKind; 3] =
     [TransportKind::Tcpmux, TransportKind::Kcp, TransportKind::Ws];
 

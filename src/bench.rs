@@ -25,7 +25,9 @@ use crate::speedtest::{self, Latency, Options, Pipe, Rate};
 
 /// The transports a benchmark measures, in the order it measures them. `tcp` without mux
 /// moves data like `tcpmux` (one connection per user connection instead of one shared), and
-/// `auto` switches between `tcpmux`, `kcp` and `ws`: both are judged by those.
+/// `auto` switches between `tcpmux`, `kcp` and `ws`: both are judged by those. `paqet` is
+/// not measured in phase 1: it needs root/CAP_NET_RAW and host firewall rules, which a
+/// panel-run benchmark cannot assume.
 #[cfg(feature = "quic")]
 pub const TRANSPORTS: [TransportKind; 5] = [
     TransportKind::Tcpmux,
