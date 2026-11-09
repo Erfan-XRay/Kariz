@@ -1362,7 +1362,11 @@ async fn tunnel_edit(
     let what = format!(
         "edited tunnel {}{}",
         body.request.name,
-        if body.request.rotate { " (new token)" } else { "" }
+        if body.request.rotate {
+            " (new token)"
+        } else {
+            ""
+        }
     );
     match pair::edit_with_kcp(&state.hub, body.request, body.kcp) {
         Ok(op) => {

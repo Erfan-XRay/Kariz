@@ -1401,7 +1401,10 @@ mod tests {
         // Raw TCP: the listening port is a TCP one, not UDP as KCP's own transport is.
         let wanted = wanted_ports(&s);
         assert_eq!(wanted[0], ("tcp", 44300), "{wanted:?}");
-        assert!(!wanted.iter().any(|(proto, _)| *proto == "udp"), "{wanted:?}");
+        assert!(
+            !wanted.iter().any(|(proto, _)| *proto == "udp"),
+            "{wanted:?}"
+        );
         let text = render(&s, &"a".repeat(48), None).unwrap();
         for line in [
             "transport = \"paqet\"",

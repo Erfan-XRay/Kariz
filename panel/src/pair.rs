@@ -99,10 +99,7 @@ pub struct PairRequestWithKcp {
 impl PairRequestWithKcp {
     /// The request and its KCP tuning, with an empty table read as none.
     pub fn parts(&self) -> (&PairRequest, Option<&KcpSpec>) {
-        (
-            &self.request,
-            self.kcp.as_ref().filter(|k| !k.is_empty()),
-        )
+        (&self.request, self.kcp.as_ref().filter(|k| !k.is_empty()))
     }
 }
 
@@ -426,20 +423,18 @@ pub(crate) fn validate_kcp(transport: &str, kcp: Option<&KcpSpec>) -> Result<()>
         }
     }
     if let Some(mtu) = kcp.mtu {
-        if !(576..=1443).contains(&mtu) {
+        if !(576..=1430).contains(&mtu) {
             bail!("bad_kcp_mtu");
         }
     }
     let fec = match (kcp.fec_data, kcp.fec_parity) {
         (None, None) | (Some(0), Some(0)) => false,
-        (Some(data), Some(parity))
-            if (1..=64).contains(&data) && (1..=32).contains(&parity) =>
-        {
+        (Some(data), Some(parity)) if (1..=64).contains(&data) && (1..=32).contains(&parity) => {
             true
         }
         _ => bail!("bad_kcp_fec"),
     };
-    if fec && kcp.mtu.is_some_and(|mtu| mtu > 1429) {
+    if fec && kcp.mtu.is_some_and(|mtu| mtu > 1417) {
         bail!("bad_kcp_mtu_fec");
     }
     Ok(())
@@ -743,11 +738,7 @@ pub fn create(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
 }
 
 /// [`create`] with a `paqet` tunnel's KCP tuning.
-pub fn create_with_kcp(
-    hub: &Arc<Hub>,
-    req: PairRequest,
-    kcp: Option<KcpSpec>,
-) -> Result<String> {
+pub fn create_with_kcp(hub: &Arc<Hub>, req: PairRequest, kcp: Option<KcpSpec>) -> Result<String> {
     req.validate()?;
     validate_kcp(&req.transport, kcp.as_ref())?;
     req.require_new_enough(hub)?;
@@ -2158,7 +2149,7 @@ mod tests {
         let off = KcpSpec {
             fec_data: Some(0),
             fec_parity: Some(0),
-            mtu: Some(1443),
+            mtu: Some(1430),
             ..kcp.clone()
         };
         validate_kcp("paqet", Some(&off)).unwrap();

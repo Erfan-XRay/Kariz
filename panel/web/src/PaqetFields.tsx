@@ -60,7 +60,7 @@ const text = (v?: number | null) => (v == null ? "" : String(v));
 /** A `[tunnel.kcp]` table from a server, as the form holds it. */
 export function kcpFromSpec(k?: KcpSpec | null): KcpForm {
   if (!k) return emptyKcp();
-  const fec = k.fec_data == null && k.fec_parity == null ? "default" : k.fec_data === 0 && k.fec_parity === 0 ? "off" : "custom";
+  const fec = k.fec_data == null && k.fec_parity == null ? "default" : (k.fec_data ?? 0) === 0 && (k.fec_parity ?? 0) === 0 ? "off" : "custom";
   return {
     mode: (k.mode ?? "") as KcpMode | "",
     nodelay: tri(k.nodelay),
@@ -87,7 +87,7 @@ function numberIn(raw: string, lo: number, hi: number): number | null | undefine
 }
 
 /** The form as a `[tunnel.kcp]` table (`undefined`: all defaults), or the first field that is wrong. */
-export function kcpToSpec(f: KcpForm): { spec?: KcpSpec; bad?: KcpBad } {
+export function kcpToSpec(f: KcpForm, profile: string): { spec?: KcpSpec; bad?: KcpBad } {
   if (f.mode && !KCP_MODES.includes(f.mode)) return { bad: "mode" };
   const spec: KcpSpec = {};
   if (f.mode) spec.mode = f.mode;
@@ -114,7 +114,7 @@ export function kcpToSpec(f: KcpForm): { spec?: KcpSpec; bad?: KcpBad } {
   if (recv === null) return { bad: "recv_window" };
   if (recv !== undefined) spec.recv_window = recv;
 
-  const mtu = numberIn(f.mtu, 576, 1443);
+  const mtu = numberIn(f.mtu, 576, 1430);
   if (mtu === null) return { bad: "mtu" };
   if (mtu !== undefined) spec.mtu = mtu;
 
@@ -128,17 +128,18 @@ export function kcpToSpec(f: KcpForm): { spec?: KcpSpec; bad?: KcpBad } {
     if (parity === null || parity === undefined) return { bad: "fec_parity" };
     spec.fec_data = data;
     spec.fec_parity = parity;
-    // The core's KCP packet with FEC leaves room for the parity packet.
-    if (mtu !== undefined && mtu > 1429) return { bad: "mtu_fec" };
   }
+
+  const fec = f.fec === "custom" || (f.fec === "default" && profile === "gaming" && (mtu ?? 1350) <= 1429);
+  if (fec && mtu !== undefined && mtu > 1417) return { bad: "mtu_fec" };
 
   if (f.datagrams) spec.datagrams = f.datagrams === "on";
   return { spec: Object.keys(spec).length ? spec : undefined };
 }
 
 /** The KCP tuning to send: only a Paqet tunnel has one, and an empty form sends nothing. */
-export function kcpSpecOf(f: KcpForm, transport: string): KcpSpec | undefined {
-  return transport === "paqet" ? kcpToSpec(f).spec : undefined;
+export function kcpSpecOf(f: KcpForm, transport: string, profile: string): KcpSpec | undefined {
+  return transport === "paqet" ? kcpToSpec(f, profile).spec : undefined;
 }
 
 /** What the core uses when a field is empty, as placeholders. */
@@ -157,10 +158,11 @@ function defaults(profile: string) {
 export function KcpFields({ value, onChange, profile }: { value: KcpForm; onChange: (v: KcpForm) => void; profile: string }) {
   const { t } = useApp();
   const d = defaults(profile);
-  const bad = kcpToSpec(value).bad;
+  const bad = kcpToSpec(value, profile).bad;
   const changed = JSON.stringify(value) !== JSON.stringify(emptyKcp());
   const field = (key: KcpField, help: string, input: ReactNode, wrong = bad === key) => (
     <div className="field">
+      <label htmlFor={`kcp-${key}`}>{t(`kcp.${key}`)}</label>
       {input}
       <span className={`help ${wrong ? "err" : ""}`} id={`kcp-${key}-help`}>
         {wrong ? t(`kcp.bad.${bad}`) : help}
@@ -375,6 +377,26 @@ export function PaqetNote() {
     <div className="banner warn" role="note">
       <Icon name="alert" size={18} />
       <span>{t("paqet.help")}</span>
+    </div>
+  );
+}
+
+export function validPaqetBind(value: string): boolean {
+  const octets = value.split(".");
+  return octets.length === 4 && +octets[0] > 0 && +octets[0] < 224 &&
+    octets.every((octet) => /^(0|[1-9]\d{0,2})$/.test(octet) && +octet < 256);
+}
+
+export function PaqetBind({ id, value, onChange }: { id: string; value: string; onChange: (value: string) => void }) {
+  const { t } = useApp();
+  const invalid = value !== "" && !validPaqetBind(value);
+  return (
+    <div className="field">
+      <label htmlFor={id}>{t("paqet.bind")}</label>
+      <input className={`text mono ${invalid ? "is-bad" : ""}`} id={id} dir="ltr" value={value}
+        placeholder="192.0.2.21" aria-invalid={invalid} aria-describedby={`${id}-help`}
+        onChange={(event) => onChange(event.target.value.trim())} />
+      <span className={`help ${invalid ? "err" : ""}`} id={`${id}-help`}>{t(invalid ? "paqet.badBind" : "paqet.bindHelp")}</span>
     </div>
   );
 }

@@ -26,8 +26,6 @@ export function linkPorts(port: number, transport: string): string {
   if (transport === "kcp") return `UDP ${port}`;
   if (transport === "quic") return `UDP ${port + 1}`;
   if (transport === "wss") return `TCP ${port + 1}`;
-  // Paqet's own raw TCP listener (a tunnel transport; management links never use it).
-  if (transport === "paqet") return `TCP ${port}`;
   return `TCP ${port}`;
 }
 

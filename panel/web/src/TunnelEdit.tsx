@@ -10,7 +10,7 @@ import { MuxFields, MuxToggle, muxFromSpec, muxSpecOf, muxToSpec } from "./MuxFi
 import { TlsChoice, emptyTls, isLetsEncrypt, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
-import { KcpFields, PaqetNote, emptyKcp, kcpFromSpec, kcpSpecOf, kcpToSpec } from "./PaqetFields";
+import { KcpFields, PaqetBind, PaqetNote, emptyKcp, kcpFromSpec, kcpSpecOf, kcpToSpec, validPaqetBind } from "./PaqetFields";
 import { PerIpLimit, perIpOf } from "./PerIpLimit";
 import { UdpFlows, udpFlowsOf } from "./UdpFlows";
 import { ProxyProtocol, proxyFromSpec, proxyOf } from "./ProxyProtocol";
@@ -224,7 +224,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   const stuck = away.filter((id) => id === entry || id === exit);
 
   const muxSpec = muxToSpec(mux);
-  const kcpSpec = kcpToSpec(kcp);
+  const kcpSpec = kcpToSpec(kcp, profile);
   const request = (): PairRequest => ({
     name: tunnel.name,
     entry,
@@ -240,7 +240,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
     tls_sni: transport === "wss" && tls.mode === "self" && sni.trim() ? sni.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
-    kcp: kcpSpecOf(kcp, transport),
+    kcp: kcpSpecOf(kcp, transport, profile),
     encryption: cipherOf(enc, transport),
     quic_obfs: obfsOf(obfs, transport),
     max_conns_per_ip: perIpOf(perIp).value,
@@ -264,8 +264,8 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   // Dialed at an IPv6 address, the accepting side listens on every address, IPv6 too (on every IPv4 one it
   // would never answer).
   useEffect(() => {
-    if (!netId && isV6(dialHost) && listenHost === "0.0.0.0") setListenHost("[::]");
-  }, [dialHost, netId, listenHost]);
+    if (transport !== "paqet" && !netId && isV6(dialHost) && listenHost === "0.0.0.0") setListenHost("[::]");
+  }, [dialHost, netId, listenHost, transport]);
 
   // Opened from a benchmark result: once what the tunnel has is known, its direction, transport, network, the
   // IPv6 address of an IPv6 result and the server name of a wss one are put in, as changes to look over and save.
@@ -287,13 +287,15 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     if (moved && [entry, exit].some((id) => !online(id))) return t("te.moveOffline");
     if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
     if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
+    if (transport === "paqet" && !netId && !validPaqetBind(listenHost)) return t("paqet.badBind");
+    if (transport === "paqet" && !netId && isV6(dialHost)) return t("paqet.ip");
     if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
     if (transport === "wss" && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
     if (!cipherReady(enc, transport, encAck)) return t("enc.needAck");
     if (parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
     if (muxSpec.bad) return `${t(`mux.${muxSpec.bad}`)}: ${t("mux.badValue")}`;
     if (transport === "paqet") {
-      const bad = kcpToSpec(kcp).bad;
+      const bad = kcpToSpec(kcp, profile).bad;
       if (bad) return t(`kcp.bad.${bad}`);
     }
     if (perIpOf(perIp).bad) return t("perip.bad");
@@ -456,6 +458,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                 {transport === "paqet" && <span className="help">{t("paqet.port")}</span>}
                 {(transport === "quic" || transport === "kcp") && <span className="help">{t("wz.portUdp")}</span>}
               </div>
+              {transport === "paqet" && !netId && <PaqetBind id="te-paqet-bind" value={listenHost === "0.0.0.0" || listenHost === "[::]" ? "" : listenHost} onChange={setListenHost} />}
               <div className="field" hidden={!!netId}>
                 <label htmlFor="te-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>
                 <input className="text mono" id="te-dial" dir="ltr" value={dialHost} placeholder="203.0.113.5" onChange={(e) => setDialHost(e.target.value.trim())} />
