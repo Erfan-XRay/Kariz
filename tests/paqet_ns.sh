@@ -76,7 +76,7 @@ fec_parity = 2
 [[forward]]
 listen = "127.0.0.1:$FORWARD"
 target = "127.0.0.1:$TARGET"
-protocol = "both"
+protocol = "tcp+udp"
 EOF
 write_exit() {
     cat >"$WORK/exit.toml" <<EOF

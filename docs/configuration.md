@@ -78,6 +78,8 @@ root certificates.
 
 ## `[tunnel.kcp]` (`kcp`)
 
+[Paqet](paqet.md) uses this table with an MTU cap of 1430, or 1417 with FEC.
+
 | Key | Values | Default | Notes |
 |---|---|---|---|
 | `mode` | `normal`, `fast`, `fast2`, `fast3`, `manual` | `fast2` | Presets from gentle to aggressive (below). |

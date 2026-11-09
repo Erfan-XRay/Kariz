@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.8.0-beta.1 - 2026-11-09
+
+Paqet is a native Kariz tunnel transport for Linux IPv4. It carries encrypted KCP
+packets in raw TCP segments and shares Kariz's multiplexing, FEC and datagram code.
+Update both ends of a Paqet tunnel and prepare its dedicated TCP port and firewall rules
+before connecting. See the [Paqet setup guide](https://github.com/Erfan-XRay/Kariz/blob/v2.8.0-beta.1/docs/paqet.md) for configuration and
+deployment limits.
+
+This prerelease is available on the Beta update channel.
+
 ## 2.7.1 - 2026-10-27
 
 The stable release after 2.6.1, with everything of the four betas

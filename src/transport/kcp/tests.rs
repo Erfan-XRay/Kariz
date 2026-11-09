@@ -266,6 +266,7 @@ fn params_fec(key: u8, data: usize, parity: usize) -> KcpParams {
     p
 }
 
+#[cfg(target_os = "linux")]
 fn params_paqet(key: u8) -> KcpParams {
     KcpParams {
         config: KcpConfig::default(),
