@@ -277,6 +277,52 @@ impl MuxSpec {
     }
 }
 
+/// A `paqet` tunnel's `[tunnel.kcp]`: the native encrypted KCP wire's own tuning. Every
+/// field is optional, and what is left out keeps the profile's value. The table is only
+/// written for `paqet`, and only an agent of 2.8.0-beta.1 or newer reads it.
+///
+/// This is data only: whether raw TCP, the kernel's RST suppression and the listening
+/// port are ready is a runtime check on the servers (see `manage::wanted_ports`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KcpSpec {
+    /// `normal`, `fast`, `fast2`, `fast3` or `manual`. Left out: the profile's preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// `mode = "manual"` only; the other modes set these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodelay: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resend: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_congestion: Option<bool>,
+    /// In packets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recv_window: Option<u32>,
+    /// KCP packet size (its 24-byte header included).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<usize>,
+    /// Reed-Solomon FEC: parity packets per group of data packets. Both left out keep the
+    /// profile's default; both 0 turn FEC off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fec_data: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fec_parity: Option<usize>,
+    /// UDP flows take the datagram path beside KCP. Left out: on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datagrams: Option<bool>,
+}
+
+impl KcpSpec {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// What a tunnel is, as data: everything the manager's `add` takes, without free text
 /// going into the file. The agent turns it into the config.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,6 +360,10 @@ pub struct Spec {
     /// Mux settings; left out, the profile's apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mux: Option<MuxSpec>,
+    /// A `paqet` tunnel's `[tunnel.kcp]`; left out, the profile's values apply. Only an
+    /// agent of 2.8.0-beta.1 or newer reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kcp: Option<KcpSpec>,
     /// The cipher of the tunnel: `aes-256-gcm`, `chacha20-poly1305` or `none` (traffic in the
     /// clear, authenticated only). Left out: `auto` (AES where the CPU has it, else ChaCha).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -593,6 +643,37 @@ mod tests {
             size > 16 * 1024,
             "the old limit would have refused it: {size} bytes"
         );
+    }
+
+    #[test]
+    fn an_older_agent_is_not_sent_a_kcp_field_it_does_not_know() {
+        let spec = Spec {
+            name: "p".into(),
+            role: "entry".into(),
+            mode: "reverse".into(),
+            transport: "paqet".into(),
+            listen: Some("0.0.0.0:44300".into()),
+            token: Some("t".repeat(48)),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("\"kcp\""), "{json}");
+        // A spec from an older agent (no kcp) still reads.
+        let old: Spec = serde_json::from_str(&json).unwrap();
+        assert_eq!(old.kcp, None);
+        // A paqet table survives, and an empty one serializes as nothing.
+        let tuned = Spec {
+            kcp: Some(KcpSpec {
+                mode: Some("manual".into()),
+                mtu: Some(1400),
+                ..Default::default()
+            }),
+            ..spec
+        };
+        let json = serde_json::to_string(&tuned).unwrap();
+        assert!(json.contains("\"kcp\":{"), "{json}");
+        let back: Spec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kcp.unwrap().mtu, Some(1400));
     }
 
     #[test]

@@ -70,6 +70,11 @@ impl Path {
     fn udp(self) -> u64 {
         self.ip + UDP
     }
+
+    /// Header bytes of one synthetic TCP segment on this path (Paqet: no TCP options).
+    fn tcp(self) -> u64 {
+        self.ip + TCP
+    }
 }
 
 struct Dir {
@@ -187,6 +192,23 @@ impl Meter {
         self.legs[path.index]
             .received
             .add(bytes + headers, packets, headers);
+    }
+
+    /// A Paqet packet of `len` bytes (the sealed payload) was sent in a synthetic TCP
+    /// segment on `path`.
+    pub fn sent_tcp(&self, path: Path, len: usize) {
+        let headers = path.tcp();
+        self.legs[path.index]
+            .sent
+            .add(len as u64 + headers, 1, headers);
+    }
+
+    /// A Paqet packet of `len` bytes was received in a synthetic TCP segment on `path`.
+    pub fn received_tcp(&self, path: Path, len: usize) {
+        let headers = path.tcp();
+        self.legs[path.index]
+            .received
+            .add(len as u64 + headers, 1, headers);
     }
 
     /// `len` bytes of what was sent on `path` (and counted with [`Self::sent`]) were

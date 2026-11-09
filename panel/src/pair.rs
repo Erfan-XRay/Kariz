@@ -13,14 +13,15 @@ use crate::config::random_hex;
 use crate::hub::Hub;
 use crate::manage::valid_name;
 use crate::wire::{
-    Ack, CheckReply, ForwardInfo, PutReply, Request, Spec, SpeedReply, TextReply, TunnelInfo,
+    Ack, CheckReply, ForwardInfo, KcpSpec, PutReply, Request, Spec, SpeedReply, TextReply,
+    TunnelInfo,
 };
 
 /// How long a new tunnel has to connect before it counts as failed.
 pub const CONNECT_WAIT: Duration = Duration::from_secs(30);
 
 /// What the wizard sends: one tunnel, both sides.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct PairRequest {
     pub name: String,
     /// Server ids (`local` for the panel's own).
@@ -82,10 +83,42 @@ pub struct PairRequest {
     pub network: Option<String>,
 }
 
+/// What the API reads for a tunnel: a [`PairRequest`] with the optional `[tunnel.kcp]`
+/// tuning beside it. It is a wrapper rather than a field of [`PairRequest`] so the many
+/// existing struct literals (the integration tests among them) keep building; the JSON is
+/// one flat object, as if `kcp` were a `PairRequest` field. Left out, the profile's KCP
+/// values apply.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PairRequestWithKcp {
+    #[serde(flatten)]
+    pub request: PairRequest,
+    #[serde(default)]
+    pub kcp: Option<KcpSpec>,
+}
+
+impl PairRequestWithKcp {
+    /// The request and its KCP tuning, with an empty table read as none.
+    pub fn parts(&self) -> (&PairRequest, Option<&KcpSpec>) {
+        (&self.request, self.kcp.as_ref().filter(|k| !k.is_empty()))
+    }
+}
+
 impl PairRequest {
     /// The two specs. `token` is `None` on an edit that keeps the token; `pin` is the
     /// listening wss side's certificate pin, for the dialing side.
     pub fn specs(&self, token: Option<&str>, pin: Option<&str>) -> (Spec, Spec) {
+        self.specs_with_kcp(token, pin, None)
+    }
+
+    /// [`Self::specs`] with a `paqet` tunnel's `[tunnel.kcp]` tuning (ignored for every
+    /// other transport, and an empty table is left out).
+    pub fn specs_with_kcp(
+        &self,
+        token: Option<&str>,
+        pin: Option<&str>,
+        kcp: Option<&KcpSpec>,
+    ) -> (Spec, Spec) {
+        let kcp = kcp_for(&self.transport, kcp).cloned();
         let reverse = self.mode == "reverse";
         let side = |role: &str, accepts: bool| Spec {
             name: self.name.clone(),
@@ -100,6 +133,7 @@ impl PairRequest {
             ws_path: self.ws_path.clone(),
             ws_host: self.ws_host.clone(),
             mux: self.mux.clone().filter(|m| !m.is_empty()),
+            kcp: kcp.clone(),
             encryption: self.chosen_encryption().map(str::to_owned),
             quic_obfs: self.sealed(),
             max_conns_per_ip: (role == "entry").then(|| self.per_ip_limit()).flatten(),
@@ -160,6 +194,11 @@ impl PairRequest {
         self.transport == "auto" || self.mux.as_ref().is_some_and(|m| !m.is_empty())
     }
 
+    /// Whether this tunnel uses Paqet, which came with 2.8.0-beta.1 on both sides.
+    fn needs_paqet(&self) -> bool {
+        self.transport == "paqet"
+    }
+
     /// Whether the tunnel's QUIC packets are sealed.
     fn sealed(&self) -> bool {
         self.quic_obfs && self.transport == "quic"
@@ -212,6 +251,7 @@ impl PairRequest {
     /// `old_agent_proxy:...` for PROXY headers) naming the first server that is too old.
     fn require_new_enough(&self, hub: &Hub) -> Result<()> {
         let anything_new = self.needs_new_servers()
+            || self.needs_paqet()
             || self.chosen_encryption().is_some()
             || self.sealed()
             || self.needs_2_4().0
@@ -231,6 +271,11 @@ impl PairRequest {
 
     /// [`Self::require_new_enough`] for one of the two servers.
     fn require_version(&self, id: &str, version: &str) -> Result<()> {
+        // Paqet is native raw TCP and its own encrypted KCP wire only from 2.8.0-beta.1:
+        // both sides take part, so both must have it.
+        if self.needs_paqet() && !release_at_least(version, PAQET_SINCE) {
+            bail!("old_agent_paqet:{id}:{version}");
+        }
         // A cipher setting came after 1.5.2; auto and mux settings with 1.5.0.
         if self.chosen_encryption().is_some() && !version_at_least(version, (1, 5, 3)) {
             bail!("old_agent_enc:{id}:{version}");
@@ -316,12 +361,84 @@ impl PairRequest {
     }
 }
 
+/// The first release with the native Paqet transport: raw TCP, its own encrypted KCP wire
+/// and `[tunnel.kcp]` tuning on both sides.
+const PAQET_SINCE: &str = "2.8.0-beta.1";
+
 /// The first release whose agent writes `tuning.udp_max_flows` from the panel.
 const UDP_FLOWS_SINCE: &str = "2.6.0-beta.4";
 
 /// The first release whose agent takes a wss certificate of the admin's own (any PEM files
 /// on the server, not only the manager's Let's Encrypt ones).
 const OWN_CERT_SINCE: &str = "2.7.0-beta.1";
+
+/// A `paqet` tunnel's `[tunnel.kcp]` table, and only its: an empty table is the same as
+/// none, and another transport never gets the table (the core refuses it there).
+fn kcp_for<'a>(transport: &str, kcp: Option<&'a KcpSpec>) -> Option<&'a KcpSpec> {
+    if transport != "paqet" {
+        return None;
+    }
+    kcp.filter(|k| !k.is_empty())
+}
+
+/// Checks the `[tunnel.kcp]` values the panel is about to write. The core checks them too
+/// once an agent knows `paqet`; this gives the same ranges a panel error before anything is
+/// sent, and keeps a raw KCP table off every other transport. The errors are codes the page
+/// translates (`bad_kcp_mtu`, ...).
+pub(crate) fn validate_kcp(transport: &str, kcp: Option<&KcpSpec>) -> Result<()> {
+    let Some(kcp) = kcp.filter(|k| !k.is_empty()) else {
+        return Ok(());
+    };
+    if transport != "paqet" {
+        bail!("kcp_paqet_only");
+    }
+    if let Some(mode) = kcp.mode.as_deref() {
+        if !matches!(mode, "normal" | "fast" | "fast2" | "fast3" | "manual") {
+            bail!("bad_kcp_mode");
+        }
+    }
+    let manual = kcp.nodelay.is_some()
+        || kcp.interval_ms.is_some()
+        || kcp.resend.is_some()
+        || kcp.no_congestion.is_some();
+    if manual && kcp.mode.as_deref() != Some("manual") {
+        bail!("bad_kcp_timing");
+    }
+    if let Some(v) = kcp.interval_ms {
+        if !(10..=1000).contains(&v) {
+            bail!("bad_kcp_interval");
+        }
+    }
+    if kcp.resend.is_some_and(|v| v > 10) {
+        bail!("bad_kcp_resend");
+    }
+    if let Some(v) = kcp.send_window {
+        if !(16..=32768).contains(&v) {
+            bail!("bad_kcp_window");
+        }
+    }
+    if let Some(v) = kcp.recv_window {
+        if !(128..=32768).contains(&v) {
+            bail!("bad_kcp_window");
+        }
+    }
+    if let Some(mtu) = kcp.mtu {
+        if !(576..=1430).contains(&mtu) {
+            bail!("bad_kcp_mtu");
+        }
+    }
+    let fec = match (kcp.fec_data, kcp.fec_parity) {
+        (None, None) | (Some(0), Some(0)) => false,
+        (Some(data), Some(parity)) if (1..=64).contains(&data) && (1..=32).contains(&parity) => {
+            true
+        }
+        _ => bail!("bad_kcp_fec"),
+    };
+    if fec && kcp.mtu.is_some_and(|mtu| mtu > 1417) {
+        bail!("bad_kcp_mtu_fec");
+    }
+    Ok(())
+}
 
 /// Whether `version` is `min` or a later release, prereleases in their order
 /// (`2.6.0-beta.3` is before `2.6.0-beta.4`, which is before `2.6.0`). One that cannot be
@@ -486,9 +603,19 @@ fn fail_text(reply: &Ack) -> String {
 
 /// Checks a request on both servers (nothing is written).
 pub async fn check(hub: &Hub, req: &PairRequest) -> Result<(CheckReply, CheckReply)> {
+    check_with_kcp(hub, req, None).await
+}
+
+/// [`check`] with a `paqet` tunnel's KCP tuning.
+pub async fn check_with_kcp(
+    hub: &Hub,
+    req: &PairRequest,
+    kcp: Option<&KcpSpec>,
+) -> Result<(CheckReply, CheckReply)> {
     req.validate()?;
+    validate_kcp(&req.transport, kcp)?;
     req.require_new_enough(hub)?;
-    let (entry, exit) = req.specs(None, None);
+    let (entry, exit) = req.specs_with_kcp(None, None, kcp);
     let a = hub
         .ask_as(&req.entry, &Request::TunnelCheck { spec: entry })
         .await?;
@@ -607,7 +734,13 @@ fn describe(check: &CheckReply) -> String {
 
 /// Starts making a tunnel. The operation's id comes back at once.
 pub fn create(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
+    create_with_kcp(hub, req, None)
+}
+
+/// [`create`] with a `paqet` tunnel's KCP tuning.
+pub fn create_with_kcp(hub: &Arc<Hub>, req: PairRequest, kcp: Option<KcpSpec>) -> Result<String> {
     req.validate()?;
+    validate_kcp(&req.transport, kcp.as_ref())?;
     req.require_new_enough(hub)?;
     let id = hub.ops.begin("create", &req.name)?;
     let hub = hub.clone();
@@ -615,7 +748,7 @@ pub fn create(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
     tokio::spawn(async move {
         // A link made for this tunnel goes again if the tunnel cannot be made.
         let mut made_link = None;
-        let outcome = run_create(&hub, &op, &req, &mut made_link).await;
+        let outcome = run_create(&hub, &op, &req, kcp.as_ref(), &mut made_link).await;
         match outcome {
             Ok(()) => hub.ops.finish(&op, None, None),
             Err((error, undone)) => {
@@ -660,6 +793,7 @@ async fn run_create(
     hub: &Hub,
     op: &str,
     req: &PairRequest,
+    kcp: Option<&KcpSpec>,
     made_link: &mut Option<crate::networks::Link>,
 ) -> Result<(), (String, bool)> {
     let ops = &hub.ops;
@@ -689,8 +823,16 @@ async fn run_create(
 
     // Both servers agree it is valid, and its ports are free.
     for (step, server, spec) in [
-        ("check_entry", &req.entry, req.specs(None, None).0),
-        ("check_exit", &req.exit, req.specs(None, None).1),
+        (
+            "check_entry",
+            &req.entry,
+            req.specs_with_kcp(None, None, kcp).0,
+        ),
+        (
+            "check_exit",
+            &req.exit,
+            req.specs_with_kcp(None, None, kcp).1,
+        ),
     ] {
         ops.run(op, step);
         match hub
@@ -717,7 +859,7 @@ async fn run_create(
     let pin;
 
     // The accepting side first: the dialing side needs its address (and its pin) to be up.
-    let (entry_spec, exit_spec) = req.specs(Some(&token), None);
+    let (entry_spec, exit_spec) = req.specs_with_kcp(Some(&token), None, kcp);
     let first_spec = if first_role == "entry" {
         entry_spec
     } else {
@@ -732,7 +874,7 @@ async fn run_create(
         }
         Err(e) => return Err((step_fail(ops, e), true)),
     }
-    let (entry_spec, exit_spec) = req.specs(Some(&token), pin.as_deref());
+    let (entry_spec, exit_spec) = req.specs_with_kcp(Some(&token), pin.as_deref(), kcp);
     let second_spec = if second_role == "entry" {
         entry_spec
     } else {
@@ -812,7 +954,13 @@ fn moves(old: &[(String, TunnelInfo)], req: &PairRequest) -> (Vec<(String, Tunne
 /// request's own: `offline:SERVER` (a new side must be connected),
 /// `old_agent_move:SERVER:VERSION`.
 pub fn edit(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
+    edit_with_kcp(hub, req, None)
+}
+
+/// [`edit`] with a `paqet` tunnel's KCP tuning.
+pub fn edit_with_kcp(hub: &Arc<Hub>, req: PairRequest, kcp: Option<KcpSpec>) -> Result<String> {
     req.validate()?;
+    validate_kcp(&req.transport, kcp.as_ref())?;
     req.require_new_enough(hub)?;
     let old = place(hub, &req.name)?.sides;
     let (_, moved) = moves(&old, &req);
@@ -838,7 +986,7 @@ pub fn edit(hub: &Arc<Hub>, req: PairRequest) -> Result<String> {
     tokio::spawn(async move {
         // A link made for this edit goes again if the edit cannot be made.
         let mut made_link = None;
-        match run_edit(&hub, &op, &req, &mut made_link).await {
+        match run_edit(&hub, &op, &req, kcp.as_ref(), &mut made_link).await {
             Ok(()) => hub.ops.finish(&op, None, None),
             Err((error, undone)) => {
                 if let Some(link) = made_link {
@@ -855,6 +1003,7 @@ async fn run_edit(
     hub: &Hub,
     op: &str,
     req: &PairRequest,
+    kcp: Option<&KcpSpec>,
     made_link: &mut Option<crate::networks::Link>,
 ) -> Result<(), (String, bool)> {
     let ops = &hub.ops;
@@ -906,8 +1055,16 @@ async fn run_edit(
         None
     };
     for (step, server, spec) in [
-        ("check_entry", &req.entry, req.specs(None, None).0),
-        ("check_exit", &req.exit, req.specs(None, None).1),
+        (
+            "check_entry",
+            &req.entry,
+            req.specs_with_kcp(None, None, kcp).0,
+        ),
+        (
+            "check_exit",
+            &req.exit,
+            req.specs_with_kcp(None, None, kcp).1,
+        ),
     ] {
         ops.run(op, step);
         match hub
@@ -924,7 +1081,7 @@ async fn run_edit(
     let mut pin = None;
     let mut changed: Vec<&str> = Vec::new();
     for (i, server) in [first, second].into_iter().enumerate() {
-        let (entry_spec, exit_spec) = req.specs(token.as_deref(), pin.as_deref());
+        let (entry_spec, exit_spec) = req.specs_with_kcp(token.as_deref(), pin.as_deref(), kcp);
         let spec = if server == req.entry {
             entry_spec
         } else {
@@ -1837,5 +1994,186 @@ mod tests {
         bad.tls_host = Some("not a host".into());
         assert_eq!(bad.validate().unwrap_err().to_string(), "bad_tls_host");
         assert!(req(None, None, true).validate().is_ok());
+    }
+
+    #[test]
+    fn paqet_needs_2_8_0_beta_1_on_both_servers() {
+        let req = PairRequest {
+            transport: "paqet".into(),
+            ..Default::default()
+        };
+        for server in ["a", "b"] {
+            for old in ["2.7.1", "2.8.0-beta.0", "2.8.0-alpha.9", "nonsense", ""] {
+                assert_eq!(
+                    req.require_version(server, old).unwrap_err().to_string(),
+                    format!("old_agent_paqet:{server}:{old}")
+                );
+            }
+            for new in ["2.8.0-beta.1", "2.8.0-beta.2", "2.8.0", "v2.9.0"] {
+                assert!(req.require_version(server, new).is_ok(), "{new}");
+            }
+        }
+        // Only paqet asks for it.
+        let tcp = PairRequest {
+            transport: "tcpmux".into(),
+            ..Default::default()
+        };
+        assert!(tcp.require_version("a", "2.7.1").is_ok());
+    }
+
+    fn a_kcp_tuning() -> KcpSpec {
+        KcpSpec {
+            mode: Some("manual".into()),
+            nodelay: Some(true),
+            interval_ms: Some(20),
+            resend: Some(2),
+            no_congestion: Some(false),
+            send_window: Some(1024),
+            recv_window: Some(2048),
+            mtu: Some(1350),
+            fec_data: Some(10),
+            fec_parity: Some(3),
+            datagrams: Some(false),
+        }
+    }
+
+    #[test]
+    fn paqet_kcp_tuning_goes_to_both_sides_and_is_validated() {
+        let req = PairRequest {
+            transport: "paqet".into(),
+            ..Default::default()
+        };
+        let kcp = a_kcp_tuning();
+        validate_kcp("paqet", Some(&kcp)).unwrap();
+        let (entry, exit) = req.specs_with_kcp(None, None, Some(&kcp));
+        assert_eq!(entry.kcp, Some(kcp.clone()));
+        assert_eq!(exit.kcp, Some(kcp.clone()));
+        // An empty table is the profile's values, and writes nothing at all.
+        assert_eq!(
+            req.specs_with_kcp(None, None, Some(&KcpSpec::default()))
+                .0
+                .kcp,
+            None
+        );
+        // It is Paqet's own table: another transport never gets it.
+        assert_eq!(
+            validate_kcp("tcpmux", Some(&kcp)).unwrap_err().to_string(),
+            "kcp_paqet_only"
+        );
+        let pin = "ab".repeat(32);
+        assert!(req
+            .specs_with_kcp(None, Some(pin.as_str()), Some(&kcp))
+            .0
+            .kcp
+            .is_some());
+        let mut tcp = req.clone();
+        tcp.transport = "tcpmux".into();
+        let (left, right) = tcp.specs_with_kcp(None, None, Some(&kcp));
+        assert!(left.kcp.is_none() && right.kcp.is_none());
+
+        // The timing only belongs to manual mode.
+        let mut auto = kcp.clone();
+        auto.mode = Some("fast2".into());
+        assert_eq!(
+            validate_kcp("paqet", Some(&auto)).unwrap_err().to_string(),
+            "bad_kcp_timing"
+        );
+        // The core's KCP ranges.
+        for (mut bad, code) in [
+            (
+                KcpSpec {
+                    interval_ms: Some(5),
+                    ..kcp.clone()
+                },
+                "bad_kcp_interval",
+            ),
+            (
+                KcpSpec {
+                    resend: Some(11),
+                    ..kcp.clone()
+                },
+                "bad_kcp_resend",
+            ),
+            (
+                KcpSpec {
+                    send_window: Some(8),
+                    ..kcp.clone()
+                },
+                "bad_kcp_window",
+            ),
+            (
+                KcpSpec {
+                    recv_window: Some(64),
+                    ..kcp.clone()
+                },
+                "bad_kcp_window",
+            ),
+            (
+                KcpSpec {
+                    mtu: Some(1500),
+                    ..kcp.clone()
+                },
+                "bad_kcp_mtu",
+            ),
+            (
+                KcpSpec {
+                    fec_data: Some(65),
+                    ..kcp.clone()
+                },
+                "bad_kcp_fec",
+            ),
+            (
+                KcpSpec {
+                    fec_parity: Some(0),
+                    ..kcp.clone()
+                },
+                "bad_kcp_fec",
+            ),
+        ] {
+            bad.mode = Some("manual".into());
+            assert_eq!(
+                validate_kcp("paqet", Some(&bad)).unwrap_err().to_string(),
+                code
+            );
+        }
+        // With FEC the packet has to leave room for the parity one.
+        let mut too_big = kcp.clone();
+        too_big.mtu = Some(1430);
+        assert_eq!(
+            validate_kcp("paqet", Some(&too_big))
+                .unwrap_err()
+                .to_string(),
+            "bad_kcp_mtu_fec"
+        );
+        // FEC off is both zero, and allows the largest MTU.
+        let off = KcpSpec {
+            fec_data: Some(0),
+            fec_parity: Some(0),
+            mtu: Some(1430),
+            ..kcp.clone()
+        };
+        validate_kcp("paqet", Some(&off)).unwrap();
+    }
+
+    #[test]
+    fn the_api_reads_paqet_kcp_from_the_same_flat_body() {
+        let json = r#"{
+            "name":"p","entry":"a","exit":"b","mode":"reverse",
+            "transport":"paqet","listen":"0.0.0.0:44300","dial":"203.0.113.5:44300",
+            "kcp":{"mode":"manual","interval_ms":30,"send_window":2048}
+        }"#;
+        let body: PairRequestWithKcp = serde_json::from_str(json).unwrap();
+        assert_eq!(body.request.transport, "paqet");
+        let (req, kcp) = body.parts();
+        let (entry, exit) = req.specs_with_kcp(None, None, kcp);
+        assert_eq!(entry.kcp.as_ref().and_then(|k| k.interval_ms), Some(30));
+        assert_eq!(exit.kcp.as_ref().and_then(|k| k.send_window), Some(2048));
+        // No kcp in the body: the old flat request still reads, with no table.
+        let old: PairRequestWithKcp = serde_json::from_str(
+            r#"{"name":"p","entry":"a","exit":"b","mode":"reverse",
+                "transport":"tcpmux","listen":"0.0.0.0:3080","dial":"203.0.113.5:3080"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.kcp, None);
     }
 }

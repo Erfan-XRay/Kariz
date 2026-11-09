@@ -107,7 +107,7 @@ export interface Section {
 export const SECTIONS: Section[] = [
   { id: "start", title: { en: "Get started", fa: "شروع کار" }, pages: ["getting-started", "using-the-panel", "video", "tour", "manager", "panel"] },
   { id: "concepts", title: { en: "Concepts", fa: "مفاهیم" }, pages: ["how-it-works", "transports", "profiles", "udp-and-games", "cdn"] },
-  { id: "guides", title: { en: "Guides", fa: "راهنماها" }, pages: ["networks", "troubleshooting", "speedtest", "telegram", "performance"] },
+  { id: "guides", title: { en: "Guides", fa: "راهنماها" }, pages: ["networks", "paqet", "troubleshooting", "speedtest", "telegram", "performance"] },
   { id: "reference", title: { en: "Reference", fa: "مرجع" }, pages: ["configuration", "status", "accessibility"] },
   { id: "security", title: { en: "Security", fa: "امنیت" }, pages: ["security", "security-review"] },
   { id: "project", title: { en: "Project", fa: "پروژه" }, pages: ["changelog", "roadmap", "support"] },
@@ -127,6 +127,7 @@ export const LABELS: Record<string, Record<Lang, string>> = {
   "udp-and-games": { en: "UDP and games", fa: "UDP و بازی" },
   cdn: { en: "Behind a CDN", fa: "پشت CDN" },
   networks: { en: "Private networks (GRE, VXLAN)", fa: "شبکه‌های خصوصی (GRE، VXLAN)" },
+  paqet: { en: "Paqet setup", fa: "راه‌اندازی Paqet" },
   troubleshooting: { en: "Troubleshooting", fa: "عیب‌یابی" },
   speedtest: { en: "Speed test", fa: "تست سرعت" },
   telegram: { en: "Telegram alerts", fa: "اعلان تلگرام" },

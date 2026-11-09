@@ -1,6 +1,6 @@
 # Kariz documentation
 
-For Kariz **v2.7.1**; what changed in each version is in the [changelog](../CHANGELOG.md). Start with
+For Kariz **v2.8.0-beta.1**; what changed in each version is in the [changelog](../CHANGELOG.md). Start with
 [Getting started](getting-started.md) and come back to the reference pages when you need a specific
 setting. The same pages are a website, with search,
 animated diagrams and a live demo of the panel, in English and Persian:
@@ -21,6 +21,7 @@ animated diagrams and a live demo of the panel, in English and Persian:
 | [فارسی: مستندات به زبان فارسی](fa/README.md) | every page of this documentation in Persian |
 | [Private networks (GRE, VXLAN)](networks.md) | private addresses between your servers, made by the panel, never repeated |
 | [Transports](transports.md) | `tcp`, `tcpmux`, `ws`, `wss`, `quic`, `kcp`: how each works and when to pick it |
+| [Paqet setup](paqet.md) | Raw TCP requirements, firewall rules and KCP tuning |
 | [Profiles](profiles.md) | `balanced`, `ultraspeed`, `gaming`, and overriding their values |
 | [UDP forwarding and games](udp-and-games.md) | UDP rules, the datagram path, packet duplication, DSCP |
 | [Performance](performance.md) | Measurements, tuning for speed, running the benchmarks |

@@ -21,6 +21,7 @@ flowchart TD
 | `wss` | WebSocket over TLS (HTTPS) | behind a CDN, or on its own to look like an HTTPS site |
 | `quic` | QUIC over UDP: streams and datagrams, TLS 1.3 | UDP flows without head-of-line blocking; paths where UDP works well |
 | `kcp` | KCP over UDP, every packet encrypted, optional FEC | lossy links where TCP collapses; games |
+| [`paqet`](paqet.md) | Encrypted KCP in raw TCP over IPv4 on Linux | Routes that pass synthetic TCP. Requires scoped firewall rules. |
 
 Everything except `quic` runs the same layers on top: the handshake (mutual
 authentication with the token, X25519 for forward secrecy), AEAD records, and mux.
@@ -157,4 +158,4 @@ transport gets through. It needs the three ports open on the listening side; if 
 ## Modes and transports
 
 Every transport works in both modes. The listening side needs its port reachable:
-TCP for `tcp`, `tcpmux`, `ws` and `wss`, UDP for `quic` and `kcp`.
+TCP for `tcp`, `tcpmux`, `ws` and `wss`, UDP for `quic` and `kcp`. For `paqet`, follow the [raw TCP firewall setup](paqet.md).

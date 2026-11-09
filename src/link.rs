@@ -7,7 +7,9 @@
 //! on all of them (TCP and UDP of its agents port, and TLS and QUIC on the next port,
 //! [`wss_addr`]), and an agent uses the one that gets through. Which side dials and which
 //! opens streams are independent: an agent dials the panel, but the panel is the one that
-//! opens streams (requests).
+//! opens streams (requests). `paqet` is a tunnel transport only for now: a management link
+//! is expected to work without root/CAP_NET_RAW and without host firewall rules, so Paqet
+//! is not in [`LINK_TRANSPORTS`].
 //!
 //! Over `wss` the dialing side does not check the certificate: TLS is only there to look
 //! like a web site. Who is on the other end is proven by the token handshake inside, as on

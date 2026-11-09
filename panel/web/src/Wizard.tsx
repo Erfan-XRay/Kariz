@@ -11,6 +11,7 @@ import { MuxFields, MuxToggle, emptyMux, muxSpecOf, muxToSpec } from "./MuxField
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
+import { KcpFields, PaqetBind, PaqetNote, emptyKcp, kcpSpecOf, kcpToSpec, validPaqetBind } from "./PaqetFields";
 import { PerIpLimit, perIpOf } from "./PerIpLimit";
 import { UdpFlows, udpFlowsOf } from "./UdpFlows";
 import { ProxyProtocol, proxyOf } from "./ProxyProtocol";
@@ -19,7 +20,7 @@ import { Choice, More, noteOf, pairOf } from "./Choice";
 import { BenchPanel, benchLabel, isV6 } from "./Benchmark";
 import type { BenchChoice } from "./Benchmark";
 import { MUX_OPTIONAL, TRANSPORTS, joinTransport, transportLabel } from "./transport";
-import { FIRST_TUNNEL_PORT, freeTunnelPort, hostOf, portOf, portsInUse } from "./ports";
+import { FIRST_TUNNEL_PORT, firstTunnelPort, freeTunnelPort, hostOf, portOf, portsInUse } from "./ports";
 
 export const PROFILES = ["balanced", "ultraspeed", "gaming"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -95,13 +96,15 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [dialHost, setDialHost] = useState("");
   // The host the accepting side listens on: every IPv4 address, every address (IPv6 too) when it is dialed at
   // its IPv6 address, or (for a tunnel that was made over a private network) its private one.
-  const listenHost = isV6(dialHost) ? "[::]" : "0.0.0.0";
+  const [paqetBind, setPaqetBind] = useState("");
   const [netId, setNetId] = useState("");
+  const listenHost = transport === "paqet" && !netId ? paqetBind : isV6(dialHost) ? "[::]" : "0.0.0.0";
   const { networks, links } = useNetworks();
   const [wsPath, setWsPath] = useState("/");
   const [wsHost, setWsHost] = useState("");
   const [sni, setSni] = useState("");
   const [mux, setMux] = useState(emptyMux());
+  const [kcp, setKcp] = useState(emptyKcp());
   const [tls, setTls] = useState(emptyTls());
   const [enc, setEnc] = useState<string>("auto");
   const [encAck, setEncAck] = useState(false);
@@ -207,6 +210,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     // other side checks a real one against the name it was issued for (tls_host).
     tls_sni: transport === "wss" && tls.mode === "self" && sni.trim() ? sni.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
+    kcp: kcpSpecOf(kcp, transport, profile),
     encryption: cipherOf(enc, transport),
     quic_obfs: obfsOf(obfs, transport),
     max_conns_per_ip: perIpOf(perIp).value,
@@ -229,11 +233,17 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     if (s === 2) {
       if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
       if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
+      if (transport === "paqet" && !netId && !validPaqetBind(listenHost)) return t("paqet.badBind");
+      if (transport === "paqet" && !netId && isV6(dialHost)) return t("paqet.ip");
       if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
       if (transport === "wss" && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
     }
     if (s === 1 && !cipherReady(enc, transport, encAck)) return t("enc.needAck");
     if (s === 1 && muxToSpec(mux).bad) return t(`mux.${muxToSpec(mux).bad}`) + ": " + t("mux.badValue");
+    if (s === 1 && transport === "paqet") {
+      const bad = kcpToSpec(kcp, profile).bad;
+      if (bad) return t(`kcp.bad.${bad}`);
+    }
     if (s === 3 && parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
     if (s === 3 && perIpOf(perIp).bad) return t("perip.bad");
     if (s === 3 && protocol.includes("udp") && udpFlowsOf(udpFlows).bad) return t("udpflows.bad");
@@ -293,6 +303,8 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   // What the folded groups of each step hold now, on the line that stands for them.
   const muxShown = muxOn || !MUX_OPTIONAL.includes(transport);
   const muxSpec = muxToSpec(mux);
+  const kcpSpec = kcpToSpec(kcp, profile);
+  const kcpNote = transport === "paqet" && kcpSpec.spec ? t("kcp.custom") : t("kcp.fromProfile");
   const selfSigned = transport === "wss" && tls.mode === "self";
   const plainTcp = transport === "tcp" && !muxOn;
   const udpPorts = protocol.includes("udp");
@@ -426,6 +438,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                   <Choice label={t("wz.transport")} mono value={transport} options={TRANSPORTS.map((x) => [x, x])} onChange={setTransport} hint={t(`wz.tr.${transport}`)} />
                   <Choice label={t("wz.profile")} value={profile} options={PROFILES.map((p) => [p, t(`wz.pf.${p}`)])} onChange={setProfile} hint={t(`wz.pf.${profile}.d`)} />
                 </div>
+                {transport === "paqet" && <PaqetNote />}
                 <More title={t("more.title")} note={kindNote} show={step === 1 && !!error}>
                   <EncryptionChoice value={enc} onChange={setEnc} transport={transport} ack={encAck} onAck={setEncAck} />
                   {transport === "quic" && <QuicObfs value={obfs} onChange={setObfs} />}
@@ -433,6 +446,11 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                   {(muxOn || !MUX_OPTIONAL.includes(transport)) && (
                     <More title={t("mux.title")} note={muxSpec.spec ? t("mux.custom") : t("mux.fromProfile")} show={!!muxSpec.bad}>
                       <MuxFields value={mux} onChange={setMux} profile={profile} transport={transport} />
+                    </More>
+                  )}
+                  {transport === "paqet" && (
+                    <More title={t("kcp.title")} note={kcpNote} show={step === 1 && !!error && !!kcpSpec.bad}>
+                      <KcpFields value={kcp} onChange={setKcp} profile={profile} />
                     </More>
                   )}
                 </More>
@@ -458,12 +476,14 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                         setListenPort(e.target.value.trim());
                       }}
                     />
-                    {!portTouched && suggestedPort !== String(FIRST_TUNNEL_PORT) && (
-                      <span className="help">{t("wz.portMoved", { first: String(FIRST_TUNNEL_PORT), server: serverName(acceptor), port: suggestedPort })}</span>
+                    {!portTouched && suggestedPort !== String(firstTunnelPort(transport)) && (
+                      <span className="help">{t("wz.portMoved", { first: String(firstTunnelPort(transport)), server: serverName(acceptor), port: suggestedPort })}</span>
                     )}
                     {transport === "auto" && <span className="help">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</span>}
+                    {transport === "paqet" && <span className="help">{t("paqet.port")}</span>}
                     {udp && <span className="help">{t("wz.portUdp")}</span>}
                   </div>
+                  {transport === "paqet" && !netId && <PaqetBind id="wz-paqet-bind" value={paqetBind} onChange={setPaqetBind} />}
                   <div className="field" hidden={!!netId}>
                     <label htmlFor="wz-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>
                     <input
@@ -478,6 +498,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                       }}
                     />
                     <span className="help">{t("wz.dialHelp")}</span>
+                    {transport === "paqet" && <span className="help">{t("paqet.ip")}</span>}
                     {addrChoices.length > 0 && (
                       <span className="addr-chips" aria-label={t("wz.dialSeen", { server: serverName(acceptor) })}>
                         {addrChoices.map((a) => (

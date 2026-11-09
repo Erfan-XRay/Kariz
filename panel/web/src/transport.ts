@@ -1,10 +1,10 @@
 import type { MuxSpec } from "./api";
 
 /** The transports a person chooses from. `tcp` with mux on is the core's `tcpmux`; with mux off, plain `tcp`. */
-export const TRANSPORTS = ["auto", "tcp", "ws", "wss", "quic", "kcp"] as const;
+export const TRANSPORTS = ["auto", "tcp", "ws", "wss", "quic", "kcp", "paqet"] as const;
 
 /** Transports where mux can be turned off (`auto` and `quic` always multiplex). */
-export const MUX_OPTIONAL = ["tcp", "ws", "wss", "kcp"];
+export const MUX_OPTIONAL = ["tcp", "ws", "wss", "kcp", "paqet"];
 
 /** A tunnel's core transport (and mux settings) as the form shows them: a transport and whether mux is on. */
 export function splitTransport(core: string, mux?: MuxSpec | null): { transport: string; mux: boolean } {

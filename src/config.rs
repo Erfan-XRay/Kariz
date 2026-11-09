@@ -12,6 +12,7 @@
 //! * `direct`: entry dials exit (exit listens on `tunnel.listen`).
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -72,6 +73,10 @@ pub enum TransportKind {
     Quic,
     /// KCP over UDP, every packet encrypted with a key from the token.
     Kcp,
+    /// KCP packets in synthetic TCP segments over a Linux IPv4 raw socket, encrypted
+    /// with a Paqet-specific key from the token. Not wire-compatible with upstream
+    /// `hanselime/paqet`.
+    Paqet,
     /// All of tcpmux, kcp and ws at once, and the dialing side moves to the one that gets
     /// through when a link stalls (see `auto.rs`). Always multiplexed.
     Auto,
@@ -86,6 +91,7 @@ impl TransportKind {
             Self::Wss => "wss",
             Self::Quic => "quic",
             Self::Kcp => "kcp",
+            Self::Paqet => "paqet",
             Self::Auto => "auto",
         }
     }
@@ -231,7 +237,8 @@ pub struct KcpConfig {
     #[serde(default = "default_kcp_window")]
     pub recv_window: u16,
     /// KCP packet size (its 24-byte header included); the UDP packet adds 29 bytes of
-    /// protection, 43 with FEC.
+    /// protection, 43 with FEC. Equally used by `paqet`, where a 20-byte TCP header and a
+    /// 20-byte IPv4 header are added too (see `Config::validate_kcp`).
     #[serde(default = "default_kcp_mtu")]
     pub mtu: usize,
     /// Reed-Solomon FEC: parity packets per group of data packets; both 0 = off. Unset:
@@ -858,6 +865,11 @@ const KCP_RECV_WINDOW: std::ops::RangeInclusive<u16> = 128..=32768;
 const KCP_MTU: std::ops::RangeInclusive<usize> = 576..=1443;
 /// With FEC the largest packet is a parity shard: 43 bytes added.
 const KCP_MTU_FEC: usize = 1429;
+/// Paqet adds a 20-byte TCP header to the sealed packet and the kernel adds 20 bytes of
+/// IPv4 header: 1500 - 20 - 20 - 30 (sealed KCP packet) = 1430.
+const PAQET_MTU: usize = 1430;
+/// With FEC, 43 bytes are added instead of 30: 1500 - 20 - 20 - 43 = 1417.
+const PAQET_MTU_FEC: usize = 1417;
 const KCP_FEC_DATA: std::ops::RangeInclusive<usize> = 1..=64;
 const KCP_FEC_PARITY: std::ops::RangeInclusive<usize> = 1..=32;
 const MUX_MIN_LIFETIME_SECS: u64 = 60;
@@ -957,6 +969,13 @@ impl Config {
                  100 s (Cloudflare)",
             );
         }
+        if self.tunnel.transport == TransportKind::Paqet {
+            warnings.push(
+                "paqet needs root or CAP_NET_RAW, a concrete IPv4 listen address, and scoped \
+                 firewall rules that allow the TCP port and suppress the kernel's RST replies; \
+                 see docs/paqet.md",
+            );
+        }
         if self.forward.iter().any(|f| f.protocol.has_udp()) && !self.mux().enabled {
             warnings.push(
                 "UDP is forwarded without mux: every UDP flow uses its own tunnel connection; \
@@ -965,12 +984,13 @@ impl Config {
         }
         let unreliable = matches!(
             self.tunnel.transport,
-            TransportKind::Kcp | TransportKind::Quic
+            TransportKind::Kcp | TransportKind::Paqet | TransportKind::Quic
         ) && self.mux().enabled;
         if self.forward.iter().any(|f| f.duplication().is_some()) && !unreliable {
             warnings.push(
-                "forward.duplicate has no effect here: copies are only sent over kcp (with mux) \
-                 or quic, where packets may be lost; other transports deliver every packet",
+                "forward.duplicate has no effect here: copies are only sent over kcp, paqet \
+                 (with mux) or quic, where packets may be lost; other transports deliver \
+                 every packet",
             );
         }
         if self
@@ -1013,6 +1033,18 @@ impl Config {
                 "transport = \"{feature}\" is not in this build (built without the \
                  `{feature}` cargo feature)"
             );
+        }
+        if self.tunnel.transport == TransportKind::Paqet {
+            if !cfg!(feature = "kcp") {
+                bail!(
+                    "transport = \"paqet\" is not in this build (built without the `kcp` \
+                     cargo feature)"
+                );
+            }
+            if !cfg!(target_os = "linux") {
+                bail!("transport = \"paqet\" is only supported on Linux");
+            }
+            self.validate_paqet_addresses()?;
         }
         if self.tunnel.token.trim().len() < 16 {
             bail!("tunnel.token must be at least 16 characters (generate one with `kariz token`)");
@@ -1121,15 +1153,44 @@ impl Config {
         self.validate_kcp()
     }
 
+    /// Paqet phase 1 is IPv4 only and needs a concrete listening address: a wildcard
+    /// raw socket could not choose the reply source reliably. Names are resolved at bind
+    /// time; only literals can be checked here.
+    fn validate_paqet_addresses(&self) -> Result<()> {
+        if let Some(addr) = self.tunnel.listen.as_deref().and_then(parse_socket_addr) {
+            if addr.is_ipv6() {
+                bail!(
+                    "transport = \"paqet\" supports IPv4 only in this phase; tunnel.listen \
+                     cannot be {addr}"
+                );
+            }
+            if addr.ip().is_unspecified() {
+                bail!(
+                    "transport = \"paqet\" needs a concrete IPv4 address in tunnel.listen, \
+                     not {addr}; a wildcard socket could send replies from the wrong address"
+                );
+            }
+        }
+        if let Some(addr) = self.tunnel.remote.as_deref().and_then(parse_socket_addr) {
+            if addr.is_ipv6() {
+                bail!(
+                    "transport = \"paqet\" supports IPv4 only in this phase; tunnel.remote \
+                     cannot be {addr}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn validate_kcp(&self) -> Result<()> {
         let Some(k) = &self.tunnel.kcp else {
             return Ok(());
         };
         if !matches!(
             self.tunnel.transport,
-            TransportKind::Kcp | TransportKind::Auto
+            TransportKind::Kcp | TransportKind::Paqet | TransportKind::Auto
         ) {
-            bail!("[tunnel.kcp] is only used with transport = \"kcp\" or \"auto\"");
+            bail!("[tunnel.kcp] is only used with transport = \"kcp\", \"paqet\" or \"auto\"");
         }
         let manual = [
             k.nodelay.is_some(),
@@ -1189,6 +1250,21 @@ impl Config {
                 KCP_FEC_PARITY.start(),
                 KCP_FEC_PARITY.end()
             ),
+        }
+        if self.tunnel.transport == TransportKind::Paqet {
+            let effective = self.kcp();
+            let max = if effective.fec().is_some() {
+                PAQET_MTU_FEC
+            } else {
+                PAQET_MTU
+            };
+            if effective.mtu > max {
+                bail!(
+                    "tunnel.kcp.mtu must be at most {max} bytes with transport = \"paqet\" \
+                     (a 20-byte TCP header and a 20-byte IPv4 header are added; with FEC the \
+                     packet is larger)"
+                );
+            }
         }
         Ok(())
     }
@@ -1405,6 +1481,10 @@ fn is_visible_ascii(s: &str) -> bool {
     s.bytes().all(|b| b.is_ascii_graphic())
 }
 
+fn parse_socket_addr(addr: &str) -> Option<SocketAddr> {
+    addr.parse().ok()
+}
+
 /// RFC 9110 token.
 fn is_header_name(s: &str) -> bool {
     !s.is_empty()
@@ -1604,6 +1684,67 @@ mod tests {
         ));
         assert!(!off.mux().enabled);
         assert_eq!(off.mux().connections, 3);
+    }
+
+    #[test]
+    fn paqet_is_not_part_of_auto() {
+        assert!(!crate::auto::KINDS.contains(&TransportKind::Paqet));
+        assert_eq!(TransportKind::Paqet.name(), "paqet");
+    }
+
+    #[cfg(all(feature = "kcp", target_os = "linux"))]
+    #[test]
+    fn paqet_reuses_kcp_settings_with_a_tight_mtu() {
+        let ok = with_transport(
+            "entry",
+            "paqet",
+            "[tunnel.kcp]\nmtu = 1400\nfec_data = 0\nfec_parity = 0",
+        );
+        let config = Config::parse(&ok).unwrap();
+        assert_eq!(config.tunnel.transport, TransportKind::Paqet);
+        assert_eq!(config.kcp().mtu, 1400);
+
+        let no_fec = with_transport(
+            "entry",
+            "paqet",
+            "[tunnel.kcp]\nmtu = 1430\nfec_data = 0\nfec_parity = 0",
+        );
+        assert!(Config::parse(&no_fec).is_ok());
+        let too_large = with_transport(
+            "entry",
+            "paqet",
+            "[tunnel.kcp]\nmtu = 1431\nfec_data = 0\nfec_parity = 0",
+        );
+        assert!(parse_err(&too_large).contains("1430"));
+
+        let fec = with_transport(
+            "entry",
+            "paqet",
+            "[tunnel.kcp]\nmtu = 1417\nfec_data = 4\nfec_parity = 2",
+        );
+        assert!(Config::parse(&fec).is_ok());
+        let fec_too_large = with_transport(
+            "entry",
+            "paqet",
+            "[tunnel.kcp]\nmtu = 1418\nfec_data = 4\nfec_parity = 2",
+        );
+        assert!(parse_err(&fec_too_large).contains("1417"));
+
+        // A wildcard listener cannot choose a reliable reply source; IPv6 is phase 2.
+        let wildcard = with_transport("exit", "paqet", "");
+        assert!(parse_err(&wildcard).contains("concrete IPv4"));
+        let ipv6 = with_transport("entry", "paqet", "").replace(
+            "remote = \"203.0.113.1:443\"",
+            "remote = \"[2001:db8::1]:443\"",
+        );
+        assert!(parse_err(&ipv6).contains("IPv4 only"));
+    }
+
+    #[cfg(all(feature = "kcp", not(target_os = "linux")))]
+    #[test]
+    fn paqet_is_rejected_off_linux() {
+        let err = parse_err(&with_transport("entry", "paqet", ""));
+        assert!(err.contains("only supported on Linux"), "{err}");
     }
 
     #[test]

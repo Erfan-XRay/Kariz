@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UdpSocket;
 
+use super::carrier::bind_udp as udp_socket;
 use super::*;
 use crate::config::Profile;
 
@@ -9,6 +11,7 @@ fn params(key: u8) -> KcpParams {
     KcpParams {
         config: KcpConfig::default(),
         key: [key; 32],
+        carrier: CarrierKind::Udp,
     }
 }
 
@@ -261,6 +264,59 @@ fn params_fec(key: u8, data: usize, parity: usize) -> KcpParams {
     p.config.fec_data = Some(data);
     p.config.fec_parity = Some(parity);
     p
+}
+
+#[cfg(target_os = "linux")]
+fn params_paqet(key: u8) -> KcpParams {
+    KcpParams {
+        config: KcpConfig::default(),
+        key: [key; 32],
+        carrier: CarrierKind::Paqet,
+    }
+}
+
+#[test]
+fn paqet_uses_its_own_packet_key() {
+    let psk = Psk::new("paqet-key-separation-test");
+    assert_ne!(psk.subkey(KEY_CONTEXT), psk.subkey(PAQET_KEY_CONTEXT));
+}
+
+/// A real raw IPv4 socket on loopback. Root (or CAP_NET_RAW) and an opt-in are needed:
+/// `KARIZ_PAQET_IT=1 cargo test --lib --features kcp paqet_round_trip`.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paqet_round_trip_over_raw_ipv4() {
+    if std::env::var_os("KARIZ_PAQET_IT").is_none() {
+        return;
+    }
+    let l = KcpListener::bind("127.0.0.1:0", &params_paqet(1), &tuning())
+        .await
+        .expect("raw socket: run the test as root or with CAP_NET_RAW");
+    let addr = l.local_addr().unwrap().to_string();
+    let dialer = KcpDialer::new(&addr, &params_paqet(1), &tuning());
+    let client = tokio::time::timeout(Duration::from_secs(5), dialer.dial())
+        .await
+        .expect("dialed in time")
+        .expect("raw socket: run the test as root or with CAP_NET_RAW");
+    let server = accept(&l).await;
+
+    let (client_datagrams, server_datagrams) = (
+        client.datagrams().expect("datagram side"),
+        server.datagrams().expect("datagram side"),
+    );
+    assert!(client_datagrams.send(b"paqet datagram", false));
+    let datagram = tokio::time::timeout(Duration::from_secs(5), server_datagrams.recv())
+        .await
+        .expect("datagram in time")
+        .expect("stream open");
+    assert_eq!(&datagram[..], b"paqet datagram");
+
+    echo(server);
+    let got = tokio::time::timeout(Duration::from_secs(20), round_trip(client, b"raw tcp"))
+        .await
+        .expect("round trip in time")
+        .unwrap();
+    assert_eq!(got, b"raw tcp");
 }
 
 /// 2 MiB sent one way through a proxy that drops 5 % of the packets each way, with a

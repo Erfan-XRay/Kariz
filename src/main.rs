@@ -442,12 +442,21 @@ fn print_summary(config: &Config) {
     if config.tunnel.transport == TransportKind::Auto {
         println!("  auto      : tcpmux, kcp and ws together; the dialing side moves to the one that gets through");
     }
-    if config.tunnel.transport == TransportKind::Kcp {
+    if matches!(
+        config.tunnel.transport,
+        TransportKind::Kcp | TransportKind::Paqet
+    ) {
         let kcp = config.kcp();
         let t = kcp.timing();
+        let carrier = if config.tunnel.transport == TransportKind::Paqet {
+            "raw IPv4 TCP"
+        } else {
+            "UDP"
+        };
         println!(
-            "  kcp       : mode={} (nodelay={} interval={}ms resend={} no_congestion={}) \
-             window={}/{} mtu={} fec={}, packets sealed with the token",
+            "  {}      : mode={} (nodelay={} interval={}ms resend={} no_congestion={}) \
+             window={}/{} mtu={} fec={}, packets sealed with the token, carried over {}",
+            config.tunnel.transport.name(),
             kcp.mode.name(),
             t.nodelay,
             t.interval_ms,
@@ -459,7 +468,8 @@ fn print_summary(config: &Config) {
             match kcp.fec() {
                 Some((data, parity)) => format!("{data}+{parity}"),
                 None => "off".into(),
-            }
+            },
+            carrier,
         );
     }
     if config.tunnel.transport == TransportKind::Wss {

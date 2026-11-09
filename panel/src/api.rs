@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 
 use crate::auth::{self, Session};
 use crate::http::AppState;
-use crate::pair::{self, PairRequest};
+use crate::pair::{self, PairRequestWithKcp};
 use crate::wire::LinkKind;
 
 const COOKIE: &str = "__Host-kariz";
@@ -1312,12 +1312,13 @@ fn pair_error(e: anyhow::Error) -> Response {
 async fn tunnel_check(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<PairRequest>,
+    Json(body): Json<PairRequestWithKcp>,
 ) -> Response {
     if let Err(r) = authenticate(&state, &headers, true) {
         return r;
     }
-    match pair::check(&state.hub, &body).await {
+    let (request, kcp) = body.parts();
+    match pair::check_with_kcp(&state.hub, request, kcp).await {
         Ok((entry, exit)) => reply(StatusCode::OK, json!({ "entry": entry, "exit": exit })),
         Err(e) => pair_error(e),
     }
@@ -1327,14 +1328,14 @@ async fn tunnel_create(
     State(state): State<AppState>,
     peer: Peer,
     headers: HeaderMap,
-    Json(body): Json<PairRequest>,
+    Json(body): Json<PairRequestWithKcp>,
 ) -> Response {
     let me = match authenticate(&state, &headers, true) {
         Ok(s) => s,
         Err(r) => return r,
     };
-    let name = body.name.clone();
-    match pair::create(&state.hub, body) {
+    let name = body.request.name.clone();
+    match pair::create_with_kcp(&state.hub, body.request, body.kcp) {
         Ok(op) => {
             audit(
                 &state,
@@ -1352,7 +1353,7 @@ async fn tunnel_edit(
     State(state): State<AppState>,
     peer: Peer,
     headers: HeaderMap,
-    Json(body): Json<PairRequest>,
+    Json(body): Json<PairRequestWithKcp>,
 ) -> Response {
     let me = match authenticate(&state, &headers, true) {
         Ok(s) => s,
@@ -1360,10 +1361,14 @@ async fn tunnel_edit(
     };
     let what = format!(
         "edited tunnel {}{}",
-        body.name,
-        if body.rotate { " (new token)" } else { "" }
+        body.request.name,
+        if body.request.rotate {
+            " (new token)"
+        } else {
+            ""
+        }
     );
-    match pair::edit(&state.hub, body) {
+    match pair::edit_with_kcp(&state.hub, body.request, body.kcp) {
         Ok(op) => {
             audit(&state, &format!("session {}", me.id), &ip_of(&peer), &what);
             reply(StatusCode::ACCEPTED, json!({ "op": op }))
