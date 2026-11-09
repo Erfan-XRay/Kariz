@@ -994,19 +994,23 @@ impl Services for Systemd {
 }
 
 /// Daemons run as child processes of the agent, for hosts without systemd. They stop
-/// with the agent.
+/// with the agent. Cloning is cheap: the clones share the children.
+#[derive(Clone)]
 pub struct Processes {
     dir: PathBuf,
     binary: PathBuf,
-    children: std::sync::Mutex<HashMap<String, tokio::process::Child>>,
+    children: std::sync::Arc<std::sync::Mutex<HashMap<String, tokio::process::Child>>>,
 }
+
+/// How long a stopped daemon has to go before the next one starts anyway.
+const STOP_WAIT: Duration = Duration::from_secs(5);
 
 impl Processes {
     pub fn new(dir: &Path, binary: &Path) -> Self {
         Self {
             dir: dir.to_path_buf(),
             binary: binary.to_path_buf(),
-            children: std::sync::Mutex::new(HashMap::new()),
+            children: Default::default(),
         }
     }
 
@@ -1030,7 +1034,10 @@ impl Processes {
         Ok(())
     }
 
-    fn stop(&self, name: &str) {
+    /// Kills the daemon and waits until it is gone: a restart that started the next one
+    /// at once could find the tunnel's port still held by the old one, and the new one
+    /// would exit (as `systemctl restart` waits too).
+    async fn stop(&self, name: &str) {
         let child = self
             .children
             .lock()
@@ -1038,24 +1045,28 @@ impl Processes {
             .remove(name);
         if let Some(mut child) = child {
             let _ = child.start_kill();
+            let _ = tokio::time::timeout(STOP_WAIT, child.wait()).await;
         }
     }
 }
 
 impl Services for Processes {
     fn ctl(&self, name: String, action: String) -> Fut<Result<()>> {
-        let result = ctl_args(&name, &action).and_then(|_| match action.as_str() {
-            "start" | "enable" => self.start(&name),
-            "stop" | "disable" => {
-                self.stop(&name);
-                Ok(())
+        let this = self.clone();
+        Box::pin(async move {
+            ctl_args(&name, &action)?;
+            match action.as_str() {
+                "start" | "enable" => this.start(&name),
+                "stop" | "disable" => {
+                    this.stop(&name).await;
+                    Ok(())
+                }
+                _ => {
+                    this.stop(&name).await;
+                    this.start(&name)
+                }
             }
-            _ => {
-                self.stop(&name);
-                self.start(&name)
-            }
-        });
-        Box::pin(async move { result })
+        })
     }
 
     fn active(&self, name: String) -> Fut<Option<bool>> {
