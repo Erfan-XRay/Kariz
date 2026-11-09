@@ -263,6 +263,10 @@ jobs:
       - run: shellcheck tests/gre_ns.sh
       - run: cargo build -p kariz -p kariz-panel
       - run: sudo bash tests/gre_ns.sh target/debug/kariz-panel target/debug/kariz
+      - name: Paqet TCP and UDP forwarding across Linux network namespaces
+        run: |
+          shellcheck tests/paqet_ns.sh
+          sudo bash tests/paqet_ns.sh target/debug/kariz
 
   # The panel the way a person uses it: Playwright drives a real browser against a real panel
   # and a real agent (tunnels run as child processes, so no systemd is needed here). It covers
