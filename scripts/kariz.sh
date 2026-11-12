@@ -1392,6 +1392,22 @@ certbot_ok() {
     [[ -n "$v" ]] && ! version_lt "$v" "$CERTBOT_MIN"
 }
 
+# apt-get install of the packages given. A server whose package lists are stale asks the
+# mirror for versions it has since dropped (404 Not Found), so on a failure the lists are
+# fetched again, and then thrown away and fetched from scratch, before giving up.
+apt_install() {
+    local -a get=(env DEBIAN_FRONTEND=noninteractive apt-get -y)
+    "${get[@]}" install --no-install-recommends "$@" && return 0
+    info "apt could not install $*; refreshing the package lists and trying again."
+    "${get[@]}" update || true
+    "${get[@]}" install --no-install-recommends "$@" && return 0
+    info "Still failing; clearing apt's cache and package lists and trying once more."
+    apt-get clean || true
+    rm -rf /var/lib/apt/lists/*
+    "${get[@]}" update || true
+    "${get[@]}" install --no-install-recommends --fix-missing "$@"
+}
+
 # The certbot to use (its path in CERTBOT): the system's if it is new enough, else one of
 # our own in a virtualenv, installed with pip.
 ensure_certbot() {
@@ -1408,7 +1424,7 @@ ensure_certbot() {
     if ! { command -v python3 >/dev/null && rm -rf "$CERTBOT_VENV" && python3 -m venv "$CERTBOT_VENV"; }; then
         info "Installing python with venv and pip."
         if command -v apt-get >/dev/null; then
-            apt-get install -y --no-install-recommends python3 python3-venv
+            apt_install python3 python3-venv
         elif command -v dnf >/dev/null; then
             dnf install -y --setopt=install_weak_deps=False python3 python3-pip
         elif command -v yum >/dev/null; then
