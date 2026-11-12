@@ -54,7 +54,7 @@ type Row = serde_json::Map<String, Value>;
 /// Every row of `table`, as column name to value.
 fn dump(conn: &Connection, table: &str) -> Result<Vec<Row>> {
     let mut stmt = conn.prepare(&format!("SELECT * FROM {table}"))?;
-    let names: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
+    let names: Vec<String> = stmt.column_names().map(str::to_owned).collect();
     let rows = stmt.query_map([], |r| {
         let mut row = Row::new();
         for (i, name) in names.iter().enumerate() {
