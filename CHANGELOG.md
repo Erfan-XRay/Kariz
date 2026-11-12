@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.8.2 - 2026-11-12
+
+A fix for installing on servers with stale package lists. Nothing changes in tunnels; update when
+convenient.
+
+- **The installer gets past stale package lists.** Getting a certificate installs python with venv
+  for certbot. On a server whose apt lists are out of date the mirror answers `404 Not Found` and the
+  install stopped. Now apt refreshes its lists and tries again, then clears its cache and lists and
+  tries once more.
+- **Dependencies.** rusqlite 0.41, whose SQLite bindings are clear of
+  [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459).
+
 ## 2.8.1 - 2026-11-09
 
 The stable release after 2.7.1, with everything of the two betas
