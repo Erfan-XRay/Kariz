@@ -505,7 +505,7 @@ impl PacketSink for ReplyTo {
 
 /// Binds the UDP socket of a forward rule.
 pub async fn bind(listen: &str, udp: &UdpTuning) -> io::Result<UdpSocket> {
-    let socket = UdpSocket::bind(listen).await?;
+    let socket = crate::listen::udp(listen).await?;
     tune(&socket, udp);
     Ok(socket)
 }

@@ -235,7 +235,7 @@ pub async fn run(config: Config) -> Result<()> {
 
     for (forward, counters) in config.forward.iter().zip(&stats.forwards) {
         if forward.protocol.has_tcp() {
-            let listener = TcpListener::bind(&forward.listen)
+            let listener = crate::listen::tcp(&forward.listen)
                 .await
                 .with_context(|| format!("failed to listen on forward port {}", forward.listen))?;
             let (entry, forward, counters) = (entry.clone(), forward.clone(), counters.clone());
@@ -412,7 +412,8 @@ async fn accept_users(
     let open = encode_open(Open::tcp(forward.target.clone()));
     loop {
         let (user, peer) = match listener.accept().await {
-            Ok(v) => v,
+            // A user over IPv4 on a dual-stack socket comes as `::ffff:a.b.c.d`: the IPv4 one.
+            Ok((user, peer)) => (user, SocketAddr::new(peer.ip().to_canonical(), peer.port())),
             Err(e) => {
                 warn!(error = %e, listen = %forward.listen, "user accept failed");
                 sleep(Duration::from_millis(100)).await;
