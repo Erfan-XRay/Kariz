@@ -9,6 +9,10 @@ Forward ports answer on IPv6 too. Update the entry server (the one users connect
   `[::]:PORT` socket that accepts IPv4 as well, for TCP and UDP. A server without IPv6 listens on IPv4
   as before, and any other address (a single IP, or `[::]:PORT`) is used as written. IPv4 users still
   show up with their IPv4 address in limits, logs and the PROXY protocol header.
+- **Dependencies.** quinn-proto 0.11.19 and quinn-udp 0.5.16, clear of
+  [RUSTSEC-2026-0523](https://rustsec.org/advisories/RUSTSEC-2026-0523),
+  [RUSTSEC-2026-0524](https://rustsec.org/advisories/RUSTSEC-2026-0524) and
+  [RUSTSEC-2026-0538](https://rustsec.org/advisories/RUSTSEC-2026-0538).
 
 ## 2.8.2 - 2026-11-12
 

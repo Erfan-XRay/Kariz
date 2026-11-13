@@ -12,6 +12,10 @@
   قبل روی IPv4 گوش می‌دهد، و هر آدرس دیگری (یک IP مشخص یا `[::]:PORT`) همان‌طور که نوشته شده به کار
   می‌رود. کاربرهای IPv4 در محدودیت‌ها، لاگ‌ها و سرآیند PROXY protocol همچنان با آدرس IPv4 خودشان
   دیده می‌شوند.
+- **وابستگی‌ها.** quinn-proto نسخهٔ 0.11.19 و quinn-udp نسخهٔ 0.5.16، بدون مشکل‌های
+  [RUSTSEC-2026-0523](https://rustsec.org/advisories/RUSTSEC-2026-0523)،
+  [RUSTSEC-2026-0524](https://rustsec.org/advisories/RUSTSEC-2026-0524) و
+  [RUSTSEC-2026-0538](https://rustsec.org/advisories/RUSTSEC-2026-0538).
 
 ## 2.8.2 - 2026-11-12
 
