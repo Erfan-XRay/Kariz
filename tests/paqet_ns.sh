@@ -173,6 +173,7 @@ if client tcp 4; then
     echo "Paqet forwarded traffic with the wrong token" >&2
     exit 1
 fi
+echo "wrong token: entry accepted $(counter entry_fw), exit accepted $(counter exit_fw)"
 test "$(counter entry_fw)" -gt 0
 test "$(counter exit_fw)" -eq 0
 kill "$wrong_pid"

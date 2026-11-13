@@ -19,9 +19,12 @@
 //! ```text
 //! raw    PREROUTING  incoming segments      CT --notrack
 //! raw    OUTPUT      outgoing segments      CT --notrack
-//! filter INPUT       incoming segments      ACCEPT
 //! filter OUTPUT      outgoing TCP resets    DROP
+//! filter INPUT       incoming segments      ACCEPT
 //! ```
+//!
+//! They go in in this order (and come out in the reverse), so segments are never let in
+//! while the kernel can still answer them with resets.
 //!
 //! Every rule carries the comment `kariz-paqet pid=<pid>`. A process that was killed
 //! cannot remove its rules, so the first socket of a process removes the rules of
@@ -210,15 +213,17 @@ pub(crate) fn rules_for(
             chain: "OUTPUT",
             spec: with(&outgoing, &[], &notrack),
         },
-        Rule {
-            table: "filter",
-            chain: "INPUT",
-            spec: with(&incoming, &[], &["-j", "ACCEPT"]),
-        },
+        // The resets are dropped before segments are let in: the other way round, the
+        // kernel answers the first segments with resets while the second rule goes in.
         Rule {
             table: "filter",
             chain: "OUTPUT",
             spec: with(&outgoing, &["--tcp-flags", "RST", "RST"], &["-j", "DROP"]),
+        },
+        Rule {
+            table: "filter",
+            chain: "INPUT",
+            spec: with(&incoming, &[], &["-j", "ACCEPT"]),
         },
     ]
 }
@@ -372,8 +377,8 @@ mod tests {
             [
                 "raw PREROUTING -d 192.0.2.21 -p tcp --dport 31080 -m comment --comment kariz-paqet pid=7 -j CT --notrack",
                 "raw OUTPUT -s 192.0.2.21 -p tcp --sport 31080 -m comment --comment kariz-paqet pid=7 -j CT --notrack",
-                "filter INPUT -d 192.0.2.21 -p tcp --dport 31080 -m comment --comment kariz-paqet pid=7 -j ACCEPT",
                 "filter OUTPUT -s 192.0.2.21 -p tcp --sport 31080 --tcp-flags RST RST -m comment --comment kariz-paqet pid=7 -j DROP",
+                "filter INPUT -d 192.0.2.21 -p tcp --dport 31080 -m comment --comment kariz-paqet pid=7 -j ACCEPT",
             ]
         );
     }
@@ -385,11 +390,11 @@ mod tests {
             .map(joined)
             .collect();
         assert_eq!(
-            rules[2],
+            rules[3],
             "filter INPUT -p tcp --dport 31080 -m comment --comment c -j ACCEPT"
         );
         assert_eq!(
-            rules[3],
+            rules[2],
             "filter OUTPUT -p tcp --sport 31080 --tcp-flags RST RST -m comment --comment c -j DROP"
         );
     }
@@ -405,14 +410,14 @@ mod tests {
             "raw PREROUTING -s 192.0.2.21 -d 192.0.2.22 -p tcp --sport 31080 -m comment --comment c -j CT --notrack"
         );
         assert_eq!(
-            rules[3],
+            rules[2],
             "filter OUTPUT -s 192.0.2.22 -d 192.0.2.21 -p tcp --dport 31080 --tcp-flags RST RST -m comment --comment c -j DROP"
         );
     }
 
     #[test]
     fn insert_goes_to_the_top_and_delete_names_the_same_rule() {
-        let rule = &rules_for(*addr(21, 0).ip(), Some(1), None, "c")[2];
+        let rule = &rules_for(*addr(21, 0).ip(), Some(1), None, "c")[3];
         let insert = rule_args("-I", rule);
         assert_eq!(
             &insert[..7],
