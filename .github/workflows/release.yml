@@ -13,10 +13,14 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # C code (SQLite, ring) for the oldest x86_64 CPUs, whatever the runner's compiler assumes:
+  # Ubuntu 26.04's builds used BMI2 and MOVBE, and old or virtual servers died with SIGILL.
+  CFLAGS_x86_64_unknown_linux_musl: -march=x86-64 -mtune=generic
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pinned: a new ubuntu-latest changes the C compiler under the release.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: true
       matrix:
@@ -60,6 +64,11 @@ jobs:
           tool: cross
       - if: ${{ matrix.cross }}
         run: cross build --release --locked --target ${{ matrix.target }} -p kariz -p kariz-panel
+      - if: ${{ matrix.arch == 'x86_64' }}
+        name: Runs on a baseline x86_64 CPU
+        run: |
+          sudo apt-get install -y qemu-user
+          bash tests/cpu_baseline.sh target/${{ matrix.target }}/release
       - name: Package
         run: |
           name="kariz-$GITHUB_REF_NAME-${{ matrix.arch }}-linux"

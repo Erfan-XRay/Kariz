@@ -7,6 +7,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The same C flags as release.yml: C code (SQLite, ring) for the oldest x86_64 CPUs.
+  CFLAGS_x86_64_unknown_linux_musl: -march=x86-64 -mtune=generic
 
 jobs:
   # Formatting and lints, which fail in seconds: kept apart from the tests, so a mistake
@@ -95,6 +97,24 @@ jobs:
       - run: ls -l target/${{ matrix.target }}/release/kariz target/${{ matrix.target }}/release/kariz-panel
       - name: Library tests under QEMU
         run: cross test --locked --target ${{ matrix.target }} --lib
+
+  # The x86_64 release build (static, musl) on QEMU's oldest x86_64 CPU: no instruction an
+  # old or virtual server lacks (tests/cpu_baseline.sh). On the newest runner on purpose,
+  # whose C compiler is the one most likely to assume a newer CPU.
+  baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: baseline
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools qemu-user
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl -p kariz -p kariz-panel
+      - run: shellcheck tests/cpu_baseline.sh
+      - run: bash tests/cpu_baseline.sh target/x86_64-unknown-linux-musl/release
 
   # scripts/kariz.sh on a real systemd host: install from a local build, the menu through a
   # terminal, the panel and an agent, signed releases, updating the panel from the panel. The
