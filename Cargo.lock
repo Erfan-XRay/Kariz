@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "kariz"
-version = "2.8.2"
+version = "2.8.3"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "kariz-panel"
-version = "2.8.2"
+version = "2.8.3"
 dependencies = [
  "anyhow",
  "argon2",

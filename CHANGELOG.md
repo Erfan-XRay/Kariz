@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.8.3 - 2026-11-13
+
+Forward ports answer on IPv6 too. Update the entry server (the one users connect to).
+
+- **Forward ports listen on IPv4 and IPv6.** A forward on `0.0.0.0:PORT` used to listen on IPv4 only,
+  so users could not reach it over the server's IPv6 address. Now the same port takes both: one
+  `[::]:PORT` socket that accepts IPv4 as well, for TCP and UDP. A server without IPv6 listens on IPv4
+  as before, and any other address (a single IP, or `[::]:PORT`) is used as written. IPv4 users still
+  show up with their IPv4 address in limits, logs and the PROXY protocol header.
+
 ## 2.8.2 - 2026-11-12
 
 A fix for installing on servers with stale package lists. Nothing changes in tunnels; update when
