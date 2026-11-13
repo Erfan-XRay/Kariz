@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.8.4 - 2026-11-14
+
+2.8.3 does not start on older or virtual x86_64 CPUs: the core and the agent stop with
+`status=4/ILL` (illegal instruction). 2.8.4 runs everywhere 2.8.1 did. Update every x86_64 server
+that has 2.8.3; nothing else changes.
+
+- **The x86_64 builds run on every x86_64 CPU again.** GitHub's newest build machine compiled the
+  C code inside Kariz (SQLite, cryptography) for newer CPUs, with instructions (BMI2, MOVBE) that
+  older processors and many virtual servers do not have. The C code is now built for the baseline
+  x86_64 CPU, and every release is run on an emulated oldest CPU before it is published.
+
 ## 2.8.3 - 2026-11-13
 
 Forward ports answer on IPv6 too. Update the entry server (the one users connect to).
