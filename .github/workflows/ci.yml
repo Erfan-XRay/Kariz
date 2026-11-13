@@ -7,6 +7,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The same C flags as release.yml: C code (SQLite, ring) for the oldest x86_64 CPUs.
+  CFLAGS_x86_64_unknown_linux_musl: -march=x86-64 -mtune=generic
 
 jobs:
   # Formatting and lints, which fail in seconds: kept apart from the tests, so a mistake
