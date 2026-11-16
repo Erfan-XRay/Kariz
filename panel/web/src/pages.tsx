@@ -470,7 +470,7 @@ type JoinWay = "internet" | "gre" | "vxlan" | "reverse";
 const REVERSE_PORT = "29001";
 
 function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agentsOn: boolean; onClose: () => void }) {
-  const { t, digitsOf, toast } = useApp();
+  const { t, lang, digitsOf, toast } = useApp();
   const [way, setWay] = useState<JoinWay>("internet");
   const [name, setName] = useState("");
   const [host, setHost] = useState(location.hostname.replace(/^\[|\]$/g, ""));
@@ -795,6 +795,12 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
               {t("add.runInstalled")}
             </span>
             <CodeBlock text={`kariz-manager --agent ${code}`} />
+            <span className="help">
+              {t("add.offline")}{" "}
+              <a href={`https://erfan-xray.github.io/Kariz/${lang === "fa" ? "fa/" : ""}docs/offline/`} target="_blank" rel="noopener noreferrer">
+                {t("add.offlineLink")}
+              </a>
+            </span>
             {(!gre || rev) && transport !== "auto" && <span className="help">{t("add.via", { t: t(`add.x.${transport}`) })}</span>}
             <span className="countdown">{joined ? "" : t("add.valid", { m: digitsOf(mmss) })}</span>
           </div>

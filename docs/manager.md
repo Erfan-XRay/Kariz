@@ -37,6 +37,9 @@ script) the menu and the questions are numbered and read as lines.
 | **11** Live logs | follow the panel's or the agent's log |
 | **12** Uninstall Kariz | stops and removes what it installed |
 
+**No GitHub on your server?** Download the release on your own computer and install from the file:
+[install and update without GitHub](offline.md).
+
 If GitHub limits your downloads (many servers behind one address), set `GITHUB_TOKEN` to any
 personal access token before running the script: it is used only to lift that limit.
 

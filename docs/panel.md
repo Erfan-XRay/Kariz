@@ -478,8 +478,9 @@ To check a download by hand: `kariz-panel release-verify kariz-v0.11.0-x86_64-li
 ### If the panel cannot reach GitHub
 
 The panel needs to reach `api.github.com` and GitHub's download addresses to find and fetch a
-release. If it cannot, update by hand on each server with `kariz-manager update` (the manager
-checks the signature too).
+release. If it cannot, update its server from a file ([without GitHub](offline.md)): the panel then
+keeps that release, and *Update the servers* sends it to the agents. Or update by hand on each
+server with `kariz-manager update` (the manager checks the signature too).
 
 ## Removing
 

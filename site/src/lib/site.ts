@@ -105,7 +105,7 @@ export interface Section {
 
 /** The map of the docs. A slug is the file name of a page in `docs/`, lower case. */
 export const SECTIONS: Section[] = [
-  { id: "start", title: { en: "Get started", fa: "شروع کار" }, pages: ["getting-started", "using-the-panel", "video", "tour", "manager", "panel"] },
+  { id: "start", title: { en: "Get started", fa: "شروع کار" }, pages: ["getting-started", "using-the-panel", "video", "tour", "manager", "offline", "panel"] },
   { id: "concepts", title: { en: "Concepts", fa: "مفاهیم" }, pages: ["how-it-works", "transports", "profiles", "udp-and-games", "cdn"] },
   { id: "guides", title: { en: "Guides", fa: "راهنماها" }, pages: ["networks", "paqet", "troubleshooting", "speedtest", "telegram", "performance"] },
   { id: "reference", title: { en: "Reference", fa: "مرجع" }, pages: ["configuration", "status", "accessibility"] },
@@ -117,6 +117,7 @@ export const SECTIONS: Section[] = [
 export const LABELS: Record<string, Record<Lang, string>> = {
   "getting-started": { en: "Getting started", fa: "شروع کار" },
   manager: { en: "The manager script", fa: "اسکریپت مدیر" },
+  offline: { en: "Without GitHub", fa: "نصب بدون GitHub" },
   panel: { en: "The web panel", fa: "پنل وب" },
   "using-the-panel": { en: "Using the panel", fa: "کار با پنل" },
   tour: { en: "Guided tour", fa: "تور راهنما" },
