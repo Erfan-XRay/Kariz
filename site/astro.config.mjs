@@ -3,6 +3,7 @@ import { defineConfig } from "astro/config";
 import sitemap from "@astrojs/sitemap";
 import { unified } from "@astrojs/markdown-remark";
 import { remarkDocLinks } from "./src/plugins/remark-doc-links.mjs";
+import { remarkReleaseVersion } from "./src/plugins/remark-release-version.mjs";
 
 const base = "/Kariz";
 // The version on the site is the program's, from the workspace manifest.
@@ -17,7 +18,10 @@ export default defineConfig({
   markdown: {
     // The text stays as written: no curly quotes or dashes made from the docs' plain ones.
     processor: unified({
-      remarkPlugins: [[remarkDocLinks, { base, repo: "https://github.com/Erfan-XRay/Kariz" }]],
+      remarkPlugins: [
+        [remarkDocLinks, { base, repo: "https://github.com/Erfan-XRay/Kariz" }],
+        [remarkReleaseVersion, { version }],
+      ],
       smartypants: false,
     }),
     shikiConfig: {

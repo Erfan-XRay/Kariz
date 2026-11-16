@@ -219,7 +219,7 @@ systemctl kill -s HUP kariz-panel    # loads the new files for the next connecti
 
 هر آرشیو یک فایل چک‌سام و یک امضا دارد (`.sha256` و `.sig`): امضای Ed25519 روی فایل چک‌سام، که نام آرشیو را هم دارد؛ پس نمی‌شود آرشیوی را با آرشیو دیگری از همان نسخه عوض کرد. کلید عمومی داخل `kariz-panel` و `kariz-manager` ساخته شده و کلید خصوصی یک secret مخزن است که فقط workflow انتشار آن را می‌بیند. فایلی که امضایش درست نباشد هرگز اجرا نمی‌شود و پاک می‌شود. چک‌سام به‌تنهایی فقط ثابت می‌کرد دانلود خراب نشده است، چون از همان جایی می‌آید که خود فایل می‌آید.
 
-برای بررسی دستی یک دانلود: `kariz-panel release-verify kariz-v0.11.0-x86_64-linux.tar.gz` (با `.sha256` و `.sig` کنارش). برای pin کردن کلید خودتان (مثلاً در یک fork)، `release_key = "HEX"` را در `panel.toml` بگذارید (و برای agentها در `agent.toml`)، و با `release_api = "https://api.github.com/repos/OWNER/REPO"` جای دیگری را به‌جای GitHub پیش‌فرض نشان بدهید.
+برای بررسی دستی یک دانلود: `kariz-panel release-verify kariz-v2.8.5-x86_64-linux.tar.gz` (با `.sha256` و `.sig` کنارش). برای pin کردن کلید خودتان (مثلاً در یک fork)، `release_key = "HEX"` را در `panel.toml` بگذارید (و برای agentها در `agent.toml`)، و با `release_api = "https://api.github.com/repos/OWNER/REPO"` جای دیگری را به‌جای GitHub پیش‌فرض نشان بدهید.
 
 ### اگر پنل به GitHub نمی‌رسد
 
