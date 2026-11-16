@@ -20,6 +20,8 @@
 #   kariz-manager status              what runs here, and this server's addresses
 #
 # If GitHub limits your downloads, set GITHUB_TOKEN to a personal access token: it lifts the limit.
+# Without GitHub at all (a server in Iran): copy a release archive to the server, unpack it and
+# run the script inside it; any command then installs from that file (docs/offline.md).
 set -euo pipefail
 
 REPO="Erfan-XRay/Kariz"
@@ -608,6 +610,98 @@ sync_manager() {
     fi
 }
 
+# Unpacks the checked archive $1/$2.tar.gz of version $3 and puts its programs in place.
+# The archive and its proofs are also kept where the panel looks for its own release, so it
+# can update the agents of other servers without reaching GitHub.
+unpack_release() {
+    local tmp=$1 name=$2 version=$3
+    tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
+    install -m 0755 "$tmp/$name/kariz" "$BIN"
+    # Releases from 0.8 carry the web panel and its agent in the same archive.
+    if [[ -f "$tmp/$name/kariz-panel" ]]; then
+        install -m 0755 "$tmp/$name/kariz-panel" "$PANEL_BIN"
+        if [[ -s "$tmp/$name.tar.gz.sig" ]]; then
+            local keep="$PANEL_DATA/updates/${version#v}/release" e
+            if mkdir -p "$keep" 2>/dev/null; then
+                for e in tar.gz tar.gz.sha256 tar.gz.sig; do
+                    cp -f "$tmp/$name.$e" "$keep/" 2>/dev/null || true
+                done
+            fi
+        fi
+    fi
+}
+
+# ---- Installing without GitHub ----
+# A release archive already on this server (kariz-vX.Y.Z-ARCH-linux.tar.gz, with its .sha256
+# and .sig next to it), for servers that cannot reach GitHub (docs/offline.md): given with
+# --file or KARIZ_ARCHIVE, or found by itself when this script is run from the unpacked
+# archive.
+LOCAL_ARCHIVE=${KARIZ_ARCHIVE:-}
+
+# The version in an archive's name ("kariz-v2.8.4-x86_64-linux.tar.gz" gives v2.8.4), when it
+# is one for this server's CPU; else it fails.
+archive_version() {
+    local base a
+    base=$(basename "$1")
+    a=$(arch 2>/dev/null) || return 1
+    [[ "$base" == kariz-v*-"$a"-linux.tar.gz ]] || return 1
+    base=${base#kariz-}
+    echo "${base%-"$a"-linux.tar.gz}"
+}
+
+# Prints the newest archive for this CPU next to the unpacked archive this script is in (or
+# next to the script), or in the current directory. Not for the installed kariz-manager:
+# an old archive left in a folder must not be installed again by `kariz-manager update`.
+find_local_archive() {
+    local self dir pkg f v found=""
+    self=${BASH_SOURCE[0]:-}
+    [[ -f "$self" ]] || return 1
+    self=$(realpath "$self")
+    [[ "$self" != "$(realpath "$MANAGER" 2>/dev/null || echo "$MANAGER")" ]] || return 1
+    dir=$(dirname "$self")
+    pkg=$(dirname "$dir")
+    for dir in "$(dirname "$pkg")" "$dir" "$PWD"; do
+        for f in "$dir"/kariz-v*-linux.tar.gz; do
+            [[ -f "$f" ]] || continue
+            v=$(archive_version "$f") || continue
+            found+="${v#v}"$'\t'"$f"$'\n'
+        done
+    done
+    [[ -n "$found" ]] || return 1
+    printf '%s' "$found" | sort -V -k1,1 | tail -n 1 | cut -f2-
+}
+
+# Installs Kariz from the archive $1 (version $2, if one was asked for, must match it).
+install_from_archive() {
+    local file=$1 want=${2:-} version name tmp a e
+    a=$(arch)
+    [[ -f "$file" ]] || die "No file at $file."
+    version=$(archive_version "$file") ||
+        die "$(basename "$file") is not a Kariz archive for this server's CPU ($a): the file's name must be like kariz-v2.8.4-$a-linux.tar.gz."
+    [[ -z "$want" || "${want#v}" == "${version#v}" ]] ||
+        die "The file is Kariz $version, not $want."
+    name="kariz-$version-$a-linux"
+    info "Installing Kariz $version from $file (nothing is downloaded)"
+    tmp=$(mktemp -d)
+    cp "$file" "$tmp/$name.tar.gz"
+    for e in sha256 sig; do
+        [[ -f "$file.$e" ]] && cp "$file.$e" "$tmp/$name.tar.gz.$e"
+    done
+    if [[ -f "$tmp/$name.tar.gz.sha256" ]]; then
+        (cd "$tmp" && sha256sum -c --quiet "$name.tar.gz.sha256") ||
+            { rm -rf "$tmp"; die "Checksum mismatch: the file is damaged. Download it again."; }
+        verify_signature "$tmp" "$name" "$version"
+    else
+        warn "$name.tar.gz.sha256 and $name.tar.gz.sig are not next to the file: it cannot be checked."
+        if ! confirm "Install it without checking?" n; then
+            rm -rf "$tmp"
+            die "Nothing was installed. Put the .sha256 and .sig files of the same release next to the archive."
+        fi
+    fi
+    unpack_release "$tmp" "$name" "$version"
+    rm -rf "$tmp"
+}
+
 cmd_install() {
     need_root
     need_systemd
@@ -627,11 +721,13 @@ cmd_install() {
     if [[ -n "$binary" ]]; then
         [[ -x "$binary" ]] || die "No executable at $binary."
         install -m 0755 "$binary" "$BIN"
+    elif [[ -n "$LOCAL_ARCHIVE" ]]; then
+        install_from_archive "$LOCAL_ARCHIVE" "$version"
     else
         local a tmp
         a=$(arch)
         [[ -n "$version" ]] || version=$(latest_version)
-        [[ -n "$version" ]] || die "Could not find the latest release (GitHub may be limiting you: set GITHUB_TOKEN)."
+        [[ -n "$version" ]] || die "Could not find the latest release (GitHub may be limiting you: set GITHUB_TOKEN, or install from a file: docs/offline.md)."
         info "Downloading Kariz $version for $a"
         local name="kariz-$version-$a-linux"
         tmp=$(mktemp -d)
@@ -643,12 +739,7 @@ cmd_install() {
         (cd "$tmp" && sha256sum -c --quiet "$name.tar.gz.sha256") ||
             die "Checksum mismatch: the download is damaged."
         verify_signature "$tmp" "$name" "$version"
-        tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
-        install -m 0755 "$tmp/$name/kariz" "$BIN"
-        # Releases from 0.8 carry the web panel and its agent in the same archive.
-        if [[ -f "$tmp/$name/kariz-panel" ]]; then
-            install -m 0755 "$tmp/$name/kariz-panel" "$PANEL_BIN"
-        fi
+        unpack_release "$tmp" "$name" "$version"
         rm -rf "$tmp"
     fi
     mkdir -p "$CONF_DIR"
@@ -2488,11 +2579,36 @@ usage() {
   tunnel-cert --domain D | --ip A [--email E]  a Let's Encrypt certificate for a wss tunnel (the
                                                panel runs this on the server the tunnel listens on)
 
+  --file ARCHIVE    with install, update, panel install or --agent: install from a release
+                    archive on this server instead of downloading it (no GitHub needed; its
+                    .sha256 and .sig go next to it). Run from an unpacked archive, the
+                    archive next to it is found by itself. See docs/offline.md.
+
   Set GITHUB_TOKEN if GitHub limits your downloads.
 EOF
 }
 
 main() {
+    # --file ARCHIVE goes with any command: install, update, panel install, --agent or the menu.
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --file)
+                [[ $# -ge 2 ]] || die "--file needs the path of a release archive (kariz-vX.Y.Z-ARCH-linux.tar.gz)."
+                LOCAL_ARCHIVE=$2 && shift 2
+                ;;
+            --file=*) LOCAL_ARCHIVE=${1#--file=} && shift ;;
+            *) args+=("$1") && shift ;;
+        esac
+    done
+    set -- ${args[@]+"${args[@]}"}
+    [[ -n "$LOCAL_ARCHIVE" ]] || LOCAL_ARCHIVE=$(find_local_archive || true)
+    if [[ -n "$LOCAL_ARCHIVE" ]]; then
+        [[ -f "$LOCAL_ARCHIVE" ]] || die "No file at $LOCAL_ARCHIVE."
+        LOCAL_ARCHIVE=$(realpath "$LOCAL_ARCHIVE")
+        # Nothing is asked of GitHub: the release is the file.
+        export KARIZ_NO_UPDATE_CHECK=1
+    fi
     case ${1:-} in
         help | -h | --help | tunnel-cert) ;;
         *) sync_manager ;;

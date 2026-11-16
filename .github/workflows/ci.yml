@@ -130,6 +130,8 @@ jobs:
         run: shellcheck -x tests/heal.sh && bash tests/heal.sh
       - name: The panel's port and a certificate of your own
         run: shellcheck -x tests/panel_port.sh && bash tests/panel_port.sh
+      - name: Install from a release archive, without GitHub
+        run: shellcheck -x tests/offline.sh && bash tests/offline.sh
       - run: cargo build --release --locked -p kariz -p kariz-panel
       - name: Install with the manager
         run: |

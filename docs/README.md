@@ -11,6 +11,7 @@ animated diagrams and a live demo of the panel, in English and Persian:
 | [Getting started](getting-started.md) | The quick way (the panel), and by hand: a token, two configs, systemd |
 | [Using the panel](using-the-panel.md) | A walk through the web panel: sign in, add servers, make a tunnel, watch it, keep it safe |
 | [The manager script](manager.md) | One-line install of Kariz and the panel on a server, and connecting a server to a panel |
+| [Without GitHub](offline.md) | Install and update from a downloaded file, for servers that cannot reach GitHub |
 | [Configuration reference](configuration.md) | Every setting, its default and its limits |
 | [Speed test](speedtest.md) | The panel's button and `kariz speedtest`: speed, latency and UDP through the live tunnel |
 | [Telegram alerts](telegram.md) | A bot that tells you when a server or tunnel goes down, and answers `/status`; if Telegram is blocked |
