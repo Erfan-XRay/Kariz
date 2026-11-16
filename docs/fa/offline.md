@@ -22,12 +22,12 @@ uname -m
 
 ## ۲. سه فایل را دانلود کنید
 
-روی کامپیوتر خودتان (جایی که GitHub باز می‌شود) به صفحهٔ [Releases](https://github.com/Erfan-XRay/Kariz/releases/latest) بروید و از بخش **Assets** این **سه فایل** را بگیرید. مثلاً برای نسخهٔ 2.8.4 و `x86_64`:
+روی کامپیوتر خودتان (جایی که GitHub باز می‌شود) به صفحهٔ [Releases](https://github.com/Erfan-XRay/Kariz/releases/latest) بروید و از بخش **Assets** این **سه فایل** را بگیرید. مثلاً برای `x86_64` (عدد داخل نام‌ها همان آخرین نسخه است):
 
 ```
-kariz-v2.8.4-x86_64-linux.tar.gz
-kariz-v2.8.4-x86_64-linux.tar.gz.sha256
-kariz-v2.8.4-x86_64-linux.tar.gz.sig
+kariz-v2.8.5-x86_64-linux.tar.gz
+kariz-v2.8.5-x86_64-linux.tar.gz.sha256
+kariz-v2.8.5-x86_64-linux.tar.gz.sig
 ```
 
 دو فایل کوچک (`.sha256` و `.sig`) امضای فایل اصلی‌اند. اسکریپت با آن‌ها مطمئن می‌شود فایل دست‌کاری نشده است، پس **هر سه را بگیرید** و نامشان را عوض نکنید.
@@ -37,7 +37,7 @@ kariz-v2.8.4-x86_64-linux.tar.gz.sig
 با هر برنامه‌ای که فایل روی سرور می‌برید (WinSCP، MobaXterm، FileZilla)، هر سه فایل را در پوشهٔ `/root` سرور بگذارید. یا از ترمینال کامپیوتر خودتان:
 
 ```bash
-scp kariz-v2.8.4-x86_64-linux.tar.gz* root@IP-SERVER:/root/
+scp kariz-v2.8.5-x86_64-linux.tar.gz* root@IP-SERVER:/root/
 ```
 
 ## ۴. باز کنید و اجرا کنید
@@ -49,11 +49,11 @@ cd /root
 ```
 
 ```bash
-tar -xzf kariz-v2.8.4-x86_64-linux.tar.gz
+tar -xzf kariz-v2.8.5-x86_64-linux.tar.gz
 ```
 
 ```bash
-bash kariz-v2.8.4-x86_64-linux/scripts/kariz.sh
+bash kariz-v2.8.5-x86_64-linux/scripts/kariz.sh
 ```
 
 همان منوی همیشگی کاریز باز می‌شود. اسکریپت فایل کنار خودش را پیدا می‌کند و پیام می‌دهد که از روی آن نصب می‌کند (*nothing is downloaded*). از اینجا مثل همیشه انتخاب کنید که این سرور چه کاره است.
@@ -63,7 +63,7 @@ bash kariz-v2.8.4-x86_64-linux/scripts/kariz.sh
 در منو، پنل وب را انتخاب کنید. یا مستقیم:
 
 ```bash
-bash kariz-v2.8.4-x86_64-linux/scripts/kariz.sh panel install
+bash kariz-v2.8.5-x86_64-linux/scripts/kariz.sh panel install
 ```
 
 گواهی Let's Encrypt از سرورهای خود Let's Encrypt گرفته می‌شود، نه از GitHub. اگر آن هم در دسترس نبود، گواهی‌ای را که خودتان دارید بدهید ([پنل وب](panel.md)).
@@ -73,7 +73,7 @@ bash kariz-v2.8.4-x86_64-linux/scripts/kariz.sh panel install
 در پنل، *سرورها*، *افزودن سرور* را بزنید. دستوری که پنل نشان می‌دهد به GitHub نیاز دارد؛ **فقط کد پیوستن** آخرش را بردارید (همان که با `kz1_` شروع می‌شود) و روی سرور بزنید:
 
 ```bash
-bash kariz-v2.8.4-x86_64-linux/scripts/kariz.sh --agent kz1_...
+bash kariz-v2.8.5-x86_64-linux/scripts/kariz.sh --agent kz1_...
 ```
 
 نسخهٔ agent بهتر است با نسخهٔ پنل یکی باشد.
@@ -82,18 +82,18 @@ bash kariz-v2.8.4-x86_64-linux/scripts/kariz.sh --agent kz1_...
 
 ### سروری که پنل رویش است
 
-سه فایل **نسخهٔ تازه** را مثل بالا دانلود کنید، روی سرور ببرید و بزنید (به‌جای 2.9.0 نسخهٔ خودتان):
+سه فایل **نسخهٔ تازه** را مثل بالا دانلود کنید، روی سرور ببرید و بزنید (با همان نسخه‌ای که در نام فایل‌های دانلودشده است):
 
 ```bash
 cd /root
 ```
 
 ```bash
-tar -xzf kariz-v2.9.0-x86_64-linux.tar.gz
+tar -xzf kariz-v2.8.5-x86_64-linux.tar.gz
 ```
 
 ```bash
-bash kariz-v2.9.0-x86_64-linux/scripts/kariz.sh update
+bash kariz-v2.8.5-x86_64-linux/scripts/kariz.sh update
 ```
 
 پنل، هسته و تانل‌های این سرور به نسخهٔ تازه می‌روند.
@@ -105,7 +105,7 @@ bash kariz-v2.9.0-x86_64-linux/scripts/kariz.sh update
 این فقط برای سرورهایی است که CPUشان با سرور پنل یکی است (مثلاً همه `x86_64`). سروری با CPU دیگر را مثل بالا با فایل خودش به‌روز کنید:
 
 ```bash
-bash kariz-v2.9.0-aarch64-linux/scripts/kariz.sh update
+bash kariz-v2.8.5-aarch64-linux/scripts/kariz.sh update
 ```
 
 ## اگر چیزی درست پیش نرفت
@@ -120,7 +120,7 @@ bash kariz-v2.9.0-aarch64-linux/scripts/kariz.sh update
 اگر فایل جای دیگری است، مسیرش را خودتان بدهید:
 
 ```bash
-kariz-manager install --file /path/kariz-v2.8.4-x86_64-linux.tar.gz
+kariz-manager install --file /path/kariz-v2.8.5-x86_64-linux.tar.gz
 ```
 
 `--file` با `install`، `update`، `panel install` و `--agent` کار می‌کند.

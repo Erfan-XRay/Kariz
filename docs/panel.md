@@ -470,7 +470,7 @@ for another of the same release. The public key is built into `kariz-panel` and 
 file whose signature does not verify is never run, and is deleted. The checksum alone would only
 prove the download was not damaged: it comes from the same place as the file.
 
-To check a download by hand: `kariz-panel release-verify kariz-v0.11.0-x86_64-linux.tar.gz`
+To check a download by hand: `kariz-panel release-verify kariz-v2.8.5-x86_64-linux.tar.gz`
 (with its `.sha256` and `.sig` beside it). To pin a key of your own (a fork), set
 `release_key = "HEX"` in `panel.toml` (and in `agent.toml` for agents), and `release_api =
 "https://api.github.com/repos/OWNER/REPO"` to look somewhere else.

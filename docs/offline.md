@@ -25,12 +25,13 @@ uname -m
 ## 2. Download three files
 
 On your own computer (where GitHub opens), go to [Releases](https://github.com/Erfan-XRay/Kariz/releases/latest)
-and take these **three files** from **Assets**. For version 2.8.4 on `x86_64`, for example:
+and take these **three files** from **Assets**. For `x86_64`, for example (the number in the names is the
+newest version):
 
 ```
-kariz-v2.8.4-x86_64-linux.tar.gz
-kariz-v2.8.4-x86_64-linux.tar.gz.sha256
-kariz-v2.8.4-x86_64-linux.tar.gz.sig
+kariz-v2.8.5-x86_64-linux.tar.gz
+kariz-v2.8.5-x86_64-linux.tar.gz.sha256
+kariz-v2.8.5-x86_64-linux.tar.gz.sig
 ```
 
 The two small files (`.sha256` and `.sig`) are the main file's signature: the script checks with
@@ -42,7 +43,7 @@ With any program that copies files to a server (WinSCP, MobaXterm, FileZilla), p
 in `/root` on the server. Or from your own computer's terminal:
 
 ```bash
-scp kariz-v2.8.4-x86_64-linux.tar.gz* root@SERVER-IP:/root/
+scp kariz-v2.8.5-x86_64-linux.tar.gz* root@SERVER-IP:/root/
 ```
 
 ## 4. Unpack and run
@@ -54,11 +55,11 @@ cd /root
 ```
 
 ```bash
-tar -xzf kariz-v2.8.4-x86_64-linux.tar.gz
+tar -xzf kariz-v2.8.5-x86_64-linux.tar.gz
 ```
 
 ```bash
-bash kariz-v2.8.4-x86_64-linux/scripts/kariz.sh
+bash kariz-v2.8.5-x86_64-linux/scripts/kariz.sh
 ```
 
 The usual Kariz menu opens. The script finds the file next to it and says it installs from it
@@ -69,7 +70,7 @@ The usual Kariz menu opens. The script finds the file next to it and says it ins
 Pick the web panel in the menu, or directly:
 
 ```bash
-bash kariz-v2.8.4-x86_64-linux/scripts/kariz.sh panel install
+bash kariz-v2.8.5-x86_64-linux/scripts/kariz.sh panel install
 ```
 
 The Let's Encrypt certificate comes from Let's Encrypt, not GitHub. If that cannot be reached
@@ -81,7 +82,7 @@ In the panel, *Servers*, *Add server*. The command it shows needs GitHub: take *
 code** at its end (it starts with `kz1_`) and run on the server:
 
 ```bash
-bash kariz-v2.8.4-x86_64-linux/scripts/kariz.sh --agent kz1_...
+bash kariz-v2.8.5-x86_64-linux/scripts/kariz.sh --agent kz1_...
 ```
 
 The agent is best on the same version as the panel.
@@ -90,19 +91,19 @@ The agent is best on the same version as the panel.
 
 ### The server the panel is on
 
-Download the three files of the **new version** as above, copy them over, and run (your version
-instead of 2.9.0):
+Download the three files of the **new version** as above, copy them over, and run (with the version
+in the names of the files you downloaded):
 
 ```bash
 cd /root
 ```
 
 ```bash
-tar -xzf kariz-v2.9.0-x86_64-linux.tar.gz
+tar -xzf kariz-v2.8.5-x86_64-linux.tar.gz
 ```
 
 ```bash
-bash kariz-v2.9.0-x86_64-linux/scripts/kariz.sh update
+bash kariz-v2.8.5-x86_64-linux/scripts/kariz.sh update
 ```
 
 The panel, the core and this server's tunnels move to the new version.
@@ -117,7 +118,7 @@ That is for servers with the same CPU as the panel's server (all `x86_64`, say).
 with another CPU with its own file, as above:
 
 ```bash
-bash kariz-v2.9.0-aarch64-linux/scripts/kariz.sh update
+bash kariz-v2.8.5-aarch64-linux/scripts/kariz.sh update
 ```
 
 ## If something goes wrong
@@ -132,7 +133,7 @@ bash kariz-v2.9.0-aarch64-linux/scripts/kariz.sh update
 If the file is somewhere else, give its path yourself:
 
 ```bash
-kariz-manager install --file /path/kariz-v2.8.4-x86_64-linux.tar.gz
+kariz-manager install --file /path/kariz-v2.8.5-x86_64-linux.tar.gz
 ```
 
 `--file` works with `install`, `update`, `panel install` and `--agent`.
