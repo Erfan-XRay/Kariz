@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.8.5 - 2026-11-16
+
+Kariz installs and updates on servers that cannot reach GitHub (servers in Iran, where
+`raw.githubusercontent.com` is blocked). Nothing changes for servers that can: no update is needed.
+
+- **Install and update from a file.** Download the release archive, its `.sha256` and its `.sig`
+  on your own computer, copy them to the server, unpack the archive and run
+  `kariz-v2.8.5-ARCH-linux/scripts/kariz.sh`: the menu, `install`, `update`, `panel install` and
+  `--agent CODE` then install from that file, check its signature as for a download, and ask
+  GitHub for nothing. `--file PATH` points at an archive somewhere else.
+- **The panel updates agents without GitHub.** A panel updated from a file keeps that release, so
+  *Update the servers* sends it to the agents (those with the panel server's CPU).
+- **A simple guide**, [Install and update without GitHub](docs/offline.md), in English and Persian,
+  linked from the panel's *Add server* page.
+
 ## 2.8.4 - 2026-11-14
 
 2.8.3 does not start on older or virtual x86_64 CPUs: the core and the agent stop with
